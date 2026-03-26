@@ -87,15 +87,12 @@ def _match_game_files(
             continue
 
         # No snapshot match — check if it looks like a game file by pattern
-        # This catches new PAZ files that mods add (e.g., 0012/5.paz)
+        # This catches new PAZ files that mods add (e.g., 0012/5.paz, 0036/0.paz)
         for i in range(len(parts)):
             candidate = "/".join(parts[i:])
             if _GAME_FILE_RE.match(candidate):
-                # Verify the parent directory exists in the game
-                dir_part = candidate.split("/")[0]
-                if (game_dir / dir_part).exists():
-                    matches.append((candidate, f, True))
-                    break
+                matches.append((candidate, f, True))
+                break
 
     return matches
 
