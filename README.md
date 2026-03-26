@@ -136,6 +136,12 @@ All data is stored in `%LOCALAPPDATA%\cdmm\`:
 - Crimson Desert (Steam)
 - ~1 GB free disk space for vanilla backups
 
+## Support
+
+If you find this useful, consider supporting development:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kindiboy)
+
 ## License
 
 MIT
