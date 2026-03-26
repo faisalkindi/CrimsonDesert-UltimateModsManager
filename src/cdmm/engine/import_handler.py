@@ -93,6 +93,10 @@ def import_from_zip(
         except zipfile.BadZipFile as e:
             result.error = f"Invalid zip file: {e}"
             return result
+        except Exception as e:
+            result.error = f"Failed to extract zip: {e}"
+            logger.error("Zip extraction failed: %s", e, exc_info=True)
+            return result
 
         # Check if zip contains a script instead of game files
         scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
@@ -278,42 +282,47 @@ def _process_extracted_files(
         mod_id = cursor.lastrowid
 
     for rel_path, extracted_path in matches:
-        vanilla_path = game_dir / rel_path.replace("/", "\\")
-        if not vanilla_path.exists():
-            logger.warning("Vanilla file not found for %s, skipping", rel_path)
-            continue
+        try:
+            vanilla_path = game_dir / rel_path.replace("/", "\\")
+            if not vanilla_path.exists():
+                logger.warning("Vanilla file not found for %s, skipping", rel_path)
+                continue
 
-        vanilla_bytes = vanilla_path.read_bytes()
-        modified_bytes = extracted_path.read_bytes()
+            vanilla_bytes = vanilla_path.read_bytes()
+            modified_bytes = extracted_path.read_bytes()
 
-        if vanilla_bytes == modified_bytes:
-            logger.debug("File %s is identical to vanilla, skipping", rel_path)
-            continue
+            if vanilla_bytes == modified_bytes:
+                logger.debug("File %s is identical to vanilla, skipping", rel_path)
+                continue
 
-        # Generate delta
-        delta_bytes = generate_delta(vanilla_bytes, modified_bytes)
+            # Generate delta
+            delta_bytes = generate_delta(vanilla_bytes, modified_bytes)
 
-        # Get byte ranges
-        byte_ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
+            # Get byte ranges
+            byte_ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
 
-        # Save delta to disk
-        safe_name = rel_path.replace("/", "_") + ".bsdiff"
-        delta_path = deltas_dir / str(mod_id) / safe_name
-        save_delta(delta_bytes, delta_path)
+            # Save delta to disk
+            safe_name = rel_path.replace("/", "_") + ".bsdiff"
+            delta_path = deltas_dir / str(mod_id) / safe_name
+            save_delta(delta_bytes, delta_path)
 
-        # Store each byte range as a separate mod_delta entry
-        for byte_start, byte_end in byte_ranges:
-            db.connection.execute(
-                "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (mod_id, rel_path, str(delta_path), byte_start, byte_end),
-            )
+            # Store each byte range as a separate mod_delta entry
+            for byte_start, byte_end in byte_ranges:
+                db.connection.execute(
+                    "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (mod_id, rel_path, str(delta_path), byte_start, byte_end),
+                )
 
-        result.changed_files.append({
-            "file_path": rel_path,
-            "delta_path": str(delta_path),
-            "byte_ranges": byte_ranges,
-        })
+            result.changed_files.append({
+                "file_path": rel_path,
+                "delta_path": str(delta_path),
+                "byte_ranges": byte_ranges,
+            })
+        except Exception as e:
+            logger.error("Failed to process %s: %s", rel_path, e, exc_info=True)
+            result.error = f"Failed to process {rel_path}: {e}"
+            return result
 
     db.connection.commit()
     logger.info("Imported mod '%s': %d files changed", mod_name, len(result.changed_files))
