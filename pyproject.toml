@@ -1,0 +1,32 @@
+[project]
+name = "cdmm"
+version = "0.1.0"
+description = "Crimson Desert Mod Manager — archive-aware mod composition with conflict detection"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "bsdiff4>=1.2",
+    "lz4>=4.3",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyinstaller>=6.0",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,147 @@
+"""Test Mod mode — read-only conflict analysis without installing.
+
+Imports a mod temporarily, runs full conflict detection against all
+installed mods, generates an exportable compatibility report.
+"""
+import logging
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+from cdmm.engine.conflict_detector import Conflict, ConflictDetector
+from cdmm.engine.import_handler import detect_format, import_from_folder, import_from_zip
+from cdmm.engine.snapshot_manager import SnapshotManager
+from cdmm.storage.database import Database
+
+logger = logging.getLogger(__name__)
+
+
+class ModTestResult:
+    def __init__(self, mod_name: str) -> None:
+        self.mod_name = mod_name
+        self.changed_files: list[dict] = []
+        self.conflicts: list[Conflict] = []
+        self.compatible_mods: list[str] = []
+        self.error: str | None = None
+
+
+def test_mod(
+    mod_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager
+) -> ModTestResult:
+    """Analyze a mod without installing it. Read-only operation.
+
+    Temporarily imports the mod to a separate database, runs conflict
+    detection, then cleans up. The main database is not modified.
+    """
+    fmt = detect_format(mod_path)
+    mod_name = mod_path.stem
+    result = ModTestResult(mod_name)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        deltas_dir = tmp_path / "deltas"
+
+        # Import to get change analysis (uses the REAL database temporarily)
+        if fmt == "zip":
+            import_result = import_from_zip(mod_path, game_dir, db, snapshot, deltas_dir)
+        elif fmt == "folder":
+            import_result = import_from_folder(mod_path, game_dir, db, snapshot, deltas_dir)
+        else:
+            result.error = f"Test Mod only supports zip and folder formats (got: {fmt})"
+            return result
+
+        if import_result.error:
+            result.error = import_result.error
+            # Clean up the temporarily imported mod
+            _cleanup_test_mod(db)
+            return result
+
+        result.changed_files = import_result.changed_files
+
+        # Run conflict detection
+        detector = ConflictDetector(db)
+        all_conflicts = detector.detect_all()
+
+        # Find the test mod's ID (last inserted)
+        cursor = db.connection.execute("SELECT MAX(id) FROM mods")
+        test_mod_id = cursor.fetchone()[0]
+
+        # Filter conflicts involving the test mod
+        for c in all_conflicts:
+            if c.mod_a_id == test_mod_id or c.mod_b_id == test_mod_id:
+                result.conflicts.append(c)
+
+        # Determine compatible mods (no conflicts with test mod)
+        all_mods = db.connection.execute(
+            "SELECT id, name FROM mods WHERE id != ?", (test_mod_id,)
+        ).fetchall()
+
+        conflicting_ids = set()
+        for c in result.conflicts:
+            if c.level in ("byte_range", "paz"):
+                conflicting_ids.add(c.mod_a_id)
+                conflicting_ids.add(c.mod_b_id)
+        conflicting_ids.discard(test_mod_id)
+
+        for mod_id, mod_name_db in all_mods:
+            if mod_id not in conflicting_ids:
+                result.compatible_mods.append(mod_name_db)
+
+        # Clean up: remove the temporarily imported mod
+        _cleanup_test_mod(db, test_mod_id)
+
+    return result
+
+
+def _cleanup_test_mod(db: Database, mod_id: int | None = None) -> None:
+    """Remove temporarily imported test mod from database."""
+    if mod_id is None:
+        cursor = db.connection.execute("SELECT MAX(id) FROM mods")
+        row = cursor.fetchone()
+        if row and row[0]:
+            mod_id = row[0]
+    if mod_id:
+        db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+        db.connection.commit()
+
+
+def generate_compatibility_report(result: ModTestResult) -> str:
+    """Generate a markdown compatibility report for Nexus Mods."""
+    lines = [
+        f"# Compatibility Report: {result.mod_name}",
+        f"",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"",
+        f"## Files Modified",
+        f"",
+    ]
+
+    if result.changed_files:
+        for cf in result.changed_files:
+            lines.append(f"- `{cf['file_path']}`")
+    else:
+        lines.append("- No file changes detected")
+
+    lines.append("")
+    lines.append("## Compatibility")
+    lines.append("")
+
+    if result.compatible_mods:
+        lines.append("**Compatible with:**")
+        for name in sorted(result.compatible_mods):
+            lines.append(f"- {name}")
+    else:
+        lines.append("**No installed mods to test against.**")
+
+    if result.conflicts:
+        lines.append("")
+        lines.append("**Conflicts with:**")
+        for c in result.conflicts:
+            other_name = c.mod_b_name if c.mod_a_name == result.mod_name else c.mod_a_name
+            lines.append(f"- **{other_name}** — {c.explanation}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("*Generated by Crimson Desert Mod Manager*")
+
+    return "\n".join(lines)
