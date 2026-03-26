@@ -58,10 +58,25 @@ For mods distributed as installer scripts (`.bat` or `.py`):
 
 The manager passes `CDMM_GAME_DIR` as an environment variable so scripts can find the game directory automatically.
 
+### Mod Health Check
+Every mod is automatically validated before import:
+
+- **Duplicate PAMT paths** — detects mods that add files already in another PAZ (crashes the game). Auto-fixed by redirecting the entry.
+- **Hash mismatches** — verifies PAMT and PAPGT integrity chains
+- **PAZ size errors** — catches when PAMT size fields don't match actual files
+- **Version mismatches** — warns if the mod was built for a different game version
+- **Bug report generator** — one-click copy of a detailed report to send to the mod author
+
+### PAZ-Shift Aware Composition
+Mods that rearrange PAZ files (like LootMultiplier's data shift) work alongside mods that patch specific bytes (like Inventory Expander). The apply engine detects file size changes and automatically adjusts patch offsets so both mods compose correctly.
+
 ### ASI Plugin Management
 A dedicated **ASI Plugins** tab for managing native DLL plugins:
 
 - Scans `bin64/` for installed `.asi` files
+- **Install** — copies `.asi`, all `.ini` config files, and ASI loader DLLs from mod folder
+- **Update** — replace a plugin with a newer version while preserving enabled/disabled state
+- **Uninstall** — deletes the `.asi` and all companion `.ini` files
 - Enable/disable plugins (renames to `.asi.disabled`)
 - Detects hook conflicts between plugins
 - Opens `.ini` config files in your text editor
@@ -127,14 +142,14 @@ Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAP
 
 All data is stored in `%LOCALAPPDATA%\cdmm\`:
 - `cdmm.db` — mod registry, snapshots, conflicts
-- `vanilla/` — backup of original game files
+- `vanilla/` — byte-range backups of modified game files (not full copies)
 - `deltas/` — binary patches for each mod
 
 ## Requirements
 
 - Windows 10/11
 - Crimson Desert (Steam)
-- ~1 GB free disk space for vanilla backups
+- Minimal free disk space (backups are byte-range level, not full file copies)
 
 ## Support
 
