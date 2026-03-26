@@ -1,5 +1,6 @@
 import sys
 import logging
+import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
@@ -37,16 +38,38 @@ def setup_logging(app_data: Path) -> None:
     root_logger.addHandler(console_handler)
 
 
+def _flush_logs():
+    """Flush all log handlers to disk."""
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+
+
 def _global_exception_handler(exc_type, exc_value, exc_tb):
     """Catch unhandled exceptions and log them before the app dies."""
     logger = logging.getLogger("CRASH")
     logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+    _flush_logs()
     sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+def _thread_exception_handler(args):
+    """Catch unhandled exceptions in worker threads."""
+    logger = logging.getLogger("CRASH")
+    logger.critical(
+        "Unhandled exception in thread %s",
+        args.thread.name if args.thread else "unknown",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
+    _flush_logs()
 
 
 def main() -> int:
     setup_logging(APP_DATA_DIR)
     sys.excepthook = _global_exception_handler
+    threading.excepthook = _thread_exception_handler
 
     logger = logging.getLogger(__name__)
     logger.info("Starting Crimson Desert Mod Manager")

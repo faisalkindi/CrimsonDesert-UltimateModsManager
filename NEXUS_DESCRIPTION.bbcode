@@ -16,10 +16,23 @@ Drop a mod file onto the window and it's installed. Supports:
 [*][b]ASI plugins[/b] (.asi) — native DLL plugins for ASI Loader
 [/list]
 
+[size=3][b]Mod Health Check[/b][/size]
+Every mod is automatically validated before import:
+[list]
+[*][b]Duplicate file detection[/b] — catches mods that add files already in another PAZ (would crash the game). Auto-fixed by redirecting the entry.
+[*][b]Integrity chain verification[/b] — validates PAMT and PAPGT hashes before applying
+[*][b]PAZ size validation[/b] — catches when PAMT size fields don't match actual files
+[*][b]Version mismatch detection[/b] — warns if the mod was built for a different game version
+[*][b]Bug report generator[/b] — one-click copy of a detailed technical report you can send to the mod author
+[/list]
+
+[size=3][b]PAZ-Shift Aware Composition[/b][/size]
+Mods that rearrange PAZ files (like LootMultiplier's data shift) work alongside mods that patch specific bytes (like Inventory Expander). The apply engine detects file size changes and automatically adjusts patch offsets so both mods compose correctly without crashing.
+
 [size=3][b]Delta-Based Patching[/b][/size]
 Mods are stored as binary deltas against your vanilla game files, not full copies. This means:
 [list]
-[*][b]Small on disk[/b] — only the changed bytes are saved
+[*][b]Small on disk[/b] — only the changed bytes are saved and backed up
 [*][b]Composable[/b] — multiple mods can safely modify the same PAZ file
 [*][b]Reversible[/b] — vanilla files are always preserved
 [/list]
@@ -44,6 +57,7 @@ Conflicts are displayed in a tree view with color-coded severity and plain-Engli
 [list]
 [*][b]Apply[/b] — composes all enabled mods onto vanilla using atomic file operations (never leaves your game half-patched)
 [*][b]Revert to Vanilla[/b] — restores original game files instantly
+[*]Untick a mod and click Apply — that mod's changes are properly removed
 [*]Crash recovery built in — if something goes wrong mid-apply, it rolls back
 [/list]
 
@@ -57,13 +71,15 @@ For mods distributed as installer scripts:
 [/list]
 
 [size=3][b]ASI Plugin Management[/b][/size]
-Dedicated ASI Plugins tab:
+Dedicated ASI Plugins tab with full lifecycle management:
 [list]
-[*]Scans bin64/ for installed .asi files
-[*]Enable/disable plugins without uninstalling
-[*]Detects hook conflicts between plugins
-[*]Opens .ini config files in your text editor
-[*]Shows ASI Loader status
+[*][b]Install[/b] — copies .asi, all .ini config files, and ASI loader DLLs (version.dll, winmm.dll, etc.)
+[*][b]Update[/b] — replace a plugin with a newer version while preserving enabled/disabled state
+[*][b]Uninstall[/b] — deletes the .asi and all companion .ini files from bin64/
+[*][b]Enable/Disable[/b] — toggle plugins without uninstalling
+[*][b]Conflict detection[/b] — warns when two plugins hook the same targets
+[*][b]Config editor[/b] — opens .ini files in your text editor
+[*]Shows ASI Loader installation status
 [/list]
 
 [size=3][b]Test Mod (Dry Run)[/b][/size]
@@ -85,8 +101,9 @@ Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAP
 
 [list=1]
 [*][b]Snapshots[/b] your vanilla game files on first run (SHA-256 hashes)
+[*][b]Validates[/b] mods on import — catches broken integrity chains, duplicates, and version mismatches before they crash your game
 [*][b]Imports[/b] mods by diffing modified files against vanilla, storing only the binary delta
-[*][b]Composes[/b] all enabled mod deltas onto vanilla in priority order when you click Apply
+[*][b]Composes[/b] all enabled mod deltas onto vanilla in priority order when you click Apply — with automatic offset adjustment for PAZ-shift mods
 [*][b]Rebuilds[/b] the PAPGT integrity chain so the game accepts the modified files
 [*][b]Commits[/b] atomically — all files are staged and swapped in one operation
 [/list]
@@ -103,11 +120,17 @@ Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAP
 [*]Start dropping mods in!
 [/list]
 
+[size=4][b]Important[/b][/size]
+[list]
+[*]Make sure your game files are [b]vanilla[/b] (unmodded) before first launch. Use Steam → Verify Integrity if you have mods installed manually.
+[*]The snapshot must be taken on clean game files — this is your baseline for all mod operations.
+[/list]
+
 [size=4][b]Requirements[/b][/size]
 [list]
 [*]Windows 10/11
 [*]Crimson Desert (Steam)
-[*]~1 GB free disk space for vanilla backups
+[*]Minimal disk space — backups are byte-range level, not full file copies
 [/list]
 
 [b]No Python required[/b] — the exe is fully standalone.
@@ -117,16 +140,25 @@ Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAP
 [size=4][b]FAQ[/b][/size]
 
 [b]Q: Is it safe? Can it break my game?[/b]
-A: The manager always keeps a backup of your vanilla files. Click "Revert to Vanilla" at any time to restore your game to its original state. All file operations are atomic — if something fails mid-apply, it rolls back automatically.
+A: The manager always keeps backups of the bytes it modifies. Click "Revert to Vanilla" at any time to restore your game. All file operations are atomic — if something fails mid-apply, it rolls back automatically. If all else fails, Steam → Verify Integrity restores everything.
+
+[b]Q: A mod shows a health check warning — what do I do?[/b]
+A: The health check catches common mod packaging errors. For critical issues (like duplicate file paths), the manager auto-fixes them when possible. Click "Copy Bug Report" to get a detailed report you can send to the mod author so they can fix the root cause.
 
 [b]Q: Can I use this with mods I installed manually?[/b]
-A: Yes. Use "Scan for Changes" to detect manually-installed mods and bring them under management. You can also use "Revert to Vanilla" first, then re-import all your mods through the manager for a clean setup.
+A: Best practice is to start clean: Verify game files through Steam, then import all mods through the manager. This ensures accurate deltas and proper revert support.
+
+[b]Q: Two mods conflict — will the game crash?[/b]
+A: Not necessarily. The conflict view shows what overlaps and who wins. For simple byte conflicts, load order resolves it. For PAZ-shift conflicts (one mod rearranges the archive), the manager automatically adjusts offsets so both work together.
 
 [b]Q: How does load order work?[/b]
 A: Mods higher in the list are applied last and win any byte-range conflicts. Use Move Up/Move Down to adjust. The conflict view at the bottom shows exactly what overlaps and who wins.
 
 [b]Q: Does it work with the latest game update?[/b]
-A: After a game update, click "Refresh Snapshot" to re-scan your vanilla files, then re-apply your mods. Your mod deltas may need to be re-imported if the update changed the same files.
+A: After a game update, use Steam → Verify Integrity to get clean files, then delete the app data folder (%LOCALAPPDATA%\cdmm), relaunch, take a new snapshot, and re-import your mods.
+
+[b]Q: Does it work with ASI mods?[/b]
+A: Yes. The ASI Plugins tab manages .asi files separately from PAZ mods. You can install, update, uninstall, enable/disable, and detect conflicts between ASI plugins.
 
 [line]
 
@@ -134,4 +166,4 @@ A: After a game update, click "Refresh Snapshot" to re-scan your vanilla files, 
 [url=https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager]GitHub Repository[/url]
 
 [size=3][b]Support Development[/b][/size]
-[url=https://ko-fi.com/kindiboy]Buy me a coffee on Ko-fi[/url][/center]
+[url=https://ko-fi.com/kindiboy][img]https://storage.ko-fi.com/cdn/kofi2.png[/img][/url][/center]

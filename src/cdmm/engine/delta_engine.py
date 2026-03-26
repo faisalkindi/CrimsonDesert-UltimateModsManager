@@ -56,7 +56,13 @@ def generate_delta(vanilla_bytes: bytes, modified_bytes: bytes) -> bytes:
         ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
         return _make_sparse_patch_from_ranges(vanilla_bytes, modified_bytes, ranges)
 
-    return bsdiff4.diff(vanilla_bytes, modified_bytes)
+    try:
+        return bsdiff4.diff(vanilla_bytes, modified_bytes)
+    except (MemoryError, OSError, SystemError) as e:
+        logger.warning("bsdiff4 failed (%.1f MB file), falling back to sparse: %s",
+                       len(vanilla_bytes) / 1048576, e)
+        ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
+        return _make_sparse_patch_from_ranges(vanilla_bytes, modified_bytes, ranges)
 
 
 def apply_delta(vanilla_bytes: bytes, delta_bytes: bytes) -> bytes:
