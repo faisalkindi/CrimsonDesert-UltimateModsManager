@@ -1,25 +1,186 @@
 """Apply engine — composes enabled mod deltas into a valid game state.
 
 Pipeline:
-  1. Read vanilla files from backup
-  2. Apply each enabled mod's bsdiff4 delta in sequence
-  3. Rebuild PAPGT from scratch
-  4. Stage all modified files
-  5. Atomic commit (transactional I/O)
+  1. Ensure vanilla range backups exist for all mod-affected files
+  2. Read game files, restore vanilla at mod byte ranges
+  3. Apply each enabled mod's delta in sequence
+  4. Rebuild PAPGT from scratch
+  5. Stage all modified files
+  6. Atomic commit (transactional I/O)
+
+Vanilla backups are byte-range level (not full file copies) for files with
+sparse deltas. Only the specific byte ranges that mods modify are backed up.
+Bsdiff deltas use full file backups (but those files are always small).
 """
 import logging
-import tempfile
+import struct
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
 from cdmm.archive.papgt_manager import PapgtManager
 from cdmm.archive.transactional_io import TransactionalIO
-from cdmm.engine.delta_engine import apply_delta, load_delta
+from cdmm.engine.delta_engine import (
+    SPARSE_MAGIC, apply_delta, apply_delta_from_file, load_delta,
+)
 from cdmm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+RANGE_BACKUP_EXT = ".vranges"  # sparse range backup extension
+
+
+def _delta_changes_size(delta_path: Path, vanilla_size: int) -> bool:
+    """Check if a sparse delta produces a file of different size than vanilla."""
+    try:
+        with open(delta_path, "rb") as f:
+            magic = f.read(4)
+            if magic != SPARSE_MAGIC:
+                return False  # bsdiff — can't easily tell without applying
+            count = struct.unpack("<I", f.read(4))[0]
+            # Check if any patch entry writes past vanilla_size
+            for _ in range(count):
+                offset = struct.unpack("<Q", f.read(8))[0]
+                length = struct.unpack("<I", f.read(4))[0]
+                if offset + length > vanilla_size:
+                    return True
+                f.seek(length, 1)
+    except Exception:
+        pass
+    return False
+
+
+def _find_insertion_point(delta_path: Path) -> int:
+    """Find the first offset in a sparse delta (the insertion/shift point)."""
+    try:
+        with open(delta_path, "rb") as f:
+            f.read(4)  # skip magic
+            count = struct.unpack("<I", f.read(4))[0]
+            if count > 0:
+                offset = struct.unpack("<Q", f.read(8))[0]
+                return offset
+    except Exception:
+        pass
+    return 0
+
+
+def _apply_sparse_shifted(
+    buf: bytearray, delta_path: Path, insertion_point: int, shift: int,
+) -> None:
+    """Apply a sparse delta with offset adjustment for shifted data.
+
+    Entries at or after insertion_point have their offset shifted.
+    """
+    with open(delta_path, "rb") as f:
+        magic = f.read(4)
+        if magic != SPARSE_MAGIC:
+            return  # can't shift bsdiff
+        count = struct.unpack("<I", f.read(4))[0]
+
+        for _ in range(count):
+            offset = struct.unpack("<Q", f.read(8))[0]
+            length = struct.unpack("<I", f.read(4))[0]
+            data = f.read(length)
+
+            # Adjust offset if past the insertion point
+            if offset >= insertion_point:
+                offset += shift
+
+            end = offset + length
+            if end > len(buf):
+                buf.extend(b"\x00" * (end - len(buf)))
+            buf[offset:end] = data
+
+
+# ── Range backup helpers ─────────────────────────────────────────────
+
+def _save_range_backup(game_dir: Path, vanilla_dir: Path,
+                       file_path: str, byte_ranges: list[tuple[int, int]]) -> None:
+    """Save vanilla bytes at specific byte ranges from the game file.
+
+    Stored in sparse format: SPRS + count + (offset, length, data)*
+    """
+    game_file = game_dir / file_path.replace("/", "\\")
+    if not game_file.exists():
+        return
+
+    backup_path = vanilla_dir / (file_path.replace("/", "_") + RANGE_BACKUP_EXT)
+    if backup_path.exists():
+        return  # already backed up
+
+    # Merge overlapping ranges and sort
+    merged = _merge_ranges(byte_ranges)
+
+    buf = bytearray(SPARSE_MAGIC)
+    buf += struct.pack("<I", len(merged))
+
+    with open(game_file, "rb") as f:
+        for start, end in merged:
+            length = end - start
+            f.seek(start)
+            data = f.read(length)
+            buf += struct.pack("<QI", start, len(data))
+            buf += data
+
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path.write_bytes(bytes(buf))
+    total_bytes = sum(e - s for s, e in merged)
+    logger.info("Range backup: %s (%d ranges, %d bytes)",
+                file_path, len(merged), total_bytes)
+
+
+def _load_range_backup(vanilla_dir: Path, file_path: str
+                       ) -> list[tuple[int, bytes]] | None:
+    """Load a range backup. Returns [(offset, data), ...] or None."""
+    backup_path = vanilla_dir / (file_path.replace("/", "_") + RANGE_BACKUP_EXT)
+    if not backup_path.exists():
+        return None
+
+    raw = backup_path.read_bytes()
+    if raw[:4] != SPARSE_MAGIC:
+        return None
+
+    entries: list[tuple[int, bytes]] = []
+    offset = 4
+    count = struct.unpack_from("<I", raw, offset)[0]
+    offset += 4
+
+    for _ in range(count):
+        file_offset = struct.unpack_from("<Q", raw, offset)[0]
+        offset += 8
+        length = struct.unpack_from("<I", raw, offset)[0]
+        offset += 4
+        data = raw[offset:offset + length]
+        offset += length
+        entries.append((file_offset, data))
+
+    return entries
+
+
+def _apply_ranges_to_buf(buf: bytearray, entries: list[tuple[int, bytes]]) -> None:
+    """Overwrite byte ranges in a buffer."""
+    for file_offset, data in entries:
+        end = file_offset + len(data)
+        if end > len(buf):
+            buf.extend(b"\x00" * (end - len(buf)))
+        buf[file_offset:end] = data
+
+
+def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping/adjacent byte ranges."""
+    if not ranges:
+        return []
+    sorted_r = sorted(ranges)
+    merged = [sorted_r[0]]
+    for start, end in sorted_r[1:]:
+        if start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+# ── Workers ──────────────────────────────────────────────────────────
 
 class ApplyWorker(QObject):
     """Background worker for apply operation."""
@@ -45,52 +206,57 @@ class ApplyWorker(QObject):
             self.error_occurred.emit(f"Apply failed: {e}")
 
     def _apply(self) -> None:
-        # Get all enabled mods with their deltas, grouped by file
         file_deltas = self._get_file_deltas()
-        if not file_deltas:
-            self.error_occurred.emit("No enabled mods with changes to apply.")
+        revert_files = self._get_files_to_revert(set(file_deltas.keys()))
+
+        if not file_deltas and not revert_files:
+            self.error_occurred.emit("No mod changes to apply or revert.")
             return
 
-        total_files = len(file_deltas)
+        all_files = set(file_deltas.keys()) | set(revert_files)
+        total_files = len(all_files)
         self.progress_updated.emit(0, f"Applying {total_files} file(s)...")
 
-        # Create staging directory on same filesystem as game
+        # Ensure vanilla backups exist BEFORE any modifications.
+        self.progress_updated.emit(2, "Backing up vanilla byte ranges...")
+        self._ensure_backups(file_deltas, revert_files)
+
         staging_dir = self._game_dir / ".cdmm_staging"
         staging_dir.mkdir(exist_ok=True)
-
         txn = TransactionalIO(self._game_dir, staging_dir)
         modified_pamts: dict[str, bytes] = {}
 
         try:
-            # For each file, start from vanilla and apply all deltas
-            for i, (file_path, deltas) in enumerate(file_deltas.items()):
-                pct = int((i / total_files) * 80)
+            file_idx = 0
+
+            # Apply enabled mod deltas
+            for file_path, deltas in file_deltas.items():
+                pct = int((file_idx / total_files) * 80)
                 self.progress_updated.emit(pct, f"Processing {file_path}...")
+                file_idx += 1
 
-                # Read vanilla version
-                vanilla_path = self._vanilla_dir / file_path.replace("/", "\\")
-                if not vanilla_path.exists():
-                    # Fallback: read from game directory (might be unmodified)
-                    vanilla_path = self._game_dir / file_path.replace("/", "\\")
-
-                if not vanilla_path.exists():
-                    logger.warning("Vanilla file not found: %s, skipping", file_path)
+                result_bytes = self._compose_file(file_path, deltas)
+                if result_bytes is None:
                     continue
 
-                current_bytes = vanilla_path.read_bytes()
-
-                # Apply each delta in sequence
-                for delta_info in deltas:
-                    delta_bytes = load_delta(Path(delta_info["delta_path"]))
-                    current_bytes = apply_delta(current_bytes, delta_bytes)
-
-                # Stage the result
-                txn.stage_file(file_path, current_bytes)
-
-                # Track PAMT files for PAPGT rebuild
+                txn.stage_file(file_path, result_bytes)
                 if file_path.endswith(".pamt"):
-                    dir_name = file_path.split("/")[0]
-                    modified_pamts[dir_name] = current_bytes
+                    modified_pamts[file_path.split("/")[0]] = result_bytes
+
+            # Revert files from disabled mods
+            for file_path in revert_files:
+                pct = int((file_idx / total_files) * 80)
+                self.progress_updated.emit(pct, f"Reverting {file_path}...")
+                file_idx += 1
+
+                vanilla_bytes = self._get_vanilla_bytes(file_path)
+                if vanilla_bytes is None:
+                    logger.warning("Cannot revert %s — no backup", file_path)
+                    continue
+
+                txn.stage_file(file_path, vanilla_bytes)
+                if file_path.endswith(".pamt"):
+                    modified_pamts[file_path.split("/")[0]] = vanilla_bytes
 
             # Rebuild PAPGT
             self.progress_updated.emit(85, "Rebuilding PAPGT integrity chain...")
@@ -99,9 +265,8 @@ class ApplyWorker(QObject):
                 papgt_bytes = papgt_mgr.rebuild(modified_pamts)
                 txn.stage_file("meta/0.papgt", papgt_bytes)
             except FileNotFoundError:
-                logger.warning("PAPGT not found, skipping integrity chain rebuild")
+                logger.warning("PAPGT not found, skipping rebuild")
 
-            # Commit atomically
             self.progress_updated.emit(95, "Committing changes...")
             txn.commit()
 
@@ -114,11 +279,163 @@ class ApplyWorker(QObject):
         finally:
             txn.cleanup_staging()
 
-    def _get_file_deltas(self) -> dict[str, list[dict]]:
-        """Get all deltas for enabled mods, grouped by file path.
+    def _ensure_backups(self, file_deltas: dict, revert_files: list[str]) -> None:
+        """Create vanilla backups for all files about to be modified.
 
-        Returns {file_path: [{delta_path, mod_name}, ...]} in mod order.
+        - Sparse-only files: byte-range backup (tiny — just the modified bytes)
+        - Bsdiff files: full file backup (file is small anyway)
         """
+        self._vanilla_dir.mkdir(parents=True, exist_ok=True)
+
+        all_files = set(file_deltas.keys()) | set(revert_files)
+        for file_path in all_files:
+            delta_infos = file_deltas.get(file_path, [])
+            has_bsdiff = self._has_bsdiff_delta(file_path)
+
+            if has_bsdiff:
+                # Full file backup (small files only — bsdiff is skipped for >500MB)
+                full_path = self._vanilla_dir / file_path.replace("/", "\\")
+                if not full_path.exists():
+                    game_path = self._game_dir / file_path.replace("/", "\\")
+                    if game_path.exists():
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        import shutil
+                        shutil.copy2(game_path, full_path)
+                        logger.info("Full vanilla backup: %s", file_path)
+            else:
+                # Byte-range backup — only the positions mods touch
+                ranges = self._get_all_byte_ranges(file_path)
+                if ranges:
+                    _save_range_backup(
+                        self._game_dir, self._vanilla_dir, file_path, ranges)
+
+    def _has_bsdiff_delta(self, file_path: str) -> bool:
+        """Check if any mod delta for this file is bsdiff format."""
+        cursor = self._db.connection.execute(
+            "SELECT md.delta_path FROM mod_deltas md "
+            "JOIN mods m ON md.mod_id = m.id "
+            "WHERE md.file_path = ? AND m.mod_type = 'paz'",
+            (file_path,),
+        )
+        for (delta_path,) in cursor.fetchall():
+            try:
+                with open(delta_path, "rb") as f:
+                    magic = f.read(4)
+                if magic != SPARSE_MAGIC:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _get_all_byte_ranges(self, file_path: str) -> list[tuple[int, int]]:
+        """Get union of all mod byte ranges for a file."""
+        cursor = self._db.connection.execute(
+            "SELECT byte_start, byte_end FROM mod_deltas "
+            "WHERE file_path = ? AND byte_start IS NOT NULL",
+            (file_path,),
+        )
+        return [(row[0], row[1]) for row in cursor.fetchall()]
+
+    def _compose_file(self, file_path: str, deltas: list[dict]) -> bytes | None:
+        """Compose a file by starting from vanilla and applying deltas.
+
+        Handles PAZ-shift conflicts: if one delta changes the file size
+        (e.g., LootMultiplier's PAZ shift), it's applied first, then
+        remaining deltas have their offsets adjusted to account for the shift.
+        """
+        has_bsdiff = self._has_bsdiff_delta(file_path)
+
+        if has_bsdiff:
+            full_vanilla = self._vanilla_dir / file_path.replace("/", "\\")
+            if not full_vanilla.exists():
+                logger.warning("No vanilla backup for %s", file_path)
+                return None
+            current = full_vanilla.read_bytes()
+        else:
+            game_path = self._game_dir / file_path.replace("/", "\\")
+            if not game_path.exists():
+                logger.warning("Game file not found: %s", file_path)
+                return None
+
+            current_buf = bytearray(game_path.read_bytes())
+            range_entries = _load_range_backup(self._vanilla_dir, file_path)
+            if range_entries:
+                _apply_ranges_to_buf(current_buf, range_entries)
+            current = bytes(current_buf)
+
+        vanilla_size = len(current)
+
+        # Separate deltas into size-changing (PAZ shift) and size-preserving
+        size_changing = []
+        size_preserving = []
+        for d in deltas:
+            if _delta_changes_size(Path(d["delta_path"]), vanilla_size):
+                size_changing.append(d)
+            else:
+                size_preserving.append(d)
+
+        # Apply size-changing deltas first
+        for d in size_changing:
+            current = apply_delta_from_file(current, Path(d["delta_path"]))
+
+        if not size_preserving:
+            return current
+
+        # If file size changed, adjust offsets for remaining deltas
+        shift = len(current) - vanilla_size
+        if shift != 0 and size_changing:
+            insertion_point = _find_insertion_point(
+                Path(size_changing[0]["delta_path"]))
+            logger.info(
+                "PAZ shift detected: %+d bytes at offset %d, "
+                "adjusting %d remaining delta(s)",
+                shift, insertion_point, len(size_preserving))
+
+            # Apply remaining deltas with offset adjustment
+            result = bytearray(current)
+            for d in size_preserving:
+                _apply_sparse_shifted(
+                    result, Path(d["delta_path"]), insertion_point, shift)
+            return bytes(result)
+
+        # No shift — apply normally
+        for d in size_preserving:
+            current = apply_delta_from_file(current, Path(d["delta_path"]))
+        return current
+
+    def _get_vanilla_bytes(self, file_path: str) -> bytes | None:
+        """Get vanilla version of a file from backup (range or full)."""
+        # Try full backup first
+        full_path = self._vanilla_dir / file_path.replace("/", "\\")
+        if full_path.exists():
+            return full_path.read_bytes()
+
+        # Try range backup — reconstruct vanilla from game file + ranges
+        game_path = self._game_dir / file_path.replace("/", "\\")
+        if not game_path.exists():
+            return None
+
+        range_entries = _load_range_backup(self._vanilla_dir, file_path)
+        if range_entries:
+            buf = bytearray(game_path.read_bytes())
+            _apply_ranges_to_buf(buf, range_entries)
+            return bytes(buf)
+
+        return None
+
+    def _get_files_to_revert(self, enabled_files: set[str]) -> list[str]:
+        """Find files modified by disabled mods that no enabled mod covers."""
+        cursor = self._db.connection.execute(
+            "SELECT DISTINCT md.file_path "
+            "FROM mod_deltas md "
+            "JOIN mods m ON md.mod_id = m.id "
+            "WHERE m.enabled = 0 AND m.mod_type = 'paz'"
+        )
+        disabled_files = {row[0] for row in cursor.fetchall()}
+        return sorted(disabled_files - enabled_files)
+
+    def _get_file_deltas(self) -> dict[str, list[dict]]:
+        """Get all deltas for enabled mods, grouped by file path."""
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name "
             "FROM mod_deltas md "
@@ -128,7 +445,7 @@ class ApplyWorker(QObject):
         )
 
         file_deltas: dict[str, list[dict]] = {}
-        seen_deltas: set[str] = set()  # deduplicate by delta_path
+        seen_deltas: set[str] = set()
 
         for file_path, delta_path, mod_name in cursor.fetchall():
             if delta_path in seen_deltas:
@@ -157,39 +474,65 @@ class RevertWorker(QObject):
 
     def run(self) -> None:
         try:
+            self._db = Database(self._db_path)
+            self._db.initialize()
             self._revert()
+            self._db.close()
         except Exception as e:
             logger.error("Revert failed: %s", e, exc_info=True)
             self.error_occurred.emit(f"Revert failed: {e}")
 
     def _revert(self) -> None:
-        # Find all files that have vanilla backups
-        if not self._vanilla_dir.exists():
-            self.error_occurred.emit("No vanilla backups found. Nothing to revert.")
+        """Revert all mod-affected files to vanilla using range or full backups."""
+        # Get all files any mod has ever touched
+        cursor = self._db.connection.execute(
+            "SELECT DISTINCT file_path FROM mod_deltas")
+        mod_files = [row[0] for row in cursor.fetchall()]
+
+        if not mod_files:
+            self.error_occurred.emit("No mod data found. Nothing to revert.")
             return
 
-        backup_files: list[tuple[str, Path]] = []
-        for f in self._vanilla_dir.rglob("*"):
-            if f.is_file():
-                rel = f.relative_to(self._vanilla_dir).as_posix()
-                backup_files.append((rel, f))
-
-        if not backup_files:
-            self.error_occurred.emit("No vanilla backup files found.")
-            return
-
-        total = len(backup_files)
+        total = len(mod_files)
         self.progress_updated.emit(0, f"Reverting {total} file(s) to vanilla...")
 
         staging_dir = self._game_dir / ".cdmm_staging"
         staging_dir.mkdir(exist_ok=True)
         txn = TransactionalIO(self._game_dir, staging_dir)
 
+        reverted = 0
         try:
-            for i, (rel_path, backup_path) in enumerate(backup_files):
+            for i, file_path in enumerate(mod_files):
                 pct = int((i / total) * 90)
-                self.progress_updated.emit(pct, f"Restoring {rel_path}...")
-                txn.stage_file(rel_path, backup_path.read_bytes())
+                self.progress_updated.emit(pct, f"Restoring {file_path}...")
+
+                vanilla_bytes = self._get_vanilla_bytes(file_path)
+                if vanilla_bytes:
+                    txn.stage_file(file_path, vanilla_bytes)
+                    reverted += 1
+                else:
+                    logger.warning("Cannot revert %s — no backup found", file_path)
+
+            if reverted == 0:
+                self.error_occurred.emit(
+                    "No vanilla backups found. Use Steam 'Verify Integrity' to restore.")
+                return
+
+            # Rebuild PAPGT from vanilla PAMTs
+            self.progress_updated.emit(92, "Rebuilding PAPGT...")
+            modified_pamts: dict[str, bytes] = {}
+            for file_path in mod_files:
+                if file_path.endswith(".pamt"):
+                    vanilla_path = self._vanilla_dir / file_path.replace("/", "\\")
+                    if vanilla_path.exists():
+                        modified_pamts[file_path.split("/")[0]] = vanilla_path.read_bytes()
+
+            papgt_mgr = PapgtManager(self._game_dir)
+            try:
+                papgt_bytes = papgt_mgr.rebuild(modified_pamts)
+                txn.stage_file("meta/0.papgt", papgt_bytes)
+            except FileNotFoundError:
+                pass
 
             self.progress_updated.emit(95, "Committing revert...")
             txn.commit()
@@ -202,3 +545,21 @@ class RevertWorker(QObject):
             raise
         finally:
             txn.cleanup_staging()
+
+    def _get_vanilla_bytes(self, file_path: str) -> bytes | None:
+        """Get vanilla version from full backup or range backup."""
+        full_path = self._vanilla_dir / file_path.replace("/", "\\")
+        if full_path.exists():
+            return full_path.read_bytes()
+
+        game_path = self._game_dir / file_path.replace("/", "\\")
+        if not game_path.exists():
+            return None
+
+        range_entries = _load_range_backup(self._vanilla_dir, file_path)
+        if range_entries:
+            buf = bytearray(game_path.read_bytes())
+            _apply_ranges_to_buf(buf, range_entries)
+            return bytes(buf)
+
+        return None

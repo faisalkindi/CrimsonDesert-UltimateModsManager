@@ -66,6 +66,44 @@ def apply_delta(vanilla_bytes: bytes, delta_bytes: bytes) -> bytes:
     return bsdiff4.patch(vanilla_bytes, delta_bytes)
 
 
+def apply_delta_from_file(vanilla_bytes: bytes, delta_path: Path) -> bytes:
+    """Apply a delta from disk, streaming large sparse patches to avoid OOM."""
+    import os
+    file_size = os.path.getsize(delta_path)
+
+    with open(delta_path, "rb") as f:
+        magic = f.read(4)
+
+    if magic == SPARSE_MAGIC and file_size > 500 * 1024 * 1024:
+        # Stream sparse patches from disk for large deltas
+        return _apply_sparse_patch_streaming(vanilla_bytes, delta_path)
+
+    # Small enough to load into memory
+    delta_bytes = delta_path.read_bytes()
+    return apply_delta(vanilla_bytes, delta_bytes)
+
+
+def _apply_sparse_patch_streaming(vanilla_bytes: bytes, delta_path: Path) -> bytes:
+    """Apply a sparse patch by streaming entries from disk (low memory)."""
+    result = bytearray(vanilla_bytes)
+
+    with open(delta_path, "rb") as f:
+        f.seek(4)  # skip magic
+        count = struct.unpack("<I", f.read(4))[0]
+
+        for i in range(count):
+            file_offset = struct.unpack("<Q", f.read(8))[0]
+            length = struct.unpack("<I", f.read(4))[0]
+            data = f.read(length)
+
+            end = file_offset + length
+            if end > len(result):
+                result.extend(b"\x00" * (end - len(result)))
+            result[file_offset:end] = data
+
+    return bytes(result)
+
+
 def _make_sparse_patch(patches: list[tuple[int, bytes]]) -> bytes:
     """Create a sparse patch: SPRS + count + (offset, length, data) entries."""
     buf = bytearray(SPARSE_MAGIC)

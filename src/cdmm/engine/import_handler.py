@@ -28,6 +28,7 @@ class ModImportResult:
         self.mod_type = mod_type
         self.changed_files: list[dict] = []  # [{file_path, delta_path, byte_start, byte_end}]
         self.error: str | None = None
+        self.health_issues: list = []  # list[HealthIssue] from mod_health_check
 
 
 def detect_format(path: Path) -> str:
@@ -249,6 +250,21 @@ def _process_extracted_files(
     if not matches:
         result.error = "No recognized game files found in this mod."
         return result
+
+    # Run health check on mod files before importing
+    try:
+        from cdmm.engine.mod_health_check import check_mod_health, auto_fix_matches
+        mod_file_map = {rel: abs_path for rel, abs_path in matches}
+        result.health_issues = check_mod_health(mod_file_map, game_dir)
+        if result.health_issues:
+            critical = [i for i in result.health_issues if i.severity == "critical"]
+            logger.info("Health check: %d issues (%d critical)",
+                        len(result.health_issues), len(critical))
+            # Auto-fix: filter out broken files from import
+            matches = auto_fix_matches(matches, result.health_issues, game_dir)
+            logger.info("After auto-fix: %d files to import", len(matches))
+    except Exception as e:
+        logger.warning("Health check failed (non-fatal): %s", e)
 
     if existing_mod_id is not None:
         mod_id = existing_mod_id

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -94,6 +95,17 @@ class AsiPanel(QWidget):
                 config_btn.clicked.connect(lambda checked, pl=p: self._asi_mgr.open_config(pl))
                 actions_layout.addWidget(config_btn)
 
+            update_btn = QPushButton("Update")
+            update_btn.setFixedWidth(60)
+            update_btn.clicked.connect(lambda checked, pl=p: self._update_plugin(pl))
+            actions_layout.addWidget(update_btn)
+
+            uninstall_btn = QPushButton("Uninstall")
+            uninstall_btn.setFixedWidth(70)
+            uninstall_btn.setStyleSheet("color: #FF8888;")
+            uninstall_btn.clicked.connect(lambda checked, pl=p: self._uninstall_plugin(pl))
+            actions_layout.addWidget(uninstall_btn)
+
             self._table.setCellWidget(row, 2, actions)
 
             # Conflicts
@@ -115,3 +127,31 @@ class AsiPanel(QWidget):
         else:
             self._asi_mgr.enable(plugin)
         self.refresh()
+
+    def _update_plugin(self, plugin) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Update {plugin.name}",
+            "", "ASI Plugins (*.asi);;All Files (*)")
+        if not path:
+            return
+        from pathlib import Path
+        updated = self._asi_mgr.update(plugin, Path(path))
+        if updated:
+            QMessageBox.information(
+                self, "Updated",
+                f"Updated {plugin.name}:\n" + "\n".join(f"  {f}" for f in updated))
+            self.refresh()
+
+    def _uninstall_plugin(self, plugin) -> None:
+        reply = QMessageBox.question(
+            self, "Uninstall ASI Plugin",
+            f"Delete {plugin.name} and its config from bin64?\n\n"
+            f"Files to remove:\n"
+            f"  {plugin.path.name}"
+            f"{chr(10) + '  ' + plugin.ini_path.name if plugin.ini_path else ''}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            deleted = self._asi_mgr.uninstall(plugin)
+            if deleted:
+                self.refresh()

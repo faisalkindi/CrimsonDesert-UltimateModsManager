@@ -320,17 +320,25 @@ class MainWindow(QMainWindow):
         logger.info("Worker finished (main thread): %s", type(self._active_worker).__name__)
 
         progress.hide()
-        progress.deleteLater()
 
+        # Wait for thread to fully stop before cleaning up — prevents Qt
+        # segfaults from accessing deleted C++ objects.
         thread.quit()
-        thread.finished.connect(thread.deleteLater)
+        thread.wait(5000)
+
+        # Now safe to schedule deletion
+        progress.deleteLater()
+        thread.deleteLater()
 
         self._active_progress = None
         self._active_worker = None
         self._worker_thread = None
 
         logger.info("Calling completion callback")
-        callback(*args)
+        try:
+            callback(*args)
+        except Exception:
+            logger.error("Completion callback crashed", exc_info=True)
         logger.info("Completion callback done")
 
     def _worker_error(self, thread: QThread, progress: ProgressDialog,
@@ -340,7 +348,8 @@ class MainWindow(QMainWindow):
         progress.close()
 
         thread.quit()
-        thread.finished.connect(thread.deleteLater)
+        thread.wait(5000)
+        thread.deleteLater()
 
         self._active_progress = None
         self._active_worker = None
@@ -620,6 +629,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Import error: {result.error}", 10000)
             logger.error("Import error: %s", result.error)
         else:
+            # Show health check dialog if issues were found
+            health_issues = getattr(result, 'health_issues', [])
+            if health_issues:
+                from cdmm.gui.health_check_dialog import HealthCheckDialog
+                name = getattr(result, 'name', 'Unknown')
+                mod_files = {}  # files already imported at this point
+                dialog = HealthCheckDialog(health_issues, name, mod_files, self)
+                dialog.exec()
+
             name = getattr(result, 'name', 'Unknown')
             files = getattr(result, 'changed_files', [])
             self.statusBar().showMessage(

@@ -1,0 +1,137 @@
+[center][size=5][b]Crimson Desert Ultimate Mods Manager (BETA)[/b][/size]
+[size=3]Install, manage, and safely combine multiple mods with automatic conflict detection[/size][/center]
+
+[size=4][b]What Is This?[/b][/size]
+A desktop mod manager built specifically for Crimson Desert. It understands the game's PAZ/PAMT/PAPGT archive format, so you can install multiple mods that modify the same game archives without breaking anything. One-click apply, one-click revert to vanilla.
+
+[size=4][b]Features[/b][/size]
+
+[size=3][b]Drag-and-Drop Install[/b][/size]
+Drop a mod file onto the window and it's installed. Supports:
+[list]
+[*][b]ZIP archives[/b] — containing modified game files or installer scripts
+[*][b]Folders[/b] — loose directories with modified PAZ/PAMT files
+[*][b]Script mods[/b] (.bat / .py) — runs the installer, captures changes automatically
+[*][b]Binary patches[/b] (.bsdiff) — pre-generated patch files
+[*][b]ASI plugins[/b] (.asi) — native DLL plugins for ASI Loader
+[/list]
+
+[size=3][b]Delta-Based Patching[/b][/size]
+Mods are stored as binary deltas against your vanilla game files, not full copies. This means:
+[list]
+[*][b]Small on disk[/b] — only the changed bytes are saved
+[*][b]Composable[/b] — multiple mods can safely modify the same PAZ file
+[*][b]Reversible[/b] — vanilla files are always preserved
+[/list]
+
+[size=3][b]3-Level Conflict Detection[/b][/size]
+When two mods touch the same files, the manager shows exactly what overlaps:
+[list]
+[*][b]PAPGT (metadata)[/b] — auto-handled, no action needed
+[*][b]PAZ (archive)[/b] — same file, different byte ranges — usually compatible
+[*][b]Byte-Range (data)[/b] — overlapping changes — resolved automatically by load order
+[/list]
+Conflicts are displayed in a tree view with color-coded severity and plain-English explanations.
+
+[size=3][b]Load Order & Priority[/b][/size]
+[list]
+[*]Reorder mods with Move Up / Move Down buttons
+[*]Higher position = applied last = wins conflicts
+[*]Enable/disable individual mods without removing them
+[/list]
+
+[size=3][b]One-Click Apply & Revert[/b][/size]
+[list]
+[*][b]Apply[/b] — composes all enabled mods onto vanilla using atomic file operations (never leaves your game half-patched)
+[*][b]Revert to Vanilla[/b] — restores original game files instantly
+[*]Crash recovery built in — if something goes wrong mid-apply, it rolls back
+[/list]
+
+[size=3][b]Script Mod Support[/b][/size]
+For mods distributed as installer scripts:
+[list=1]
+[*]Drop the zip or script onto the manager
+[*]A console window opens — interact with the installer as normal
+[*]The manager detects which game files changed and captures them as deltas
+[*]The mod is now fully managed — disable, reorder, or revert anytime
+[/list]
+
+[size=3][b]ASI Plugin Management[/b][/size]
+Dedicated ASI Plugins tab:
+[list]
+[*]Scans bin64/ for installed .asi files
+[*]Enable/disable plugins without uninstalling
+[*]Detects hook conflicts between plugins
+[*]Opens .ini config files in your text editor
+[*]Shows ASI Loader status
+[/list]
+
+[size=3][b]Test Mod (Dry Run)[/b][/size]
+Check compatibility [b]before[/b] installing:
+[list]
+[*]Analyzes which files the mod changes
+[*]Runs conflict detection against your current setup
+[*]Generates a report you can export
+[/list]
+
+[size=3][b]Built-In Bug Reporter[/b][/size]
+Collects system info, mod list, conflict status, and recent logs into a diagnostic report you can copy or save.
+
+[line]
+
+[size=4][b]How It Works[/b][/size]
+
+Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAPGT as a hash registry. This manager:
+
+[list=1]
+[*][b]Snapshots[/b] your vanilla game files on first run (SHA-256 hashes)
+[*][b]Imports[/b] mods by diffing modified files against vanilla, storing only the binary delta
+[*][b]Composes[/b] all enabled mod deltas onto vanilla in priority order when you click Apply
+[*][b]Rebuilds[/b] the PAPGT integrity chain so the game accepts the modified files
+[*][b]Commits[/b] atomically — all files are staged and swapped in one operation
+[/list]
+
+[line]
+
+[size=4][b]Installation[/b][/size]
+
+[list=1]
+[*]Download [b]CrimsonDesertModManager.exe[/b] from the Files tab
+[*]Place it anywhere you like
+[*]Run it — on first launch it will ask you to locate your Crimson Desert install
+[*]The manager takes a snapshot of your vanilla game files (takes a minute)
+[*]Start dropping mods in!
+[/list]
+
+[size=4][b]Requirements[/b][/size]
+[list]
+[*]Windows 10/11
+[*]Crimson Desert (Steam)
+[*]~1 GB free disk space for vanilla backups
+[/list]
+
+[b]No Python required[/b] — the exe is fully standalone.
+
+[line]
+
+[size=4][b]FAQ[/b][/size]
+
+[b]Q: Is it safe? Can it break my game?[/b]
+A: The manager always keeps a backup of your vanilla files. Click "Revert to Vanilla" at any time to restore your game to its original state. All file operations are atomic — if something fails mid-apply, it rolls back automatically.
+
+[b]Q: Can I use this with mods I installed manually?[/b]
+A: Yes. Use "Scan for Changes" to detect manually-installed mods and bring them under management. You can also use "Revert to Vanilla" first, then re-import all your mods through the manager for a clean setup.
+
+[b]Q: How does load order work?[/b]
+A: Mods higher in the list are applied last and win any byte-range conflicts. Use Move Up/Move Down to adjust. The conflict view at the bottom shows exactly what overlaps and who wins.
+
+[b]Q: Does it work with the latest game update?[/b]
+A: After a game update, click "Refresh Snapshot" to re-scan your vanilla files, then re-apply your mods. Your mod deltas may need to be re-imported if the update changed the same files.
+
+[line]
+
+[center][size=3][b]Source Code[/b][/size]
+[url=https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager]GitHub Repository[/url]
+
+[size=3][b]Support Development[/b][/size]
+[url=https://ko-fi.com/kindiboy]Buy me a coffee on Ko-fi[/url][/center]
