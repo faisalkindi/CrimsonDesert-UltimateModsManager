@@ -235,7 +235,23 @@ class ApplyWorker(QObject):
                 self.progress_updated.emit(pct, f"Processing {file_path}...")
                 file_idx += 1
 
-                result_bytes = self._compose_file(file_path, deltas)
+                # New files: copy from stored full file (last mod wins)
+                new_deltas = [d for d in deltas if d.get("is_new")]
+                mod_deltas = [d for d in deltas if not d.get("is_new")]
+
+                if new_deltas and not mod_deltas:
+                    # Purely new file — use the last (highest priority) copy
+                    src = Path(new_deltas[-1]["delta_path"])
+                    if src.exists():
+                        result_bytes = src.read_bytes()
+                        txn.stage_file(file_path, result_bytes)
+                        if file_path.endswith(".pamt"):
+                            modified_pamts[file_path.split("/")[0]] = result_bytes
+                        logger.info("Applying new file: %s from %s",
+                                    file_path, new_deltas[-1]["mod_name"])
+                    continue
+
+                result_bytes = self._compose_file(file_path, mod_deltas)
                 if result_bytes is None:
                     continue
 
@@ -244,10 +260,19 @@ class ApplyWorker(QObject):
                     modified_pamts[file_path.split("/")[0]] = result_bytes
 
             # Revert files from disabled mods
+            new_files_to_delete = self._get_new_files_to_delete(set(file_deltas.keys()))
             for file_path in revert_files:
                 pct = int((file_idx / total_files) * 80)
                 self.progress_updated.emit(pct, f"Reverting {file_path}...")
                 file_idx += 1
+
+                if file_path in new_files_to_delete:
+                    # New file from a disabled mod — delete it from game dir
+                    game_path = self._game_dir / file_path.replace("/", "\\")
+                    if game_path.exists():
+                        game_path.unlink()
+                        logger.info("Deleted new file from disabled mod: %s", file_path)
+                    continue
 
                 vanilla_bytes = self._get_vanilla_bytes(file_path)
                 if vanilla_bytes is None:
@@ -290,6 +315,11 @@ class ApplyWorker(QObject):
         all_files = set(file_deltas.keys()) | set(revert_files)
         for file_path in all_files:
             delta_infos = file_deltas.get(file_path, [])
+
+            # Skip new files — no vanilla version to back up
+            if all(d.get("is_new") for d in delta_infos) and delta_infos:
+                continue
+
             has_bsdiff = self._has_bsdiff_delta(file_path)
 
             if has_bsdiff:
@@ -434,10 +464,22 @@ class ApplyWorker(QObject):
         disabled_files = {row[0] for row in cursor.fetchall()}
         return sorted(disabled_files - enabled_files)
 
+    def _get_new_files_to_delete(self, enabled_files: set[str]) -> set[str]:
+        """Find new files from disabled mods that no enabled mod provides."""
+        cursor = self._db.connection.execute(
+            "SELECT DISTINCT md.file_path "
+            "FROM mod_deltas md "
+            "JOIN mods m ON md.mod_id = m.id "
+            "WHERE m.enabled = 0 AND m.mod_type = 'paz' AND md.is_new = 1"
+        )
+        disabled_new = {row[0] for row in cursor.fetchall()}
+        # Don't delete if an enabled mod also provides this new file
+        return disabled_new - enabled_files
+
     def _get_file_deltas(self) -> dict[str, list[dict]]:
         """Get all deltas for enabled mods, grouped by file path."""
         cursor = self._db.connection.execute(
-            "SELECT DISTINCT md.file_path, md.delta_path, m.name "
+            "SELECT DISTINCT md.file_path, md.delta_path, m.name, md.is_new "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
@@ -447,13 +489,14 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        for file_path, delta_path, mod_name in cursor.fetchall():
+        for file_path, delta_path, mod_name, is_new in cursor.fetchall():
             if delta_path in seen_deltas:
                 continue
             seen_deltas.add(delta_path)
             file_deltas.setdefault(file_path, []).append({
                 "delta_path": delta_path,
                 "mod_name": mod_name,
+                "is_new": bool(is_new),
             })
 
         return file_deltas
@@ -486,8 +529,10 @@ class RevertWorker(QObject):
         """Revert all mod-affected files to vanilla using range or full backups."""
         # Get all files any mod has ever touched
         cursor = self._db.connection.execute(
-            "SELECT DISTINCT file_path FROM mod_deltas")
-        mod_files = [row[0] for row in cursor.fetchall()]
+            "SELECT DISTINCT file_path, is_new FROM mod_deltas")
+        rows = cursor.fetchall()
+        mod_files = [row[0] for row in rows]
+        new_files = {row[0] for row in rows if row[1]}
 
         if not mod_files:
             self.error_occurred.emit("No mod data found. Nothing to revert.")
@@ -505,6 +550,15 @@ class RevertWorker(QObject):
             for i, file_path in enumerate(mod_files):
                 pct = int((i / total) * 90)
                 self.progress_updated.emit(pct, f"Restoring {file_path}...")
+
+                if file_path in new_files:
+                    # New file — delete it (didn't exist in vanilla)
+                    game_path = self._game_dir / file_path.replace("/", "\\")
+                    if game_path.exists():
+                        game_path.unlink()
+                        logger.info("Deleted mod-added file: %s", file_path)
+                        reverted += 1
+                    continue
 
                 vanilla_bytes = self._get_vanilla_bytes(file_path)
                 if vanilla_bytes:

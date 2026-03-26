@@ -52,27 +52,50 @@ def detect_format(path: Path) -> str:
     return "unknown"
 
 
+import re
+
+# Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt
+_GAME_FILE_RE = re.compile(r'^(\d{4}/\d+\.(?:paz|pamt)|meta/\d+\.papgt)$')
+
+
 def _match_game_files(
     extracted_dir: Path, game_dir: Path, snapshot: SnapshotManager
-) -> list[tuple[str, Path]]:
+) -> list[tuple[str, Path, bool]]:
     """Find files in extracted_dir that match known game file paths.
 
-    Returns list of (relative_posix_path, absolute_extracted_path).
+    Returns list of (relative_posix_path, absolute_extracted_path, is_new).
+    is_new=True means the file doesn't exist in vanilla (mod adds it).
     """
-    matches: list[tuple[str, Path]] = []
+    matches: list[tuple[str, Path, bool]] = []
 
     for f in extracted_dir.rglob("*"):
         if not f.is_file():
             continue
 
-        # Try to match against snapshot paths
-        # Strategy: walk up the path looking for PAZ directory patterns (0000-0032, meta)
         parts = f.relative_to(extracted_dir).parts
+        matched = False
+
+        # First try exact match against snapshot (existing vanilla files)
         for i in range(len(parts)):
             candidate = "/".join(parts[i:])
             if snapshot.get_file_hash(candidate) is not None:
-                matches.append((candidate, f))
+                matches.append((candidate, f, False))
+                matched = True
                 break
+
+        if matched:
+            continue
+
+        # No snapshot match — check if it looks like a game file by pattern
+        # This catches new PAZ files that mods add (e.g., 0012/5.paz)
+        for i in range(len(parts)):
+            candidate = "/".join(parts[i:])
+            if _GAME_FILE_RE.match(candidate):
+                # Verify the parent directory exists in the game
+                dir_part = candidate.split("/")[0]
+                if (game_dir / dir_part).exists():
+                    matches.append((candidate, f, True))
+                    break
 
     return matches
 
@@ -255,17 +278,26 @@ def _process_extracted_files(
         result.error = "No recognized game files found in this mod."
         return result
 
+    new_count = sum(1 for _, _, is_new in matches if is_new)
+    mod_count = sum(1 for _, _, is_new in matches if not is_new)
+    logger.info("Matched %d files (%d existing, %d new)", len(matches), mod_count, new_count)
+
     # Run health check on mod files before importing
     try:
         from cdmm.engine.mod_health_check import check_mod_health, auto_fix_matches
-        mod_file_map = {rel: abs_path for rel, abs_path in matches}
+        mod_file_map = {rel: abs_path for rel, abs_path, _ in matches}
         result.health_issues = check_mod_health(mod_file_map, game_dir)
         if result.health_issues:
             critical = [i for i in result.health_issues if i.severity == "critical"]
             logger.info("Health check: %d issues (%d critical)",
                         len(result.health_issues), len(critical))
             # Auto-fix: filter out broken files from import
-            matches = auto_fix_matches(matches, result.health_issues, game_dir)
+            fixed = auto_fix_matches(
+                [(rel, p) for rel, p, _ in matches],
+                result.health_issues, game_dir)
+            # Rebuild matches with is_new flags preserved
+            fixed_set = {rel for rel, _ in fixed}
+            matches = [(rel, p, is_new) for rel, p, is_new in matches if rel in fixed_set]
             logger.info("After auto-fix: %d files to import", len(matches))
     except Exception as e:
         logger.warning("Health check failed (non-fatal): %s", e)
@@ -281,8 +313,30 @@ def _process_extracted_files(
         )
         mod_id = cursor.lastrowid
 
-    for rel_path, extracted_path in matches:
+    for rel_path, extracted_path, is_new in matches:
         try:
+            if is_new:
+                # New file — store full copy, no delta needed
+                safe_name = rel_path.replace("/", "_") + ".newfile"
+                delta_path = deltas_dir / str(mod_id) / safe_name
+                delta_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extracted_path, delta_path)
+
+                file_size = extracted_path.stat().st_size
+                db.connection.execute(
+                    "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end, is_new) "
+                    "VALUES (?, ?, ?, ?, ?, 1)",
+                    (mod_id, rel_path, str(delta_path), 0, file_size),
+                )
+
+                result.changed_files.append({
+                    "file_path": rel_path,
+                    "delta_path": str(delta_path),
+                    "is_new": True,
+                })
+                logger.info("Stored new file: %s (%d bytes)", rel_path, file_size)
+                continue
+
             vanilla_path = game_dir / rel_path.replace("/", "\\")
             if not vanilla_path.exists():
                 logger.warning("Vanilla file not found for %s, skipping", rel_path)
@@ -309,8 +363,8 @@ def _process_extracted_files(
             # Store each byte range as a separate mod_delta entry
             for byte_start, byte_end in byte_ranges:
                 db.connection.execute(
-                    "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end, is_new) "
+                    "VALUES (?, ?, ?, ?, ?, 0)",
                     (mod_id, rel_path, str(delta_path), byte_start, byte_end),
                 )
 

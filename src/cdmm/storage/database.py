@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS mod_deltas (
     file_path TEXT NOT NULL,
     delta_path TEXT NOT NULL,
     byte_start INTEGER,
-    byte_end INTEGER
+    byte_end INTEGER,
+    is_new INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS conflicts (
@@ -91,6 +92,15 @@ class Database:
                 "ALTER TABLE conflicts ADD COLUMN winner_id INTEGER REFERENCES mods(id) ON DELETE SET NULL"
             )
             logger.info("Migrated: added winner_id column to conflicts")
+
+        # Add is_new column to mod_deltas if missing
+        cursor = self._connection.execute("PRAGMA table_info(mod_deltas)")
+        delta_cols = {row[1] for row in cursor.fetchall()}
+        if "is_new" not in delta_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_deltas ADD COLUMN is_new INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migrated: added is_new column to mod_deltas")
 
     @property
     def connection(self) -> sqlite3.Connection:
