@@ -87,11 +87,16 @@ def _match_game_files(
             continue
 
         # No snapshot match — check if it looks like a game file by pattern
-        # This catches new PAZ files that mods add (e.g., 0012/5.paz, 0036/0.paz)
+        # This catches PAZ files not in the snapshot (e.g., from a game update
+        # after the snapshot was taken, or truly new mod-added files)
         for i in range(len(parts)):
             candidate = "/".join(parts[i:])
             if _GAME_FILE_RE.match(candidate):
-                matches.append((candidate, f, True))
+                # Check if the file exists in the game directory — if so, it's
+                # a vanilla file missing from the snapshot, not a new file
+                game_file = game_dir / candidate.replace("/", "\\")
+                is_new = not game_file.exists()
+                matches.append((candidate, f, is_new))
                 break
 
     return matches

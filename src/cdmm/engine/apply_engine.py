@@ -180,6 +180,8 @@ def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+
+
 # ── Workers ──────────────────────────────────────────────────────────
 
 class ApplyWorker(QObject):
@@ -373,13 +375,9 @@ class ApplyWorker(QObject):
         (e.g., LootMultiplier's PAZ shift), it's applied first, then
         remaining deltas have their offsets adjusted to account for the shift.
         """
-        has_bsdiff = self._has_bsdiff_delta(file_path)
-
-        if has_bsdiff:
-            full_vanilla = self._vanilla_dir / file_path.replace("/", "\\")
-            if not full_vanilla.exists():
-                logger.warning("No vanilla backup for %s", file_path)
-                return None
+        # Always prefer full vanilla backup (most reliable restoration)
+        full_vanilla = self._vanilla_dir / file_path.replace("/", "\\")
+        if full_vanilla.exists():
             current = full_vanilla.read_bytes()
         else:
             game_path = self._game_dir / file_path.replace("/", "\\")
