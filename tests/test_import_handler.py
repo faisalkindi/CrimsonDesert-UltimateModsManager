@@ -1,13 +1,13 @@
 import zipfile
 from pathlib import Path
 
-from cdmm.engine.import_handler import (
+from cdumm.engine.import_handler import (
     detect_format,
     import_from_folder,
     import_from_zip,
 )
-from cdmm.engine.snapshot_manager import SnapshotManager, SnapshotWorker
-from cdmm.storage.database import Database
+from cdumm.engine.snapshot_manager import SnapshotManager, SnapshotWorker
+from cdumm.storage.database import Database
 
 
 def _setup_game_and_snapshot(tmp_path: Path) -> tuple[Path, Database, SnapshotManager, Path]:

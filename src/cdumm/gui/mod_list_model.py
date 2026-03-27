@@ -3,19 +3,21 @@ import logging
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 
-from cdmm.engine.conflict_detector import ConflictDetector
-from cdmm.engine.mod_manager import ModManager
+from cdumm.engine.conflict_detector import ConflictDetector
+from cdumm.engine.mod_manager import ModManager
 
 logger = logging.getLogger(__name__)
 
-COLUMNS = ["", "#", "Name", "Type", "Status", "Files", "Import Date"]
+COLUMNS = ["", "#", "Name", "Author", "Version", "Type", "Status", "Files", "Import Date"]
 COL_ENABLED = 0
 COL_ORDER = 1
 COL_NAME = 2
-COL_TYPE = 3
-COL_STATUS = 4
-COL_FILES = 5
-COL_DATE = 6
+COL_AUTHOR = 3
+COL_VERSION = 4
+COL_TYPE = 5
+COL_STATUS = 6
+COL_FILES = 7
+COL_DATE = 8
 
 
 class ModListModel(QAbstractTableModel):
@@ -59,6 +61,10 @@ class ModListModel(QAbstractTableModel):
                 return str(index.row() + 1)
             if col == COL_NAME:
                 return mod["name"]
+            if col == COL_AUTHOR:
+                return mod.get("author") or ""
+            if col == COL_VERSION:
+                return mod.get("version") or ""
             if col == COL_TYPE:
                 return mod["mod_type"].upper()
             if col == COL_STATUS:

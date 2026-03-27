@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from cdmm.engine.mod_manager import ModManager
-from cdmm.storage.database import Database
+from cdumm.engine.mod_manager import ModManager
+from cdumm.storage.database import Database
 
 
 def _create_test_mod(db: Database, mod_id: int, name: str, enabled: bool = True) -> None:

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from cdmm.storage.game_finder import validate_game_directory, _parse_library_folders
+from cdumm.storage.game_finder import validate_game_directory, _parse_library_folders
 
 
 def test_validate_game_directory_valid(tmp_path: Path) -> None:
@@ -47,7 +47,7 @@ def test_parse_library_folders_missing_file(tmp_path: Path) -> None:
 
 
 def test_config_stores_game_directory(db) -> None:
-    from cdmm.storage.config import Config
+    from cdumm.storage.config import Config
     config = Config(db)
     config.set("game_directory", "E:/SteamLibrary/steamapps/common/Crimson Desert")
     assert config.get("game_directory") == "E:/SteamLibrary/steamapps/common/Crimson Desert"

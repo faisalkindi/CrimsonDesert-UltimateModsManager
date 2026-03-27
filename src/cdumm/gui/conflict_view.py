@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget
 
-from cdmm.engine.conflict_detector import Conflict
+from cdumm.engine.conflict_detector import Conflict
 
 logger = logging.getLogger(__name__)
 

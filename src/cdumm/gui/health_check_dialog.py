@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 
-from cdmm.engine.mod_health_check import HealthIssue, generate_bug_report
+from cdumm.engine.mod_health_check import HealthIssue, generate_bug_report
 
 logger = logging.getLogger(__name__)
 

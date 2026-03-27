@@ -3,7 +3,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from cdmm.storage.database import Database
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -17,22 +17,22 @@ class ModManager:
 
     def list_mods(self, mod_type: str | None = None) -> list[dict]:
         """List all mods ordered by priority (load order), optionally filtered by type."""
+        query = (
+            "SELECT id, name, mod_type, enabled, priority, import_date, "
+            "game_version_hash, source_path, author, version, description "
+            "FROM mods"
+        )
         if mod_type:
             cursor = self._db.connection.execute(
-                "SELECT id, name, mod_type, enabled, priority, import_date, game_version_hash, source_path "
-                "FROM mods WHERE mod_type = ? ORDER BY priority",
-                (mod_type,),
-            )
+                query + " WHERE mod_type = ? ORDER BY priority", (mod_type,))
         else:
-            cursor = self._db.connection.execute(
-                "SELECT id, name, mod_type, enabled, priority, import_date, game_version_hash, source_path "
-                "FROM mods ORDER BY priority"
-            )
+            cursor = self._db.connection.execute(query + " ORDER BY priority")
         return [
             {
                 "id": row[0], "name": row[1], "mod_type": row[2],
                 "enabled": bool(row[3]), "priority": row[4], "import_date": row[5],
                 "game_version_hash": row[6], "source_path": row[7],
+                "author": row[8], "version": row[9], "description": row[10],
             }
             for row in cursor.fetchall()
         ]

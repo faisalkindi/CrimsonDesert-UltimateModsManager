@@ -8,17 +8,17 @@ from PySide6.QtWidgets import QApplication
 
 from PySide6.QtWidgets import QDialog
 
-from cdmm.gui.main_window import MainWindow
-from cdmm.gui.setup_dialog import SetupDialog
-from cdmm.storage.database import Database
-from cdmm.storage.config import Config
+from cdumm.gui.main_window import MainWindow
+from cdumm.gui.setup_dialog import SetupDialog
+from cdumm.storage.database import Database
+from cdumm.storage.config import Config
 
-APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdmm"
+APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
 
 
 def setup_logging(app_data: Path) -> None:
     app_data.mkdir(parents=True, exist_ok=True)
-    log_file = app_data / "cdmm.log"
+    log_file = app_data / "cdumm.log"
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
@@ -72,12 +72,22 @@ def main() -> int:
     threading.excepthook = _thread_exception_handler
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Crimson Desert Mod Manager")
+    logger.info("Starting Crimson Desert Ultimate Mods Manager")
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Crimson Desert Ultimate Mods Manager (BETA)")
+    app.setApplicationName("Crimson Desert Ultimate Mods Manager")
 
-    db = Database(APP_DATA_DIR / "cdmm.db")
+    # Migrate from old cdmm AppData if this is an upgrade
+    old_app_data = Path.home() / "AppData" / "Local" / "cdmm"
+    old_db = old_app_data / "cdmm.db"
+    new_db = APP_DATA_DIR / "cdumm.db"
+    if old_db.exists() and not new_db.exists():
+        import shutil
+        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_db, new_db)
+        logger.info("Migrated database from %s to %s", old_db, new_db)
+
+    db = Database(new_db)
     db.initialize()
     logger.info("Database initialized at %s", db.db_path)
 

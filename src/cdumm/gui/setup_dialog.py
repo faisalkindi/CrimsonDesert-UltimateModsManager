@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from cdmm.storage.game_finder import find_game_directories, validate_game_directory
+from cdumm.storage.game_finder import find_game_directories, validate_game_directory
 
 logger = logging.getLogger(__name__)
 

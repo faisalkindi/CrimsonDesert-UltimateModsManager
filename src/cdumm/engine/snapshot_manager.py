@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from cdmm.storage.database import Database
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 

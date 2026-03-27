@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS mods (
     priority INTEGER NOT NULL DEFAULT 0,
     import_date TEXT NOT NULL DEFAULT (datetime('now')),
     game_version_hash TEXT,
-    source_path TEXT
+    source_path TEXT,
+    author TEXT,
+    version TEXT,
+    description TEXT
 );
 
 CREATE TABLE IF NOT EXISTS mod_deltas (
@@ -92,6 +95,13 @@ class Database:
                 "ALTER TABLE conflicts ADD COLUMN winner_id INTEGER REFERENCES mods(id) ON DELETE SET NULL"
             )
             logger.info("Migrated: added winner_id column to conflicts")
+
+        # Add modinfo columns to mods if missing
+        if "author" not in columns:
+            self._connection.execute("ALTER TABLE mods ADD COLUMN author TEXT")
+            self._connection.execute("ALTER TABLE mods ADD COLUMN version TEXT")
+            self._connection.execute("ALTER TABLE mods ADD COLUMN description TEXT")
+            logger.info("Migrated: added author/version/description columns to mods")
 
         # Add is_new column to mod_deltas if missing
         cursor = self._connection.execute("PRAGMA table_info(mod_deltas)")

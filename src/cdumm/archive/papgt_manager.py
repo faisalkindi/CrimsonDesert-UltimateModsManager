@@ -18,7 +18,7 @@ import logging
 import struct
 from pathlib import Path
 
-from cdmm.archive.hashlittle import compute_pamt_hash, compute_papgt_hash
+from cdumm.archive.hashlittle import compute_pamt_hash, compute_papgt_hash
 
 logger = logging.getLogger(__name__)
 

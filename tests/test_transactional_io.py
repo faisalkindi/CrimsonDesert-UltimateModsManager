@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from cdmm.archive.transactional_io import TransactionalIO
+from cdumm.archive.transactional_io import TransactionalIO
 
 
 def test_stage_and_commit(tmp_path: Path) -> None:

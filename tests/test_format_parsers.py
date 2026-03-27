@@ -1,9 +1,9 @@
 import struct
 
-from cdmm.archive.format_parsers.pabgb_parser import identify_pabgb_records
-from cdmm.archive.format_parsers.paac_parser import identify_paac_records
-from cdmm.archive.format_parsers.pamt_parser import identify_pamt_records
-from cdmm.archive.format_parsers.base import identify_records_for_file
+from cdumm.archive.format_parsers.pabgb_parser import identify_pabgb_records
+from cdumm.archive.format_parsers.paac_parser import identify_paac_records
+from cdumm.archive.format_parsers.pamt_parser import identify_pamt_records
+from cdumm.archive.format_parsers.base import identify_records_for_file
 
 
 def _make_pabgb_data(count: int, record_size: int = 64) -> bytes:

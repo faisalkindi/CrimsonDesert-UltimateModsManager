@@ -1,5 +1,5 @@
-from cdmm.engine.conflict_detector import ConflictDetector
-from cdmm.storage.database import Database
+from cdumm.engine.conflict_detector import ConflictDetector
+from cdumm.storage.database import Database
 
 
 def _insert_mod_with_deltas(db: Database, mod_id: int, name: str,

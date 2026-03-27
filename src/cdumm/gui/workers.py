@@ -4,15 +4,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from cdmm.engine.import_handler import (
+from cdumm.engine.import_handler import (
     detect_format,
     import_from_bsdiff,
     import_from_folder,
     import_from_script,
     import_from_zip,
 )
-from cdmm.engine.snapshot_manager import SnapshotManager
-from cdmm.storage.database import Database
+from cdumm.engine.snapshot_manager import SnapshotManager
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class PreHashWorker(QObject):
 
     def run(self) -> None:
         try:
-            from cdmm.engine.snapshot_manager import hash_file as _hash_file
+            from cdumm.engine.snapshot_manager import hash_file as _hash_file
 
             db = Database(self._db_path)
             db.initialize()
@@ -140,9 +140,9 @@ class ScriptCaptureWorker(QObject):
 
     def run(self) -> None:
         try:
-            from cdmm.engine.snapshot_manager import hash_file as _hash_file
-            from cdmm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
-            from cdmm.engine.import_handler import ModImportResult
+            from cdumm.engine.snapshot_manager import hash_file as _hash_file
+            from cdumm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
+            from cdumm.engine.import_handler import ModImportResult
 
             db = Database(self._db_path)
             db.initialize()
@@ -273,12 +273,12 @@ class ScanChangesWorker(QObject):
 
     def run(self) -> None:
         try:
-            from cdmm.engine.snapshot_manager import hash_file as _hash_file
-            from cdmm.engine.delta_engine import (
+            from cdumm.engine.snapshot_manager import hash_file as _hash_file
+            from cdumm.engine.delta_engine import (
                 apply_delta, generate_delta, get_changed_byte_ranges,
                 load_delta, save_delta,
             )
-            from cdmm.engine.import_handler import ModImportResult
+            from cdumm.engine.import_handler import ModImportResult
 
             db = Database(self._db_path)
             db.initialize()

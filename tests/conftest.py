@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 
-from cdmm.storage.database import Database
+from cdumm.storage.database import Database
 
 
 @pytest.fixture

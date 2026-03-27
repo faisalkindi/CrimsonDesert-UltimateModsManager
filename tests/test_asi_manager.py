@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from cdmm.asi.asi_manager import AsiManager, AsiPlugin
+from cdumm.asi.asi_manager import AsiManager, AsiPlugin
 
 
 def _setup_bin64(tmp_path: Path) -> Path:

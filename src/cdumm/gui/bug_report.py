@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from cdmm.storage.database import Database
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
     # Log tail
     lines.append("--- LOG (last 100 lines) ---")
     if app_data_dir:
-        log_path = app_data_dir / "cdmm.log"
+        log_path = app_data_dir / "cdumm.log"
         if log_path.exists():
             try:
                 log_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -228,7 +228,7 @@ class BugReportDialog(QDialog):
     def _save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Bug Report",
-            f"cdmm_bug_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            f"cdumm_bug_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             "Text Files (*.txt)",
         )
         if path:

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from cdmm.engine.snapshot_manager import hash_file, SnapshotManager, SnapshotWorker
-from cdmm.storage.database import Database
+from cdumm.engine.snapshot_manager import hash_file, SnapshotManager, SnapshotWorker
+from cdumm.storage.database import Database
 
 
 def _create_fake_game_dir(tmp_path: Path) -> Path:

@@ -8,8 +8,8 @@ Levels:
 import logging
 from dataclasses import dataclass
 
-from cdmm.archive.format_parsers import identify_records_for_file
-from cdmm.storage.database import Database
+from cdumm.archive.format_parsers import identify_records_for_file
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 

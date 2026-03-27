@@ -1,7 +1,7 @@
 [project]
-name = "cdmm"
-version = "0.1.0"
-description = "Crimson Desert Mod Manager — archive-aware mod composition with conflict detection"
+name = "cdumm"
+version = "0.7.0"
+description = "Crimson Desert Ultimate Mods Manager — archive-aware mod composition with conflict detection"
 requires-python = ">=3.10"
 dependencies = [
     "PySide6>=6.6",

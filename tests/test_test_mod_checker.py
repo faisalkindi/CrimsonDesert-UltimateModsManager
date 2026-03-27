@@ -1,5 +1,5 @@
-from cdmm.engine.test_mod_checker import generate_compatibility_report, ModTestResult
-from cdmm.engine.conflict_detector import Conflict
+from cdumm.engine.test_mod_checker import generate_compatibility_report, ModTestResult
+from cdumm.engine.conflict_detector import Conflict
 
 
 def test_generate_report_no_conflicts() -> None:
@@ -54,4 +54,4 @@ def test_generate_report_markdown_format() -> None:
     report = generate_compatibility_report(result)
     assert report.startswith("# Compatibility Report:")
     assert "Generated:" in report
-    assert "Crimson Desert Mod Manager" in report
+    assert "Crimson Desert Ultimate Mods Manager" in report

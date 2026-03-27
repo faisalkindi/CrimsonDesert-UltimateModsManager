@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cdmm.asi.asi_manager import AsiManager
+from cdumm.asi.asi_manager import AsiManager
 
 logger = logging.getLogger(__name__)
 

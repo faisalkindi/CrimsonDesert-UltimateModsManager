@@ -21,20 +21,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cdmm.engine.apply_engine import ApplyWorker, RevertWorker
-from cdmm.engine.conflict_detector import ConflictDetector
-from cdmm.engine.mod_manager import ModManager
-from cdmm.engine.snapshot_manager import SnapshotManager, SnapshotWorker
-from cdmm.engine.test_mod_checker import test_mod
-from cdmm.gui.asi_panel import AsiPanel
-from cdmm.gui.conflict_view import ConflictView
-from cdmm.gui.import_widget import ImportWidget
-from cdmm.gui.mod_list_model import ModListModel
-from cdmm.gui.progress_dialog import ProgressDialog
-from cdmm.gui.test_mod_dialog import TestModDialog
-from cdmm.gui.workers import ImportWorker
-from cdmm.storage.config import Config
-from cdmm.storage.database import Database
+from cdumm.engine.apply_engine import ApplyWorker, RevertWorker
+from cdumm.engine.conflict_detector import ConflictDetector
+from cdumm.engine.mod_manager import ModManager
+from cdumm.engine.snapshot_manager import SnapshotManager, SnapshotWorker
+from cdumm.engine.test_mod_checker import test_mod
+from cdumm.gui.asi_panel import AsiPanel
+from cdumm.gui.conflict_view import ConflictView
+from cdumm.gui.import_widget import ImportWidget
+from cdumm.gui.mod_list_model import ModListModel
+from cdumm.gui.progress_dialog import ProgressDialog
+from cdumm.gui.test_mod_dialog import TestModDialog
+from cdumm.gui.workers import ImportWorker
+from cdumm.storage.config import Config
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -65,24 +65,30 @@ class MainWindow(QMainWindow):
     def __init__(self, db: Database | None = None, game_dir: Path | None = None,
                  app_data_dir: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("Crimson Desert Ultimate Mods Manager (BETA)")
+        from cdumm import __version__
+        self.setWindowTitle(f"Crimson Desert Ultimate Mods Manager v{__version__}")
         self.setMinimumSize(1000, 700)
 
         # Set window icon
         import sys
         from PySide6.QtGui import QIcon
         if getattr(sys, 'frozen', False):
-            icon_path = Path(sys._MEIPASS) / "cdmm.ico"
+            icon_path = Path(sys._MEIPASS) / "cdumm.ico"
         else:
-            icon_path = Path(__file__).resolve().parents[3] / "cdmm.ico"
+            icon_path = Path(__file__).resolve().parents[3] / "cdumm.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
         self._db = db
         self._game_dir = game_dir
-        self._app_data_dir = app_data_dir or Path.home() / "AppData" / "Local" / "cdmm"
-        self._deltas_dir = self._app_data_dir / "deltas"
-        self._vanilla_dir = self._app_data_dir / "vanilla"
+        self._app_data_dir = app_data_dir or Path.home() / "AppData" / "Local" / "cdumm"
+        # Store vanilla backups and deltas on the game drive (CDMods folder)
+        # so we can use hard links instead of copies for multi-GB PAZ files.
+        self._cdmods_dir = game_dir / "CDMods" if game_dir else self._app_data_dir
+        self._cdmods_dir.mkdir(parents=True, exist_ok=True)
+        self._deltas_dir = self._cdmods_dir / "deltas"
+        self._vanilla_dir = self._cdmods_dir / "vanilla"
+        self._migrate_from_appdata()
         self._worker_thread: QThread | None = None
         self._active_progress: ProgressDialog | None = None
         self._needs_apply = False
@@ -116,6 +122,29 @@ class MainWindow(QMainWindow):
         # If previous session didn't close cleanly, offer bug report
         if crashed_last_time:
             QTimer.singleShot(1000, self._offer_crash_report)
+
+    def _migrate_from_appdata(self) -> None:
+        """One-time migration: move vanilla/deltas from old AppData locations to CDMods on game drive."""
+        import shutil
+        # Check both old (cdmm) and current (cdumm) AppData paths
+        old_appdata = Path.home() / "AppData" / "Local" / "cdmm"
+        search_dirs = [old_appdata, self._app_data_dir]
+
+        for appdata in search_dirs:
+            for sub in ("vanilla", "deltas"):
+                old_dir = appdata / sub
+                new_dir = self._vanilla_dir if sub == "vanilla" else self._deltas_dir
+                if old_dir.exists() and not new_dir.exists() and old_dir != new_dir:
+                    try:
+                        shutil.move(str(old_dir), str(new_dir))
+                        logger.info("Migrated %s -> %s", old_dir, new_dir)
+                    except Exception as e:
+                        logger.warning("Migration failed for %s: %s (will copy instead)", old_dir, e)
+                        try:
+                            shutil.copytree(str(old_dir), str(new_dir))
+                            shutil.rmtree(old_dir, ignore_errors=True)
+                        except Exception as e2:
+                            logger.error("Copy fallback also failed: %s", e2)
 
     def _auto_snapshot_first_run(self) -> None:
         reply = QMessageBox.question(
@@ -160,7 +189,7 @@ class MainWindow(QMainWindow):
             header = self._mod_table.horizontalHeader()
             header.setStretchLastSection(False)
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            from cdmm.gui.mod_list_model import COL_NAME
+            from cdumm.gui.mod_list_model import COL_NAME
             header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
             mods_layout.addWidget(self._mod_table)
 
@@ -241,8 +270,12 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(bug_btn)
 
     def _build_status_bar(self) -> None:
+        from cdumm import __version__
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
+        version_label = QLabel(f"v{__version__}")
+        version_label.setStyleSheet("color: gray; padding-right: 10px;")
+        status_bar.addPermanentWidget(version_label)
         self._snapshot_label = QLabel()
         status_bar.addPermanentWidget(self._snapshot_label)
         self._update_snapshot_status()
@@ -380,7 +413,7 @@ class MainWindow(QMainWindow):
         logger.info("Starting import: %s", path)
 
         # Check if this is an ASI mod first (fast, no thread needed)
-        from cdmm.asi.asi_manager import AsiManager
+        from cdumm.asi.asi_manager import AsiManager
         if AsiManager.contains_asi(path):
             self._install_asi_mod(path)
             return
@@ -394,7 +427,7 @@ class MainWindow(QMainWindow):
 
         # Check if this is a script-based mod — needs to run on main thread
         # so the user can interact with the cmd window
-        from cdmm.engine.import_handler import detect_format, import_script_live
+        from cdumm.engine.import_handler import detect_format, import_script_live
         import zipfile as _zf
         import tempfile
 
@@ -438,10 +471,10 @@ class MainWindow(QMainWindow):
         """Handle script-based mods — launch script, poll for completion, capture changes."""
         import tempfile
         import zipfile as _zf
-        from cdmm.engine.import_handler import (
+        from cdumm.engine.import_handler import (
             _detect_script_targets, _ensure_vanilla_backup, import_from_game_scan,
         )
-        from cdmm.engine.snapshot_manager import hash_file as _hash_file
+        from cdumm.engine.snapshot_manager import hash_file as _hash_file
 
         logger.info("Script mod detected: %s", path)
 
@@ -587,13 +620,13 @@ class MainWindow(QMainWindow):
         if self._script_pre_hashes is None:
             # No pre-hash — use scan-based capture (compares vs vanilla
             # snapshot). This handles idempotent scripts that restore+repatch.
-            from cdmm.gui.workers import ScanChangesWorker
+            from cdumm.gui.workers import ScanChangesWorker
             worker = ScanChangesWorker(
                 self._script_mod_name,
                 self._game_dir, self._db.db_path, self._deltas_dir,
             )
         else:
-            from cdmm.gui.workers import ScriptCaptureWorker
+            from cdumm.gui.workers import ScriptCaptureWorker
             worker = ScriptCaptureWorker(
                 self._script_mod_name, self._script_pre_hashes,
                 self._game_dir, self._db.db_path, self._deltas_dir,
@@ -674,7 +707,7 @@ class MainWindow(QMainWindow):
             # Show health check dialog if issues were found
             health_issues = getattr(result, 'health_issues', [])
             if health_issues:
-                from cdmm.gui.health_check_dialog import HealthCheckDialog
+                from cdumm.gui.health_check_dialog import HealthCheckDialog
                 name = getattr(result, 'name', 'Unknown')
                 mod_files = {}  # files already imported at this point
                 dialog = HealthCheckDialog(health_issues, name, mod_files, self)
@@ -692,7 +725,7 @@ class MainWindow(QMainWindow):
 
     def _install_asi_mod(self, path: Path) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
-        from cdmm.asi.asi_manager import AsiManager
+        from cdumm.asi.asi_manager import AsiManager
         asi_mgr = AsiManager(self._game_dir / "bin64")
 
         if not asi_mgr.has_loader():
@@ -893,7 +926,7 @@ class MainWindow(QMainWindow):
         self._mod_manager.clear_deltas(mod_id)
 
         # Check for script mods — same flow as import but with existing mod_id
-        from cdmm.engine.import_handler import detect_format
+        from cdumm.engine.import_handler import detect_format
         import zipfile as _zf
 
         is_script_mod = False
@@ -1030,7 +1063,7 @@ class MainWindow(QMainWindow):
 
     # --- Bug Report ---
     def _on_report_bug(self) -> None:
-        from cdmm.gui.bug_report import generate_bug_report, BugReportDialog
+        from cdumm.gui.bug_report import generate_bug_report, BugReportDialog
         report = generate_bug_report(self._db, self._game_dir, self._app_data_dir)
         dialog = BugReportDialog(report, self)
         dialog.exec()
@@ -1045,7 +1078,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            from cdmm.gui.bug_report import generate_bug_report, BugReportDialog
+            from cdumm.gui.bug_report import generate_bug_report, BugReportDialog
             report = generate_bug_report(self._db, self._game_dir, self._app_data_dir)
             dialog = BugReportDialog(report, self, is_crash=True)
             dialog.exec()

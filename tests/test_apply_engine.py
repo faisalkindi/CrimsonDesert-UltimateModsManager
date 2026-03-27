@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from cdmm.archive.hashlittle import hashlittle, compute_pamt_hash, compute_papgt_hash
-from cdmm.engine.apply_engine import ApplyWorker, RevertWorker
-from cdmm.engine.delta_engine import generate_delta, save_delta
-from cdmm.storage.database import Database
+from cdumm.archive.hashlittle import hashlittle, compute_pamt_hash, compute_papgt_hash
+from cdumm.engine.apply_engine import ApplyWorker, RevertWorker
+from cdumm.engine.delta_engine import generate_delta, save_delta
+from cdumm.storage.database import Database
 
 
 def test_hashlittle_deterministic() -> None:
@@ -101,6 +101,18 @@ def test_apply_worker_single_mod(tmp_path: Path) -> None:
 def test_revert_worker(tmp_path: Path) -> None:
     game_dir, vanilla_dir, db = _setup_apply_test(tmp_path)
 
+    # RevertWorker needs mod_deltas rows to know which files to revert.
+    # Simulate a mod that touched 0008/0.paz.
+    db.connection.execute(
+        "INSERT INTO mods (name, mod_type, priority) VALUES (?, ?, ?)",
+        ("test_mod", "paz", 1),
+    )
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end, is_new) "
+        "VALUES (1, '0008/0.paz', 'dummy', 0, 5, 0)",
+    )
+    db.connection.commit()
+
     # Modify game file (simulate applied mod)
     modified = bytearray((game_dir / "0008" / "0.paz").read_bytes())
     modified[0:5] = b"MODDD"
@@ -133,7 +145,7 @@ def test_apply_no_enabled_mods(tmp_path: Path) -> None:
     worker.run()
 
     assert len(errors) == 1
-    assert "No enabled mods" in errors[0]
+    assert "No mod changes to apply or revert" in errors[0]
     db.close()
 
 
@@ -144,6 +156,17 @@ def test_revert_no_backups(tmp_path: Path) -> None:
 
     db = Database(tmp_path / "test.db")
     db.initialize()
+
+    # Add a mod delta so RevertWorker has something to attempt
+    db.connection.execute(
+        "INSERT INTO mods (name, mod_type, priority) VALUES (?, ?, ?)",
+        ("test_mod", "paz", 1),
+    )
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end, is_new) "
+        "VALUES (1, '0008/0.paz', 'dummy', 0, 5, 0)",
+    )
+    db.connection.commit()
 
     worker = RevertWorker(game_dir, empty_vanilla, db.db_path)
     errors = []

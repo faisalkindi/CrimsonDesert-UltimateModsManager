@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from cdmm.storage.database import Database
-from cdmm.storage.config import Config
+from cdumm.storage.database import Database
+from cdumm.storage.config import Config
 
 
 EXPECTED_TABLES = ["config", "snapshots", "mods", "mod_deltas", "conflicts"]

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from cdmm.engine.test_mod_checker import ModTestResult, generate_compatibility_report
+from cdumm.engine.test_mod_checker import ModTestResult, generate_compatibility_report
 
 logger = logging.getLogger(__name__)
 

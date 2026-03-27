@@ -1,4 +1,4 @@
-"""PyInstaller build script for Crimson Desert Mod Manager."""
+"""PyInstaller build script for Crimson Desert Ultimate Mods Manager."""
 import subprocess
 import sys
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 
 def build() -> None:
     project_root = Path(__file__).resolve().parent.parent
-    spec_file = project_root / "cdmm.spec"
+    spec_file = project_root / "cdumm.spec"
 
     if not spec_file.exists():
         print(f"Spec file not found: {spec_file}")

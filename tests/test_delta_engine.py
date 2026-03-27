@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from cdmm.engine.delta_engine import (
+from cdumm.engine.delta_engine import (
     apply_delta,
     generate_delta,
     get_changed_byte_ranges,

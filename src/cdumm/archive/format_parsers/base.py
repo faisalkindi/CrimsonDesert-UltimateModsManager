@@ -6,9 +6,9 @@ Falls back to byte-range-only reporting for unknown formats.
 import logging
 from pathlib import PurePosixPath
 
-from cdmm.archive.format_parsers.pabgb_parser import identify_pabgb_records
-from cdmm.archive.format_parsers.paac_parser import identify_paac_records
-from cdmm.archive.format_parsers.pamt_parser import identify_pamt_records
+from cdumm.archive.format_parsers.pabgb_parser import identify_pabgb_records
+from cdumm.archive.format_parsers.paac_parser import identify_paac_records
+from cdumm.archive.format_parsers.pamt_parser import identify_pamt_records
 
 logger = logging.getLogger(__name__)
 

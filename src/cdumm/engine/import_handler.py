@@ -5,9 +5,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from cdmm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
-from cdmm.engine.snapshot_manager import SnapshotManager
-from cdmm.storage.database import Database
+from cdumm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
+from cdumm.engine.snapshot_manager import SnapshotManager
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,50 @@ def detect_format(path: Path) -> str:
     return "unknown"
 
 
+import json
 import re
 
 # Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt
 _GAME_FILE_RE = re.compile(r'^(\d{4}/\d+\.(?:paz|pamt)|meta/\d+\.papgt)$')
+
+
+def _verify_and_fix_pamt_crc(pamt_bytes: bytes, rel_path: str) -> bytes:
+    """Verify PAMT CRC and fix it if wrong.
+
+    PAMT header: first 4 bytes = hashlittle(data[12:], 0xC5EDE).
+    If the stored hash doesn't match, recompute and return fixed bytes.
+    """
+    import struct
+    from cdumm.archive.hashlittle import compute_pamt_hash
+    stored_hash = struct.unpack_from("<I", pamt_bytes, 0)[0]
+    actual_hash = compute_pamt_hash(pamt_bytes)
+    if stored_hash != actual_hash:
+        logger.info("Auto-fixed PAMT CRC for %s (stored=%08X, actual=%08X)",
+                     rel_path, stored_hash, actual_hash)
+        fixed = bytearray(pamt_bytes)
+        struct.pack_into("<I", fixed, 0, actual_hash)
+        return bytes(fixed)
+    return pamt_bytes
+
+
+def _read_modinfo(extracted_dir: Path) -> dict | None:
+    """Read modinfo.json from extracted mod directory if present.
+
+    Searches the root and one level deep (for nested zips).
+    Returns dict with keys: name, version, author, description (all optional).
+    """
+    for candidate in [extracted_dir / "modinfo.json",
+                      *extracted_dir.glob("*/modinfo.json")]:
+        if candidate.exists():
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    logger.info("Found modinfo.json: %s", {k: data.get(k) for k in ("name", "version", "author")})
+                    return data
+            except Exception as e:
+                logger.warning("Failed to parse modinfo.json: %s", e)
+    return None
 
 
 def _match_game_files(
@@ -132,9 +172,14 @@ def import_from_zip(
             )
             return result
 
+        # Read mod metadata from modinfo.json if present
+        modinfo = _read_modinfo(tmp_path)
+        if modinfo and modinfo.get("name"):
+            mod_name = modinfo["name"]
+
         result = _process_extracted_files(
             tmp_path, game_dir, db, snapshot, deltas_dir, mod_name,
-            existing_mod_id=existing_mod_id)
+            existing_mod_id=existing_mod_id, modinfo=modinfo)
 
     return result
 
@@ -153,9 +198,14 @@ def import_from_folder(
         result.error = "This folder contains a script mod. It should be handled by the script mod flow."
         return result
 
+    # Read mod metadata from modinfo.json if present
+    modinfo = _read_modinfo(folder_path)
+    if modinfo and modinfo.get("name"):
+        mod_name = modinfo["name"]
+
     return _process_extracted_files(
         folder_path, game_dir, db, snapshot, deltas_dir, mod_name,
-        existing_mod_id=existing_mod_id)
+        existing_mod_id=existing_mod_id, modinfo=modinfo)
 
 
 def import_from_script(
@@ -268,6 +318,7 @@ def _process_extracted_files(
     deltas_dir: Path,
     mod_name: str,
     existing_mod_id: int | None = None,
+    modinfo: dict | None = None,
 ) -> ModImportResult:
     """Common logic for zip and folder imports: match files, generate deltas, store.
 
@@ -286,7 +337,7 @@ def _process_extracted_files(
 
     # Run health check on mod files before importing
     try:
-        from cdmm.engine.mod_health_check import check_mod_health, auto_fix_matches
+        from cdumm.engine.mod_health_check import check_mod_health, auto_fix_matches
         mod_file_map = {rel: abs_path for rel, abs_path, _ in matches}
         result.health_issues = check_mod_health(mod_file_map, game_dir)
         if result.health_issues:
@@ -306,12 +357,22 @@ def _process_extracted_files(
 
     if existing_mod_id is not None:
         mod_id = existing_mod_id
+        # Update metadata if modinfo provided
+        if modinfo:
+            db.connection.execute(
+                "UPDATE mods SET author=?, version=?, description=? WHERE id=?",
+                (modinfo.get("author"), modinfo.get("version"), modinfo.get("description"), mod_id),
+            )
     else:
         # Store mod in database
         priority = _next_priority(db)
+        author = modinfo.get("author") if modinfo else None
+        version = modinfo.get("version") if modinfo else None
+        description = modinfo.get("description") if modinfo else None
         cursor = db.connection.execute(
-            "INSERT INTO mods (name, mod_type, priority) VALUES (?, ?, ?)",
-            (mod_name, "paz", priority),
+            "INSERT INTO mods (name, mod_type, priority, author, version, description) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (mod_name, "paz", priority, author, version, description),
         )
         mod_id = cursor.lastrowid
 
@@ -322,7 +383,17 @@ def _process_extracted_files(
                 safe_name = rel_path.replace("/", "_") + ".newfile"
                 delta_path = deltas_dir / str(mod_id) / safe_name
                 delta_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(extracted_path, delta_path)
+                # Auto-fix PAMT CRC for new files too
+                if rel_path.endswith(".pamt"):
+                    raw = extracted_path.read_bytes()
+                    if len(raw) >= 12:
+                        raw = _verify_and_fix_pamt_crc(raw, rel_path)
+                        delta_path.parent.mkdir(parents=True, exist_ok=True)
+                        delta_path.write_bytes(raw)
+                    else:
+                        shutil.copy2(extracted_path, delta_path)
+                else:
+                    shutil.copy2(extracted_path, delta_path)
 
                 file_size = extracted_path.stat().st_size
                 db.connection.execute(
@@ -346,6 +417,10 @@ def _process_extracted_files(
 
             vanilla_bytes = vanilla_path.read_bytes()
             modified_bytes = extracted_path.read_bytes()
+
+            # Auto-fix PAMT CRC if it's wrong (common mod authoring mistake)
+            if rel_path.endswith(".pamt") and len(modified_bytes) >= 12:
+                modified_bytes = _verify_and_fix_pamt_crc(modified_bytes, rel_path)
 
             if vanilla_bytes == modified_bytes:
                 logger.debug("File %s is identical to vanilla, skipping", rel_path)
@@ -477,7 +552,7 @@ def import_script_live(
 
     vanilla_dir = deltas_dir.parent / "vanilla"
     vanilla_dir.mkdir(parents=True, exist_ok=True)
-    from cdmm.engine.snapshot_manager import hash_file as _hash_file
+    from cdumm.engine.snapshot_manager import hash_file as _hash_file
 
     # Figure out which game files the script might touch by reading its source
     targeted_files = _detect_script_targets(script_path, game_dir)
@@ -623,12 +698,19 @@ def _detect_script_targets(script_path: Path, game_dir: Path) -> list[str]:
 
 
 def _ensure_vanilla_backup(game_dir: Path, vanilla_dir: Path, rel_path: str) -> None:
-    """Back up a single game file if not already backed up."""
+    """Back up a single game file if not already backed up.
+
+    Uses hard link (instant, zero extra space) with copy fallback.
+    """
+    import os
     src = game_dir / rel_path.replace("/", "\\")
     dst = vanilla_dir / rel_path.replace("/", "\\")
     if not dst.exists() and src.exists():
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
         logger.debug("Backed up vanilla: %s", rel_path)
 
 

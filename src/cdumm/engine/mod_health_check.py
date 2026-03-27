@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from cdmm.archive.hashlittle import hashlittle
+from cdumm.archive.hashlittle import hashlittle
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ def _check_duplicate_paths(
 ) -> list[HealthIssue]:
     """C1: Check if mod adds files that already exist in a different PAZ."""
     try:
-        from cdmm.archive.paz_parse import parse_pamt
+        from cdumm.archive.paz_parse import parse_pamt
     except ImportError:
         return []
 
@@ -354,7 +354,7 @@ def _check_record_bounds(
 ) -> list[HealthIssue]:
     """C6: Check if any PAMT records point outside PAZ file boundaries."""
     try:
-        from cdmm.archive.paz_parse import parse_pamt
+        from cdumm.archive.paz_parse import parse_pamt
     except ImportError:
         return []
 
@@ -613,7 +613,7 @@ def _fix_duplicate_pamt(
     import tempfile
 
     try:
-        from cdmm.archive.paz_parse import parse_pamt
+        from cdumm.archive.paz_parse import parse_pamt
     except ImportError:
         return None
 

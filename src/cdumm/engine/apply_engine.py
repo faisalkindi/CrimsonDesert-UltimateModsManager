@@ -18,16 +18,26 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from cdmm.archive.papgt_manager import PapgtManager
-from cdmm.archive.transactional_io import TransactionalIO
-from cdmm.engine.delta_engine import (
+from cdumm.archive.papgt_manager import PapgtManager
+from cdumm.archive.transactional_io import TransactionalIO
+from cdumm.engine.delta_engine import (
     SPARSE_MAGIC, apply_delta, apply_delta_from_file, load_delta,
 )
-from cdmm.storage.database import Database
+from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
 RANGE_BACKUP_EXT = ".vranges"  # sparse range backup extension
+
+
+def _hardlink_or_copy(src: Path, dst: Path) -> None:
+    """Create a hard link from src to dst, falling back to copy on failure."""
+    import os
+    import shutil
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 def _delta_changes_size(delta_path: Path, vanilla_size: int) -> bool:
@@ -223,7 +233,7 @@ class ApplyWorker(QObject):
         self.progress_updated.emit(2, "Backing up vanilla byte ranges...")
         self._ensure_backups(file_deltas, revert_files)
 
-        staging_dir = self._game_dir / ".cdmm_staging"
+        staging_dir = self._game_dir / ".cdumm_staging"
         staging_dir.mkdir(exist_ok=True)
         txn = TransactionalIO(self._game_dir, staging_dir)
         modified_pamts: dict[str, bytes] = {}
@@ -329,14 +339,14 @@ class ApplyWorker(QObject):
             has_bsdiff = self._has_bsdiff_delta(file_path)
 
             if has_bsdiff:
-                # Full file backup (small files only — bsdiff is skipped for >500MB)
+                # Full file backup — use hard link (instant, zero extra space)
+                # with copy fallback for cross-drive or filesystem issues.
                 full_path = self._vanilla_dir / file_path.replace("/", "\\")
                 if not full_path.exists():
                     game_path = self._game_dir / file_path.replace("/", "\\")
                     if game_path.exists():
                         full_path.parent.mkdir(parents=True, exist_ok=True)
-                        import shutil
-                        shutil.copy2(game_path, full_path)
+                        _hardlink_or_copy(game_path, full_path)
                         logger.info("Full vanilla backup: %s", file_path)
             else:
                 # Byte-range backup — only the positions mods touch
@@ -543,7 +553,7 @@ class RevertWorker(QObject):
         total = len(mod_files)
         self.progress_updated.emit(0, f"Reverting {total} file(s) to vanilla...")
 
-        staging_dir = self._game_dir / ".cdmm_staging"
+        staging_dir = self._game_dir / ".cdumm_staging"
         staging_dir.mkdir(exist_ok=True)
         txn = TransactionalIO(self._game_dir, staging_dir)
 
