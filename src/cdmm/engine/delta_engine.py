@@ -69,7 +69,12 @@ def apply_delta(vanilla_bytes: bytes, delta_bytes: bytes) -> bytes:
     """Apply a delta to vanilla bytes, returning modified bytes."""
     if delta_bytes[:4] == SPARSE_MAGIC:
         return _apply_sparse_patch(vanilla_bytes, delta_bytes)
-    return bsdiff4.patch(vanilla_bytes, delta_bytes)
+    if delta_bytes[:8] == b"BSDIFF40":
+        return bsdiff4.patch(vanilla_bytes, delta_bytes)
+    # Unknown format — treat as raw file replacement (e.g., .newfile)
+    logger.warning("Unknown delta format (magic=%s), treating as raw file",
+                   delta_bytes[:4].hex())
+    return delta_bytes
 
 
 def apply_delta_from_file(vanilla_bytes: bytes, delta_path: Path) -> bytes:

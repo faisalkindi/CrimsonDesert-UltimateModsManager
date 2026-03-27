@@ -8,8 +8,8 @@ from cdmm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-# PAZ directory pattern: 0000, 0001, ..., 0032
-PAZ_DIRS = [f"{i:04d}" for i in range(33)]
+# PAZ directory pattern: 0000, 0001, ..., 0099 (covers current and future directories)
+PAZ_DIRS = [f"{i:04d}" for i in range(100)]
 PAZ_PATTERN = "*.paz"
 PAMT_FILE = "0.pamt"
 PAPGT_FILE = "meta/0.papgt"

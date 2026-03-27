@@ -237,6 +237,10 @@ class ApplyWorker(QObject):
                 self.progress_updated.emit(pct, f"Processing {file_path}...")
                 file_idx += 1
 
+                # Skip PAPGT — it's always rebuilt from scratch at the end
+                if file_path == "meta/0.papgt":
+                    continue
+
                 # New files: copy from stored full file (last mod wins)
                 new_deltas = [d for d in deltas if d.get("is_new")]
                 mod_deltas = [d for d in deltas if not d.get("is_new")]

@@ -489,7 +489,9 @@ class MainWindow(QMainWindow):
             return
         self._script_mod_name = name.strip()
 
-        # Phase 1: Back up targeted files before the script modifies them
+        # Phase 1: Restore game files to vanilla so the .bat runs against
+        # clean files. This ensures captured deltas are always relative to
+        # vanilla, regardless of what mods were previously applied.
         vanilla_dir = self._deltas_dir.parent / "vanilla"
         vanilla_dir.mkdir(parents=True, exist_ok=True)
 
@@ -504,6 +506,9 @@ class MainWindow(QMainWindow):
         logger.info("Script targets: %s", targeted)
         for rel_path in targeted:
             _ensure_vanilla_backup(self._game_dir, vanilla_dir, rel_path)
+
+        # Restore targeted files (or all modded files) to vanilla before .bat runs
+        self._restore_vanilla_for_import(targeted, vanilla_dir)
 
         if targeted:
             # Record pre-script hashes for targeted files (fast — few files)
@@ -611,8 +616,45 @@ class MainWindow(QMainWindow):
             files = getattr(result, 'changed_files', [])
             logger.info("Script mod captured: %s (%d files)", name, len(files))
             self.statusBar().showMessage(
-                f"Imported script mod: {name} ({len(files)} files changed)", 15000)
+                f"Imported script mod: {name} ({len(files)} files changed). Re-applying mods...", 15000)
             self._refresh_all()
+
+            # Re-apply all enabled mods (we restored vanilla before the .bat ran)
+            self._on_apply()
+
+    def _restore_vanilla_for_import(self, targeted: list[str], vanilla_dir: Path) -> None:
+        """Restore game files to vanilla before a script import.
+
+        If targeted files are known, only restore those. Otherwise restore
+        all files that have vanilla backups (full coverage).
+        """
+        import os
+        import shutil
+
+        if targeted:
+            files_to_restore = targeted
+        else:
+            # Restore all files with full vanilla backups
+            files_to_restore = []
+            for dirpath, _dirnames, filenames in os.walk(vanilla_dir):
+                for fname in filenames:
+                    if fname.endswith(".vranges"):
+                        continue  # skip range backups
+                    full = Path(dirpath) / fname
+                    rel = full.relative_to(vanilla_dir)
+                    files_to_restore.append(str(rel).replace("\\", "/"))
+
+        restored = 0
+        for rel_path in files_to_restore:
+            vanilla_file = vanilla_dir / rel_path.replace("/", "\\")
+            game_file = self._game_dir / rel_path.replace("/", "\\")
+            if vanilla_file.exists() and game_file.exists():
+                shutil.copy2(vanilla_file, game_file)
+                restored += 1
+                logger.info("Restored vanilla: %s", rel_path)
+
+        if restored:
+            logger.info("Restored %d files to vanilla for clean import", restored)
 
     def _cleanup_script(self) -> None:
         """Clean up script temp files."""
