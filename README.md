@@ -157,6 +157,12 @@ If you find this useful, consider supporting development:
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kindiboy)
 
+## Credits
+
+- **Lazorr** — [Crimson Desert Unpacker](https://www.nexusmods.com/crimsondesert/mods/62) — PAZ parsing and repacking tools that CDUMM's archive pipeline is built on
+- **PhorgeForge** — [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113) — JSON byte-patch mod format, natively supported by CDUMM
+- **993499094** — [Crimson Desert QT Mod Manager](https://www.nexusmods.com/crimsondesert/mods/218) — Hard link deployment approach and modinfo.json format
+
 ## License
 
 MIT
