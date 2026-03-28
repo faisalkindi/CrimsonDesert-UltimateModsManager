@@ -47,6 +47,7 @@ class AsiPanel(QWidget):
         self._table.setHorizontalHeaderLabels(["Plugin", "Status", "Actions", "Conflicts"])
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSortingEnabled(True)
         layout.addWidget(self._table)
 
         self.refresh()

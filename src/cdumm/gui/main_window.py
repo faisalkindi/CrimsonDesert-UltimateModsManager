@@ -285,8 +285,12 @@ class MainWindow(QMainWindow):
                 game_dir=self._game_dir, db_path=self._db.db_path,
                 deltas_dir=self._deltas_dir)
             self._mod_list_model.mod_toggled.connect(self._on_mod_toggled_via_checkbox)
+            from PySide6.QtCore import QSortFilterProxyModel
+            self._sort_proxy = QSortFilterProxyModel()
+            self._sort_proxy.setSourceModel(self._mod_list_model)
             self._mod_table = QTableView()
-            self._mod_table.setModel(self._mod_list_model)
+            self._mod_table.setModel(self._sort_proxy)
+            self._mod_table.setSortingEnabled(True)
             self._mod_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
             self._mod_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self._mod_table.customContextMenuRequested.connect(self._show_mod_context_menu)
@@ -1003,7 +1007,7 @@ class MainWindow(QMainWindow):
             indexes = self._mod_table.selectionModel().selectedRows()
             if not indexes:
                 return
-            mod = self._mod_list_model.get_mod_at_row(indexes[0].row())
+            mod = self._get_mod_at_proxy_row(indexes[0].row())
             if not mod:
                 return
             mod_id = mod["id"]
@@ -1021,13 +1025,20 @@ class MainWindow(QMainWindow):
             self._on_apply()
 
     # --- View details ---
+    def _get_mod_at_proxy_row(self, proxy_row: int) -> dict | None:
+        """Map a proxy model row to the source model and get the mod."""
+        if hasattr(self, "_sort_proxy"):
+            source_index = self._sort_proxy.mapToSource(self._sort_proxy.index(proxy_row, 0))
+            return self._mod_list_model.get_mod_at_row(source_index.row())
+        return self._mod_list_model.get_mod_at_row(proxy_row)
+
     def _on_view_details(self) -> None:
         if not hasattr(self, "_mod_table") or not self._mod_manager:
             return
         indexes = self._mod_table.selectionModel().selectedRows()
         if not indexes:
             return
-        mod = self._mod_list_model.get_mod_at_row(indexes[0].row())
+        mod = self._get_mod_at_proxy_row(indexes[0].row())
         if not mod:
             return
         self._show_mod_contents(mod["id"])
@@ -1039,7 +1050,7 @@ class MainWindow(QMainWindow):
         index = self._mod_table.indexAt(pos)
         if not index.isValid():
             return
-        mod = self._mod_list_model.get_mod_at_row(index.row())
+        mod = self._get_mod_at_proxy_row(index.row())
         if not mod:
             return
 
@@ -1206,7 +1217,7 @@ class MainWindow(QMainWindow):
         indexes = self._mod_table.selectionModel().selectedRows()
         if not indexes:
             return
-        mod = self._mod_list_model.get_mod_at_row(indexes[0].row())
+        mod = self._get_mod_at_proxy_row(indexes[0].row())
         if not mod:
             return
         self._mod_manager.move_up(mod["id"])
@@ -1222,7 +1233,7 @@ class MainWindow(QMainWindow):
         indexes = self._mod_table.selectionModel().selectedRows()
         if not indexes:
             return
-        mod = self._mod_list_model.get_mod_at_row(indexes[0].row())
+        mod = self._get_mod_at_proxy_row(indexes[0].row())
         if not mod:
             return
         self._mod_manager.move_down(mod["id"])
