@@ -105,6 +105,10 @@ def _match_game_files(
 
     Returns list of (relative_posix_path, absolute_extracted_path, is_new).
     is_new=True means the file doesn't exist in vanilla (mod adds it).
+
+    Also handles mods that ship PAZ/PAMT files in a non-numbered directory
+    (e.g., "enlarge_fontsize/0.paz" instead of "0012/0.paz"). These are
+    assigned the next available PAZ directory number automatically.
     """
     matches: list[tuple[str, Path, bool]] = []
 
@@ -137,9 +141,42 @@ def _match_game_files(
                 game_file = game_dir / candidate.replace("/", "\\")
                 is_new = not game_file.exists()
                 matches.append((candidate, f, is_new))
+                matched = True
                 break
 
+        if matched:
+            continue
+
+    # If no matches found, check for unnumbered PAZ/PAMT mods
+    # (e.g., mod ships "modname/0.paz" + "modname/0.pamt" without a numbered dir)
+    if not matches:
+        paz_files = list(extracted_dir.rglob("*.paz"))
+        pamt_files = list(extracted_dir.rglob("*.pamt"))
+        if paz_files and pamt_files:
+            # Assign next available directory number
+            next_dir = _next_paz_directory(game_dir)
+            logger.info("Unnumbered PAZ mod detected, assigning directory %s", next_dir)
+            for f in paz_files + pamt_files:
+                rel_path = f"{next_dir}/{f.name}"
+                matches.append((rel_path, f, True))
+            # Also include meta/0.papgt if present
+            for papgt in extracted_dir.rglob("0.papgt"):
+                matches.append(("meta/0.papgt", papgt, False))
+
     return matches
+
+
+def _next_paz_directory(game_dir: Path) -> str:
+    """Find the next available PAZ directory number (0036+)."""
+    existing = set()
+    for d in game_dir.iterdir():
+        if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
+            existing.add(int(d.name))
+    # Start from 36 (base game uses 0000-0035)
+    for n in range(36, 200):
+        if n not in existing:
+            return f"{n:04d}"
+    return "0100"  # fallback
 
 
 def import_from_zip(

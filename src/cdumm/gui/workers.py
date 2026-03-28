@@ -505,3 +505,69 @@ class ScanChangesWorker(QObject):
         except Exception as e:
             logger.error("Scan failed: %s", e, exc_info=True)
             self.error_occurred.emit(str(e))
+
+
+class BackupVerifyWorker(QObject):
+    """Background worker that verifies vanilla backups against snapshot hashes."""
+
+    progress_updated = Signal(int, str)
+    finished = Signal(object)  # int: count of purged files
+    error_occurred = Signal(str)
+
+    def __init__(self, vanilla_dir: Path, db_path: Path) -> None:
+        super().__init__()
+        self._vanilla_dir = vanilla_dir
+        self._db_path = db_path
+
+    def run(self) -> None:
+        try:
+            import os
+            from cdumm.engine.snapshot_manager import hash_file
+
+            db = Database(self._db_path)
+            db.initialize()
+
+            # Collect all backup files
+            backup_files = []
+            for dirpath, _, filenames in os.walk(self._vanilla_dir):
+                for fname in filenames:
+                    if fname.endswith(".vranges"):
+                        continue
+                    backup_files.append(Path(dirpath) / fname)
+
+            total = len(backup_files)
+            if total == 0:
+                self.finished.emit(0)
+                db.close()
+                return
+
+            purged = 0
+            for i, full in enumerate(backup_files):
+                pct = int((i / total) * 100)
+                rel = str(full.relative_to(self._vanilla_dir)).replace("\\", "/")
+                self.progress_updated.emit(pct, f"Verifying {rel}...")
+
+                snap = db.connection.execute(
+                    "SELECT file_hash FROM snapshots WHERE file_path = ?", (rel,)
+                ).fetchone()
+                if snap is None:
+                    continue
+                try:
+                    backup_hash, _ = hash_file(full)
+                    if backup_hash != snap[0]:
+                        full.unlink()
+                        purged += 1
+                        logger.warning("Purged corrupted backup: %s", rel)
+                except Exception as e:
+                    logger.warning("Could not verify backup %s: %s", rel, e)
+
+            if purged:
+                logger.info("Purged %d corrupted vanilla backup(s)", purged)
+
+            db.close()
+            self.progress_updated.emit(100, "Done!")
+            self.finished.emit(purged)
+
+        except Exception as e:
+            logger.error("Backup verify failed: %s", e, exc_info=True)
+            self.error_occurred.emit(str(e))

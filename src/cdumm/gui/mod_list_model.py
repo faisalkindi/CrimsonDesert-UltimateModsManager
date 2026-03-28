@@ -92,9 +92,14 @@ class ModListModel(QAbstractTableModel):
             return
 
         # Clean up previous thread
-        if self._status_thread and self._status_thread.isRunning():
-            self._status_thread.quit()
-            self._status_thread.wait(1000)
+        if self._status_thread is not None:
+            try:
+                if self._status_thread.isRunning():
+                    self._status_thread.quit()
+                    self._status_thread.wait(1000)
+            except RuntimeError:
+                pass  # C++ object already deleted
+            self._status_thread = None
 
         mod_ids = [m["id"] for m in self._mods]
         worker = _StatusWorker(mod_ids, self._db_path, self._game_dir, self._deltas_dir)
@@ -104,10 +109,14 @@ class ModListModel(QAbstractTableModel):
         worker.finished.connect(self._on_statuses_ready)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: self._on_status_thread_done())
         self._status_thread = thread
         self._status_worker = worker  # prevent GC
         thread.start()
+
+    def _on_status_thread_done(self) -> None:
+        self._status_thread = None
+        self._status_worker = None
 
     def _on_statuses_ready(self, results: dict) -> None:
         self._status_cache.update(results)
@@ -182,7 +191,60 @@ class ModListModel(QAbstractTableModel):
         flags = super().flags(index)
         if index.column() == COL_ENABLED:
             flags |= Qt.ItemFlag.ItemIsUserCheckable
+        if index.isValid():
+            flags |= Qt.ItemFlag.ItemIsDragEnabled
+        flags |= Qt.ItemFlag.ItemIsDropEnabled
         return flags
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction
+
+    def mimeTypes(self):
+        return ["application/x-cdumm-mod-row"]
+
+    def mimeData(self, indexes):
+        from PySide6.QtCore import QMimeData
+        data = QMimeData()
+        rows = sorted(set(idx.row() for idx in indexes if idx.isValid()))
+        data.setData("application/x-cdumm-mod-row", ",".join(str(r) for r in rows).encode())
+        return data
+
+    def canDropMimeData(self, data, action, row, column, parent):
+        return data.hasFormat("application/x-cdumm-mod-row")
+
+    def dropMimeData(self, data, action, row, column, parent):
+        if not data.hasFormat("application/x-cdumm-mod-row"):
+            return False
+        raw = bytes(data.data("application/x-cdumm-mod-row")).decode()
+        if not raw:
+            return False
+        source_rows = [int(r) for r in raw.split(",")]
+        if not source_rows:
+            return False
+
+        # When dropping ON a row (not between), row is -1 and parent is valid
+        if row < 0 and parent.isValid():
+            row = parent.row()
+        elif row < 0:
+            row = len(self._mods)
+
+        # Reorder: move source rows to target position
+        ids = [m["id"] for m in self._mods]
+        moved = [ids[r] for r in source_rows if r < len(ids)]
+        remaining = [mid for mid in ids if mid not in moved]
+        # Adjust target: account for removed items above the drop point
+        target = row
+        for r in sorted(source_rows):
+            if r < row:
+                target -= 1
+        target = max(0, min(target, len(remaining)))
+        new_order = remaining[:target] + moved + remaining[target:]
+
+        self._mod_manager.reorder_mods(new_order)
+        self.refresh()
+        self.refresh_statuses()
+        self.mod_toggled.emit()
+        return True
 
     def get_mod_at_row(self, row: int) -> dict | None:
         if 0 <= row < len(self._mods):

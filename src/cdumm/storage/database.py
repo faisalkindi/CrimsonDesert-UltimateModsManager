@@ -54,6 +54,21 @@ CREATE TABLE IF NOT EXISTS conflicts (
     explanation TEXT,
     winner_id INTEGER REFERENCES mods(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS profile_mods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    mod_id INTEGER NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(profile_id, mod_id)
+);
 """
 
 

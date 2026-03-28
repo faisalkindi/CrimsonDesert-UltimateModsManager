@@ -4,15 +4,6 @@ import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-from PySide6.QtWidgets import QApplication
-
-from PySide6.QtWidgets import QDialog
-
-from cdumm.gui.main_window import MainWindow
-from cdumm.gui.setup_dialog import SetupDialog
-from cdumm.storage.database import Database
-from cdumm.storage.config import Config
-
 APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
 
 
@@ -39,7 +30,6 @@ def setup_logging(app_data: Path) -> None:
 
 
 def _flush_logs():
-    """Flush all log handlers to disk."""
     for handler in logging.getLogger().handlers:
         try:
             handler.flush()
@@ -48,7 +38,6 @@ def _flush_logs():
 
 
 def _global_exception_handler(exc_type, exc_value, exc_tb):
-    """Catch unhandled exceptions and log them before the app dies."""
     logger = logging.getLogger("CRASH")
     logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
     _flush_logs()
@@ -56,7 +45,6 @@ def _global_exception_handler(exc_type, exc_value, exc_tb):
 
 
 def _thread_exception_handler(args):
-    """Catch unhandled exceptions in worker threads."""
     logger = logging.getLogger("CRASH")
     logger.critical(
         "Unhandled exception in thread %s",
@@ -74,8 +62,22 @@ def main() -> int:
     logger = logging.getLogger(__name__)
     logger.info("Starting Crimson Desert Ultimate Mods Manager")
 
+    # Minimal import for QApplication — everything else is lazy
+    from PySide6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     app.setApplicationName("Crimson Desert Ultimate Mods Manager")
+
+    # Show splash immediately before heavy imports
+    from cdumm.gui.splash import show_splash
+    splash = show_splash()
+    app.processEvents()
+
+    # Now do heavy imports
+    splash.showMessage("  Loading database...", 0x0081)  # AlignLeft | AlignBottom
+    app.processEvents()
+
+    from cdumm.storage.database import Database
+    from cdumm.storage.config import Config
 
     # Migrate from old cdmm AppData if this is an upgrade
     old_app_data = Path.home() / "AppData" / "Local" / "cdmm"
@@ -96,6 +98,9 @@ def main() -> int:
     # First-run: game directory setup
     game_dir = config.get("game_directory")
     if game_dir is None:
+        splash.close()
+        from PySide6.QtWidgets import QDialog
+        from cdumm.gui.setup_dialog import SetupDialog
         dialog = SetupDialog()
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.game_directory:
             config.set("game_directory", str(dialog.game_directory))
@@ -104,9 +109,16 @@ def main() -> int:
         else:
             logger.warning("No game directory selected, exiting")
             return 1
+        splash = show_splash()
+        app.processEvents()
 
+    splash.showMessage("  Building UI...", 0x0081)
+    app.processEvents()
+
+    from cdumm.gui.main_window import MainWindow
     window = MainWindow(db=db, game_dir=Path(game_dir), app_data_dir=APP_DATA_DIR)
     window.show()
+    splash.finish(window)
 
     return app.exec()
 

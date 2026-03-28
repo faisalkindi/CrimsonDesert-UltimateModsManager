@@ -139,19 +139,24 @@ class ModManager:
         import os
         from cdumm.engine.snapshot_manager import hash_file
         for (file_path,) in files:
+            is_new = self._db.connection.execute(
+                "SELECT is_new FROM mod_deltas WHERE mod_id = ? AND file_path = ? LIMIT 1",
+                (mod_id, file_path)).fetchone()
+            game_file = game_dir / file_path.replace("/", os.sep)
+
+            if is_new and is_new[0]:
+                # New file from mod — active if it exists on disk
+                if game_file.exists():
+                    return "active"
+                continue
+
+            if not game_file.exists():
+                continue
+
             snap = self._db.connection.execute(
                 "SELECT file_hash FROM snapshots WHERE file_path = ?", (file_path,)).fetchone()
-            game_file = game_dir / file_path.replace("/", os.sep)
-            if not game_file.exists():
-                # New file from mod — check if it's on disk
-                is_new = self._db.connection.execute(
-                    "SELECT is_new FROM mod_deltas WHERE mod_id = ? AND file_path = ? LIMIT 1",
-                    (mod_id, file_path)).fetchone()
-                if is_new and is_new[0]:
-                    continue  # new file not on disk = not applied
-                continue
             if snap is None:
-                continue  # no snapshot for this file, can't tell
+                continue
             current_hash, _ = hash_file(game_file)
             if current_hash != snap[0]:
                 return "active"
@@ -215,6 +220,14 @@ class ModManager:
         self._db.connection.execute(
             "UPDATE mods SET priority = ? WHERE id = ?", (rows[mod_a_id], mod_b_id))
         self._db.connection.commit()
+
+    def reorder_mods(self, ordered_ids: list[int]) -> None:
+        """Reassign priorities based on a new ordering."""
+        for priority, mod_id in enumerate(ordered_ids):
+            self._db.connection.execute(
+                "UPDATE mods SET priority = ? WHERE id = ?", (priority, mod_id))
+        self._db.connection.commit()
+        logger.info("Reordered %d mods", len(ordered_ids))
 
     def set_winner(self, mod_id: int) -> None:
         """Set a mod as #1 priority (wins all conflicts)."""

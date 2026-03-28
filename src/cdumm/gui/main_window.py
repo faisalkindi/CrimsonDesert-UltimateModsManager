@@ -25,18 +25,44 @@ from cdumm.engine.apply_engine import ApplyWorker, RevertWorker
 from cdumm.engine.conflict_detector import ConflictDetector
 from cdumm.engine.mod_manager import ModManager
 from cdumm.engine.snapshot_manager import SnapshotManager, SnapshotWorker
-from cdumm.engine.test_mod_checker import test_mod
 from cdumm.gui.asi_panel import AsiPanel
 from cdumm.gui.conflict_view import ConflictView
 from cdumm.gui.import_widget import ImportWidget
 from cdumm.gui.mod_list_model import ModListModel
 from cdumm.gui.progress_dialog import ProgressDialog
-from cdumm.gui.test_mod_dialog import TestModDialog
 from cdumm.gui.workers import ImportWorker
 from cdumm.storage.config import Config
 from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
+
+
+def _is_standalone_paz_mod(path: Path) -> bool:
+    """Check if path is a standalone PAZ mod (0.paz + 0.pamt, not in a numbered dir).
+
+    These mods add a new PAZ directory and don't need a vanilla snapshot.
+    """
+    import zipfile
+    if path.is_dir():
+        # Check folder: has 0.paz + 0.pamt at root or one level deep
+        if (path / "0.paz").exists() and (path / "0.pamt").exists():
+            return True
+        for sub in path.iterdir():
+            if sub.is_dir() and (sub / "0.paz").exists() and (sub / "0.pamt").exists():
+                # But NOT if it's a numbered directory (those are regular mods)
+                if not (sub.name.isdigit() and len(sub.name) == 4):
+                    return True
+        return False
+    if path.suffix.lower() == ".zip":
+        try:
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+                has_paz = any(n.endswith("/0.paz") or n == "0.paz" for n in names)
+                has_pamt = any(n.endswith("/0.pamt") or n == "0.pamt" for n in names)
+                return has_paz and has_pamt
+        except Exception:
+            return False
+    return False
 
 
 class MainThreadDispatcher(QObject):
@@ -109,6 +135,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_status_bar()
         self._refresh_all(update_statuses=False)
+        self.setAcceptDrops(True)
 
         # Crash detection — lock file
         self._lock_file = self._app_data_dir / ".running"
@@ -117,6 +144,9 @@ class MainWindow(QMainWindow):
 
         # Deferred startup tasks (after window is visible)
         QTimer.singleShot(500, self._deferred_startup)
+
+        # Update check (delayed further to not compete with UI loading)
+        QTimer.singleShot(5000, self._check_for_updates)
 
         # Auto-snapshot on first run (after window is shown)
         if self._snapshot and not self._snapshot.has_snapshot() and self._game_dir:
@@ -173,48 +203,49 @@ class MainWindow(QMainWindow):
             self._mod_list_model.refresh_statuses()
         if self._snapshot and self._snapshot.has_snapshot() and self._game_dir:
             self._purge_corrupted_backups()
+            self._check_game_version_mismatches()
+
+    def _check_game_version_mismatches(self) -> None:
+        """Warn about mods imported for a different game version."""
+        try:
+            from cdumm.engine.version_detector import detect_game_version
+            current = detect_game_version(self._game_dir)
+            if not current:
+                return
+            cursor = self._db.connection.execute(
+                "SELECT name, game_version_hash FROM mods WHERE game_version_hash IS NOT NULL AND enabled = 1")
+            mismatched = [name for name, ver in cursor.fetchall() if ver and ver != current]
+            if mismatched:
+                self.statusBar().showMessage(
+                    f"Warning: {len(mismatched)} mod(s) imported for a different game version: "
+                    + ", ".join(mismatched[:3])
+                    + ("..." if len(mismatched) > 3 else ""), 15000)
+        except Exception as e:
+            logger.debug("Version mismatch check failed: %s", e)
 
     def _purge_corrupted_backups(self) -> None:
-        """One-time check: delete vanilla backups that don't match the snapshot hash.
-
-        Corrupted backups can occur from the old hard link approach where
-        modifying the game file also modified the backup (same inode).
-        Deleting them forces a fresh copy on next Apply.
-
-        Only runs once — sets a config flag after completion.
-        """
-        from cdumm.storage.config import Config
+        """One-time check: run background worker to verify and purge corrupted backups."""
         config = Config(self._db)
         if config.get("backups_verified") == "1":
-            return  # already checked
-
-        import os
-        from cdumm.engine.snapshot_manager import hash_file
+            return
         if not self._vanilla_dir.exists():
             config.set("backups_verified", "1")
             return
-        purged = 0
-        for dirpath, _, filenames in os.walk(self._vanilla_dir):
-            for fname in filenames:
-                if fname.endswith(".vranges"):
-                    continue
-                full = Path(dirpath) / fname
-                rel = str(full.relative_to(self._vanilla_dir)).replace("\\", "/")
-                snap = self._db.connection.execute(
-                    "SELECT file_hash FROM snapshots WHERE file_path = ?", (rel,)
-                ).fetchone()
-                if snap is None:
-                    continue
-                try:
-                    backup_hash, _ = hash_file(full)
-                    if backup_hash != snap[0]:
-                        full.unlink()
-                        purged += 1
-                        logger.warning("Purged corrupted backup: %s", rel)
-                except Exception as e:
-                    logger.warning("Could not verify backup %s: %s", rel, e)
-        if purged:
-            logger.info("Purged %d corrupted vanilla backup(s)", purged)
+
+        from cdumm.gui.workers import BackupVerifyWorker
+        progress = ProgressDialog("Verifying vanilla backups...", self)
+        worker = BackupVerifyWorker(self._vanilla_dir, self._db.db_path)
+        thread = QThread()
+        self._run_worker(worker, thread, progress,
+                         on_finished=self._on_backup_verify_done)
+
+    def _on_backup_verify_done(self, purged_count: int) -> None:
+        self._sync_db()
+        config = Config(self._db)
+        config.set("backups_verified", "1")
+        if purged_count and purged_count > 0:
+            self.statusBar().showMessage(
+                f"Purged {purged_count} corrupted vanilla backup(s)", 10000)
         config.set("backups_verified", "1")
 
     def _auto_snapshot_first_run(self) -> None:
@@ -242,7 +273,8 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # Tab widget for mods and ASI
-        tabs = QTabWidget()
+        self._tabs = QTabWidget()
+        tabs = self._tabs
 
         # PAZ Mods tab
         mods_widget = QWidget()
@@ -258,6 +290,11 @@ class MainWindow(QMainWindow):
             self._mod_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
             self._mod_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self._mod_table.customContextMenuRequested.connect(self._show_mod_context_menu)
+            self._mod_table.setDragEnabled(True)
+            self._mod_table.setAcceptDrops(True)
+            self._mod_table.setDropIndicatorShown(True)
+            self._mod_table.setDragDropMode(QTableView.DragDropMode.InternalMove)
+            self._mod_table.setDefaultDropAction(Qt.DropAction.MoveAction)
             # Column sizing: stretch Name, fit others to content
             from PySide6.QtWidgets import QHeaderView
             header = self._mod_table.horizontalHeader()
@@ -333,6 +370,20 @@ class MainWindow(QMainWindow):
         gamedir_btn = QPushButton("Game Directory...")
         gamedir_btn.clicked.connect(self._on_change_game_dir)
         toolbar.addWidget(gamedir_btn)
+
+        toolbar.addSeparator()
+
+        profiles_btn = QPushButton("Profiles...")
+        profiles_btn.clicked.connect(self._on_profiles)
+        toolbar.addWidget(profiles_btn)
+
+        export_btn = QPushButton("Export List")
+        export_btn.clicked.connect(self._on_export_list)
+        toolbar.addWidget(export_btn)
+
+        import_list_btn = QPushButton("Import List")
+        import_list_btn.clicked.connect(self._on_import_list)
+        toolbar.addWidget(import_list_btn)
 
         toolbar.addSeparator()
 
@@ -521,6 +572,17 @@ class MainWindow(QMainWindow):
         if path:
             self._run_import(Path(path))
 
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if urls:
+            path = Path(urls[0].toLocalFile())
+            logger.info("File dropped on main window: %s", path)
+            self._run_import(path)
+
     def _on_import_dropped(self, path: Path) -> None:
         self._run_import(path)
 
@@ -538,8 +600,10 @@ class MainWindow(QMainWindow):
             self._install_asi_mod(path)
             return
 
-        # PAZ mod import — requires snapshot
-        if not self._snapshot or not self._snapshot.has_snapshot():
+        # Standalone PAZ mods (modinfo.json + 0.paz + 0.pamt) don't need a snapshot
+        # since they add new directories rather than modifying existing files.
+        # All other PAZ mods require a snapshot for delta generation.
+        if not _is_standalone_paz_mod(path) and (not self._snapshot or not self._snapshot.has_snapshot()):
             self.statusBar().showMessage(
                 "Snapshot required before importing PAZ mods. Click 'Refresh Snapshot' first.", 10000
             )
@@ -838,9 +902,25 @@ class MainWindow(QMainWindow):
                 f"Imported PAZ mod: {name} ({len(files)} files changed)", 10000
             )
             logger.info("Import success: %s (%d files)", name, len(files))
-            logger.info("Refreshing UI...")
+
+            # Stamp mod with current game version
+            try:
+                from cdumm.engine.version_detector import detect_game_version
+                ver = detect_game_version(self._game_dir)
+                if ver:
+                    # Find the just-imported mod (highest id)
+                    row = self._db.connection.execute("SELECT MAX(id) FROM mods").fetchone()
+                    if row and row[0]:
+                        self._db.connection.execute(
+                            "UPDATE mods SET game_version_hash = ? WHERE id = ?",
+                            (ver, row[0]))
+                        self._db.connection.commit()
+            except Exception as e:
+                logger.debug("Game version stamp failed (non-fatal): %s", e)
+
             self._refresh_all()
-            logger.info("UI refresh done")
+            self._tabs.setCurrentIndex(0)  # Switch to PAZ Mods tab
+            self._on_apply()  # Auto-apply after import
 
     def _install_asi_mod(self, path: Path) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
@@ -859,9 +939,10 @@ class MainWindow(QMainWindow):
                 f"Installed ASI mod: {', '.join(installed)} → bin64/", 10000
             )
             logger.info("ASI install success: %s", installed)
-            # Refresh ASI panel if it exists
+            # Refresh ASI panel and switch to ASI tab
             if hasattr(self, "_asi_panel"):
                 self._asi_panel.refresh()
+                self._tabs.setCurrentWidget(self._asi_panel)
         else:
             self.statusBar().showMessage("No ASI files found to install.", 5000)
             logger.warning("No ASI files found in %s", path)
@@ -949,15 +1030,7 @@ class MainWindow(QMainWindow):
         mod = self._mod_list_model.get_mod_at_row(indexes[0].row())
         if not mod:
             return
-        details = self._mod_manager.get_mod_details(mod["id"])
-        if not details:
-            return
-        lines = [f"Mod: {details['name']}", f"Type: {details['mod_type']}",
-                 f"Enabled: {details['enabled']}", f"Imported: {details['import_date']}",
-                 "", "Changed files:"]
-        for cf in details["changed_files"]:
-            lines.append(f"  {cf['file_path']} (bytes {cf['byte_start']}-{cf['byte_end']})")
-        QMessageBox.information(self, f"Details: {details['name']}", "\n".join(lines))
+        self._show_mod_contents(mod["id"])
 
     # --- Mod context menu ---
     def _show_mod_context_menu(self, pos) -> None:
@@ -1027,18 +1100,41 @@ class MainWindow(QMainWindow):
 
     # --- Update mod ---
     def _on_update_mod(self, mod: dict) -> None:
-        """Replace a mod's deltas with a new version, keeping name/priority/enabled."""
+        """Show overlay for drag-drop mod update."""
         if not self._db or not self._game_dir or not self._mod_manager:
             return
+        from cdumm.gui.update_overlay import UpdateOverlay
+        self._update_overlay = UpdateOverlay(mod["name"], parent=self.centralWidget())
+        self._update_mod_target = mod
+        self._update_overlay.folder_dropped.connect(self._on_update_drop)
+        self._update_overlay.cancelled.connect(lambda: self._update_overlay.deleteLater())
+        self._update_overlay.show_overlay()
 
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Update: {mod['name']}",
-            "", "Mod Files (*.zip *.bat *.py *.bsdiff);;All Files (*)",
-        )
-        if not path:
-            return
+    def _on_update_drop(self, path: Path) -> None:
+        """Handle the dropped folder/zip for mod update."""
+        mod = self._update_mod_target
+        self._update_overlay.deleteLater()
 
-        path = Path(path)
+        # Validate: check the dropped content looks like the same mod
+        from cdumm.engine.import_handler import _read_modinfo
+        modinfo = _read_modinfo(path) if path.is_dir() else None
+
+        # Check by modinfo name match if available
+        if modinfo and modinfo.get("name"):
+            dropped_name = modinfo["name"].lower().strip()
+            existing_name = mod["name"].lower().strip()
+            # Allow partial matches (mod names often have version suffixes)
+            if dropped_name not in existing_name and existing_name not in dropped_name:
+                # Names don't match — warn the user
+                reply = QMessageBox.question(
+                    self, "Mod Name Mismatch",
+                    f"The dropped mod is \"{modinfo['name']}\" but you're updating "
+                    f"\"{mod['name']}\".\n\nAre you sure this is the right mod?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
         mod_id = mod["id"]
         logger.info("Updating mod %d (%s) from %s", mod_id, mod["name"], path)
 
@@ -1156,6 +1252,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.statusBar().showMessage(f"Testing mod: {Path(path).name}...")
+        from cdumm.engine.test_mod_checker import test_mod
+        from cdumm.gui.test_mod_dialog import TestModDialog
         result = test_mod(Path(path), self._game_dir, self._db, self._snapshot)
         dialog = TestModDialog(result, self)
         dialog.exec()
@@ -1230,6 +1328,121 @@ class MainWindow(QMainWindow):
             from cdumm.gui.bug_report import generate_bug_report, BugReportDialog
             report = generate_bug_report(self._db, self._game_dir, self._app_data_dir)
             dialog = BugReportDialog(report, self, is_crash=True)
+            dialog.exec()
+
+    # --- Profiles ---
+    def _on_profiles(self) -> None:
+        from cdumm.gui.profile_dialog import ProfileDialog
+        dialog = ProfileDialog(self._db, self)
+        dialog.exec()
+        if dialog.was_profile_loaded:
+            self._refresh_all()
+            self._on_apply()
+
+    # --- Export/Import Mod List ---
+    def _on_export_list(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Mod List", "cdumm_modlist.json", "JSON Files (*.json)")
+        if not path:
+            return
+        from cdumm.engine.mod_list_io import export_mod_list
+        count = export_mod_list(self._db, Path(path))
+        self.statusBar().showMessage(f"Exported {count} mods to {Path(path).name}", 10000)
+
+    def _on_import_list(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Mod List", "", "JSON Files (*.json)")
+        if not path:
+            return
+        from cdumm.engine.mod_list_io import import_mod_list
+        mods = import_mod_list(Path(path))
+        if not mods:
+            QMessageBox.information(self, "Import List", "No mods found in the file.")
+            return
+        # Show what mods the list contains vs what we have installed
+        installed = {m["name"].lower() for m in (self._mod_manager.list_mods() if self._mod_manager else [])}
+        lines = []
+        missing = 0
+        for m in mods:
+            status = "installed" if m["name"].lower() in installed else "MISSING"
+            if status == "MISSING":
+                missing += 1
+            lines.append(f"[{status}] {m['name']}" + (f" by {m['author']}" if m.get('author') else ""))
+        QMessageBox.information(
+            self, "Mod List",
+            f"{len(mods)} mods in list, {missing} not installed:\n\n" + "\n".join(lines))
+
+    # --- Update Check ---
+    def _check_for_updates(self) -> None:
+        from cdumm import __version__
+        from cdumm.engine.update_checker import UpdateCheckWorker
+        worker = UpdateCheckWorker(__version__)
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.update_available.connect(self._on_update_available)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda: setattr(self, '_update_thread', None))
+        self._update_thread = thread
+        self._update_worker = worker
+        thread.start()
+
+    def _on_update_available(self, info: dict) -> None:
+        download_url = info.get("download_url", "")
+        if download_url:
+            reply = QMessageBox.question(
+                self, "Update Available",
+                f"A new version is available: {info['tag']}\n\n"
+                f"{info['body'][:300]}\n\n"
+                "Download and install automatically?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._download_and_apply_update(download_url)
+        else:
+            import webbrowser
+            reply = QMessageBox.information(
+                self, "Update Available",
+                f"A new version is available: {info['tag']}\n\n"
+                "Open the download page?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes and info.get("url"):
+                webbrowser.open(info["url"])
+
+    def _download_and_apply_update(self, download_url: str) -> None:
+        from cdumm.engine.update_checker import UpdateDownloadWorker
+        progress = ProgressDialog("Downloading Update", self)
+        worker = UpdateDownloadWorker(download_url)
+        thread = QThread()
+        self._run_worker(worker, thread, progress,
+                         on_finished=self._on_update_downloaded)
+
+    def _on_update_downloaded(self, new_exe_path) -> None:
+        if not new_exe_path:
+            QMessageBox.warning(self, "Update Failed", "Download failed. Try again later.")
+            return
+        from pathlib import Path
+        from cdumm.engine.update_checker import apply_update
+        reply = QMessageBox.question(
+            self, "Update Ready",
+            "Update downloaded. The app will close and restart with the new version.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            apply_update(Path(str(new_exe_path)))
+
+    # --- View Mod Contents ---
+    def _show_mod_contents(self, mod_id: int) -> None:
+        mod = None
+        for m in self._mod_list_model._mods:
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if mod:
+            from cdumm.gui.mod_contents_dialog import ModContentsDialog
+            dialog = ModContentsDialog(mod, self._mod_manager, self)
             dialog.exec()
 
     def closeEvent(self, event) -> None:
