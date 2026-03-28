@@ -1,4 +1,4 @@
-# Crimson Desert Ultimate Mods Manager (BETA)
+# Crimson Desert Ultimate Mods Manager
 
 A desktop mod manager for **Crimson Desert** that understands the game's PAZ/PAMT/PAPGT archive format. Install, manage, and safely combine multiple mods with automatic conflict detection and one-click revert to vanilla.
 
@@ -13,6 +13,8 @@ Drop a mod onto the window and it's installed. Supports multiple formats:
 |--------|-------------|
 | `.zip` | Archives containing modified game files or installer scripts |
 | Folders | Loose directories with modified PAZ/PAMT files |
+| `.json` | JSON byte-patch mods (compatible with [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113)) |
+| `manifest.json` + files | Loose-file mods — automatically repacked into PAZ format |
 | `.bat` / `.py` | Script-based installers — runs in a visible console, captures changes automatically |
 | `.bsdiff` | Pre-generated binary patches |
 | `.asi` | Native ASI plugins (installed to `bin64/`) |
@@ -109,7 +111,7 @@ Copy to clipboard or save as a file for troubleshooting.
 ## Installation
 
 ### Option 1: Standalone Executable
-Download `CrimsonDesertModManager.exe` from the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page. No Python required.
+Download `CDUMM.exe` from the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page. No Python required.
 
 ### Option 2: Run from Source
 Requires Python 3.10+.
@@ -118,17 +120,17 @@ Requires Python 3.10+.
 git clone https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager.git
 cd CrimsonDesert-UltimateModsManager
 pip install -e .
-python src/cdmm/main.py
+py -3 -m cdumm.main
 ```
 
 ### Building the Executable
 
 ```bash
 pip install pyinstaller
-python scripts/build.py
+pyinstaller cdumm.spec --noconfirm
 ```
 
-The exe is written to `dist/CrimsonDesertModManager.exe`.
+The exe is written to `dist/CDUMM.exe`.
 
 ## How It Works
 
@@ -140,8 +142,8 @@ Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAP
 4. **Rebuilds** the PAPGT integrity chain so the game accepts the modified files
 5. **Commits** atomically — all files are staged and swapped in one operation
 
-All data is stored in `%LOCALAPPDATA%\cdmm\`:
-- `cdmm.db` — mod registry, snapshots, conflicts
+All data is stored in `%LOCALAPPDATA%\cdumm\`:
+- `cdumm.db` — mod registry, snapshots, conflicts
 - `vanilla/` — byte-range backups of modified game files (not full copies)
 - `deltas/` — binary patches for each mod
 
