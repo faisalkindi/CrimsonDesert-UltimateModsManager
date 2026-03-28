@@ -330,6 +330,10 @@ class MainWindow(QMainWindow):
         snapshot_btn.clicked.connect(self._on_refresh_snapshot)
         toolbar.addWidget(snapshot_btn)
 
+        gamedir_btn = QPushButton("Game Directory...")
+        gamedir_btn.clicked.connect(self._on_change_game_dir)
+        toolbar.addWidget(gamedir_btn)
+
         toolbar.addSeparator()
 
         bug_btn = QPushButton("Report Bug")
@@ -1176,6 +1180,35 @@ class MainWindow(QMainWindow):
         self._update_snapshot_status()
         self.statusBar().showMessage(f"Snapshot complete: {count} files indexed. You can now import mods.", 10000)
         logger.info("Snapshot finished and UI updated")
+
+    # --- Change Game Directory ---
+    def _on_change_game_dir(self) -> None:
+        current = str(self._game_dir) if self._game_dir else ""
+        new_dir = QFileDialog.getExistingDirectory(
+            self, "Select Crimson Desert Game Directory", current)
+        if not new_dir:
+            return
+        new_path = Path(new_dir)
+        # Basic validation — check for expected game files
+        if not (new_path / "meta" / "0.papgt").exists():
+            QMessageBox.warning(
+                self, "Invalid Directory",
+                "This doesn't look like a Crimson Desert installation.\n"
+                "Expected to find meta/0.papgt in the selected folder.")
+            return
+        from cdumm.storage.config import Config
+        config = Config(self._db)
+        config.set("game_directory", str(new_path))
+        self._game_dir = new_path
+        self._cdmods_dir = new_path / "CDMods"
+        self._cdmods_dir.mkdir(parents=True, exist_ok=True)
+        self._deltas_dir = self._cdmods_dir / "deltas"
+        self._vanilla_dir = self._cdmods_dir / "vanilla"
+        self.statusBar().showMessage(f"Game directory changed to: {new_path}", 10000)
+        QMessageBox.information(
+            self, "Game Directory Changed",
+            f"Game directory set to:\n{new_path}\n\n"
+            "You should click 'Refresh Snapshot' to index the new installation.")
 
     # --- Bug Report ---
     def _on_report_bug(self) -> None:
