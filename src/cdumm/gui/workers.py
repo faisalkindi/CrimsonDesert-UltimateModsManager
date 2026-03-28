@@ -122,6 +122,115 @@ class PreHashWorker(QObject):
             self.error_occurred.emit(str(e))
 
 
+class ScriptPrepWorker(QObject):
+    """Background worker that backs up vanilla files, restores them, and pre-hashes."""
+
+    progress_updated = Signal(int, str)
+    finished = Signal(object)  # dict[str, str] pre_hashes or None
+    error_occurred = Signal(str)
+
+    def __init__(self, targeted: list[str], game_dir: Path, vanilla_dir: Path) -> None:
+        super().__init__()
+        self._targeted = targeted
+        self._game_dir = game_dir
+        self._vanilla_dir = vanilla_dir
+
+    def run(self) -> None:
+        try:
+            import os
+            import shutil
+            from cdumm.engine.import_handler import _ensure_vanilla_backup
+            from cdumm.engine.snapshot_manager import hash_file as _hash_file
+            from cdumm.storage.database import Database
+
+            total = len(self._targeted) if self._targeted else 0
+            if total == 0:
+                self.finished.emit(None)
+                return
+
+            # Load snapshot hashes to check what actually needs work
+            db_path = self._vanilla_dir.parent / ".." / ".." / "AppData" / "Local" / "cdumm" / "cdumm.db"
+            # Find the DB by walking up from vanilla_dir (CDMods/vanilla -> game_dir)
+            # The DB is at AppData, but we can check snapshot inline
+            snap_hashes: dict[str, str] = {}
+            try:
+                # Try to find DB path from standard location
+                db_path = Path.home() / "AppData" / "Local" / "cdumm" / "cdumm.db"
+                if db_path.exists():
+                    db = Database(db_path)
+                    db.initialize()
+                    for rel_path in self._targeted:
+                        row = db.connection.execute(
+                            "SELECT file_hash FROM snapshots WHERE file_path = ?",
+                            (rel_path,)).fetchone()
+                        if row:
+                            snap_hashes[rel_path] = row[0]
+                    db.close()
+            except Exception:
+                pass  # proceed without snapshot optimization
+
+            # Step 1: Back up and restore only files that need it
+            backed_up = 0
+            restored = 0
+            for i, rel_path in enumerate(self._targeted):
+                pct = int((i / total) * 50)
+                game_file = self._game_dir / rel_path.replace("/", os.sep)
+                vanilla_file = self._vanilla_dir / rel_path.replace("/", os.sep)
+
+                if not game_file.exists():
+                    continue
+
+                # Check if game file already matches vanilla snapshot
+                if rel_path in snap_hashes:
+                    current_hash, _ = _hash_file(game_file)
+                    if current_hash == snap_hashes[rel_path]:
+                        # Already vanilla — just ensure backup exists, no restore needed
+                        if not vanilla_file.exists():
+                            self.progress_updated.emit(pct, f"Backing up {rel_path}...")
+                            _ensure_vanilla_backup(self._game_dir, self._vanilla_dir, rel_path)
+                            backed_up += 1
+                        continue
+
+                # File is modified — back up and restore
+                if not vanilla_file.exists():
+                    self.progress_updated.emit(pct, f"Backing up {rel_path}...")
+                    _ensure_vanilla_backup(self._game_dir, self._vanilla_dir, rel_path)
+                    backed_up += 1
+
+                if vanilla_file.exists():
+                    self.progress_updated.emit(pct, f"Restoring {rel_path}...")
+                    shutil.copy2(str(vanilla_file), str(game_file))
+                    restored += 1
+
+            if backed_up:
+                logger.info("Backed up %d vanilla files", backed_up)
+            if restored:
+                logger.info("Restored %d files to vanilla for clean import", restored)
+            else:
+                logger.info("All target files already vanilla, no restore needed")
+
+            # Step 2: Pre-hash
+            pre_hashes = {}
+            for i, rel_path in enumerate(self._targeted):
+                pct = 50 + int((i / total) * 50)
+                self.progress_updated.emit(pct, f"Hashing {rel_path}...")
+                game_file = self._game_dir / rel_path.replace("/", os.sep)
+                if game_file.exists():
+                    # If we already know it matches vanilla, reuse that hash
+                    if rel_path in snap_hashes and restored == 0:
+                        pre_hashes[rel_path] = snap_hashes[rel_path]
+                    else:
+                        h, _ = _hash_file(game_file)
+                        pre_hashes[rel_path] = h
+
+            self.progress_updated.emit(100, "Ready!")
+            self.finished.emit(pre_hashes)
+
+        except Exception as e:
+            logger.error("Script prep failed: %s", e, exc_info=True)
+            self.error_occurred.emit(str(e))
+
+
 class ScriptCaptureWorker(QObject):
     """Background worker that captures game file changes after a script ran."""
 

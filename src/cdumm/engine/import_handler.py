@@ -661,7 +661,9 @@ def import_script_live(
 def _detect_script_targets(script_path: Path, game_dir: Path) -> list[str]:
     """Read a script's source code to detect which game files it targets.
 
-    Looks for PAZ directory patterns (0000-0032) and file references.
+    Looks for PAZ directory patterns (0000-0099) and file references,
+    including os.path.join style references like ("0009") and bare
+    directory name strings.
     """
     import re
     targets: list[str] = []
@@ -671,6 +673,8 @@ def _detect_script_targets(script_path: Path, game_dir: Path) -> list[str]:
     except Exception:
         return targets
 
+    dirs_found: set[str] = set()
+
     # Look for PAZ directory references like "0008\0.paz" or "0008/0.paz"
     for match in re.finditer(r'(\d{4})[/\\]+(\d+\.(?:paz|pamt))', content, re.IGNORECASE):
         dir_name = match.group(1)
@@ -678,18 +682,32 @@ def _detect_script_targets(script_path: Path, game_dir: Path) -> list[str]:
         rel = f"{dir_name}/{file_name}"
         if (game_dir / dir_name / file_name).exists() and rel not in targets:
             targets.append(rel)
+            dirs_found.add(dir_name)
+
+    # Look for bare PAZ directory references like "0009" in quotes
+    # (catches os.path.join(game_dir, "0009") style)
+    for match in re.finditer(r'["\'](\d{4})["\']', content):
+        dir_name = match.group(1)
+        dir_path = game_dir / dir_name
+        if dir_path.exists() and dir_path.is_dir():
+            dirs_found.add(dir_name)
 
     # Look for meta/0.papgt references
     if re.search(r'meta[/\\]+0\.papgt', content, re.IGNORECASE):
         if (game_dir / "meta" / "0.papgt").exists():
             targets.append("meta/0.papgt")
 
-    # Also always include PAMT and PAPGT for any PAZ directory we found
-    dirs_found = {t.split("/")[0] for t in targets if "/" in t and t.split("/")[0].isdigit()}
-    for d in dirs_found:
-        pamt = f"{d}/0.pamt"
-        if (game_dir / d / "0.pamt").exists() and pamt not in targets:
-            targets.append(pamt)
+    # For every directory found, include all PAZ and PAMT files
+    for d in sorted(dirs_found):
+        dir_path = game_dir / d
+        if not dir_path.exists():
+            continue
+        for f in sorted(dir_path.iterdir()):
+            if f.is_file() and f.suffix.lower() in ('.paz', '.pamt'):
+                rel = f"{d}/{f.name}"
+                if rel not in targets:
+                    targets.append(rel)
+
     if dirs_found and "meta/0.papgt" not in targets:
         if (game_dir / "meta" / "0.papgt").exists():
             targets.append("meta/0.papgt")
@@ -700,17 +718,14 @@ def _detect_script_targets(script_path: Path, game_dir: Path) -> list[str]:
 def _ensure_vanilla_backup(game_dir: Path, vanilla_dir: Path, rel_path: str) -> None:
     """Back up a single game file if not already backed up.
 
-    Uses hard link (instant, zero extra space) with copy fallback.
+    Always a real copy — hard links are unsafe because script mods can
+    modify the game file directly, which would corrupt a hard-linked backup.
     """
-    import os
     src = game_dir / rel_path.replace("/", "\\")
     dst = vanilla_dir / rel_path.replace("/", "\\")
     if not dst.exists() and src.exists():
         dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(src, dst)
-        except OSError:
-            shutil.copy2(src, dst)
+        shutil.copy2(src, dst)
         logger.debug("Backed up vanilla: %s", rel_path)
 
 

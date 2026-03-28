@@ -107,6 +107,57 @@ class ModManager:
         self._db.connection.commit()
         logger.info("Cleared deltas for mod %d", mod_id)
 
+    def get_mod_game_status(self, mod_id: int, game_dir: Path) -> str:
+        """Check if a mod is actually active in the game files.
+
+        Returns:
+            'active'      — mod's files differ from vanilla (mod is working)
+            'not applied' — mod is enabled but game files are still vanilla
+            'no data'     — mod has 0 deltas (broken import, needs re-import)
+            'disabled'    — mod is not enabled
+        """
+        # Check if enabled
+        row = self._db.connection.execute(
+            "SELECT enabled FROM mods WHERE id = ?", (mod_id,)).fetchone()
+        if not row or not row[0]:
+            return "disabled"
+
+        # Check if mod has any deltas
+        delta_count = self._db.connection.execute(
+            "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = ?", (mod_id,)).fetchone()[0]
+        if delta_count == 0:
+            return "no data"
+
+        # Get the mod's target files (excluding meta/0.papgt which is always rebuilt)
+        files = self._db.connection.execute(
+            "SELECT DISTINCT file_path FROM mod_deltas WHERE mod_id = ? AND file_path != 'meta/0.papgt'",
+            (mod_id,)).fetchall()
+        if not files:
+            return "no data"
+
+        # Check if any target file differs from vanilla snapshot
+        import os
+        from cdumm.engine.snapshot_manager import hash_file
+        for (file_path,) in files:
+            snap = self._db.connection.execute(
+                "SELECT file_hash FROM snapshots WHERE file_path = ?", (file_path,)).fetchone()
+            game_file = game_dir / file_path.replace("/", os.sep)
+            if not game_file.exists():
+                # New file from mod — check if it's on disk
+                is_new = self._db.connection.execute(
+                    "SELECT is_new FROM mod_deltas WHERE mod_id = ? AND file_path = ? LIMIT 1",
+                    (mod_id, file_path)).fetchone()
+                if is_new and is_new[0]:
+                    continue  # new file not on disk = not applied
+                continue
+            if snap is None:
+                continue  # no snapshot for this file, can't tell
+            current_hash, _ = hash_file(game_file)
+            if current_hash != snap[0]:
+                return "active"
+
+        return "not applied"
+
     def cleanup_orphaned_deltas(self) -> None:
         """Remove delta folders on disk that have no matching mod in the DB."""
         if not self._deltas_dir.exists():

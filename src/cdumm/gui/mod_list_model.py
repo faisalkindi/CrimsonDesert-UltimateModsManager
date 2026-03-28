@@ -1,7 +1,9 @@
 """Qt Model for the mod list table view."""
 import logging
+from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QThread, Qt, Signal, QObject
+from PySide6.QtGui import QColor
 
 from cdumm.engine.conflict_detector import ConflictDetector
 from cdumm.engine.mod_manager import ModManager
@@ -19,6 +21,38 @@ COL_STATUS = 6
 COL_FILES = 7
 COL_DATE = 8
 
+STATUS_COLORS = {
+    "active": QColor(76, 175, 80),       # green
+    "not applied": QColor(255, 152, 0),   # orange
+    "no data": QColor(244, 67, 54),       # red
+    "disabled": QColor(158, 158, 158),    # gray
+    "checking...": QColor(158, 158, 158), # gray
+}
+
+
+class _StatusWorker(QObject):
+    """Background worker to compute mod game statuses without blocking UI."""
+    finished = Signal(object)  # {mod_id: status_str}
+
+    def __init__(self, mod_ids: list[int], db_path: Path, game_dir: Path,
+                 deltas_dir: Path) -> None:
+        super().__init__()
+        self._mod_ids = mod_ids
+        self._db_path = db_path
+        self._game_dir = game_dir
+        self._deltas_dir = deltas_dir
+
+    def run(self) -> None:
+        from cdumm.storage.database import Database
+        db = Database(self._db_path)
+        db.initialize()
+        mgr = ModManager(db, self._deltas_dir)
+        results = {}
+        for mid in self._mod_ids:
+            results[mid] = mgr.get_mod_game_status(mid, self._game_dir)
+        db.close()
+        self.finished.emit(results)
+
 
 class ModListModel(QAbstractTableModel):
     """Table model backed by SQLite mod registry."""
@@ -26,17 +60,62 @@ class ModListModel(QAbstractTableModel):
     mod_toggled = Signal()  # emitted when a mod is enabled/disabled via checkbox
 
     def __init__(self, mod_manager: ModManager, conflict_detector: ConflictDetector,
-                 parent=None) -> None:
+                 game_dir: Path | None = None, db_path: Path | None = None,
+                 deltas_dir: Path | None = None, parent=None) -> None:
         super().__init__(parent)
         self._mod_manager = mod_manager
         self._conflict_detector = conflict_detector
+        self._game_dir = game_dir
+        self._db_path = db_path
+        self._deltas_dir = deltas_dir
         self._mods: list[dict] = []
+        self._status_cache: dict[int, str] = {}
+        self._status_thread: QThread | None = None
         self.refresh()
 
     def refresh(self) -> None:
         self.beginResetModel()
         self._mods = self._mod_manager.list_mods()
+        # Set placeholder — real status computed after window is shown
+        self._status_cache = {mod["id"]: "checking..." for mod in self._mods}
         self.endResetModel()
+
+    def refresh_statuses(self) -> None:
+        """Trigger background status computation. Call after window is visible."""
+        self._refresh_statuses_async()
+
+    def _refresh_statuses_async(self) -> None:
+        """Compute mod game statuses on a background thread."""
+        if not self._game_dir or not self._db_path or not self._deltas_dir:
+            return
+        if not self._mods:
+            return
+
+        # Clean up previous thread
+        if self._status_thread and self._status_thread.isRunning():
+            self._status_thread.quit()
+            self._status_thread.wait(1000)
+
+        mod_ids = [m["id"] for m in self._mods]
+        worker = _StatusWorker(mod_ids, self._db_path, self._game_dir, self._deltas_dir)
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_statuses_ready)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._status_thread = thread
+        self._status_worker = worker  # prevent GC
+        thread.start()
+
+    def _on_statuses_ready(self, results: dict) -> None:
+        self._status_cache.update(results)
+        # Emit dataChanged for the status column
+        if self._mods:
+            top = self.index(0, COL_STATUS)
+            bottom = self.index(len(self._mods) - 1, COL_STATUS)
+            self.dataChanged.emit(top, bottom)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._mods)
@@ -68,12 +147,20 @@ class ModListModel(QAbstractTableModel):
             if col == COL_TYPE:
                 return mod["mod_type"].upper()
             if col == COL_STATUS:
-                return self._conflict_detector.get_mod_status(mod["id"])
+                status = self._status_cache.get(mod["id"], "")
+                conflict = self._conflict_detector.get_mod_status(mod["id"])
+                if conflict in ("conflict", "resolved"):
+                    return f"{status} ({conflict})"
+                return status
             if col == COL_FILES:
                 details = self._mod_manager.get_mod_details(mod["id"])
                 return str(len(details["changed_files"])) if details else "0"
             if col == COL_DATE:
                 return mod["import_date"][:10] if mod["import_date"] else ""
+
+        if role == Qt.ItemDataRole.ForegroundRole and col == COL_STATUS:
+            status = self._status_cache.get(mod["id"], "")
+            return STATUS_COLORS.get(status)
 
         if role == Qt.ItemDataRole.CheckStateRole and col == COL_ENABLED:
             return Qt.CheckState.Checked if mod["enabled"] else Qt.CheckState.Unchecked

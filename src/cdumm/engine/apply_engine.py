@@ -30,14 +30,14 @@ logger = logging.getLogger(__name__)
 RANGE_BACKUP_EXT = ".vranges"  # sparse range backup extension
 
 
-def _hardlink_or_copy(src: Path, dst: Path) -> None:
-    """Create a hard link from src to dst, falling back to copy on failure."""
-    import os
+def _backup_copy(src: Path, dst: Path) -> None:
+    """Copy a file for vanilla backup. Always a real copy, never a hard link.
+
+    Hard links are unsafe for backups — if a script mod writes directly to
+    the game file, it corrupts the backup too (same inode).
+    """
     import shutil
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+    shutil.copy2(src, dst)
 
 
 def _delta_changes_size(delta_path: Path, vanilla_size: int) -> bool:
@@ -346,7 +346,7 @@ class ApplyWorker(QObject):
                     game_path = self._game_dir / file_path.replace("/", "\\")
                     if game_path.exists():
                         full_path.parent.mkdir(parents=True, exist_ok=True)
-                        _hardlink_or_copy(game_path, full_path)
+                        _backup_copy(game_path, full_path)
                         logger.info("Full vanilla backup: %s", file_path)
             else:
                 # Byte-range backup — only the positions mods touch

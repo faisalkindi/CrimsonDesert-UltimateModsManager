@@ -108,12 +108,15 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_toolbar()
         self._build_status_bar()
-        self._refresh_all()
+        self._refresh_all(update_statuses=False)
 
         # Crash detection — lock file
         self._lock_file = self._app_data_dir / ".running"
         crashed_last_time = self._lock_file.exists()
         self._lock_file.write_text(str(datetime.now()), encoding="utf-8")
+
+        # Deferred startup tasks (after window is visible)
+        QTimer.singleShot(500, self._deferred_startup)
 
         # Auto-snapshot on first run (after window is shown)
         if self._snapshot and not self._snapshot.has_snapshot() and self._game_dir:
@@ -164,6 +167,56 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.error("Failed to update delta paths in DB: %s", e)
 
+    def _deferred_startup(self) -> None:
+        """Run after window is visible — background status check and backup validation."""
+        if hasattr(self, "_mod_list_model"):
+            self._mod_list_model.refresh_statuses()
+        if self._snapshot and self._snapshot.has_snapshot() and self._game_dir:
+            self._purge_corrupted_backups()
+
+    def _purge_corrupted_backups(self) -> None:
+        """One-time check: delete vanilla backups that don't match the snapshot hash.
+
+        Corrupted backups can occur from the old hard link approach where
+        modifying the game file also modified the backup (same inode).
+        Deleting them forces a fresh copy on next Apply.
+
+        Only runs once — sets a config flag after completion.
+        """
+        from cdumm.storage.config import Config
+        config = Config(self._db)
+        if config.get("backups_verified") == "1":
+            return  # already checked
+
+        import os
+        from cdumm.engine.snapshot_manager import hash_file
+        if not self._vanilla_dir.exists():
+            config.set("backups_verified", "1")
+            return
+        purged = 0
+        for dirpath, _, filenames in os.walk(self._vanilla_dir):
+            for fname in filenames:
+                if fname.endswith(".vranges"):
+                    continue
+                full = Path(dirpath) / fname
+                rel = str(full.relative_to(self._vanilla_dir)).replace("\\", "/")
+                snap = self._db.connection.execute(
+                    "SELECT file_hash FROM snapshots WHERE file_path = ?", (rel,)
+                ).fetchone()
+                if snap is None:
+                    continue
+                try:
+                    backup_hash, _ = hash_file(full)
+                    if backup_hash != snap[0]:
+                        full.unlink()
+                        purged += 1
+                        logger.warning("Purged corrupted backup: %s", rel)
+                except Exception as e:
+                    logger.warning("Could not verify backup %s: %s", rel, e)
+        if purged:
+            logger.info("Purged %d corrupted vanilla backup(s)", purged)
+        config.set("backups_verified", "1")
+
     def _auto_snapshot_first_run(self) -> None:
         reply = QMessageBox.question(
             self, "First Run — Create Snapshot",
@@ -195,7 +248,10 @@ class MainWindow(QMainWindow):
         mods_widget = QWidget()
         mods_layout = QVBoxLayout(mods_widget)
         if self._mod_manager and self._conflict_detector:
-            self._mod_list_model = ModListModel(self._mod_manager, self._conflict_detector)
+            self._mod_list_model = ModListModel(
+                self._mod_manager, self._conflict_detector,
+                game_dir=self._game_dir, db_path=self._db.db_path,
+                deltas_dir=self._deltas_dir)
             self._mod_list_model.mod_toggled.connect(self._on_mod_toggled_via_checkbox)
             self._mod_table = QTableView()
             self._mod_table.setModel(self._mod_list_model)
@@ -253,12 +309,6 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        import_btn = QPushButton("Import Mod...")
-        import_btn.clicked.connect(self._on_import_clicked)
-        toolbar.addWidget(import_btn)
-
-        toolbar.addSeparator()
-
         apply_btn = QPushButton("Apply")
         apply_btn.setStyleSheet("font-weight: bold; color: #4CAF50;")
         apply_btn.clicked.connect(self._on_apply)
@@ -306,9 +356,55 @@ class MainWindow(QMainWindow):
             count = self._snapshot.get_snapshot_count()
             self._snapshot_label.setText(f"Snapshot: Valid ({count} files)")
             self._snapshot_label.setStyleSheet("color: green;")
+            # Check for game updates in background (deferred)
+            QTimer.singleShot(3000, self._check_snapshot_outdated_async)
         else:
             self._snapshot_label.setText("Snapshot: Missing — click Refresh Snapshot")
             self._snapshot_label.setStyleSheet("color: red; font-weight: bold;")
+
+    def _check_snapshot_outdated_async(self) -> None:
+        """Check if game was updated, then update the label."""
+        if self._check_snapshot_outdated():
+            count = self._snapshot.get_snapshot_count() if self._snapshot else 0
+            self._snapshot_label.setText(
+                f"Snapshot: OUTDATED — game was updated, click Refresh Snapshot ({count} files)")
+            self._snapshot_label.setStyleSheet("color: #FF9800; font-weight: bold;")
+
+    def _check_snapshot_outdated(self) -> bool:
+        """Check if the game was updated since the snapshot was taken.
+
+        Compares a few files that no mod touches against the snapshot.
+        If any differ, the game was updated and the snapshot is stale.
+        """
+        if not self._snapshot or not self._game_dir or not self._db:
+            return False
+        import os
+        from cdumm.engine.snapshot_manager import hash_file
+
+        # Get files that no mod touches
+        modded = self._db.connection.execute(
+            "SELECT DISTINCT file_path FROM mod_deltas").fetchall()
+        modded_set = {row[0] for row in modded}
+
+        # Check up to 3 unmodded files
+        cursor = self._db.connection.execute("SELECT file_path, file_hash FROM snapshots")
+        checked = 0
+        for file_path, snap_hash in cursor.fetchall():
+            if file_path in modded_set:
+                continue
+            game_file = self._game_dir / file_path.replace("/", os.sep)
+            if not game_file.exists():
+                return True  # file was removed = game changed
+            try:
+                current_hash, _ = hash_file(game_file)
+                if current_hash != snap_hash:
+                    return True
+            except Exception:
+                continue
+            checked += 1
+            if checked >= 3:
+                break
+        return False
 
     def _sync_db(self) -> None:
         """Sync main DB after a worker writes via WAL checkpoint."""
@@ -319,11 +415,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("WAL checkpoint failed: %s", e)
 
-    def _refresh_all(self) -> None:
+    def _refresh_all(self, update_statuses: bool = True) -> None:
         logger.debug("_refresh_all: start")
         if hasattr(self, "_mod_list_model"):
             logger.debug("_refresh_all: refreshing mod list model")
             self._mod_list_model.refresh()
+            if update_statuses:
+                self._mod_list_model.refresh_statuses()
         if self._conflict_detector:
             logger.debug("_refresh_all: detecting conflicts")
             conflicts = self._conflict_detector.detect_all()
@@ -555,30 +653,29 @@ class MainWindow(QMainWindow):
             targeted = list(dict.fromkeys(targeted))  # dedupe preserving order
 
         logger.info("Script targets: %s", targeted)
-        for rel_path in targeted:
-            _ensure_vanilla_backup(self._game_dir, vanilla_dir, rel_path)
 
-        # Restore targeted files (or all modded files) to vanilla before .bat runs
-        self._restore_vanilla_for_import(targeted, vanilla_dir)
+        # Phase 1: Backup, restore, and pre-hash on a background thread
+        # to avoid freezing the UI for large directories
+        self._pending_script_path = script_path
+        self._pending_targeted = targeted
 
-        if targeted:
-            # Record pre-script hashes for targeted files (fast — few files)
-            self._script_pre_hashes = {}
-            for rel_path in targeted:
-                game_file = self._game_dir / rel_path.replace("/", "\\")
-                if game_file.exists():
-                    h, _ = _hash_file(game_file)
-                    self._script_pre_hashes[rel_path] = h
-        else:
-            # No targets detected — skip slow pre-hash, launch script now.
-            # After script finishes, use scan-based capture (compares vs
-            # vanilla snapshot) which reliably detects changes even when
-            # the script is idempotent (restores backup then re-patches).
-            logger.info("No targets detected, launching script directly")
+        from cdumm.gui.workers import ScriptPrepWorker
+        progress = ProgressDialog("Preparing for script mod...", self)
+        worker = ScriptPrepWorker(
+            targeted, self._game_dir, vanilla_dir)
+        thread = QThread()
+        self._run_worker(worker, thread, progress,
+                         on_finished=self._on_script_prep_finished)
+
+    def _on_script_prep_finished(self, pre_hashes) -> None:
+        """Backup/restore/pre-hash complete — now launch the script."""
+        if pre_hashes is None:
             self._script_pre_hashes = None
-
-        # Phase 2: Launch the script in a visible cmd window (non-blocking)
-        self._launch_script(script_path)
+            logger.info("No targets, launching script directly")
+        else:
+            self._script_pre_hashes = pre_hashes
+            logger.info("Prep done: %d files hashed", len(pre_hashes))
+        self._launch_script(self._pending_script_path)
 
     def _on_prehash_finished(self, pre_hashes) -> None:
         """Pre-hash complete — now launch the script."""
@@ -835,7 +932,8 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self._mod_manager.remove_mod(mod_id)
             self._refresh_all()
-            self.statusBar().showMessage(f"Uninstalled: {mod_name}", 5000)
+            self.statusBar().showMessage(f"Uninstalled: {mod_name}. Applying changes...", 10000)
+            self._on_apply()
 
     # --- View details ---
     def _on_view_details(self) -> None:
