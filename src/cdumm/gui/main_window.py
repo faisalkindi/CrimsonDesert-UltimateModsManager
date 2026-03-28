@@ -766,7 +766,7 @@ class MainWindow(QMainWindow):
 
         import os as _os
         env = _os.environ.copy()
-        env["CDMM_GAME_DIR"] = str(self._game_dir)
+        env["CDUMM_GAME_DIR"] = str(self._game_dir)
 
         logger.info("Launching script: %s", script_path)
         self._script_proc = subprocess.Popen(

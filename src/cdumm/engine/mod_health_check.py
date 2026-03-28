@@ -95,7 +95,7 @@ def check_mod_health(
             ),
         ))
 
-    # I1: PAPGT included (info only — CDMM rebuilds it)
+    # I1: PAPGT included (info only — CDUMM rebuilds it)
     if papgt_files:
         issues.append(HealthIssue(
             severity="info", code="I1",
@@ -106,7 +106,7 @@ def check_mod_health(
                 "PAPGT automatically after every apply, so this file will "
                 "be regenerated with correct hashes."
             ),
-            technical_detail="PAPGT is always rebuilt by CDMM — mod's copy is ignored.",
+            technical_detail="PAPGT is always rebuilt by CDUMM — mod's copy is ignored.",
         ))
 
     return issues
@@ -409,17 +409,17 @@ def _check_papgt_overwrites(
     rel_path: str, abs_path: Path, game_dir: Path,
 ) -> list[HealthIssue]:
     """C7: Check if mod's PAPGT would overwrite entries for other directories."""
-    # This is info-only since CDMM rebuilds PAPGT anyway
+    # This is info-only since CDUMM rebuilds PAPGT anyway
     return [HealthIssue(
         severity="info", code="C7",
         check_name="PAPGT will be rebuilt",
         file_path=rel_path,
         description=(
-            "This mod ships a custom PAPGT file. CDMM always rebuilds "
+            "This mod ships a custom PAPGT file. CDUMM always rebuilds "
             "PAPGT from scratch after applying mods, so this file's "
             "hash entries will be regenerated correctly."
         ),
-        technical_detail="CDMM rebuilds PAPGT with correct hashes for all directories.",
+        technical_detail="CDUMM rebuilds PAPGT with correct hashes for all directories.",
     )]
 
 
@@ -593,8 +593,8 @@ def auto_fix_matches(
                 # Can't fix — skip this PAMT to avoid crash
                 logger.warning("Skipping broken PAMT: %s", rel_path)
         elif rel_path.endswith(".papgt"):
-            # CDMM rebuilds PAPGT — safe to skip mod's copy
-            logger.info("Skipping mod PAPGT (CDMM rebuilds it): %s", rel_path)
+            # CDUMM rebuilds PAPGT — safe to skip mod's copy
+            logger.info("Skipping mod PAPGT (CDUMM rebuilds it): %s", rel_path)
         else:
             fixed_matches.append((rel_path, abs_path))
 
