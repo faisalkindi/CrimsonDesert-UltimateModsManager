@@ -213,39 +213,52 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
             shutil.copy2(paz_src, paz_dst)
             logger.info("Copied PAZ: %s -> %s", paz_src.name, paz_dst)
 
-        # Write patched payload at the correct offset
-        restore_ts = _save_timestamps(str(paz_dst))
-        with open(paz_dst, "r+b") as fh:
-            fh.seek(entry.offset)
-            fh.write(payload)
-        restore_ts()
+        new_offset = entry.offset
+        if actual_comp > entry.comp_size:
+            # Data doesn't fit in the original slot — append to end of PAZ
+            # and update offset in PAMT
+            restore_ts = _save_timestamps(str(paz_dst))
+            with open(paz_dst, "r+b") as fh:
+                fh.seek(0, 2)  # seek to end
+                new_offset = fh.tell()
+                fh.write(payload)
+            restore_ts()
+            logger.info("Appended %s to end of PAZ at offset %d (was %d, grew %d->%d)",
+                        game_file, new_offset, entry.offset, entry.comp_size, actual_comp)
+        else:
+            # Write patched payload at the original offset
+            restore_ts = _save_timestamps(str(paz_dst))
+            with open(paz_dst, "r+b") as fh:
+                fh.seek(entry.offset)
+                fh.write(payload)
+            restore_ts()
 
-        # Copy PAMT and update comp_size if it changed
+        # Copy PAMT and update comp_size/offset if they changed
         pamt_src = paz_src.parent / "0.pamt"
         pamt_dst = work_dir / dir_name / "0.pamt"
         if pamt_src.exists() and not pamt_dst.exists():
             pamt_dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pamt_src, pamt_dst)
 
-        if actual_comp != entry.comp_size and pamt_dst.exists():
-            _update_pamt_comp_size(pamt_dst, entry, actual_comp)
-            logger.info("Updated PAMT comp_size for %s: %d -> %d",
-                        game_file, entry.comp_size, actual_comp)
+        if (actual_comp != entry.comp_size or new_offset != entry.offset) and pamt_dst.exists():
+            _update_pamt_record(pamt_dst, entry, actual_comp, new_offset)
+            logger.info("Updated PAMT for %s: comp %d->%d, offset %d->%d",
+                        game_file, entry.comp_size, actual_comp,
+                        entry.offset, new_offset)
 
     return work_dir
 
 
-def _update_pamt_comp_size(pamt_path: Path, entry: PazEntry, new_comp_size: int) -> None:
-    """Update a file record's comp_size in a PAMT binary file.
+def _update_pamt_record(pamt_path: Path, entry: PazEntry,
+                        new_comp_size: int, new_offset: int) -> None:
+    """Update a file record's comp_size and/or offset in a PAMT binary file.
 
     PAMT file records are 20 bytes: node_ref(4) + offset(4) + comp_size(4) + orig_size(4) + flags(4).
-    We find the record matching entry's (offset, comp_size, orig_size, flags) and patch comp_size.
+    We find the record matching entry's (offset, comp_size, orig_size, flags) and patch fields.
     """
     data = bytearray(pamt_path.read_bytes())
 
-    # Search for the 20-byte record matching this entry
-    target = struct.pack('<IIIII', 0, entry.offset, entry.comp_size, entry.orig_size, entry.flags)
-    # We don't know node_ref, so search for the last 16 bytes (offset+comp+orig+flags)
+    # Search for the 16-byte pattern: offset + comp_size + orig_size + flags
     search = struct.pack('<IIII', entry.offset, entry.comp_size, entry.orig_size, entry.flags)
 
     pos = 0
@@ -257,12 +270,14 @@ def _update_pamt_comp_size(pamt_path: Path, entry: PazEntry, new_comp_size: int)
         # The record starts 4 bytes before (node_ref precedes offset)
         record_start = idx - 4
         if record_start >= 0:
-            # Verify this looks like a valid record position
-            comp_offset = record_start + 8  # offset of comp_size within record
-            struct.pack_into('<I', data, comp_offset, new_comp_size)
+            # Update offset (at idx, which is record_start + 4)
+            struct.pack_into('<I', data, idx, new_offset)
+            # Update comp_size (at idx + 4)
+            struct.pack_into('<I', data, idx + 4, new_comp_size)
             found = True
-            logger.debug("Patched PAMT comp_size at byte %d: %d -> %d",
-                         comp_offset, entry.comp_size, new_comp_size)
+            logger.debug("Patched PAMT record at byte %d: offset %d->%d, comp %d->%d",
+                         record_start, entry.offset, new_offset,
+                         entry.comp_size, new_comp_size)
             break
         pos = idx + 1
 
@@ -271,7 +286,7 @@ def _update_pamt_comp_size(pamt_path: Path, entry: PazEntry, new_comp_size: int)
                        entry.path, entry.offset, entry.comp_size)
         return
 
-    # Recompute PAMT hash (first 4 bytes = hashlittle(data[12:], 0xC5EDE))
+    # Recompute PAMT hash
     from cdumm.archive.hashlittle import compute_pamt_hash
     new_hash = compute_pamt_hash(bytes(data))
     struct.pack_into('<I', data, 0, new_hash)

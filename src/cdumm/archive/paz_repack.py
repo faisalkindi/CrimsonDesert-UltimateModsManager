@@ -255,13 +255,12 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                     if stripped is not None:
                         compressed = lz4.block.compress(stripped, store_size=False)
                         actual_comp_size = len(compressed)
-                if actual_comp_size > entry.comp_size:
-                    raise ValueError(
-                        f"Compressed size {actual_comp_size} exceeds budget "
-                        f"{entry.comp_size}. Cannot repack.")
-            # Pad with original PAZ tail bytes (read from disk) to fill the slot
-            if actual_comp_size < entry.comp_size:
-                # Read original trailing bytes from PAZ to preserve them
+            if actual_comp_size > entry.comp_size:
+                # Data doesn't fit in the original slot — return it unsized.
+                # Caller must append to end of PAZ and update PAMT offset.
+                payload = compressed
+            elif actual_comp_size < entry.comp_size:
+                # Pad with original PAZ tail bytes to fill the slot
                 pad_size = entry.comp_size - actual_comp_size
                 try:
                     with open(entry.paz_file, 'rb') as f:

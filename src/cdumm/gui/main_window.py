@@ -702,32 +702,6 @@ class MainWindow(QMainWindow):
         # Check if this is an ASI mod first (fast, no thread needed)
         from cdumm.asi.asi_manager import AsiManager
         if AsiManager.contains_asi(path):
-            # Check if it's an update to an existing ASI plugin
-            asi_mgr = AsiManager(self._game_dir / "bin64")
-            existing_plugins = asi_mgr.scan()
-            asi_files = list(path.rglob("*.asi")) if path.is_dir() else []
-            if not asi_files and path.suffix.lower() == ".asi":
-                asi_files = [path]
-            for af in asi_files:
-                for plugin in existing_plugins:
-                    if af.stem.lower() == plugin.name.lower():
-                        logger.info("ASI update detected: %s", plugin.name)
-                        # Pass the folder so .ini files are included
-                        source = af.parent if af.parent != path else path
-                        updated = asi_mgr.update(plugin, source)
-                        files_str = ", ".join(updated) if updated else af.name
-                        self.statusBar().showMessage(
-                            f"Updated ASI: {plugin.name} ({files_str})", 10000)
-                        QMessageBox.information(
-                            self, "ASI Updated",
-                            f"Updated {plugin.name}:\n\n"
-                            + "\n".join(f"  {f}" for f in (updated or [af.name])))
-                        if hasattr(self, "_asi_panel"):
-                            self._asi_panel.refresh()
-                            self._on_nav("ASI Mods")
-                        return
-
-        if AsiManager.contains_asi(path):
             self._install_asi_mod(path)
             return
 
@@ -1079,6 +1053,8 @@ class MainWindow(QMainWindow):
 
     def _install_asi_mod(self, path: Path) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
+        import tempfile
+        import zipfile
         from cdumm.asi.asi_manager import AsiManager
         asi_mgr = AsiManager(self._game_dir / "bin64")
 
@@ -1087,6 +1063,16 @@ class MainWindow(QMainWindow):
                 "Warning: ASI Loader (winmm.dll) not found in bin64/. ASI mods won't load without it.", 10000
             )
             logger.warning("ASI Loader not found, installing ASI mod anyway")
+
+        # Extract zip first if needed
+        if path.is_file() and path.suffix.lower() == ".zip":
+            tmp = tempfile.mkdtemp(prefix="cdumm_asi_")
+            try:
+                with zipfile.ZipFile(path) as zf:
+                    zf.extractall(tmp)
+                path = Path(tmp)
+            except Exception as e:
+                logger.error("Failed to extract ASI zip: %s", e)
 
         installed = asi_mgr.install(path)
         if installed:
