@@ -288,6 +288,13 @@ class ApplyWorker(QObject):
                     if game_path.exists():
                         game_path.unlink()
                         logger.info("Deleted new file from disabled mod: %s", file_path)
+                    # Remove empty parent directory if it was mod-created
+                    parent = game_path.parent
+                    if parent != self._game_dir and parent.exists():
+                        remaining = list(parent.iterdir())
+                        if not remaining:
+                            parent.rmdir()
+                            logger.info("Removed empty mod directory: %s", parent.name)
                     continue
 
                 vanilla_bytes = self._get_vanilla_bytes(file_path)
@@ -301,12 +308,27 @@ class ApplyWorker(QObject):
 
             # Rebuild PAPGT
             self.progress_updated.emit(85, "Rebuilding PAPGT integrity chain...")
-            papgt_mgr = PapgtManager(self._game_dir)
-            try:
-                papgt_bytes = papgt_mgr.rebuild(modified_pamts)
-                txn.stage_file("meta/0.papgt", papgt_bytes)
-            except FileNotFoundError:
-                logger.warning("PAPGT not found, skipping rebuild")
+            if not file_deltas:
+                # No enabled mods — restore vanilla PAPGT directly
+                vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
+                if vanilla_papgt.exists():
+                    txn.stage_file("meta/0.papgt", vanilla_papgt.read_bytes())
+                    logger.info("Restored vanilla PAPGT (no mods enabled)")
+                else:
+                    logger.warning("No vanilla PAPGT backup, rebuilding instead")
+                    papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
+                    try:
+                        papgt_bytes = papgt_mgr.rebuild(modified_pamts)
+                        txn.stage_file("meta/0.papgt", papgt_bytes)
+                    except FileNotFoundError:
+                        pass
+            else:
+                papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
+                try:
+                    papgt_bytes = papgt_mgr.rebuild(modified_pamts)
+                    txn.stage_file("meta/0.papgt", papgt_bytes)
+                except FileNotFoundError:
+                    logger.warning("PAPGT not found, skipping rebuild")
 
             self.progress_updated.emit(95, "Committing changes...")
             txn.commit()
@@ -593,7 +615,7 @@ class RevertWorker(QObject):
                     if vanilla_path.exists():
                         modified_pamts[file_path.split("/")[0]] = vanilla_path.read_bytes()
 
-            papgt_mgr = PapgtManager(self._game_dir)
+            papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
                 papgt_bytes = papgt_mgr.rebuild(modified_pamts)
                 txn.stage_file("meta/0.papgt", papgt_bytes)

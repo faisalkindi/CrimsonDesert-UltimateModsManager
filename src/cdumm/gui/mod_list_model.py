@@ -92,14 +92,16 @@ class ModListModel(QAbstractTableModel):
             return
 
         # Clean up previous thread
-        if self._status_thread is not None:
+        old_thread = self._status_thread
+        if old_thread is not None:
             try:
-                if self._status_thread.isRunning():
-                    self._status_thread.quit()
-                    self._status_thread.wait(1000)
+                if old_thread.isRunning():
+                    old_thread.quit()
+                    old_thread.wait(2000)
             except RuntimeError:
-                pass  # C++ object already deleted
-            self._status_thread = None
+                pass
+        self._status_thread = None
+        self._status_worker = None
 
         mod_ids = [m["id"] for m in self._mods]
         worker = _StatusWorker(mod_ids, self._db_path, self._game_dir, self._deltas_dir)
@@ -108,15 +110,9 @@ class ModListModel(QAbstractTableModel):
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_statuses_ready)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda: self._on_status_thread_done())
         self._status_thread = thread
-        self._status_worker = worker  # prevent GC
+        self._status_worker = worker
         thread.start()
-
-    def _on_status_thread_done(self) -> None:
-        self._status_thread = None
-        self._status_worker = None
 
     def _on_statuses_ready(self, results: dict) -> None:
         self._status_cache.update(results)

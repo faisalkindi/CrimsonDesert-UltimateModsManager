@@ -286,7 +286,19 @@ class MainWindow(QMainWindow):
                 deltas_dir=self._deltas_dir)
             self._mod_list_model.mod_toggled.connect(self._on_mod_toggled_via_checkbox)
             from PySide6.QtCore import QSortFilterProxyModel
-            self._sort_proxy = QSortFilterProxyModel()
+            from cdumm.gui.mod_list_model import COL_ORDER, COL_FILES
+
+            class _NumericSortProxy(QSortFilterProxyModel):
+                def lessThan(self, left, right):
+                    col = left.column()
+                    if col in (COL_ORDER, COL_FILES):
+                        try:
+                            return int(left.data() or 0) < int(right.data() or 0)
+                        except (ValueError, TypeError):
+                            pass
+                    return super().lessThan(left, right)
+
+            self._sort_proxy = _NumericSortProxy()
             self._sort_proxy.setSourceModel(self._mod_list_model)
             self._mod_table = QTableView()
             self._mod_table.setModel(self._sort_proxy)

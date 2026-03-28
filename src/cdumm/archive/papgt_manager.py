@@ -31,12 +31,17 @@ ENTRY_SIZE = 12  # bytes per directory entry
 class PapgtManager:
     """Manages PAPGT rebuild from scratch."""
 
-    def __init__(self, game_dir: Path) -> None:
+    def __init__(self, game_dir: Path, vanilla_dir: Path | None = None) -> None:
         self._game_dir = game_dir
         self._papgt_path = game_dir / "meta" / "0.papgt"
+        self._vanilla_papgt = vanilla_dir / "meta" / "0.papgt" if vanilla_dir else None
 
     def rebuild(self, modified_pamts: dict[str, bytes] | None = None) -> bytes:
         """Rebuild PAPGT with correct hashes for all directories.
+
+        Always starts from the vanilla PAPGT to avoid stale entries from
+        previously enabled mods. New directory entries are added only for
+        directories in modified_pamts that aren't in vanilla.
 
         Args:
             modified_pamts: dict of {dir_name: pamt_bytes} for directories
@@ -46,10 +51,12 @@ class PapgtManager:
         Returns:
             The rebuilt PAPGT bytes.
         """
-        if not self._papgt_path.exists():
-            raise FileNotFoundError(f"PAPGT not found: {self._papgt_path}")
+        # Use vanilla PAPGT as the base (avoids stale mod directory entries)
+        base_path = self._vanilla_papgt if self._vanilla_papgt and self._vanilla_papgt.exists() else self._papgt_path
+        if not base_path.exists():
+            raise FileNotFoundError(f"PAPGT not found: {base_path}")
 
-        papgt = bytearray(self._papgt_path.read_bytes())
+        papgt = bytearray(base_path.read_bytes())
 
         if len(papgt) < 12:
             raise ValueError("PAPGT file too small")

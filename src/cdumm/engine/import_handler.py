@@ -106,11 +106,15 @@ def _match_game_files(
     Returns list of (relative_posix_path, absolute_extracted_path, is_new).
     is_new=True means the file doesn't exist in vanilla (mod adds it).
 
-    Also handles mods that ship PAZ/PAMT files in a non-numbered directory
-    (e.g., "enlarge_fontsize/0.paz" instead of "0012/0.paz"). These are
-    assigned the next available PAZ directory number automatically.
+    Detects standalone PAZ mods that ship their own directory (e.g., 0036/)
+    with completely different content from vanilla. These get assigned a new
+    directory number instead of being treated as modifications to vanilla.
     """
     matches: list[tuple[str, Path, bool]] = []
+
+    # First: detect if this is a standalone directory mod
+    # (ships 0.paz + 0.pamt in a numbered dir but content is unrelated to vanilla)
+    standalone_remap = _detect_standalone_mod(extracted_dir, game_dir, snapshot)
 
     for f in extracted_dir.rglob("*"):
         if not f.is_file():
@@ -119,25 +123,34 @@ def _match_game_files(
         parts = f.relative_to(extracted_dir).parts
         matched = False
 
-        # First try exact match against snapshot (existing vanilla files)
+        # Build candidate paths
         for i in range(len(parts)):
             candidate = "/".join(parts[i:])
+
+            # Skip meta/0.papgt from standalone mods (CDUMM rebuilds it)
+            if candidate == "meta/0.papgt" and standalone_remap:
+                matched = True
+                break
+
+            # Remap standalone mod directories to their assigned number
+            if standalone_remap:
+                for old_dir, new_dir in standalone_remap.items():
+                    if candidate.startswith(old_dir + "/"):
+                        candidate = new_dir + candidate[len(old_dir):]
+                        matches.append((candidate, f, True))
+                        matched = True
+                        break
+                if matched:
+                    break
+
+            # Try exact match against snapshot (existing vanilla files)
             if snapshot.get_file_hash(candidate) is not None:
                 matches.append((candidate, f, False))
                 matched = True
                 break
 
-        if matched:
-            continue
-
-        # No snapshot match — check if it looks like a game file by pattern
-        # This catches PAZ files not in the snapshot (e.g., from a game update
-        # after the snapshot was taken, or truly new mod-added files)
-        for i in range(len(parts)):
-            candidate = "/".join(parts[i:])
+            # Check if it looks like a game file by pattern
             if _GAME_FILE_RE.match(candidate):
-                # Check if the file exists in the game directory — if so, it's
-                # a vanilla file missing from the snapshot, not a new file
                 game_file = game_dir / candidate.replace("/", "\\")
                 is_new = not game_file.exists()
                 matches.append((candidate, f, is_new))
@@ -148,22 +161,82 @@ def _match_game_files(
             continue
 
     # If no matches found, check for unnumbered PAZ/PAMT mods
-    # (e.g., mod ships "modname/0.paz" + "modname/0.pamt" without a numbered dir)
     if not matches:
         paz_files = list(extracted_dir.rglob("*.paz"))
         pamt_files = list(extracted_dir.rglob("*.pamt"))
         if paz_files and pamt_files:
-            # Assign next available directory number
             next_dir = _next_paz_directory(game_dir)
             logger.info("Unnumbered PAZ mod detected, assigning directory %s", next_dir)
             for f in paz_files + pamt_files:
                 rel_path = f"{next_dir}/{f.name}"
                 matches.append((rel_path, f, True))
-            # Also include meta/0.papgt if present
-            for papgt in extracted_dir.rglob("0.papgt"):
-                matches.append(("meta/0.papgt", papgt, False))
 
     return matches
+
+
+def _detect_standalone_mod(
+    extracted_dir: Path, game_dir: Path, snapshot: SnapshotManager
+) -> dict[str, str] | None:
+    """Detect if a mod ships standalone PAZ/PAMT in a numbered directory.
+
+    A standalone mod has its own 0.paz + 0.pamt that are completely different
+    from vanilla (different PAMT or PAZ size). These should get their own
+    directory number instead of being treated as modifications.
+
+    Returns {old_dir_prefix: new_dir} remap dict, or None if not standalone.
+    The old_dir_prefix is relative to extracted_dir (e.g., "FatStacks10x/0036").
+    """
+    remap: dict[str, str] = {}
+
+    # Search recursively for numbered directories containing 0.paz + 0.pamt
+    for d in extracted_dir.rglob("*"):
+        if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+            continue
+        dir_name = d.name
+        mod_pamt = d / "0.pamt"
+        mod_paz = d / "0.paz"
+        if not mod_pamt.exists() or not mod_paz.exists():
+            continue
+
+        # Compare mod's files against vanilla
+        vanilla_pamt = game_dir / dir_name / "0.pamt"
+        vanilla_paz = game_dir / dir_name / "0.paz"
+        if not vanilla_pamt.exists():
+            continue  # no vanilla dir = truly new, handled elsewhere
+
+        mod_pamt_size = mod_pamt.stat().st_size
+        vanilla_pamt_size = vanilla_pamt.stat().st_size
+        is_standalone = False
+
+        # Different PAMT size = different file entries = standalone mod
+        if mod_pamt_size != vanilla_pamt_size:
+            is_standalone = True
+            logger.info("Standalone: %s PAMT differs (mod=%d, vanilla=%d)",
+                        dir_name, mod_pamt_size, vanilla_pamt_size)
+
+        # Same PAMT but wildly different PAZ size = standalone mod
+        if not is_standalone and vanilla_paz.exists():
+            mod_paz_size = mod_paz.stat().st_size
+            vanilla_paz_size = vanilla_paz.stat().st_size
+            if vanilla_paz_size > 0:
+                ratio = mod_paz_size / vanilla_paz_size
+                if ratio < 0.5 or ratio > 2.0:
+                    is_standalone = True
+                    logger.info("Standalone: %s PAZ ratio=%.1f (mod=%d, vanilla=%d)",
+                                dir_name, ratio, mod_paz_size, vanilla_paz_size)
+
+        if is_standalone:
+            # Build the relative path prefix for remapping
+            rel_parts = d.relative_to(extracted_dir).parts
+            old_prefix = "/".join(rel_parts)
+            new_dir = _next_paz_directory(game_dir)
+            remap[old_prefix] = new_dir
+            logger.info("Remapping %s -> %s", old_prefix, new_dir)
+
+    return remap if remap else None
+
+
+_assigned_dirs: set[int] = set()  # track dirs assigned in current session
 
 
 def _next_paz_directory(game_dir: Path) -> str:
@@ -172,9 +245,11 @@ def _next_paz_directory(game_dir: Path) -> str:
     for d in game_dir.iterdir():
         if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
             existing.add(int(d.name))
+    existing |= _assigned_dirs
     # Start from 36 (base game uses 0000-0035)
     for n in range(36, 200):
         if n not in existing:
+            _assigned_dirs.add(n)
             return f"{n:04d}"
     return "0100"  # fallback
 
