@@ -128,9 +128,9 @@ class MainWindow(QMainWindow):
         import shutil
         # Check both old (cdmm) and current (cdumm) AppData paths
         old_appdata = Path.home() / "AppData" / "Local" / "cdmm"
-        search_dirs = [old_appdata, self._app_data_dir]
+        migrated_deltas_from: list[str] = []
 
-        for appdata in search_dirs:
+        for appdata in [old_appdata, self._app_data_dir]:
             for sub in ("vanilla", "deltas"):
                 old_dir = appdata / sub
                 new_dir = self._vanilla_dir if sub == "vanilla" else self._deltas_dir
@@ -138,13 +138,31 @@ class MainWindow(QMainWindow):
                     try:
                         shutil.move(str(old_dir), str(new_dir))
                         logger.info("Migrated %s -> %s", old_dir, new_dir)
+                        if sub == "deltas":
+                            migrated_deltas_from.append(str(old_dir))
                     except Exception as e:
                         logger.warning("Migration failed for %s: %s (will copy instead)", old_dir, e)
                         try:
                             shutil.copytree(str(old_dir), str(new_dir))
                             shutil.rmtree(old_dir, ignore_errors=True)
+                            if sub == "deltas":
+                                migrated_deltas_from.append(str(old_dir))
                         except Exception as e2:
                             logger.error("Copy fallback also failed: %s", e2)
+
+        # Update delta_path references in the database to point to the new location
+        if migrated_deltas_from:
+            for old_path in migrated_deltas_from:
+                new_path = str(self._deltas_dir)
+                try:
+                    count = self._db.connection.execute(
+                        "UPDATE mod_deltas SET delta_path = REPLACE(delta_path, ?, ?)",
+                        (old_path, new_path),
+                    ).rowcount
+                    self._db.connection.commit()
+                    logger.info("Updated %d delta paths: %s -> %s", count, old_path, new_path)
+                except Exception as e:
+                    logger.error("Failed to update delta paths in DB: %s", e)
 
     def _auto_snapshot_first_run(self) -> None:
         reply = QMessageBox.question(
