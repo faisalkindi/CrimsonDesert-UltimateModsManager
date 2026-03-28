@@ -86,31 +86,42 @@ def apply_update(new_exe: Path) -> None:
     bat = tempfile.NamedTemporaryFile(suffix=".bat", delete=False, mode="w",
                                       dir=tempfile.gettempdir())
     current_dir = current_exe.parent
-    bat.write(f"""@echo off
-echo Updating CDUMM...
-echo Waiting for app to close...
-timeout /t 3 /nobreak >nul
-:wait
-tasklist /fi "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait
-)
-echo Copying new version...
-copy /y "{new_exe}" "{current_exe}"
-if errorlevel 1 (
-    echo Copy failed, retrying...
-    timeout /t 2 /nobreak >nul
-    copy /y "{new_exe}" "{current_exe}"
-)
-del "{new_exe}" 2>nul
-echo Launching updated app...
-timeout /t 2 /nobreak >nul
-cd /d "{current_dir}"
-start "" "{current_exe}"
-timeout /t 3 /nobreak >nul
-del "%~f0"
+    # Use PowerShell for reliable copy + relaunch
+    ps1 = tempfile.NamedTemporaryFile(suffix=".ps1", delete=False, mode="w",
+                                       dir=tempfile.gettempdir())
+    ps1.write(f"""
+# Wait for the old process to fully exit
+$pid = {os.getpid()}
+Write-Host "Waiting for CDUMM (PID $pid) to exit..."
+while (Get-Process -Id $pid -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Seconds 1
+}}
+Start-Sleep -Seconds 2
+
+# Clean up old PyInstaller temp folders
+Get-ChildItem "$env:TEMP\\_MEI*" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# Copy new exe over old
+Write-Host "Installing update..."
+Copy-Item -Path "{new_exe}" -Destination "{current_exe}" -Force
+Remove-Item -Path "{new_exe}" -Force -ErrorAction SilentlyContinue
+
+# Launch the updated app
+Start-Sleep -Seconds 1
+Write-Host "Launching updated CDUMM..."
+Start-Process -FilePath "{current_exe}" -WorkingDirectory "{current_dir}"
+
+# Self-delete
+Start-Sleep -Seconds 2
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """)
+    ps1.close()
+    logger.info("Launching updater: %s", ps1.name)
+    import subprocess
+    subprocess.Popen(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", ps1.name],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
     bat.close()
     logger.info("Launching updater: %s", bat.name)
     os.startfile(bat.name)
