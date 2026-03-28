@@ -161,15 +161,34 @@ def _match_game_files(
             continue
 
     # If no matches found, check for unnumbered PAZ/PAMT mods
+    # (e.g., mod ships "modname/0.paz" + "modname/0.pamt" without a numbered dir)
     if not matches:
         paz_files = list(extracted_dir.rglob("*.paz"))
         pamt_files = list(extracted_dir.rglob("*.pamt"))
+        papgt_files = list(extracted_dir.rglob("0.papgt"))
+
         if paz_files and pamt_files:
+            # Group by parent directory — each paz+pamt pair gets its own dir
+            dirs_with_mods: dict[Path, tuple[list, list]] = {}
+            for pf in paz_files:
+                dirs_with_mods.setdefault(pf.parent, ([], []))[0].append(pf)
+            for pf in pamt_files:
+                dirs_with_mods.setdefault(pf.parent, ([], []))[1].append(pf)
+
+            for mod_dir, (pazs, pamts) in dirs_with_mods.items():
+                if pazs and pamts:
+                    next_dir = _next_paz_directory(game_dir)
+                    logger.info("Unnumbered PAZ mod in %s -> assigning %s",
+                                mod_dir.name, next_dir)
+                    for f in pazs + pamts:
+                        matches.append((f"{next_dir}/{f.name}", f, True))
+
+        elif paz_files and not pamt_files:
+            # Some mods only ship PAZ without PAMT — still try to import
             next_dir = _next_paz_directory(game_dir)
-            logger.info("Unnumbered PAZ mod detected, assigning directory %s", next_dir)
-            for f in paz_files + pamt_files:
-                rel_path = f"{next_dir}/{f.name}"
-                matches.append((rel_path, f, True))
+            logger.info("PAZ-only mod detected (no PAMT), assigning directory %s", next_dir)
+            for f in paz_files:
+                matches.append((f"{next_dir}/{f.name}", f, True))
 
     return matches
 
