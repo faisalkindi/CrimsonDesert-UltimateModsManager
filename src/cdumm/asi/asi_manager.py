@@ -111,7 +111,7 @@ class AsiManager:
                         shutil.copy2(f, self._bin64 / f.name)
                         installed.append(f.name)
         elif source.is_dir():
-            for f in source.iterdir():
+            for f in source.rglob("*"):
                 if not f.is_file():
                     continue
                 if f.suffix.lower() in (ASI_SUFFIX, ".ini"):
@@ -148,8 +148,8 @@ class AsiManager:
     def update(self, plugin: AsiPlugin, source: Path) -> list[str]:
         """Update an ASI plugin by replacing its files with newer versions.
 
-        Copies .asi and .ini from source, overwriting existing files.
-        Returns list of updated file names.
+        Accepts a single .asi file, or a folder (searches recursively).
+        Copies .asi and all companion .ini files. Returns list of updated file names.
         """
         updated: list[str] = []
         self._bin64.mkdir(parents=True, exist_ok=True)
@@ -160,19 +160,21 @@ class AsiManager:
                 dest = self._bin64 / (plugin.name + DISABLED_SUFFIX)
             shutil.copy2(source, dest)
             updated.append(dest.name)
-            ini = source.with_suffix(".ini")
-            if ini.exists():
-                shutil.copy2(ini, self._bin64 / (plugin.name + ".ini"))
-                updated.append(plugin.name + ".ini")
+            # Copy all .ini files from the same directory
+            for ini in source.parent.glob("*.ini"):
+                shutil.copy2(ini, self._bin64 / ini.name)
+                updated.append(ini.name)
         elif source.is_dir():
-            for f in source.iterdir():
-                if f.is_file() and f.suffix.lower() == ASI_SUFFIX:
+            for f in source.rglob("*"):
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() == ASI_SUFFIX:
                     dest = self._bin64 / (plugin.name + ASI_SUFFIX)
                     if not plugin.enabled:
                         dest = self._bin64 / (plugin.name + DISABLED_SUFFIX)
                     shutil.copy2(f, dest)
                     updated.append(dest.name)
-                elif f.is_file() and f.suffix.lower() == ".ini":
+                elif f.suffix.lower() == ".ini":
                     shutil.copy2(f, self._bin64 / f.name)
                     updated.append(f.name)
 
@@ -182,11 +184,11 @@ class AsiManager:
 
     @staticmethod
     def contains_asi(path: Path) -> bool:
-        """Check if a path contains ASI plugin files."""
+        """Check if a path contains ASI plugin files (searches subdirectories)."""
         if path.is_file():
             return path.suffix.lower() == ASI_SUFFIX
         if path.is_dir():
-            return any(f.suffix.lower() == ASI_SUFFIX for f in path.iterdir() if f.is_file())
+            return any(path.rglob(f"*{ASI_SUFFIX}"))
         return False
 
     def open_config(self, plugin: AsiPlugin) -> bool:

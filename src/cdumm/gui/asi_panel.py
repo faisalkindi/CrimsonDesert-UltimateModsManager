@@ -3,11 +3,12 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -27,12 +28,16 @@ class AsiPanel(QWidget):
     def __init__(self, bin64_dir: Path, parent=None) -> None:
         super().__init__(parent)
         self._asi_mgr = AsiManager(bin64_dir)
+        self._plugins = []
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 8, 0, 0)
 
-        # Header with loader status
+        # Header
         header = QHBoxLayout()
-        header.addWidget(QLabel("ASI Plugins"))
+        title = QLabel("ASI Plugins")
+        title.setStyleSheet("font-size: 14px; font-weight: 600; padding-left: 8px;")
+        header.addWidget(title)
         self._loader_label = QLabel()
         header.addWidget(self._loader_label)
         header.addStretch()
@@ -41,86 +46,117 @@ class AsiPanel(QWidget):
         header.addWidget(refresh_btn)
         layout.addLayout(header)
 
-        # Plugin table
+        # Table — 3 columns, no inline buttons
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["Plugin", "Status", "Actions", "Conflicts"])
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["Plugin", "Status", "Conflicts"])
+        from PySide6.QtWidgets import QHeaderView
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setSortingEnabled(True)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self._table)
+
+        # Hint
+        hint = QLabel("Right-click a plugin for actions")
+        hint.setStyleSheet("color: #4E5564; font-size: 11px; padding: 4px 8px;")
+        layout.addWidget(hint)
 
         self.refresh()
 
     def refresh(self) -> None:
-        """Rescan bin64 and rebuild table."""
-        # Loader status
         if self._asi_mgr.has_loader():
             self._loader_label.setText("ASI Loader: Installed")
-            self._loader_label.setStyleSheet("color: green;")
+            self._loader_label.setStyleSheet("color: #48A858; font-weight: 600;")
         else:
             self._loader_label.setText("ASI Loader: Missing (winmm.dll)")
-            self._loader_label.setStyleSheet("color: red;")
+            self._loader_label.setStyleSheet("color: #D04848; font-weight: 600;")
 
-        plugins = self._asi_mgr.scan()
-        conflicts = self._asi_mgr.detect_conflicts(plugins)
+        self._plugins = self._asi_mgr.scan()
+        conflicts = self._asi_mgr.detect_conflicts(self._plugins)
 
-        self._table.setRowCount(len(plugins))
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(self._plugins))
 
-        for row, plugin in enumerate(plugins):
+        for row, plugin in enumerate(self._plugins):
             # Name
-            self._table.setItem(row, 0, QTableWidgetItem(plugin.name))
+            name_item = QTableWidgetItem(plugin.name)
+            name_item.setData(Qt.ItemDataRole.UserRole, row)  # store index
+            self._table.setItem(row, 0, name_item)
 
-            # Status
+            # Status with color
             status = "Enabled" if plugin.enabled else "Disabled"
             status_item = QTableWidgetItem(status)
-            status_item.setForeground(
-                Qt.GlobalColor.darkGreen if plugin.enabled else Qt.GlobalColor.gray
-            )
+            if plugin.enabled:
+                status_item.setForeground(QColor("#48A858"))
+            else:
+                status_item.setForeground(QColor("#788090"))
             self._table.setItem(row, 1, status_item)
-
-            # Actions
-            actions = QWidget()
-            actions_layout = QHBoxLayout(actions)
-            actions_layout.setContentsMargins(2, 2, 2, 2)
-
-            toggle_btn = QPushButton("Disable" if plugin.enabled else "Enable")
-            toggle_btn.setFixedWidth(70)
-            p = plugin  # capture for lambda
-            toggle_btn.clicked.connect(lambda checked, pl=p: self._toggle_plugin(pl))
-            actions_layout.addWidget(toggle_btn)
-
-            if plugin.ini_path:
-                config_btn = QPushButton("Config")
-                config_btn.setFixedWidth(60)
-                config_btn.clicked.connect(lambda checked, pl=p: self._asi_mgr.open_config(pl))
-                actions_layout.addWidget(config_btn)
-
-            update_btn = QPushButton("Update")
-            update_btn.setFixedWidth(60)
-            update_btn.clicked.connect(lambda checked, pl=p: self._update_plugin(pl))
-            actions_layout.addWidget(update_btn)
-
-            uninstall_btn = QPushButton("Uninstall")
-            uninstall_btn.setFixedWidth(70)
-            uninstall_btn.setStyleSheet("color: #FF8888;")
-            uninstall_btn.clicked.connect(lambda checked, pl=p: self._uninstall_plugin(pl))
-            actions_layout.addWidget(uninstall_btn)
-
-            self._table.setCellWidget(row, 2, actions)
 
             # Conflicts
             plugin_conflicts = [c for c in conflicts
                                 if c.plugin_a == plugin.name or c.plugin_b == plugin.name]
             if plugin_conflicts:
-                conflict_text = "; ".join(c.reason for c in plugin_conflicts)
-                conflict_item = QTableWidgetItem(conflict_text)
-                conflict_item.setForeground(Qt.GlobalColor.red)
-                self._table.setItem(row, 3, conflict_item)
+                text = "; ".join(c.reason for c in plugin_conflicts)
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor("#D04848"))
             else:
-                self._table.setItem(row, 3, QTableWidgetItem("None"))
+                item = QTableWidgetItem("None")
+                item.setForeground(QColor("#4E5564"))
+            self._table.setItem(row, 2, item)
 
+        self._table.setSortingEnabled(True)
         self._table.resizeColumnsToContents()
+
+    def _get_plugin_at_row(self, row: int):
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if idx is not None and idx < len(self._plugins):
+            return self._plugins[idx]
+        return None
+
+    def _show_context_menu(self, pos) -> None:
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        plugin = self._get_plugin_at_row(index.row())
+        if not plugin:
+            return
+
+        menu = QMenu(self)
+
+        # Enable/Disable
+        if plugin.enabled:
+            toggle = QAction("Disable", self)
+        else:
+            toggle = QAction("Enable", self)
+        toggle.triggered.connect(lambda: self._toggle_plugin(plugin))
+        menu.addAction(toggle)
+
+        # Config (if .ini exists)
+        if plugin.ini_path:
+            config = QAction("Edit Config", self)
+            config.triggered.connect(lambda: self._asi_mgr.open_config(plugin))
+            menu.addAction(config)
+
+        menu.addSeparator()
+
+        # Update
+        update = QAction("Update", self)
+        update.triggered.connect(lambda: self._update_plugin(plugin))
+        menu.addAction(update)
+
+        # Uninstall
+        uninstall = QAction("Uninstall", self)
+        uninstall.triggered.connect(lambda: self._uninstall_plugin(plugin))
+        menu.addAction(uninstall)
+
+        menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _toggle_plugin(self, plugin) -> None:
         if plugin.enabled:
@@ -130,13 +166,22 @@ class AsiPanel(QWidget):
         self.refresh()
 
     def _update_plugin(self, plugin) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Update {plugin.name}",
-            "", "ASI Plugins (*.asi);;All Files (*)")
-        if not path:
+        path_str = QFileDialog.getExistingDirectory(
+            self, f"Update {plugin.name} — Select folder containing the new .asi")
+        if not path_str:
             return
-        from pathlib import Path
-        updated = self._asi_mgr.update(plugin, Path(path))
+        folder = Path(path_str)
+        # Find .asi files in the folder
+        asi_files = list(folder.glob("*.asi"))
+        if not asi_files:
+            # Check one level deep
+            asi_files = list(folder.rglob("*.asi"))
+        if not asi_files:
+            QMessageBox.warning(self, "No ASI Found", "No .asi files found in that folder.")
+            return
+        # Pick the one matching the plugin name, or the first one
+        match = next((f for f in asi_files if plugin.name.lower() in f.stem.lower()), asi_files[0])
+        updated = self._asi_mgr.update(plugin, match)
         if updated:
             QMessageBox.information(
                 self, "Updated",
@@ -146,10 +191,9 @@ class AsiPanel(QWidget):
     def _uninstall_plugin(self, plugin) -> None:
         reply = QMessageBox.question(
             self, "Uninstall ASI Plugin",
-            f"Delete {plugin.name} and its config from bin64?\n\n"
-            f"Files to remove:\n"
-            f"  {plugin.path.name}"
-            f"{chr(10) + '  ' + plugin.ini_path.name if plugin.ini_path else ''}",
+            f"Delete {plugin.name} from bin64?\n\n"
+            f"Files: {plugin.path.name}"
+            f"{', ' + plugin.ini_path.name if plugin.ini_path else ''}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:

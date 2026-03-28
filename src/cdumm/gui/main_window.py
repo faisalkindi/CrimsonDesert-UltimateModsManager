@@ -260,33 +260,69 @@ class MainWindow(QMainWindow):
             self._on_refresh_snapshot()
 
     def _build_ui(self) -> None:
+        from PySide6.QtWidgets import QFrame, QStackedWidget, QHeaderView
+        from PySide6.QtCore import QSortFilterProxyModel
+        from cdumm.gui.mod_list_model import COL_ORDER, COL_FILES, COL_NAME
+
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        main_h = QHBoxLayout(central)
+        main_h.setContentsMargins(0, 0, 0, 0)
+        main_h.setSpacing(0)
 
-        # Import widget at top
+        # ── Sidebar ──
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(80)
+        sb_layout = QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(4, 8, 4, 8)
+        sb_layout.setSpacing(4)
+
+        # Sidebar title
+        title = QLabel("CDUMM")
+        title.setObjectName("sidebarTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sb_layout.addWidget(title)
+        sb_layout.addSpacing(12)
+
+        self._nav_buttons = []
+        for label, tooltip in [("Mods", "PAZ Mods"), ("ASI", "ASI Plugins"), ("Tools", "Tools & Settings")]:
+            btn = QPushButton(label)
+            btn.setToolTip(tooltip)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, l=label: self._on_nav(l))
+            sb_layout.addWidget(btn)
+            self._nav_buttons.append((label, btn))
+
+        sb_layout.addStretch()
+        main_h.addWidget(sidebar)
+
+        # ── Content area ──
+        content_v = QVBoxLayout()
+        content_v.setContentsMargins(0, 0, 0, 0)
+        content_v.setSpacing(0)
+
+        # Drop zone (compact)
         self._import_widget = ImportWidget()
         self._import_widget.file_dropped.connect(self._on_import_dropped)
-        layout.addWidget(self._import_widget)
+        content_v.addWidget(self._import_widget)
 
-        # Main content: mod list + conflict view
+        # Stacked pages
+        self._pages = QStackedWidget()
+
+        # ── Page 0: Mods ──
+        mods_page = QWidget()
+        mods_v = QVBoxLayout(mods_page)
+        mods_v.setContentsMargins(0, 0, 0, 0)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # Tab widget for mods and ASI
-        self._tabs = QTabWidget()
-        tabs = self._tabs
-
-        # PAZ Mods tab
-        mods_widget = QWidget()
-        mods_layout = QVBoxLayout(mods_widget)
         if self._mod_manager and self._conflict_detector:
             self._mod_list_model = ModListModel(
                 self._mod_manager, self._conflict_detector,
                 game_dir=self._game_dir, db_path=self._db.db_path,
                 deltas_dir=self._deltas_dir)
             self._mod_list_model.mod_toggled.connect(self._on_mod_toggled_via_checkbox)
-            from PySide6.QtCore import QSortFilterProxyModel
-            from cdumm.gui.mod_list_model import COL_ORDER, COL_FILES
 
             class _NumericSortProxy(QSortFilterProxyModel):
                 def lessThan(self, left, right):
@@ -312,112 +348,137 @@ class MainWindow(QMainWindow):
             self._mod_table.setDropIndicatorShown(True)
             self._mod_table.setDragDropMode(QTableView.DragDropMode.InternalMove)
             self._mod_table.setDefaultDropAction(Qt.DropAction.MoveAction)
-            # Column sizing: stretch Name, fit others to content
-            from PySide6.QtWidgets import QHeaderView
+            self._mod_table.verticalHeader().setVisible(False)
             header = self._mod_table.horizontalHeader()
             header.setStretchLastSection(False)
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            from cdumm.gui.mod_list_model import COL_NAME
             header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-            mods_layout.addWidget(self._mod_table)
-
-            btn_row = QHBoxLayout()
-            remove_btn = QPushButton("Remove Selected")
-            remove_btn.clicked.connect(self._on_remove_mod)
-            btn_row.addWidget(remove_btn)
-            details_btn = QPushButton("View Details")
-            details_btn.clicked.connect(self._on_view_details)
-            btn_row.addWidget(details_btn)
-            btn_row.addStretch()
-            up_btn = QPushButton("Move Up")
-            up_btn.setToolTip("Higher priority — wins conflicts")
-            up_btn.clicked.connect(self._on_move_up)
-            btn_row.addWidget(up_btn)
-            down_btn = QPushButton("Move Down")
-            down_btn.setToolTip("Lower priority — loses conflicts")
-            down_btn.clicked.connect(self._on_move_down)
-            btn_row.addWidget(down_btn)
-            mods_layout.addLayout(btn_row)
+            splitter.addWidget(self._mod_table)
         else:
-            mods_layout.addWidget(QLabel("No database connected"))
+            splitter.addWidget(QLabel("No database connected"))
 
-        tabs.addTab(mods_widget, "PAZ Mods")
-
-        # ASI tab
-        if self._game_dir:
-            self._asi_panel = AsiPanel(self._game_dir / "bin64")
-            tabs.addTab(self._asi_panel, "ASI Plugins")
-
-        splitter.addWidget(tabs)
-
-        # Conflict view
         self._conflict_view = ConflictView()
         self._conflict_view.winner_changed.connect(self._on_set_winner)
         splitter.addWidget(self._conflict_view)
+        splitter.setSizes([500, 150])
+        mods_v.addWidget(splitter)
 
-        splitter.setSizes([400, 200])
-        layout.addWidget(splitter)
+        hint = QLabel("Right-click a mod for more options  ·  Drag rows to reorder  ·  Ctrl+click to multi-select")
+        hint.setStyleSheet("color: #4E5564; font-size: 11px; padding: 4px 8px;")
+        mods_v.addWidget(hint)
 
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        self._pages.addWidget(mods_page)
 
-        apply_btn = QPushButton("Apply")
-        apply_btn.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        # ── Page 1: ASI ──
+        if self._game_dir:
+            self._asi_panel = AsiPanel(self._game_dir / "bin64")
+            self._pages.addWidget(self._asi_panel)
+        else:
+            self._pages.addWidget(QLabel("No game directory"))
+
+        # ── Page 2: Tools & Settings ──
+        tools_page = QWidget()
+        tools_v = QVBoxLayout(tools_page)
+        tools_v.setContentsMargins(20, 20, 20, 20)
+        tools_v.setSpacing(12)
+
+        tools_header = QLabel("Tools & Settings")
+        tools_header.setObjectName("toolsHeader")
+        tools_v.addWidget(tools_header)
+
+        for label, slot in [
+            ("Refresh Snapshot", self._on_refresh_snapshot),
+            ("Change Game Directory", self._on_change_game_dir),
+            ("Profiles", self._on_profiles),
+            ("Export Mod List", self._on_export_list),
+            ("Import Mod List", self._on_import_list),
+            ("Test Mod Compatibility", self._on_test_mod),
+            ("Report Bug", self._on_report_bug),
+        ]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(36)
+            btn.clicked.connect(slot)
+            tools_v.addWidget(btn)
+        tools_v.addStretch()
+        self._pages.addWidget(tools_page)
+
+        # Fake tabs reference for tab switching on import
+        self._tabs = self._pages
+
+        content_v.addWidget(self._pages)
+
+        # ── Action Bar ──
+        action_bar = QFrame()
+        action_bar.setObjectName("actionBar")
+        action_bar.setFixedHeight(56)
+        ab_layout = QHBoxLayout(action_bar)
+        ab_layout.setContentsMargins(16, 8, 16, 8)
+
+        apply_btn = QPushButton("  Apply  ")
+        apply_btn.setObjectName("applyBtn")
         apply_btn.clicked.connect(self._on_apply)
-        toolbar.addWidget(apply_btn)
+        ab_layout.addWidget(apply_btn)
+
+        launch_btn = QPushButton("  Launch Game  ")
+        launch_btn.setObjectName("launchBtn")
+        launch_btn.clicked.connect(self._on_launch_game)
+        ab_layout.addWidget(launch_btn)
+
+        ab_layout.addStretch()
 
         revert_btn = QPushButton("Revert to Vanilla")
+        revert_btn.setObjectName("revertBtn")
         revert_btn.clicked.connect(self._on_revert)
-        toolbar.addWidget(revert_btn)
+        ab_layout.addWidget(revert_btn)
 
-        toolbar.addSeparator()
+        content_v.addWidget(action_bar)
+        main_h.addLayout(content_v)
 
-        test_btn = QPushButton("Test Mod...")
-        test_btn.clicked.connect(self._on_test_mod)
-        toolbar.addWidget(test_btn)
+        # Set initial nav
+        self._on_nav("Mods")
 
-        toolbar.addSeparator()
+    def _on_nav(self, label: str) -> None:
+        """Switch pages via sidebar navigation."""
+        page_map = {"Mods": 0, "ASI": 1, "Tools": 2}
+        idx = page_map.get(label, 0)
+        self._pages.setCurrentIndex(idx)
+        for nav_label, btn in self._nav_buttons:
+            btn.setChecked(nav_label == label)
 
-        snapshot_btn = QPushButton("Refresh Snapshot")
-        snapshot_btn.clicked.connect(self._on_refresh_snapshot)
-        toolbar.addWidget(snapshot_btn)
+    def _on_launch_game(self) -> None:
+        """Launch the game executable."""
+        import subprocess
+        if not self._game_dir:
+            return
+        exe = self._game_dir / "bin64" / "CrimsonDesert.exe"
+        if not exe.exists():
+            # Try finding the exe
+            for candidate in ["CrimsonDesert.exe", "crimsondesert.exe"]:
+                test = self._game_dir / "bin64" / candidate
+                if test.exists():
+                    exe = test
+                    break
+            else:
+                self.statusBar().showMessage("Game executable not found in bin64/", 10000)
+                return
+        try:
+            subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
+            self.statusBar().showMessage("Game launched!", 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f"Failed to launch: {e}", 10000)
 
-        gamedir_btn = QPushButton("Game Directory...")
-        gamedir_btn.clicked.connect(self._on_change_game_dir)
-        toolbar.addWidget(gamedir_btn)
-
-        toolbar.addSeparator()
-
-        profiles_btn = QPushButton("Profiles...")
-        profiles_btn.clicked.connect(self._on_profiles)
-        toolbar.addWidget(profiles_btn)
-
-        export_btn = QPushButton("Export List")
-        export_btn.clicked.connect(self._on_export_list)
-        toolbar.addWidget(export_btn)
-
-        import_list_btn = QPushButton("Import List")
-        import_list_btn.clicked.connect(self._on_import_list)
-        toolbar.addWidget(import_list_btn)
-
-        toolbar.addSeparator()
-
-        bug_btn = QPushButton("Report Bug")
-        bug_btn.setStyleSheet("color: #FF9800;")
-        bug_btn.clicked.connect(self._on_report_bug)
-        toolbar.addWidget(bug_btn)
+    def _build_toolbar(self) -> None:
+        # Toolbar replaced by sidebar — this is kept as a no-op for compatibility
+        pass
 
     def _build_status_bar(self) -> None:
         from cdumm import __version__
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
-        version_label = QLabel(f"v{__version__}")
-        version_label.setStyleSheet("color: gray; padding-right: 10px;")
-        status_bar.addPermanentWidget(version_label)
         self._snapshot_label = QLabel()
         status_bar.addPermanentWidget(self._snapshot_label)
+        version_label = QLabel(f"v{__version__}")
+        status_bar.addPermanentWidget(version_label)
         self._update_snapshot_status()
 
     def _update_snapshot_status(self) -> None:
@@ -614,6 +675,32 @@ class MainWindow(QMainWindow):
         # Check if this is an ASI mod first (fast, no thread needed)
         from cdumm.asi.asi_manager import AsiManager
         if AsiManager.contains_asi(path):
+            # Check if it's an update to an existing ASI plugin
+            asi_mgr = AsiManager(self._game_dir / "bin64")
+            existing_plugins = asi_mgr.scan()
+            asi_files = list(path.rglob("*.asi")) if path.is_dir() else []
+            if not asi_files and path.suffix.lower() == ".asi":
+                asi_files = [path]
+            for af in asi_files:
+                for plugin in existing_plugins:
+                    if af.stem.lower() == plugin.name.lower():
+                        logger.info("ASI update detected: %s", plugin.name)
+                        # Pass the folder so .ini files are included
+                        source = af.parent if af.parent != path else path
+                        updated = asi_mgr.update(plugin, source)
+                        files_str = ", ".join(updated) if updated else af.name
+                        self.statusBar().showMessage(
+                            f"Updated ASI: {plugin.name} ({files_str})", 10000)
+                        QMessageBox.information(
+                            self, "ASI Updated",
+                            f"Updated {plugin.name}:\n\n"
+                            + "\n".join(f"  {f}" for f in (updated or [af.name])))
+                        if hasattr(self, "_asi_panel"):
+                            self._asi_panel.refresh()
+                            self._on_nav("ASI")
+                        return
+
+        if AsiManager.contains_asi(path):
             self._install_asi_mod(path)
             return
 
@@ -660,9 +747,33 @@ class MainWindow(QMainWindow):
             self._run_script_mod(path)
             return
 
+        # Check if this is an update to an existing mod (match by folder/zip name)
+        existing_mod_id = None
+        if self._mod_manager:
+            drop_name = path.stem.lower()
+            # Also read modinfo.json if present
+            from cdumm.engine.import_handler import _read_modinfo
+            modinfo = _read_modinfo(path) if path.is_dir() else None
+            if modinfo and modinfo.get("name"):
+                drop_name = modinfo["name"].lower()
+            for m in self._mod_manager.list_mods():
+                if m["name"].lower().strip() in drop_name or drop_name in m["name"].lower().strip():
+                    reply = QMessageBox.question(
+                        self, "Update Existing Mod?",
+                        f"'{m['name']}' is already installed.\n\n"
+                        "Update it with the new version?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        existing_mod_id = m["id"]
+                        self._mod_manager.clear_deltas(existing_mod_id)
+                        logger.info("Updating existing mod %d (%s)", existing_mod_id, m["name"])
+                    break
+
         # Regular PAZ mod — run on background thread
         progress = ProgressDialog("Importing Mod", self)
-        worker = ImportWorker(path, self._game_dir, self._db.db_path, self._deltas_dir)
+        worker = ImportWorker(path, self._game_dir, self._db.db_path, self._deltas_dir,
+                              existing_mod_id=existing_mod_id)
         thread = QThread()
 
         self._run_worker(worker, thread, progress,
@@ -936,7 +1047,7 @@ class MainWindow(QMainWindow):
                 logger.debug("Game version stamp failed (non-fatal): %s", e)
 
             self._refresh_all()
-            self._tabs.setCurrentIndex(0)  # Switch to PAZ Mods tab
+            self._on_nav("Mods")
             self._on_apply()  # Auto-apply after import
 
     def _install_asi_mod(self, path: Path) -> None:
@@ -959,7 +1070,7 @@ class MainWindow(QMainWindow):
             # Refresh ASI panel and switch to ASI tab
             if hasattr(self, "_asi_panel"):
                 self._asi_panel.refresh()
-                self._tabs.setCurrentWidget(self._asi_panel)
+                self._on_nav("ASI")
         else:
             self.statusBar().showMessage("No ASI files found to install.", 5000)
             logger.warning("No ASI files found in %s", path)
