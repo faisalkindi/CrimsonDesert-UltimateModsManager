@@ -85,18 +85,30 @@ def apply_update(new_exe: Path) -> None:
     current_exe = Path(sys.executable)
     bat = tempfile.NamedTemporaryFile(suffix=".bat", delete=False, mode="w",
                                       dir=tempfile.gettempdir())
+    current_dir = current_exe.parent
     bat.write(f"""@echo off
 echo Updating CDUMM...
-timeout /t 2 /nobreak >nul
+echo Waiting for app to close...
+timeout /t 3 /nobreak >nul
 :wait
 tasklist /fi "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
 if not errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto wait
 )
+echo Copying new version...
 copy /y "{new_exe}" "{current_exe}"
-del "{new_exe}"
+if errorlevel 1 (
+    echo Copy failed, retrying...
+    timeout /t 2 /nobreak >nul
+    copy /y "{new_exe}" "{current_exe}"
+)
+del "{new_exe}" 2>nul
+echo Launching updated app...
+timeout /t 2 /nobreak >nul
+cd /d "{current_dir}"
 start "" "{current_exe}"
+timeout /t 3 /nobreak >nul
 del "%~f0"
 """)
     bat.close()
