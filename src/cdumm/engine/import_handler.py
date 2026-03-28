@@ -225,31 +225,21 @@ def _detect_standalone_mod(
 
         mod_pamt_size = mod_pamt.stat().st_size
         vanilla_pamt_size = vanilla_pamt.stat().st_size
-        is_standalone = False
-
-        # Different PAMT size = different file entries = standalone mod
-        if mod_pamt_size != vanilla_pamt_size:
-            is_standalone = True
-            logger.info("Standalone: %s PAMT differs (mod=%d, vanilla=%d)",
-                        dir_name, mod_pamt_size, vanilla_pamt_size)
-
-        # Same PAMT but wildly different PAZ size = standalone mod
-        if not is_standalone and vanilla_paz.exists():
-            mod_paz_size = mod_paz.stat().st_size
-            vanilla_paz_size = vanilla_paz.stat().st_size
-            if vanilla_paz_size > 0:
-                ratio = mod_paz_size / vanilla_paz_size
-                if ratio < 0.5 or ratio > 2.0:
-                    is_standalone = True
-                    logger.info("Standalone: %s PAZ ratio=%.1f (mod=%d, vanilla=%d)",
-                                dir_name, ratio, mod_paz_size, vanilla_paz_size)
+        # Any mod shipping its own 0.pamt + 0.paz for a vanilla directory
+        # is a standalone mod that needs its own directory number.
+        # These mods are self-contained PAZ archives, not patches to vanilla.
+        is_standalone = True
+        logger.info("Standalone: %s ships own PAMT+PAZ (mod_pamt=%d, vanilla_pamt=%d)",
+                     dir_name, mod_pamt_size, vanilla_pamt_size)
 
         if is_standalone:
-            # These mods are replacements for the existing directory, not additions.
-            # Their PAMT references the original PAZ files from that directory.
-            # Don't remap — let them overwrite vanilla as the mod author intended.
-            logger.info("Standalone mod for %s — will replace vanilla files (not remap)",
-                        dir_name)
+            # Each standalone mod gets its own directory number so multiple
+            # mods targeting the same directory can coexist.
+            rel_parts = d.relative_to(extracted_dir).parts
+            old_prefix = "/".join(rel_parts)
+            new_dir = _next_paz_directory(game_dir)
+            remap[old_prefix] = new_dir
+            logger.info("Standalone mod: remapping %s -> %s", old_prefix, new_dir)
 
     return remap if remap else None
 
@@ -302,6 +292,13 @@ def import_from_zip(
             )
             return result
 
+        # Detect multi-variant zips
+        variant = _find_best_variant(tmp_path)
+        if variant:
+            logger.info("Multi-variant zip, using: %s", variant.name)
+            tmp_path = variant
+            mod_name = f"{mod_name} ({variant.name})"
+
         # Read mod metadata from modinfo.json if present
         modinfo = _read_modinfo(tmp_path)
         if modinfo and modinfo.get("name"):
@@ -328,6 +325,15 @@ def import_from_folder(
         result.error = "This folder contains a script mod. It should be handled by the script mod flow."
         return result
 
+    # Detect variant folders: parent folder has multiple subdirectories each
+    # containing their own 0.paz + 0.pamt (e.g., FatStacks2x/, FatStacks10x/).
+    # Find the best single variant to import.
+    variant = _find_best_variant(folder_path)
+    if variant:
+        logger.info("Multi-variant mod detected, using variant: %s", variant.name)
+        folder_path = variant
+        mod_name = f"{folder_path.parent.name} ({variant.name})"
+
     # Read mod metadata from modinfo.json if present
     modinfo = _read_modinfo(folder_path)
     if modinfo and modinfo.get("name"):
@@ -336,6 +342,37 @@ def import_from_folder(
     return _process_extracted_files(
         folder_path, game_dir, db, snapshot, deltas_dir, mod_name,
         existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+
+def _find_best_variant(folder_path: Path) -> Path | None:
+    """Detect if a folder contains multiple mod variants.
+
+    Returns the best variant subfolder, or None if not a multi-variant mod.
+    A multi-variant mod has 2+ subdirectories each containing 0.paz + 0.pamt.
+    """
+    # Check direct children for variant directories
+    variants: list[Path] = []
+    for sub in folder_path.iterdir():
+        if not sub.is_dir():
+            continue
+        # A variant has its own 0.paz+0.pamt (directly or inside a numbered subdir)
+        has_paz = list(sub.rglob("0.paz"))
+        has_pamt = list(sub.rglob("0.pamt"))
+        if has_paz and has_pamt:
+            variants.append(sub)
+
+    if len(variants) < 2:
+        return None  # not multi-variant
+
+    # Multiple variants found. Pick the last one alphabetically (usually highest value).
+    # e.g., FatStacks10x > FatStacks2x, or variant names sorted naturally
+    variants.sort(key=lambda p: p.name)
+    chosen = variants[-1]
+    logger.info("Found %d variants: %s. Picking: %s",
+                len(variants),
+                [v.name for v in variants],
+                chosen.name)
+    return chosen
 
 
 def import_from_script(

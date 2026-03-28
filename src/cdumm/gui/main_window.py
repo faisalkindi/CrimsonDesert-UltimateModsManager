@@ -304,6 +304,7 @@ class MainWindow(QMainWindow):
             self._mod_table.setModel(self._sort_proxy)
             self._mod_table.setSortingEnabled(True)
             self._mod_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+            self._mod_table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
             self._mod_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self._mod_table.customContextMenuRequested.connect(self._show_mod_context_menu)
             self._mod_table.setDragEnabled(True)
@@ -1009,31 +1010,44 @@ class MainWindow(QMainWindow):
     def _on_remove_mod(self, mod_id: int | None = None) -> None:
         if not hasattr(self, "_mod_table") or not self._mod_manager:
             return
+
+        # Build list of mods to remove
+        mods_to_remove: list[tuple[int, str]] = []
         if mod_id is not None:
             # Called from context menu with explicit mod_id
             cursor = self._db.connection.execute("SELECT name FROM mods WHERE id = ?", (mod_id,))
             row = cursor.fetchone()
-            mod_name = row[0] if row else f"Mod {mod_id}"
+            mods_to_remove.append((mod_id, row[0] if row else f"Mod {mod_id}"))
         else:
-            # Called from Remove Selected button
+            # Called from Remove Selected button — handle multiple selections
             indexes = self._mod_table.selectionModel().selectedRows()
             if not indexes:
                 return
-            mod = self._get_mod_at_proxy_row(indexes[0].row())
-            if not mod:
-                return
-            mod_id = mod["id"]
-            mod_name = mod["name"]
+            for idx in indexes:
+                mod = self._get_mod_at_proxy_row(idx.row())
+                if mod:
+                    mods_to_remove.append((mod["id"], mod["name"]))
+
+        if not mods_to_remove:
+            return
+
+        if len(mods_to_remove) == 1:
+            msg = f"Uninstall '{mods_to_remove[0][1]}'?"
+        else:
+            names = "\n".join(f"  - {name}" for _, name in mods_to_remove)
+            msg = f"Uninstall {len(mods_to_remove)} mods?\n\n{names}"
+
         reply = QMessageBox.question(
-            self, "Uninstall Mod",
-            f"Uninstall '{mod_name}'?\n"
-            "This deletes the mod data. If applied, you should re-apply or revert.",
+            self, "Uninstall Mods", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._mod_manager.remove_mod(mod_id)
+            for mid, name in mods_to_remove:
+                self._mod_manager.remove_mod(mid)
+                logger.info("Uninstalled: %s", name)
             self._refresh_all()
-            self.statusBar().showMessage(f"Uninstalled: {mod_name}. Applying changes...", 10000)
+            self.statusBar().showMessage(
+                f"Uninstalled {len(mods_to_remove)} mod(s). Applying changes...", 10000)
             self._on_apply()
 
     # --- View details ---
@@ -1089,8 +1103,14 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        remove_action = QAction("Uninstall", self)
-        remove_action.triggered.connect(lambda: self._on_remove_mod(mod_id=mod["id"]))
+        # Uninstall — handles single or multiple selected mods
+        selected = self._mod_table.selectionModel().selectedRows()
+        if len(selected) > 1:
+            remove_action = QAction(f"Uninstall {len(selected)} selected mods", self)
+            remove_action.triggered.connect(lambda: self._on_remove_mod())
+        else:
+            remove_action = QAction("Uninstall", self)
+            remove_action.triggered.connect(lambda: self._on_remove_mod(mod_id=mod["id"]))
         menu.addAction(remove_action)
 
         menu.exec(self._mod_table.viewport().mapToGlobal(pos))
