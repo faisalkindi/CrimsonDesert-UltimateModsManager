@@ -49,7 +49,7 @@ def download_update(download_url: str, progress_callback=None) -> Path | None:
     """Download the new exe to a temp file. Returns path or None on failure."""
     try:
         req = urllib.request.Request(download_url, headers={"User-Agent": "CDUMM"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             tmp = tempfile.NamedTemporaryFile(suffix=".exe", delete=False, dir=tempfile.gettempdir())
             downloaded = 0
@@ -59,9 +59,17 @@ def download_update(download_url: str, progress_callback=None) -> Path | None:
                     break
                 tmp.write(chunk)
                 downloaded += len(chunk)
-                if progress_callback and total > 0:
-                    progress_callback(int(downloaded / total * 100))
+                if progress_callback:
+                    if total > 0:
+                        progress_callback(int(downloaded / total * 100))
+                    else:
+                        mb = downloaded / (1024 * 1024)
+                        progress_callback(min(95, int(mb)))  # show MB as rough progress
             tmp.close()
+            if downloaded < 1_000_000:
+                logger.error("Download too small (%d bytes), likely failed", downloaded)
+                Path(tmp.name).unlink(missing_ok=True)
+                return None
             logger.info("Downloaded update to %s (%d bytes)", tmp.name, downloaded)
             return Path(tmp.name)
     except Exception as e:
