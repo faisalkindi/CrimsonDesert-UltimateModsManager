@@ -72,6 +72,10 @@ def main() -> int:
     splash = show_splash()
     app.processEvents()
 
+    # Apply theme
+    from cdumm.gui.theme import STYLESHEET
+    app.setStyleSheet(STYLESHEET)
+
     # Now do heavy imports
     splash.showMessage("  Loading database...", 0x0081)  # AlignLeft | AlignBottom
     app.processEvents()

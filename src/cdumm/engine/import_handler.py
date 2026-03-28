@@ -32,7 +32,7 @@ class ModImportResult:
 
 
 def detect_format(path: Path) -> str:
-    """Detect import format: 'zip', 'folder', 'script', 'bsdiff', or 'unknown'."""
+    """Detect import format: 'zip', 'folder', 'script', 'json_patch', 'bsdiff', or 'unknown'."""
     if path.is_dir():
         return "folder"
     suffix = path.suffix.lower()
@@ -40,6 +40,9 @@ def detect_format(path: Path) -> str:
         return "zip"
     if suffix in (".bat", ".py"):
         return "script"
+    if suffix == ".json":
+        if detect_json_patch(path) is not None:
+            return "json_patch"
     if suffix in (".bsdiff", ".xdelta"):
         return "bsdiff"
     # Check if it's a zip without extension
@@ -54,6 +57,9 @@ def detect_format(path: Path) -> str:
 
 import json
 import re
+
+from cdumm.engine.crimson_browser_handler import detect_crimson_browser, convert_to_paz_mod
+from cdumm.engine.json_patch_handler import detect_json_patch, convert_json_patch_to_paz
 
 # Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt
 _GAME_FILE_RE = re.compile(r'^(\d{4}/\d+\.(?:paz|pamt)|meta/\d+\.papgt)$')
@@ -96,6 +102,27 @@ def _read_modinfo(extracted_dir: Path) -> dict | None:
             except Exception as e:
                 logger.warning("Failed to parse modinfo.json: %s", e)
     return None
+
+
+def _try_convert_crimson_browser(
+    extracted_dir: Path, game_dir: Path, work_dir: Path
+) -> Path | None:
+    """If extracted_dir is a Crimson Browser mod, convert to standard PAZ format.
+
+    Returns the converted directory (inside work_dir), or None if not CB format.
+    """
+    manifest = detect_crimson_browser(extracted_dir)
+    if manifest is None:
+        return None
+
+    mod_id = manifest.get("id", "unknown")
+    logger.info("Detected Crimson Browser mod: %s", mod_id)
+    converted = convert_to_paz_mod(manifest, game_dir, work_dir)
+    if converted:
+        logger.info("CB mod converted to standard PAZ format in %s", converted)
+    else:
+        logger.error("CB mod conversion failed for %s", mod_id)
+    return converted
 
 
 def _match_game_files(
@@ -283,6 +310,39 @@ def import_from_zip(
             logger.error("Zip extraction failed: %s", e, exc_info=True)
             return result
 
+        # Check for Crimson Browser format and convert if needed
+        cb_manifest = detect_crimson_browser(tmp_path)
+        if cb_manifest is not None:
+            cb_work = Path(tmp) / "_cb_converted"
+            converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work)
+            if converted is not None:
+                cb_name = cb_manifest.get("id", mod_name)
+                modinfo = _read_modinfo(tmp_path)
+                if modinfo and modinfo.get("name"):
+                    cb_name = modinfo["name"]
+                result = _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, cb_name,
+                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+                return result
+
+        # Check for JSON byte-patch format inside the zip
+        jp_data = detect_json_patch(tmp_path)
+        if jp_data is not None:
+            jp_work = Path(tmp) / "_jp_converted"
+            converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
+            if converted is not None:
+                jp_name = jp_data.get("name", mod_name)
+                jp_modinfo = {
+                    "name": jp_data.get("name"),
+                    "version": jp_data.get("version"),
+                    "author": jp_data.get("author"),
+                    "description": jp_data.get("description"),
+                }
+                result = _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, jp_name,
+                    existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+                return result
+
         # Check if zip contains a script instead of game files
         scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
         if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
@@ -317,6 +377,39 @@ def import_from_folder(
 ) -> ModImportResult:
     """Import a mod from a folder of modified files."""
     mod_name = folder_path.name
+
+    # Check for Crimson Browser format and convert if needed
+    manifest = detect_crimson_browser(folder_path)
+    if manifest is not None:
+        with tempfile.TemporaryDirectory() as cb_tmp:
+            cb_work = Path(cb_tmp) / "_cb_converted"
+            converted = convert_to_paz_mod(manifest, game_dir, cb_work)
+            if converted is not None:
+                cb_name = manifest.get("id", mod_name)
+                modinfo = _read_modinfo(folder_path)
+                if modinfo and modinfo.get("name"):
+                    cb_name = modinfo["name"]
+                return _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, cb_name,
+                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    # Check for JSON byte-patch format in folder
+    jp_data = detect_json_patch(folder_path)
+    if jp_data is not None:
+        with tempfile.TemporaryDirectory() as jp_tmp:
+            jp_work = Path(jp_tmp) / "_jp_converted"
+            converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
+            if converted is not None:
+                jp_name = jp_data.get("name", mod_name)
+                jp_modinfo = {
+                    "name": jp_data.get("name"),
+                    "version": jp_data.get("version"),
+                    "author": jp_data.get("author"),
+                    "description": jp_data.get("description"),
+                }
+                return _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, jp_name,
+                    existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
 
     # Check if folder contains scripts instead of game files
     scripts = list(folder_path.glob("*.bat")) + list(folder_path.glob("*.py"))
@@ -474,6 +567,48 @@ def import_from_bsdiff(
         "file_path": patch_path.stem.replace("_", "/"),
         "delta_path": str(delta_dest),
     })
+    return result
+
+
+def import_from_json_patch(
+    json_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Import a mod from a JSON byte-patch file.
+
+    The JSON contains patches against specific game files (offsets into
+    decompressed content). The handler extracts the target file from PAZ,
+    applies patches, repacks, and generates deltas.
+    """
+    patch_data = detect_json_patch(json_path if json_path.is_file() else json_path)
+    if patch_data is None:
+        result = ModImportResult(json_path.stem)
+        result.error = "Not a valid JSON patch mod."
+        return result
+
+    mod_name = patch_data.get("name", json_path.stem)
+    result = ModImportResult(mod_name)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work_dir = Path(tmp) / "_patched"
+        converted = convert_json_patch_to_paz(patch_data, game_dir, work_dir)
+        if converted is None:
+            result.error = "Failed to apply JSON patches to game files."
+            return result
+
+        modinfo = {
+            "name": patch_data.get("name"),
+            "version": patch_data.get("version"),
+            "author": patch_data.get("author"),
+            "description": patch_data.get("description"),
+        }
+        if modinfo.get("name"):
+            mod_name = modinfo["name"]
+
+        result = _process_extracted_files(
+            converted, game_dir, db, snapshot, deltas_dir, mod_name,
+            existing_mod_id=existing_mod_id, modinfo=modinfo)
+
     return result
 
 

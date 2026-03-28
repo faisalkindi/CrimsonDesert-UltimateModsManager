@@ -8,6 +8,7 @@ from cdumm.engine.import_handler import (
     detect_format,
     import_from_bsdiff,
     import_from_folder,
+    import_from_json_patch,
     import_from_script,
     import_from_zip,
 )
@@ -56,6 +57,10 @@ class ImportWorker(QObject):
                 self.progress_updated.emit(10, "Executing script in sandbox...")
                 result = import_from_script(
                     self._mod_path, self._game_dir, db, snapshot, self._deltas_dir)
+            elif fmt == "json_patch":
+                result = import_from_json_patch(
+                    self._mod_path, self._game_dir, db, snapshot, self._deltas_dir,
+                    existing_mod_id=self._existing_mod_id)
             elif fmt == "bsdiff":
                 result = import_from_bsdiff(
                     self._mod_path, self._game_dir, db, snapshot, self._deltas_dir)

@@ -1,32 +1,50 @@
 """Splash screen shown during app startup."""
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import QSplashScreen
 
 
 def show_splash() -> QSplashScreen:
-    """Create and show a splash screen. Returns the splash so caller can finish() it."""
-    pixmap = QPixmap(420, 200)
-    pixmap.fill(QColor(30, 30, 30))
+    """Create and show a splash screen."""
+    pixmap = QPixmap(440, 220)
 
     painter = QPainter(pixmap)
-    painter.setPen(QColor(76, 175, 80))
-    painter.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "CDUMM")
+    # Dark gradient background
+    grad = QLinearGradient(0, 0, 440, 220)
+    grad.setColorAt(0, QColor(13, 15, 19))
+    grad.setColorAt(1, QColor(19, 22, 28))
+    painter.fillRect(pixmap.rect(), grad)
 
-    painter.setPen(QColor(180, 180, 180))
+    # Subtle top accent line
+    painter.setPen(Qt.PenStyle.NoPen)
+    accent_grad = QLinearGradient(0, 0, 440, 0)
+    accent_grad.setColorAt(0, QColor(212, 162, 76, 0))
+    accent_grad.setColorAt(0.5, QColor(212, 162, 76, 200))
+    accent_grad.setColorAt(1, QColor(212, 162, 76, 0))
+    painter.setBrush(accent_grad)
+    painter.drawRect(0, 0, 440, 2)
+
+    # App name
+    painter.setPen(QColor(212, 162, 76))
+    painter.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
+    painter.drawText(pixmap.rect().adjusted(0, -10, 0, 0),
+                     Qt.AlignmentFlag.AlignCenter, "CDUMM")
+
+    # Subtitle
+    painter.setPen(QColor(150, 155, 165))
     painter.setFont(QFont("Segoe UI", 10))
     from cdumm import __version__
     painter.drawText(
-        pixmap.rect().adjusted(0, 50, 0, 0),
-        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-        f"Crimson Desert Ultimate Mods Manager v{__version__}",
+        pixmap.rect().adjusted(0, 40, 0, 0),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignCenter,
+        f"Crimson Desert Ultimate Mods Manager  v{__version__}",
     )
 
-    painter.setPen(QColor(120, 120, 120))
+    # Loading text
+    painter.setPen(QColor(75, 80, 96))
     painter.setFont(QFont("Segoe UI", 9))
     painter.drawText(
-        pixmap.rect().adjusted(0, 0, 0, -15),
+        pixmap.rect().adjusted(0, 0, 0, -16),
         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
         "Loading...",
     )
