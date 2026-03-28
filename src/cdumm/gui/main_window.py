@@ -1427,7 +1427,7 @@ class MainWindow(QMainWindow):
         from cdumm.engine.update_checker import apply_update
         reply = QMessageBox.question(
             self, "Update Ready",
-            "Update downloaded. The app will close and restart with the new version.\n\nContinue?",
+            "Update downloaded. The app will close and install the update.\nPlease relaunch CDUMM after the update window closes.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:

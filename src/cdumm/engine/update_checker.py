@@ -87,24 +87,52 @@ def apply_update(new_exe: Path) -> None:
 
     ps1 = tempfile.NamedTemporaryFile(suffix=".ps1", delete=False, mode="w",
                                        dir=tempfile.gettempdir())
+    exe_name = current_exe.stem  # "CDUMM"
     ps1.write(f"""
-$pid = {os.getpid()}
-Write-Host "Waiting for CDUMM (PID $pid) to exit..."
-while (Get-Process -Id $pid -ErrorAction SilentlyContinue) {{
+Write-Host "Updating {exe_name}..."
+Write-Host ""
+
+# Step 1: Wait for old process to fully exit
+Write-Host "Closing {exe_name}..."
+Start-Sleep -Seconds 2
+Stop-Process -Name "{exe_name}" -Force -ErrorAction SilentlyContinue
+# Wait until no process with that name exists
+while (Get-Process -Name "{exe_name}" -ErrorAction SilentlyContinue) {{
+    Write-Host "Still running, waiting..."
     Start-Sleep -Seconds 1
 }}
-Start-Sleep -Seconds 2
+Write-Host "Process closed."
+Start-Sleep -Seconds 5
 
-Get-ChildItem "$env:TEMP\\_MEI*" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# Step 2: Replace exe
+$src = "{new_exe}"
+$dst = "{current_exe}"
+$success = $false
+for ($i = 0; $i -lt 10; $i++) {{
+    try {{
+        Copy-Item -Path $src -Destination $dst -Force -ErrorAction Stop
+        $success = $true
+        Write-Host "Update installed."
+        break
+    }} catch {{
+        Write-Host "File locked, retrying... ($($i+1)/10)"
+        Start-Sleep -Seconds 2
+    }}
+}}
 
-Write-Host "Installing update..."
-Copy-Item -Path "{new_exe}" -Destination "{current_exe}" -Force
-Remove-Item -Path "{new_exe}" -Force -ErrorAction SilentlyContinue
+if (-not $success) {{
+    Write-Host ""
+    Write-Host "ERROR: Could not replace the exe. Please close any programs using it and try again."
+    Read-Host "Press Enter to exit"
+    exit 1
+}}
 
-Start-Sleep -Seconds 1
-Write-Host "Launching updated CDUMM..."
-Start-Process -FilePath "{current_exe}" -WorkingDirectory "{current_dir}"
+Remove-Item -Path $src -Force -ErrorAction SilentlyContinue
 
+# Step 3: Done — user relaunches manually
+Write-Host ""
+Write-Host "Update complete! Please relaunch {exe_name}."
+Write-Host ""
 Start-Sleep -Seconds 2
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """)
@@ -112,10 +140,17 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
     logger.info("Launching updater: %s", ps1.name)
     import subprocess
     subprocess.Popen(
-        ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", ps1.name],
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps1.name],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
     )
-    sys.exit(0)
+    # Clean up lock file before exiting so next launch doesn't think we crashed
+    lock_file = Path.home() / "AppData" / "Local" / "cdumm" / ".running"
+    if lock_file.exists():
+        lock_file.unlink()
+    # Kill the process so the exe is fully released for the updater
+    import time
+    time.sleep(1)
+    os._exit(0)
 
 
 def _version_newer(remote: str, local: str) -> bool:
