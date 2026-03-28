@@ -252,12 +252,21 @@ def _detect_standalone_mod(
 
         mod_pamt_size = mod_pamt.stat().st_size
         vanilla_pamt_size = vanilla_pamt.stat().st_size
-        # Any mod shipping its own 0.pamt + 0.paz for a vanilla directory
-        # is a standalone mod that needs its own directory number.
-        # These mods are self-contained PAZ archives, not patches to vanilla.
-        is_standalone = True
-        logger.info("Standalone: %s ships own PAMT+PAZ (mod_pamt=%d, vanilla_pamt=%d)",
-                     dir_name, mod_pamt_size, vanilla_pamt_size)
+        mod_paz_size = mod_paz.stat().st_size
+        vanilla_paz_size = vanilla_paz.stat().st_size if vanilla_paz.exists() else 0
+
+        # A standalone mod has completely different content (different PAMT size
+        # or drastically different PAZ size). Mods that are modified copies of
+        # vanilla (same PAMT size, same PAZ size) are regular patches.
+        if mod_pamt_size == vanilla_pamt_size and mod_paz_size == vanilla_paz_size:
+            is_standalone = False
+            logger.info("Modified vanilla: %s (same PAMT+PAZ size, treating as patch)",
+                         dir_name)
+        else:
+            is_standalone = True
+            logger.info("Standalone: %s ships own PAMT+PAZ (mod_pamt=%d vs %d, mod_paz=%d vs %d)",
+                         dir_name, mod_pamt_size, vanilla_pamt_size,
+                         mod_paz_size, vanilla_paz_size)
 
         if is_standalone:
             # Each standalone mod gets its own directory number so multiple

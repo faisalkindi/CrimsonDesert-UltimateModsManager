@@ -127,20 +127,29 @@ def _apply_byte_patches(data: bytearray, changes: list[dict]) -> int:
 def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) -> Path | None:
     """Convert a JSON patch mod to modified PAZ files.
 
+    IMPORTANT: Always uses VANILLA files as the base, not the current game
+    files which may have other mods applied (shifted offsets, changed sizes).
+
     For each patched game_file:
-    1. Find it in PAMT, extract from PAZ
+    1. Find it in vanilla PAMT, extract from vanilla PAZ
     2. Apply byte patches to decompressed content
-    3. Recompress/encrypt and write to PAZ copy in work_dir
+    3. Recompress/encrypt and write to vanilla PAZ copy in work_dir
 
     Returns work_dir containing modified PAZ files, or None on failure.
     """
     patches = patch_data["patches"]
     mod_name = patch_data.get("name", "unknown")
 
+    # Use vanilla backups if available, fall back to game dir
+    vanilla_dir = game_dir / "CDMods" / "vanilla"
+    if not vanilla_dir.exists():
+        vanilla_dir = game_dir
+        logger.warning("No vanilla backup dir, using game dir (may have shifted offsets)")
+    else:
+        logger.info("Using vanilla backups for JSON patch base")
+
     logger.info("JSON patch mod '%s': %d file(s) to patch", mod_name, len(patches))
 
-    # Build a lookup of all PAMT entries across all game directories
-    # Group by game_file path for quick lookup
     entry_cache: dict[str, PazEntry] = {}
 
     for patch in patches:
@@ -150,9 +159,12 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
         if not changes:
             continue
 
-        # Find the PAMT entry for this file
+        # Find the PAMT entry using VANILLA PAMT (correct offsets)
         if game_file.lower() not in entry_cache:
-            entry = _find_pamt_entry(game_file, game_dir)
+            entry = _find_pamt_entry(game_file, vanilla_dir)
+            if entry is None:
+                # Fallback to game dir if vanilla doesn't have this directory
+                entry = _find_pamt_entry(game_file, game_dir)
             if entry:
                 entry_cache[game_file.lower()] = entry
 

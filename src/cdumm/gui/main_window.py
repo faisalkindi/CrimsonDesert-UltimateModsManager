@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
         self._worker_thread: QThread | None = None
         self._active_progress: ProgressDialog | None = None
         self._needs_apply = False
+        self._applied_state: dict[int, bool] = {}  # {mod_id: enabled} snapshot after last apply
         self._dispatcher = MainThreadDispatcher(parent=self)
 
         # Initialize managers if database is available
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_status_bar()
         self._refresh_all(update_statuses=False)
+        self._snapshot_applied_state()
         self.setAcceptDrops(True)
 
         # Crash detection — lock file
@@ -286,7 +288,7 @@ class MainWindow(QMainWindow):
         sb_layout.addSpacing(12)
 
         self._nav_buttons = []
-        for label, tooltip in [("Mods", "PAZ Mods"), ("ASI", "ASI Plugins"), ("Tools", "Tools & Settings")]:
+        for label, tooltip in [("PAZ Mods", "PAZ Archive Mods"), ("ASI Mods", "ASI Plugin Mods"), ("Tools", "Tools & Settings")]:
             btn = QPushButton(label)
             btn.setToolTip(tooltip)
             btn.setCheckable(True)
@@ -324,6 +326,28 @@ class MainWindow(QMainWindow):
                 deltas_dir=self._deltas_dir)
             self._mod_list_model.mod_toggled.connect(self._on_mod_toggled_via_checkbox)
 
+            class _CheckHeader(QHeaderView):
+                toggle_requested = Signal()
+                _label = "☐"
+
+                def __init__(self, orientation, parent=None):
+                    super().__init__(orientation, parent)
+                    self.setSectionsClickable(True)
+
+                def mousePressEvent(self, event):
+                    if self.logicalIndexAt(event.pos()) == 0:
+                        self.toggle_requested.emit()
+                        event.accept()
+                        return
+                    super().mousePressEvent(event)
+
+                def set_label(self, label: str):
+                    self._label = label
+                    if self.model():
+                        self.model().setHeaderData(
+                            0, Qt.Orientation.Horizontal, label)
+                    self.viewport().update()
+
             class _NumericSortProxy(QSortFilterProxyModel):
                 def lessThan(self, left, right):
                     col = left.column()
@@ -349,10 +373,12 @@ class MainWindow(QMainWindow):
             self._mod_table.setDragDropMode(QTableView.DragDropMode.InternalMove)
             self._mod_table.setDefaultDropAction(Qt.DropAction.MoveAction)
             self._mod_table.verticalHeader().setVisible(False)
-            header = self._mod_table.horizontalHeader()
-            header.setStretchLastSection(False)
-            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+            self._check_header = _CheckHeader(Qt.Orientation.Horizontal, self._mod_table)
+            self._check_header.toggle_requested.connect(self._on_toggle_all)
+            self._mod_table.setHorizontalHeader(self._check_header)
+            self._check_header.setStretchLastSection(False)
+            self._check_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            self._check_header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
             splitter.addWidget(self._mod_table)
         else:
             splitter.addWidget(QLabel("No database connected"))
@@ -435,11 +461,11 @@ class MainWindow(QMainWindow):
         main_h.addLayout(content_v)
 
         # Set initial nav
-        self._on_nav("Mods")
+        self._on_nav("PAZ Mods")
 
     def _on_nav(self, label: str) -> None:
         """Switch pages via sidebar navigation."""
-        page_map = {"Mods": 0, "ASI": 1, "Tools": 2}
+        page_map = {"PAZ Mods": 0, "ASI Mods": 1, "Tools": 2}
         idx = page_map.get(label, 0)
         self._pages.setCurrentIndex(idx)
         for nav_label, btn in self._nav_buttons:
@@ -562,6 +588,7 @@ class MainWindow(QMainWindow):
             self._conflict_view.update_conflicts(conflicts)
         logger.debug("_refresh_all: updating snapshot status")
         self._update_snapshot_status()
+        self._update_header_checkbox()
         logger.debug("_refresh_all: done")
 
     # --- Helper to run a worker with ProgressDialog ---
@@ -697,7 +724,7 @@ class MainWindow(QMainWindow):
                             + "\n".join(f"  {f}" for f in (updated or [af.name])))
                         if hasattr(self, "_asi_panel"):
                             self._asi_panel.refresh()
-                            self._on_nav("ASI")
+                            self._on_nav("ASI Mods")
                         return
 
         if AsiManager.contains_asi(path):
@@ -1047,7 +1074,7 @@ class MainWindow(QMainWindow):
                 logger.debug("Game version stamp failed (non-fatal): %s", e)
 
             self._refresh_all()
-            self._on_nav("Mods")
+            self._on_nav("PAZ Mods")
             self._on_apply()  # Auto-apply after import
 
     def _install_asi_mod(self, path: Path) -> None:
@@ -1070,7 +1097,7 @@ class MainWindow(QMainWindow):
             # Refresh ASI panel and switch to ASI tab
             if hasattr(self, "_asi_panel"):
                 self._asi_panel.refresh()
-                self._on_nav("ASI")
+                self._on_nav("ASI Mods")
         else:
             self.statusBar().showMessage("No ASI files found to install.", 5000)
             logger.warning("No ASI files found in %s", path)
@@ -1089,8 +1116,18 @@ class MainWindow(QMainWindow):
 
     def _on_apply_finished(self) -> None:
         self._needs_apply = False
-        self._refresh_all()
-        self.statusBar().showMessage("Mods applied successfully!", 10000)
+        # Remove mods that were pending uninstall (disabled before apply)
+        if hasattr(self, '_pending_removals') and self._pending_removals:
+            for mid in self._pending_removals:
+                self._mod_manager.remove_mod(mid)
+            count = len(self._pending_removals)
+            self._pending_removals = []
+            self._refresh_all()
+            self.statusBar().showMessage(f"Uninstalled {count} mod(s) successfully!", 10000)
+        else:
+            self._refresh_all()
+            self.statusBar().showMessage("Mods applied successfully!", 10000)
+        self._snapshot_applied_state()
 
     # --- Revert ---
     def _on_revert(self) -> None:
@@ -1114,8 +1151,14 @@ class MainWindow(QMainWindow):
                          on_finished=self._on_revert_finished)
 
     def _on_revert_finished(self) -> None:
+        # Untick all mods so the UI matches the vanilla state
+        if self._mod_manager:
+            for mod in self._mod_manager.list_mods():
+                if mod["enabled"]:
+                    self._mod_manager.set_enabled(mod["id"], False)
         self._refresh_all()
-        self.statusBar().showMessage("Reverted to vanilla! Game files restored.", 10000)
+        self._snapshot_applied_state()
+        self.statusBar().showMessage("Reverted to vanilla! All mods disabled.", 10000)
 
     # --- Remove mod ---
     def _on_remove_mod(self, mod_id: int | None = None) -> None:
@@ -1153,13 +1196,43 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            # Disable mods first so the apply engine knows to revert their files,
+            # then remove them from the database after apply completes.
             for mid, name in mods_to_remove:
-                self._mod_manager.remove_mod(mid)
-                logger.info("Uninstalled: %s", name)
+                self._mod_manager.set_enabled(mid, False)
+                logger.info("Disabled for uninstall: %s", name)
             self._refresh_all()
             self.statusBar().showMessage(
-                f"Uninstalled {len(mods_to_remove)} mod(s). Applying changes...", 10000)
+                f"Uninstalling {len(mods_to_remove)} mod(s)...", 10000)
+            # Store IDs for removal after apply finishes
+            self._pending_removals = [mid for mid, _ in mods_to_remove]
             self._on_apply()
+
+    def _update_header_checkbox(self) -> None:
+        """Sync the header checkbox label with current mod states."""
+        if not hasattr(self, '_check_header') or not self._mod_manager:
+            return
+        mods = self._mod_manager.list_mods()
+        if not mods or not any(m["enabled"] for m in mods):
+            label = "☐"
+        elif all(m["enabled"] for m in mods):
+            label = "☑"
+        else:
+            label = "◧"
+        self._check_header.set_label(label)
+
+    def _on_toggle_all(self) -> None:
+        """Toggle all mods on/off."""
+        if not self._mod_manager:
+            return
+        mods = self._mod_manager.list_mods()
+        if not mods:
+            return
+        any_enabled = any(m["enabled"] for m in mods)
+        for m in mods:
+            self._mod_manager.set_enabled(m["id"], not any_enabled)
+        self._refresh_all()
+        self._update_apply_reminder()
 
     # --- View details ---
     def _get_mod_at_proxy_row(self, proxy_row: int) -> dict | None:
@@ -1231,17 +1304,29 @@ class MainWindow(QMainWindow):
             return
         new_state = not mod["enabled"]
         self._mod_manager.set_enabled(mod["id"], new_state)
-        self._needs_apply = True
         self._refresh_all()
-        self._show_apply_reminder()
+        self._update_apply_reminder()
 
     def _on_mod_toggled_via_checkbox(self) -> None:
-        self._needs_apply = True
-        self._show_apply_reminder()
+        self._update_apply_reminder()
 
-    def _show_apply_reminder(self) -> None:
-        self.statusBar().showMessage(
-            "Mod list changed — click Apply to update game files.", 0)
+    def _snapshot_applied_state(self) -> None:
+        """Save current mod enabled states as the 'applied' baseline."""
+        if self._mod_manager:
+            self._applied_state = {m["id"]: m["enabled"] for m in self._mod_manager.list_mods()}
+
+    def _update_apply_reminder(self) -> None:
+        """Show or clear the apply reminder based on whether state differs from last apply."""
+        if not self._mod_manager:
+            return
+        current = {m["id"]: m["enabled"] for m in self._mod_manager.list_mods()}
+        if current != self._applied_state:
+            self._needs_apply = True
+            self.statusBar().showMessage(
+                "Mod list changed — click Apply to update game files.", 0)
+        else:
+            self._needs_apply = False
+            self.statusBar().clearMessage()
 
     def _on_rename_mod(self, mod: dict) -> None:
         from PySide6.QtWidgets import QInputDialog

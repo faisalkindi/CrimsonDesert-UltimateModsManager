@@ -7,15 +7,15 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 logger = logging.getLogger(__name__)
 
 DROP_DEFAULT = (
-    "border: 2px dashed #2E3440; border-radius: 8px; "
-    "padding: 14px; color: #788090; background: #090B0E; "
-    "font-size: 12px; font-weight: 500;"
+    "border: 3px dashed #2E3440; border-radius: 10px; "
+    "padding: 28px; color: #788090; background: #090B0E; "
+    "font-size: 16px; font-weight: 700;"
 )
 
 DROP_HOVER = (
-    "border: 2px dashed #D4A43C; border-radius: 8px; "
-    "padding: 14px; color: #D4A43C; background: #16140E; "
-    "font-size: 12px; font-weight: 500;"
+    "border: 3px dashed #D4A43C; border-radius: 10px; "
+    "padding: 28px; color: #D4A43C; background: #16140E; "
+    "font-size: 16px; font-weight: 700;"
 )
 
 
@@ -27,12 +27,12 @@ class ImportWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(60)
-        self.setMaximumHeight(70)
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(140)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        self._label = QLabel("Drop a mod to install or update  ·  zip, folder, .json, .bat, .py")
+        layout.setContentsMargins(8, 6, 8, 6)
+        self._label = QLabel("Drop a mod to install or update\nzip, folder, .json, .bat, .py")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(DROP_DEFAULT)
         layout.addWidget(self._label)

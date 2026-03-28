@@ -10,16 +10,15 @@ from cdumm.engine.mod_manager import ModManager
 
 logger = logging.getLogger(__name__)
 
-COLUMNS = ["", "#", "Name", "Author", "Version", "Type", "Status", "Files", "Import Date"]
+COLUMNS = ["☐", "#", "Name", "Author", "Version", "Status", "Files", "Import Date"]
 COL_ENABLED = 0
 COL_ORDER = 1
 COL_NAME = 2
 COL_AUTHOR = 3
 COL_VERSION = 4
-COL_TYPE = 5
-COL_STATUS = 6
-COL_FILES = 7
-COL_DATE = 8
+COL_STATUS = 5
+COL_FILES = 6
+COL_DATE = 7
 
 STATUS_COLORS = {
     "active": QColor(76, 175, 80),       # green
@@ -149,8 +148,6 @@ class ModListModel(QAbstractTableModel):
                 return mod.get("author") or ""
             if col == COL_VERSION:
                 return mod.get("version") or ""
-            if col == COL_TYPE:
-                return mod["mod_type"].upper()
             if col == COL_STATUS:
                 status = self._status_cache.get(mod["id"], "")
                 conflict = self._conflict_detector.get_mod_status(mod["id"])

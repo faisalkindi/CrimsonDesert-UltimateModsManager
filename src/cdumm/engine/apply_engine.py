@@ -271,6 +271,22 @@ class ApplyWorker(QObject):
                 if result_bytes is None:
                     continue
 
+                # Recompute PAMT hash after composing all mod deltas.
+                # Each mod's delta includes its own pre-computed hash (bytes 0-4),
+                # but when multiple mods modify the same PAMT the last hash wins
+                # and is wrong. Recompute from the composed content.
+                if file_path.endswith(".pamt") and len(result_bytes) >= 12:
+                    import struct
+                    from cdumm.archive.hashlittle import compute_pamt_hash
+                    correct_hash = compute_pamt_hash(result_bytes)
+                    stored_hash = struct.unpack_from("<I", result_bytes, 0)[0]
+                    if stored_hash != correct_hash:
+                        result_bytes = bytearray(result_bytes)
+                        struct.pack_into("<I", result_bytes, 0, correct_hash)
+                        result_bytes = bytes(result_bytes)
+                        logger.info("Recomputed PAMT hash for %s: %08X -> %08X",
+                                    file_path, stored_hash, correct_hash)
+
                 txn.stage_file(file_path, result_bytes)
                 if file_path.endswith(".pamt"):
                     modified_pamts[file_path.split("/")[0]] = result_bytes

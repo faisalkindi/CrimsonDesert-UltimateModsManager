@@ -26,6 +26,7 @@ class UpdateOverlay(QWidget):
             self.setGeometry(self.parent().rect())
         self.show()
         self.raise_()
+        self.setFocus()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -62,9 +63,8 @@ class UpdateOverlay(QWidget):
 
     def mousePressEvent(self, event) -> None:
         # Click anywhere to cancel
-        if event.button() == Qt.MouseButton.RightButton:
-            self.hide()
-            self.cancelled.emit()
+        self.hide()
+        self.cancelled.emit()
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
