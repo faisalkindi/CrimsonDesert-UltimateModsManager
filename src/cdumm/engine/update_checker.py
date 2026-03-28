@@ -83,14 +83,11 @@ def apply_update(new_exe: Path) -> None:
         return
 
     current_exe = Path(sys.executable)
-    bat = tempfile.NamedTemporaryFile(suffix=".bat", delete=False, mode="w",
-                                      dir=tempfile.gettempdir())
     current_dir = current_exe.parent
-    # Use PowerShell for reliable copy + relaunch
+
     ps1 = tempfile.NamedTemporaryFile(suffix=".ps1", delete=False, mode="w",
                                        dir=tempfile.gettempdir())
     ps1.write(f"""
-# Wait for the old process to fully exit
 $pid = {os.getpid()}
 Write-Host "Waiting for CDUMM (PID $pid) to exit..."
 while (Get-Process -Id $pid -ErrorAction SilentlyContinue) {{
@@ -98,20 +95,16 @@ while (Get-Process -Id $pid -ErrorAction SilentlyContinue) {{
 }}
 Start-Sleep -Seconds 2
 
-# Clean up old PyInstaller temp folders
 Get-ChildItem "$env:TEMP\\_MEI*" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-# Copy new exe over old
 Write-Host "Installing update..."
 Copy-Item -Path "{new_exe}" -Destination "{current_exe}" -Force
 Remove-Item -Path "{new_exe}" -Force -ErrorAction SilentlyContinue
 
-# Launch the updated app
 Start-Sleep -Seconds 1
 Write-Host "Launching updated CDUMM..."
 Start-Process -FilePath "{current_exe}" -WorkingDirectory "{current_dir}"
 
-# Self-delete
 Start-Sleep -Seconds 2
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """)
@@ -122,9 +115,6 @@ Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyConti
         ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", ps1.name],
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
-    bat.close()
-    logger.info("Launching updater: %s", bat.name)
-    os.startfile(bat.name)
     sys.exit(0)
 
 
