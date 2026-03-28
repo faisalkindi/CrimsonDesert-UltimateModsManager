@@ -172,14 +172,10 @@ class PapgtManager:
                 flag_counts[flags] = flag_counts.get(flags, 0) + 1
             default_flags = max(flag_counts, key=flag_counts.get)
 
-        # Build new PAPGT
+        # Build new PAPGT — insert new entries FIRST (game processes in order)
         result = bytearray(papgt[:entry_start])  # header (12 bytes)
 
-        # Write existing entries (unchanged)
-        for _, flags, name_offset, pamt_hash in entries:
-            result += struct.pack("<III", flags, name_offset, pamt_hash)
-
-        # Write new entries
+        # Write new entries first
         for i, dir_name in enumerate(new_dirs):
             pamt_data = modified_pamts.get(dir_name, b"")
             pamt_hash = compute_pamt_hash(pamt_data) if pamt_data else 0
@@ -187,12 +183,20 @@ class PapgtManager:
             logger.info("PAPGT: new entry for %s, hash=0x%08X, flags=0x%08X",
                         dir_name, pamt_hash, default_flags)
 
+        # Then write existing entries (unchanged)
+        for _, flags, name_offset, pamt_hash in entries:
+            result += struct.pack("<III", flags, name_offset, pamt_hash)
+
         # Write string table size field
         new_string_table_size = len(old_string_table) + len(new_string_additions)
         result += struct.pack("<I", new_string_table_size)
 
         # Write string table (existing + new)
         result += old_string_table + new_string_additions
+
+        # Update entry count at byte 8
+        new_entry_count = entry_count + len(new_dirs)
+        result[8] = new_entry_count
 
         return result
 

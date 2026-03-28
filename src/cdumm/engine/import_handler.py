@@ -245,12 +245,11 @@ def _detect_standalone_mod(
                                 dir_name, ratio, mod_paz_size, vanilla_paz_size)
 
         if is_standalone:
-            # Build the relative path prefix for remapping
-            rel_parts = d.relative_to(extracted_dir).parts
-            old_prefix = "/".join(rel_parts)
-            new_dir = _next_paz_directory(game_dir)
-            remap[old_prefix] = new_dir
-            logger.info("Remapping %s -> %s", old_prefix, new_dir)
+            # These mods are replacements for the existing directory, not additions.
+            # Their PAMT references the original PAZ files from that directory.
+            # Don't remap — let them overwrite vanilla as the mod author intended.
+            logger.info("Standalone mod for %s — will replace vanilla files (not remap)",
+                        dir_name)
 
     return remap if remap else None
 
