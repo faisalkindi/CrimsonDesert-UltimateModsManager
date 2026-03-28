@@ -19,6 +19,8 @@ import logging
 import shutil
 from pathlib import Path
 
+import struct
+
 from cdumm.archive.paz_parse import parse_pamt, PazEntry
 from cdumm.archive.paz_repack import repack_entry_bytes, _save_timestamps
 
@@ -122,6 +124,20 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
         # Track which PAZ files need copying
         paz_copies: dict[str, Path] = {}  # paz_file_path -> work_dir copy
 
+        # Also build a basename lookup for fallback matching
+        # PAMT flattens paths (e.g., "ui/minimaphudview2.css") while mods
+        # may use full filesystem paths ("ui/xml/gamemain/play/minimaphudview2.css")
+        basename_map: dict[str, PazEntry] = {}
+        for e in entries:
+            bname = e.path.rsplit("/", 1)[-1].lower()
+            # Only use basename if it's unique — ambiguous names skip this fallback
+            if bname in basename_map:
+                basename_map[bname] = None  # mark as ambiguous
+            else:
+                basename_map[bname] = e
+
+        pamt_updates: list[tuple[PazEntry, int]] = []  # (entry, new_comp_size)
+
         for inner_path, source_file in file_list:
             # Find matching PAMT entry
             entry = entry_map.get(inner_path.lower())
@@ -131,6 +147,10 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                     if key.endswith("/" + inner_path.lower()) or key == inner_path.lower():
                         entry = e
                         break
+            if entry is None:
+                # Fallback: match by filename only (PAMT flattens directory structure)
+                bname = inner_path.rsplit("/", 1)[-1].lower()
+                entry = basename_map.get(bname)
 
             if entry is None:
                 logger.warning("CB mod: no PAMT entry for '%s' in dir %s, skipping",
@@ -151,9 +171,10 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             # Read the modified file
             plaintext = source_file.read_bytes()
 
-            # Repack into the PAZ copy
+            # Repack into the PAZ copy (allow size change for larger/smaller files)
             try:
-                payload, _ = repack_entry_bytes(plaintext, entry)
+                payload, actual_comp = repack_entry_bytes(
+                    plaintext, entry, allow_size_change=True)
 
                 # Write payload into the PAZ copy at the correct offset
                 restore_ts = _save_timestamps(str(paz_dst))
@@ -162,16 +183,52 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                     fh.write(payload)
                 restore_ts()
 
-                logger.info("Repacked: %s (comp=%d, orig=%d, enc=%s)",
-                            inner_path, entry.comp_size, entry.orig_size, entry.encrypted)
+                # Track PAMT updates needed
+                if actual_comp != entry.comp_size:
+                    pamt_updates.append((entry, actual_comp))
+
+                logger.info("Repacked: %s (comp=%d->%d, orig=%d, enc=%s)",
+                            inner_path, entry.comp_size, actual_comp,
+                            entry.orig_size, entry.encrypted)
             except Exception as e:
                 logger.error("Failed to repack '%s': %s", inner_path, e, exc_info=True)
                 return None
 
-        # Also copy the PAMT so CDUMM can delta it
-        # (PAMT itself is unchanged — only PAZ content changes)
+        # Copy PAMT and apply any comp_size updates
         pamt_dst = work_dir / dir_name / "0.pamt"
         if not pamt_dst.exists():
+            pamt_dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pamt_path, pamt_dst)
 
+        if pamt_updates:
+            _update_pamt_entries(pamt_dst, pamt_updates)
+
     return work_dir
+
+
+def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int]]) -> None:
+    """Update comp_size fields in a PAMT file for entries whose size changed.
+
+    PAMT file records are 20 bytes: node_ref(4) + offset(4) + comp_size(4) + orig_size(4) + flags(4).
+    We find each record by matching (offset, old_comp_size, orig_size, flags) and patch comp_size.
+    """
+    data = bytearray(pamt_path.read_bytes())
+
+    for entry, new_comp_size in updates:
+        # Search for the 16-byte pattern: offset + comp_size + orig_size + flags
+        search = struct.pack('<IIII', entry.offset, entry.comp_size, entry.orig_size, entry.flags)
+        idx = data.find(search)
+        if idx < 0:
+            logger.warning("Could not find PAMT record for %s", entry.path)
+            continue
+        # comp_size is at idx + 4 (after the offset field)
+        struct.pack_into('<I', data, idx + 4, new_comp_size)
+        logger.info("Updated PAMT comp_size for %s: %d -> %d",
+                     entry.path, entry.comp_size, new_comp_size)
+
+    # Recompute PAMT hash
+    from cdumm.archive.hashlittle import compute_pamt_hash
+    new_hash = compute_pamt_hash(bytes(data))
+    struct.pack_into('<I', data, 0, new_hash)
+
+    pamt_path.write_bytes(bytes(data))

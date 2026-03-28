@@ -119,6 +119,38 @@ def _match_compressed_size(plaintext: bytes, target_comp_size: int,
         f"(best: {len(lz4.block.compress(padded, store_size=False))})")
 
 
+def _strip_whitespace_to_fit(plaintext: bytes, target_comp: int, target_orig: int) -> bytes | None:
+    """Strip trailing whitespace from text content to reduce compressed size.
+
+    Returns padded plaintext that compresses within target, or None if impossible.
+    """
+    # Strip trailing whitespace from each line
+    try:
+        text = plaintext.decode('utf-8', errors='replace')
+    except Exception:
+        return None
+
+    # Progressive stripping: first trailing spaces, then blank lines, then comments
+    stripped = '\r\n'.join(line.rstrip() for line in text.splitlines())
+    candidate = stripped.encode('utf-8')
+    padded = _pad_to_orig_size(candidate, target_orig)
+    comp = lz4.block.compress(padded, store_size=False)
+    if len(comp) <= target_comp:
+        return padded
+
+    # More aggressive: collapse multiple spaces/newlines
+    import re
+    stripped = re.sub(r'[ \t]+', ' ', stripped)
+    stripped = re.sub(r'\n{3,}', '\n\n', stripped)
+    candidate = stripped.encode('utf-8')
+    padded = _pad_to_orig_size(candidate, target_orig)
+    comp = lz4.block.compress(padded, store_size=False)
+    if len(comp) <= target_comp:
+        return padded
+
+    return None
+
+
 # ── Core repack ──────────────────────────────────────────────────────
 
 def repack_entry(modified_path: str, entry: PazEntry,
@@ -215,9 +247,18 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
             compressed = lz4.block.compress(padded, store_size=False)
             actual_comp_size = len(compressed)
             if actual_comp_size > entry.comp_size:
-                raise ValueError(
-                    f"Compressed size {actual_comp_size} exceeds budget "
-                    f"{entry.comp_size}. Cannot repack.")
+                # Try stripping trailing whitespace from text files to reduce size
+                ext = os.path.splitext(basename)[1].lower()
+                if ext in ('.css', '.html', '.thtml', '.xml', '.json', '.txt'):
+                    stripped = _strip_whitespace_to_fit(
+                        plaintext, entry.comp_size, entry.orig_size)
+                    if stripped is not None:
+                        compressed = lz4.block.compress(stripped, store_size=False)
+                        actual_comp_size = len(compressed)
+                if actual_comp_size > entry.comp_size:
+                    raise ValueError(
+                        f"Compressed size {actual_comp_size} exceeds budget "
+                        f"{entry.comp_size}. Cannot repack.")
             # Pad with original PAZ tail bytes (read from disk) to fill the slot
             if actual_comp_size < entry.comp_size:
                 # Read original trailing bytes from PAZ to preserve them
