@@ -164,6 +164,7 @@ If you find this useful, consider supporting development:
 - **Lazorr** — [Crimson Desert Unpacker](https://www.nexusmods.com/crimsondesert/mods/62) — PAZ parsing and repacking tools that CDUMM's archive pipeline is built on
 - **PhorgeForge** — [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113) — JSON byte-patch mod format, natively supported by CDUMM
 - **993499094** — [Crimson Desert QT Mod Manager](https://www.nexusmods.com/crimsondesert/mods/218) — Hard link deployment approach and modinfo.json format
+- **callmeslinkycd** — [Crimson Desert PATHC Tool](https://www.nexusmods.com/crimsondesert/mods/396) — PATHC texture index parser and repacker that CDUMM's DDS texture mod support is built on
 
 ## License
 

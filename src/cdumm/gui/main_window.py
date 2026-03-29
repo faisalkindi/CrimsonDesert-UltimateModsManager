@@ -27,6 +27,7 @@ from cdumm.engine.mod_manager import ModManager
 from cdumm.engine.snapshot_manager import SnapshotManager, SnapshotWorker
 from cdumm.gui.asi_panel import AsiPanel
 from cdumm.gui.conflict_view import ConflictView
+from cdumm.gui.changelog import PatchNotesDialog, CHANGELOG
 from cdumm.gui.import_widget import ImportWidget
 from cdumm.gui.mod_list_model import ModListModel
 from cdumm.gui.progress_dialog import ProgressDialog
@@ -235,6 +236,7 @@ class MainWindow(QMainWindow):
             self._purge_corrupted_backups()
             self._check_game_version_mismatches()
         self._check_bad_standalone_imports()
+        self._check_show_update_notes()
 
     def _check_one_time_reset(self) -> bool:
         """One-time reset when upgrading to v1.0.7+.
@@ -778,6 +780,7 @@ class MainWindow(QMainWindow):
             ("Export Mod List", self._on_export_list),
             ("Import Mod List", self._on_import_list),
             ("Test Mod Compatibility", self._on_test_mod),
+            ("Patch Notes", self._on_show_patch_notes),
             ("Report Bug", self._on_report_bug),
         ]:
             btn = QPushButton(label)
@@ -1965,6 +1968,26 @@ class MainWindow(QMainWindow):
             self, "Game Directory Changed",
             f"Game directory set to:\n{new_path}\n\n"
             "You should click 'Refresh Snapshot' to index the new installation.")
+
+    # --- Patch Notes ---
+    def _on_show_patch_notes(self) -> None:
+        dialog = PatchNotesDialog(self, latest_only=False)
+        dialog.exec()
+
+    def _check_show_update_notes(self) -> None:
+        """Show patch notes if the app was just updated."""
+        if not self._db:
+            return
+        config = Config(self._db)
+        last_seen = config.get("last_seen_version") or ""
+        from cdumm import __version__
+        if last_seen != __version__ and CHANGELOG:
+            config.set("last_seen_version", __version__)
+            QTimer.singleShot(500, self._show_update_notes)
+
+    def _show_update_notes(self) -> None:
+        dialog = PatchNotesDialog(self, latest_only=True)
+        dialog.exec()
 
     # --- Bug Report ---
     def _on_report_bug(self) -> None:

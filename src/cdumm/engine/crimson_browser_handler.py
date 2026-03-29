@@ -238,6 +238,10 @@ def _resolve_files_to_directories(
     For CB mods that use virtual paths (character/hair.xml) without numbered
     directory prefixes, we search all PAMTs by basename to find the match.
 
+    When the same file exists in multiple PAZ directories (e.g., 0009 and 0039),
+    we prefer the highest-numbered directory — game updates add new directories
+    with correct slot sizes for the latest version.
+
     Returns {dir_num: [(inner_path, source_file), ...]}
     """
     result: dict[str, list[tuple[str, Path]]] = {}
@@ -250,7 +254,10 @@ def _resolve_files_to_directories(
         bname = inner_path.rsplit("/", 1)[-1].lower()
         by_basename.setdefault(bname, []).append((inner_path, source))
 
-    # Search all PAMTs
+    # Collect ALL matches across all directories, keyed by basename
+    # {basename: [(dir_name, inner_path, source_file), ...]}
+    all_matches: dict[str, list[tuple[str, str, Path]]] = {}
+
     for d in sorted(game_dir.iterdir()):
         if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
             continue
@@ -263,14 +270,23 @@ def _resolve_files_to_directories(
                 bname = e.path.rsplit("/", 1)[-1].lower()
                 if bname in by_basename:
                     for inner_path, source in by_basename[bname]:
-                        result.setdefault(d.name, []).append((inner_path, source))
-                        logger.info("CB resolved %s -> dir %s (matched %s)",
-                                    inner_path, d.name, e.path)
-                    del by_basename[bname]
-            if not by_basename:
-                break
+                        all_matches.setdefault(bname, []).append(
+                            (d.name, inner_path, source))
         except Exception:
             continue
+
+    # For each basename, pick the highest-numbered directory
+    for bname, candidates in all_matches.items():
+        # Sort by directory number descending, pick highest
+        candidates.sort(key=lambda x: int(x[0]), reverse=True)
+        best_dir = candidates[0][0]
+        for dir_name, inner_path, source in candidates:
+            if dir_name == best_dir:
+                result.setdefault(dir_name, []).append((inner_path, source))
+                logger.info("CB resolved %s -> dir %s (preferred highest of %s)",
+                            inner_path, dir_name,
+                            sorted(set(c[0] for c in candidates)))
+        del by_basename[bname]
 
     for bname, remaining in by_basename.items():
         for inner_path, _ in remaining:
