@@ -280,10 +280,16 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
             payload = compressed
     else:
         if len(plaintext) > entry.comp_size:
-            raise ValueError(
-                f"Modified file ({len(plaintext)} bytes) exceeds budget "
-                f"({entry.comp_size} bytes)")
-        payload = plaintext + b'\x00' * (entry.comp_size - len(plaintext))
+            if allow_size_change:
+                # Uncompressed file larger than slot — caller must append to PAZ
+                actual_comp_size = len(plaintext)
+                payload = plaintext
+            else:
+                raise ValueError(
+                    f"Modified file ({len(plaintext)} bytes) exceeds budget "
+                    f"({entry.comp_size} bytes)")
+        else:
+            payload = plaintext + b'\x00' * (entry.comp_size - len(plaintext))
 
     if entry.encrypted:
         payload = encrypt(payload, basename)

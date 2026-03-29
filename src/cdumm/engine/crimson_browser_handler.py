@@ -79,19 +79,28 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     # Structure: files/NNNN/path/to/file.ext -> maps to directory NNNN
     files_by_dir: dict[str, list[tuple[str, Path]]] = {}
 
+    # Files without numbered directory prefix need PAMT lookup
+    unresolved: list[tuple[str, Path]] = []
+
     for f in files_dir.rglob("*"):
         if not f.is_file():
             continue
         rel = f.relative_to(files_dir)
         parts = rel.parts
-        if len(parts) < 2 or not parts[0].isdigit():
-            logger.warning("CB mod: skipping file with unexpected path: %s", rel)
-            continue
+        if len(parts) >= 2 and parts[0].isdigit():
+            dir_num = parts[0]
+            inner_path = "/".join(parts[1:])
+            files_by_dir.setdefault(dir_num, []).append((inner_path, f))
+        else:
+            # No numbered dir — use full relative path for PAMT lookup
+            inner_path = "/".join(parts)
+            unresolved.append((inner_path, f))
 
-        dir_num = parts[0]
-        # The file path within the PAZ archive (everything after the dir number)
-        inner_path = "/".join(parts[1:])
-        files_by_dir.setdefault(dir_num, []).append((inner_path, f))
+    # Resolve unresolved files by searching PAMTs for matching filenames
+    if unresolved:
+        dir_map = _resolve_files_to_directories(unresolved, game_dir)
+        for dir_num, file_list in dir_map.items():
+            files_by_dir.setdefault(dir_num, []).extend(file_list)
 
     if not files_by_dir:
         logger.error("CB mod: no files found in %s", files_dir)
@@ -219,6 +228,55 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             _update_pamt_entries(pamt_dst, pamt_updates)
 
     return work_dir
+
+
+def _resolve_files_to_directories(
+    files: list[tuple[str, Path]], game_dir: Path
+) -> dict[str, list[tuple[str, Path]]]:
+    """Find which PAZ directory each file belongs to by searching all PAMTs.
+
+    For CB mods that use virtual paths (character/hair.xml) without numbered
+    directory prefixes, we search all PAMTs by basename to find the match.
+
+    Returns {dir_num: [(inner_path, source_file), ...]}
+    """
+    result: dict[str, list[tuple[str, Path]]] = {}
+    if not files:
+        return result
+
+    # Build a lookup: basename -> [(inner_path, source_file)]
+    by_basename: dict[str, list[tuple[str, Path]]] = {}
+    for inner_path, source in files:
+        bname = inner_path.rsplit("/", 1)[-1].lower()
+        by_basename.setdefault(bname, []).append((inner_path, source))
+
+    # Search all PAMTs
+    for d in sorted(game_dir.iterdir()):
+        if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+            continue
+        pamt = d / "0.pamt"
+        if not pamt.exists():
+            continue
+        try:
+            entries = parse_pamt(str(pamt), paz_dir=str(d))
+            for e in entries:
+                bname = e.path.rsplit("/", 1)[-1].lower()
+                if bname in by_basename:
+                    for inner_path, source in by_basename[bname]:
+                        result.setdefault(d.name, []).append((inner_path, source))
+                        logger.info("CB resolved %s -> dir %s (matched %s)",
+                                    inner_path, d.name, e.path)
+                    del by_basename[bname]
+            if not by_basename:
+                break
+        except Exception:
+            continue
+
+    for bname, remaining in by_basename.items():
+        for inner_path, _ in remaining:
+            logger.warning("CB mod: could not resolve %s to any PAZ directory", inner_path)
+
+    return result
 
 
 def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int, int | None]]) -> None:
