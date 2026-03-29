@@ -222,6 +222,13 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     "Please verify game files through Steam, then restart the app.", 0)
             return
+        # Check if snapshot is stale (e.g., after Steam verify) — silently refresh
+        if self._game_dir and self._snapshot and self._snapshot.has_snapshot():
+            if self._snapshot_stale():
+                logger.info("Snapshot stale — silently refreshing")
+                self.statusBar().showMessage("Game files changed — refreshing snapshot...", 10000)
+                self._on_refresh_snapshot()
+                return
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
         if self._snapshot and self._snapshot.has_snapshot() and self._game_dir:
