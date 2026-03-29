@@ -13,6 +13,7 @@ PAZ_DIRS = [f"{i:04d}" for i in range(100)]
 PAZ_PATTERN = "*.paz"
 PAMT_FILE = "0.pamt"
 PAPGT_FILE = "meta/0.papgt"
+PATHC_FILE = "meta/0.pathc"
 
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks for hashing
 
@@ -91,6 +92,11 @@ class SnapshotWorker(QObject):
         papgt = self._game_dir / PAPGT_FILE
         if papgt.exists():
             files_to_hash.append((papgt, PAPGT_FILE))
+
+        # PATHC file (texture index)
+        pathc = self._game_dir / PATHC_FILE
+        if pathc.exists():
+            files_to_hash.append((pathc, PATHC_FILE))
 
         total = len(files_to_hash)
         if total == 0:

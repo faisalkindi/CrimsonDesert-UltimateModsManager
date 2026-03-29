@@ -60,9 +60,10 @@ import re
 
 from cdumm.engine.crimson_browser_handler import detect_crimson_browser, convert_to_paz_mod
 from cdumm.engine.json_patch_handler import detect_json_patch, convert_json_patch_to_paz
+from cdumm.engine.texture_mod_handler import detect_texture_mod, convert_texture_mod
 
-# Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt
-_GAME_FILE_RE = re.compile(r'^(\d{4}/\d+\.(?:paz|pamt)|meta/\d+\.papgt)$')
+# Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt, meta/0.pathc
+_GAME_FILE_RE = re.compile(r'^(\d{4}/\d+\.(?:paz|pamt)|meta/\d+\.(?:papgt|pathc))$')
 
 
 def _verify_and_fix_pamt_crc(pamt_bytes: bytes, rel_path: str) -> bytes:
@@ -261,16 +262,18 @@ def _detect_standalone_mod(
         vanilla_pamt_size = backup_pamt.stat().st_size if backup_pamt.exists() else game_pamt.stat().st_size
         vanilla_paz_size = backup_paz.stat().st_size if backup_paz.exists() else (game_paz.stat().st_size if game_paz.exists() else 0)
 
-        # A standalone mod has completely different content (different PAMT size
-        # or drastically different PAZ size). Mods that are modified copies of
-        # vanilla (same PAMT size, same PAZ size) are regular patches.
-        if mod_pamt_size == vanilla_pamt_size and mod_paz_size == vanilla_paz_size:
+        # A standalone mod has completely different content — different PAMT size
+        # indicates entirely different file entries (truly a new directory).
+        # Same PAMT size means same file entries, just modified content —
+        # this is a regular patch even if PAZ size changed (file appending).
+        if mod_pamt_size == vanilla_pamt_size:
             is_standalone = False
-            logger.info("Modified vanilla: %s (same PAMT+PAZ size, treating as patch)",
-                         dir_name)
+            logger.info("Modified vanilla: %s (same PAMT size, treating as patch, "
+                         "PAZ %d vs %d)", dir_name, mod_paz_size, vanilla_paz_size)
         else:
             is_standalone = True
-            logger.info("Standalone: %s ships own PAMT+PAZ (mod_pamt=%d vs %d, mod_paz=%d vs %d)",
+            logger.info("Standalone: %s has different PAMT (mod=%d vs vanilla=%d, "
+                         "PAZ %d vs %d)",
                          dir_name, mod_pamt_size, vanilla_pamt_size,
                          mod_paz_size, vanilla_paz_size)
 
@@ -365,6 +368,21 @@ def import_from_zip(
                     existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
                 return result
 
+        # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
+        tex_info = detect_texture_mod(tmp_path)
+        if tex_info is not None:
+            tex_work = Path(tmp) / "_tex_converted"
+            converted = convert_texture_mod(tex_info, game_dir, tex_work)
+            if converted is not None:
+                tex_name = tex_info.get("name", mod_name)
+                modinfo = _read_modinfo(tmp_path)
+                if modinfo and modinfo.get("name"):
+                    tex_name = modinfo["name"]
+                result = _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, tex_name,
+                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+                return result
+
         # Check if zip contains a script instead of game files
         scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
         if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
@@ -440,6 +458,21 @@ def import_from_folder(
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, jp_name,
                     existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+
+    # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
+    tex_info = detect_texture_mod(folder_path)
+    if tex_info is not None:
+        with tempfile.TemporaryDirectory() as tex_tmp:
+            tex_work = Path(tex_tmp) / "_tex_converted"
+            converted = convert_texture_mod(tex_info, game_dir, tex_work)
+            if converted is not None:
+                tex_name = tex_info.get("name", mod_name)
+                modinfo = _read_modinfo(folder_path)
+                if modinfo and modinfo.get("name"):
+                    tex_name = modinfo["name"]
+                return _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, tex_name,
+                    existing_mod_id=existing_mod_id, modinfo=modinfo)
 
     # Check if folder contains scripts instead of game files
     scripts = list(folder_path.glob("*.bat")) + list(folder_path.glob("*.py"))
