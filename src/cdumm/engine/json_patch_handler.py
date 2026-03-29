@@ -241,22 +241,48 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
             shutil.copy2(pamt_src, pamt_dst)
 
         if (actual_comp != entry.comp_size or new_offset != entry.offset) and pamt_dst.exists():
-            _update_pamt_record(pamt_dst, entry, actual_comp, new_offset)
-            logger.info("Updated PAMT for %s: comp %d->%d, offset %d->%d",
+            # If we appended to PAZ, pass the new file size so PAMT PAZ table is updated
+            new_paz_size = None
+            if new_offset != entry.offset:
+                new_paz_size = new_offset + actual_comp  # end of appended data = new PAZ size
+            _update_pamt_record(pamt_dst, entry, actual_comp, new_offset,
+                                new_paz_size=new_paz_size)
+            logger.info("Updated PAMT for %s: comp %d->%d, offset %d->%d%s",
                         game_file, entry.comp_size, actual_comp,
-                        entry.offset, new_offset)
+                        entry.offset, new_offset,
+                        f", paz_size={new_paz_size}" if new_paz_size else "")
 
     return work_dir
 
 
 def _update_pamt_record(pamt_path: Path, entry: PazEntry,
-                        new_comp_size: int, new_offset: int) -> None:
+                        new_comp_size: int, new_offset: int,
+                        new_paz_size: int | None = None) -> None:
     """Update a file record's comp_size and/or offset in a PAMT binary file.
 
     PAMT file records are 20 bytes: node_ref(4) + offset(4) + comp_size(4) + orig_size(4) + flags(4).
-    We find the record matching entry's (offset, comp_size, orig_size, flags) and patch fields.
+    Also updates the PAZ size table if new_paz_size is provided.
     """
     data = bytearray(pamt_path.read_bytes())
+
+    # Update PAZ size table if the PAZ file grew (data appended to end)
+    if new_paz_size is not None:
+        paz_index = entry.paz_index
+        paz_count = struct.unpack_from('<I', data, 4)[0]
+        if paz_index < paz_count:
+            # PAZ table starts at offset 16: [hash(4) + size(4)] per entry,
+            # with 4-byte separator between entries (except after the last)
+            table_off = 16
+            for i in range(paz_index):
+                table_off += 8  # hash + size
+                if i < paz_count - 1:
+                    table_off += 4  # separator
+            # table_off now points to hash(4) + size(4) for this PAZ
+            size_off = table_off + 4  # skip hash, point to size
+            old_size = struct.unpack_from('<I', data, size_off)[0]
+            struct.pack_into('<I', data, size_off, new_paz_size)
+            logger.debug("Updated PAMT PAZ[%d] size: %d -> %d",
+                         paz_index, old_size, new_paz_size)
 
     # Search for the 16-byte pattern: offset + comp_size + orig_size + flags
     search = struct.pack('<IIII', entry.offset, entry.comp_size, entry.orig_size, entry.flags)
@@ -267,12 +293,9 @@ def _update_pamt_record(pamt_path: Path, entry: PazEntry,
         idx = data.find(search, pos)
         if idx < 0:
             break
-        # The record starts 4 bytes before (node_ref precedes offset)
         record_start = idx - 4
         if record_start >= 0:
-            # Update offset (at idx, which is record_start + 4)
             struct.pack_into('<I', data, idx, new_offset)
-            # Update comp_size (at idx + 4)
             struct.pack_into('<I', data, idx + 4, new_comp_size)
             found = True
             logger.debug("Patched PAMT record at byte %d: offset %d->%d, comp %d->%d",
