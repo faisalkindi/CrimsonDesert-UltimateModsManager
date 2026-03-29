@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 ASI_SUFFIX = ".asi"
 DISABLED_SUFFIX = ".asi.disabled"
-ASI_LOADER = "winmm.dll"
+ASI_LOADER_NAMES = {"winmm.dll", "version.dll", "dinput8.dll", "dsound.dll"}
 
 
 @dataclass
@@ -62,8 +62,8 @@ class AsiManager:
         return plugins
 
     def has_loader(self) -> bool:
-        """Check if Ultimate ASI Loader (winmm.dll) is present."""
-        return (self._bin64 / ASI_LOADER).exists()
+        """Check if Ultimate ASI Loader is present (any known proxy DLL name)."""
+        return any((self._bin64 / name).exists() for name in ASI_LOADER_NAMES)
 
     def enable(self, plugin: AsiPlugin) -> None:
         """Enable a disabled ASI plugin."""
@@ -94,8 +94,6 @@ class AsiManager:
         installed: list[str] = []
         self._bin64.mkdir(parents=True, exist_ok=True)
 
-        ASI_LOADERS = {"winmm.dll", "version.dll", "dinput8.dll", "dsound.dll"}
-
         if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
             # Single .asi file — also grab all companion files from same dir
             shutil.copy2(source, self._bin64 / source.name)
@@ -106,7 +104,7 @@ class AsiManager:
                 if f.suffix.lower() == ".ini":
                     shutil.copy2(f, self._bin64 / f.name)
                     installed.append(f.name)
-                elif f.name.lower() in ASI_LOADERS:
+                elif f.name.lower() in ASI_LOADER_NAMES:
                     if not (self._bin64 / f.name).exists():
                         shutil.copy2(f, self._bin64 / f.name)
                         installed.append(f.name)
@@ -117,7 +115,7 @@ class AsiManager:
                 if f.suffix.lower() in (ASI_SUFFIX, ".ini"):
                     shutil.copy2(f, self._bin64 / f.name)
                     installed.append(f.name)
-                elif f.name.lower() in ASI_LOADERS:
+                elif f.name.lower() in ASI_LOADER_NAMES:
                     if not (self._bin64 / f.name).exists():
                         shutil.copy2(f, self._bin64 / f.name)
                         installed.append(f.name)

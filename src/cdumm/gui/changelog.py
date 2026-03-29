@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "1.2.1",
+        "date": "2026-03-30",
+        "notes": [
+            "Fixed stale vanilla backups causing 'nothing to apply' when re-importing mods",
+            "Vanilla backups are now refreshed automatically after Steam verify + rescan",
+            "ASI Loader detection now recognizes version.dll, dinput8.dll, dsound.dll (not just winmm.dll)",
+        ],
+    },
+    {
         "version": "1.2.0",
         "date": "2026-03-29",
         "notes": [
