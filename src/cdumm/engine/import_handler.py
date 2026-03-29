@@ -244,16 +244,22 @@ def _detect_standalone_mod(
         if not mod_pamt.exists() or not mod_paz.exists():
             continue
 
-        # Compare mod's files against vanilla
-        vanilla_pamt = game_dir / dir_name / "0.pamt"
-        vanilla_paz = game_dir / dir_name / "0.paz"
-        if not vanilla_pamt.exists():
+        # Compare mod's files against vanilla (check both game dir and vanilla backup)
+        vanilla_backup_dir = game_dir / "CDMods" / "vanilla"
+        game_pamt = game_dir / dir_name / "0.pamt"
+        game_paz = game_dir / dir_name / "0.paz"
+        backup_pamt = vanilla_backup_dir / dir_name / "0.pamt"
+        backup_paz = vanilla_backup_dir / dir_name / "0.paz"
+
+        if not game_pamt.exists():
             continue  # no vanilla dir = truly new, handled elsewhere
 
         mod_pamt_size = mod_pamt.stat().st_size
-        vanilla_pamt_size = vanilla_pamt.stat().st_size
         mod_paz_size = mod_paz.stat().st_size
-        vanilla_paz_size = vanilla_paz.stat().st_size if vanilla_paz.exists() else 0
+
+        # Check against vanilla backup first (accurate), then game dir (may be modded)
+        vanilla_pamt_size = backup_pamt.stat().st_size if backup_pamt.exists() else game_pamt.stat().st_size
+        vanilla_paz_size = backup_paz.stat().st_size if backup_paz.exists() else (game_paz.stat().st_size if game_paz.exists() else 0)
 
         # A standalone mod has completely different content (different PAMT size
         # or drastically different PAZ size). Mods that are modified copies of
