@@ -205,10 +205,23 @@ class MainWindow(QMainWindow):
                 return  # one-time reset in progress
             if self._check_game_updated():
                 return  # game updated — reset in progress, skip other checks
-        # Auto-take snapshot if missing and game dir is set
+        # If no snapshot exists, ask user to verify through Steam first
         if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
-            self._on_refresh_snapshot()
-            return  # snapshot in progress, other checks will run on next launch
+            reply = QMessageBox.question(
+                self, "Game Files Scan Needed",
+                "Before using the mod manager, your game files need to be scanned.\n\n"
+                "For best results, please verify your game files through Steam first:\n"
+                "  Steam → Right-click Crimson Desert → Properties\n"
+                "  → Installed Files → Verify integrity of game files\n\n"
+                "Have you verified (or is this a fresh install)?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._on_refresh_snapshot()
+            else:
+                self.statusBar().showMessage(
+                    "Please verify game files through Steam, then restart the app.", 0)
+            return
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
         if self._snapshot and self._snapshot.has_snapshot() and self._game_dir:
@@ -287,21 +300,11 @@ class MainWindow(QMainWindow):
             if stored is None:
                 # First time with this feature — save fingerprint.
                 config.set("game_version_fingerprint", current)
-            elif stored != current:
-                logger.info("Game fingerprint changed: %s -> %s", stored, current)
-                game_changed = True
-
-            # Even if fingerprint matches, check if snapshot is stale
-            # (catches Steam verify, manual file changes, etc.)
-            if not game_changed:
-                has_snapshot = self._db.connection.execute(
-                    "SELECT COUNT(*) FROM snapshots").fetchone()[0] > 0
-                if has_snapshot and self._snapshot_stale():
-                    logger.info("Snapshot stale — game files changed (Steam verify?)")
-                    game_changed = True
-
-            if not game_changed:
                 return False
+            elif stored == current:
+                return False
+            else:
+                logger.info("Game fingerprint changed: %s -> %s", stored, current)
             QMessageBox.information(
                 self, "Game Files Changed",
                 "Your game files have changed (game update or Steam verify).\n\n"
@@ -320,11 +323,21 @@ class MainWindow(QMainWindow):
     def _snapshot_stale(self) -> bool:
         """Check if stored snapshot hashes match actual game files.
 
-        Checks critical files first (PAPGT, all PAMT files), then samples others.
+        Skips files modified by enabled mods (those are expected to differ).
+        Checks PAMT files and samples PAZ files from unmodded directories.
         """
         try:
             from cdumm.engine.snapshot_manager import hash_file
             import os
+
+            # Get files that enabled mods modify — these are expected to differ
+            modded = self._db.connection.execute(
+                "SELECT DISTINCT md.file_path FROM mod_deltas md "
+                "JOIN mods m ON md.mod_id = m.id WHERE m.enabled = 1"
+            ).fetchall()
+            modded_set = {row[0] for row in modded}
+            # Also skip PAPGT since we rebuild it
+            modded_set.add("meta/0.papgt")
 
             cursor = self._db.connection.execute(
                 "SELECT file_path, file_hash FROM snapshots ORDER BY file_path")
@@ -332,18 +345,22 @@ class MainWindow(QMainWindow):
             if not all_rows:
                 return False
 
-            # Priority files: PAPGT and all PAMT files (most likely to change)
+            # Priority: PAMT files, then sample PAZ files
             priority = []
             others = []
             for row in all_rows:
-                if row[0].endswith(".papgt") or row[0].endswith(".pamt"):
+                if row[0] in modded_set:
+                    continue  # skip mod-modified files
+                if row[0].endswith(".pamt"):
                     priority.append(row)
                 else:
                     others.append(row)
 
-            # Sample some PAZ files too
             step = max(1, len(others) // 10)
             to_check = priority + others[::step]
+
+            if not to_check:
+                return False  # all files are modded, can't tell
 
             for file_path, snap_hash in to_check:
                 game_file = self._game_dir / file_path.replace("/", os.sep)
@@ -364,19 +381,46 @@ class MainWindow(QMainWindow):
         import shutil
         from cdumm.storage.config import Config
 
-        # Clear vanilla backups
+        # Step 1: Restore vanilla files BEFORE wiping backups
+        # This ensures the snapshot is taken against clean game files
+        if self._vanilla_dir.exists():
+            for backup_file in self._vanilla_dir.rglob("*"):
+                if not backup_file.is_file() or backup_file.suffix == ".vranges":
+                    continue
+                rel = backup_file.relative_to(self._vanilla_dir)
+                game_file = self._game_dir / rel
+                try:
+                    game_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup_file, game_file)
+                except Exception:
+                    pass
+            logger.info("Restored vanilla files from backup")
+
+        # Step 2: Clean up orphan mod directories (0036+)
+        for d in self._game_dir.iterdir():
+            if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                continue
+            if int(d.name) >= 36:
+                shutil.rmtree(d, ignore_errors=True)
+                logger.info("Removed orphan mod directory: %s", d.name)
+
+        # Step 3: Restore vanilla PAPGT
+        vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
+        game_papgt = self._game_dir / "meta" / "0.papgt"
+        if vanilla_papgt.exists():
+            shutil.copy2(vanilla_papgt, game_papgt)
+            logger.info("Restored vanilla PAPGT")
+
+        # Step 4: NOW wipe backups and deltas
         if self._vanilla_dir.exists():
             shutil.rmtree(self._vanilla_dir, ignore_errors=True)
             logger.info("Cleared vanilla backups")
-
-        # Clear deltas
         if self._deltas_dir.exists():
             shutil.rmtree(self._deltas_dir, ignore_errors=True)
             self._deltas_dir.mkdir(parents=True, exist_ok=True)
             logger.info("Cleared mod deltas")
 
-        # Clear deltas and snapshots but KEEP mod entries (disabled, no data)
-        # so the user can see which mods they had and re-import them
+        # Step 5: Clear database but KEEP mod entries (disabled, no data)
         self._db.connection.execute("DELETE FROM mod_deltas")
         self._db.connection.execute("DELETE FROM snapshots")
         self._db.connection.execute("UPDATE mods SET enabled = 0")
@@ -386,23 +430,6 @@ class MainWindow(QMainWindow):
             pass
         self._db.connection.commit()
         logger.info("Cleared deltas/snapshots, disabled all mods (kept mod list)")
-
-        # Clean up orphan mod directories (0036+) from game folder
-        # These are leftover from previous mod installs and may crash the game
-        for d in self._game_dir.iterdir():
-            if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
-                continue
-            dir_num = int(d.name)
-            if dir_num >= 36:
-                shutil.rmtree(d, ignore_errors=True)
-                logger.info("Removed orphan mod directory: %s", d.name)
-
-        # Restore vanilla PAPGT if we have a backup
-        vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
-        game_papgt = self._game_dir / "meta" / "0.papgt"
-        if vanilla_papgt.exists():
-            shutil.copy2(vanilla_papgt, game_papgt)
-            logger.info("Restored vanilla PAPGT")
 
         # Save new fingerprint
         config = Config(self._db)
@@ -841,7 +868,7 @@ class MainWindow(QMainWindow):
             self._snapshot_label.setText(f"Snapshot: {count} files")
             self._snapshot_label.setStyleSheet("color: green;")
         else:
-            self._snapshot_label.setText("Snapshot: Missing")
+            self._snapshot_label.setText("Snapshot: Not scanned yet")
             self._snapshot_label.setStyleSheet("color: #FF9800;")
 
     def _sync_db(self) -> None:
@@ -988,8 +1015,8 @@ class MainWindow(QMainWindow):
         # since they add new directories rather than modifying existing files.
         # All other PAZ mods require a snapshot for delta generation.
         if not _is_standalone_paz_mod(path) and (not self._snapshot or not self._snapshot.has_snapshot()):
-            self.statusBar().showMessage("Scanning game files first — please drop the mod again after.", 10000)
-            self._on_refresh_snapshot()
+            self.statusBar().showMessage(
+                "Game files not scanned yet. Go to Tools → Rescan Game Files first.", 10000)
             return
 
         # Check if this is an update to an existing mod (before routing to script/PAZ)
@@ -1307,19 +1334,28 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Import error: {result.error}", 10000)
             logger.error("Import error: %s", result.error)
         else:
-            # Show health check dialog if issues were found
+            # Show health check dialog if critical issues were found
             health_issues = getattr(result, 'health_issues', [])
-            if health_issues:
+            critical = [i for i in health_issues if i.severity == "critical"]
+            if critical:
                 from cdumm.gui.health_check_dialog import HealthCheckDialog
                 name = getattr(result, 'name', 'Unknown')
-                mod_files = {}  # files already imported at this point
+                mod_files = {}
                 dialog = HealthCheckDialog(health_issues, name, mod_files, self)
-                dialog.exec()
+                if dialog.exec() == 0:  # rejected / cancelled
+                    # Remove the just-imported mod since user cancelled
+                    row = self._db.connection.execute("SELECT MAX(id) FROM mods").fetchone()
+                    if row and row[0]:
+                        self._mod_manager.remove_mod(row[0])
+                        logger.info("Removed mod after health check cancel")
+                    self._refresh_all()
+                    self.statusBar().showMessage("Import cancelled due to health issues.", 10000)
+                    return
 
             name = getattr(result, 'name', 'Unknown')
             files = getattr(result, 'changed_files', [])
             self.statusBar().showMessage(
-                f"Imported PAZ mod: {name} ({len(files)} files changed)", 10000
+                f"Imported: {name} ({len(files)} files). Click Apply when ready.", 10000
             )
             logger.info("Import success: %s (%d files)", name, len(files))
 
@@ -1328,7 +1364,6 @@ class MainWindow(QMainWindow):
                 from cdumm.engine.version_detector import detect_game_version
                 ver = detect_game_version(self._game_dir)
                 if ver:
-                    # Find the just-imported mod (highest id)
                     row = self._db.connection.execute("SELECT MAX(id) FROM mods").fetchone()
                     if row and row[0]:
                         self._db.connection.execute(
@@ -1357,7 +1392,7 @@ class MainWindow(QMainWindow):
 
             self._refresh_all()
             self._on_nav("PAZ Mods")
-            self._on_apply()  # Auto-apply after import
+            self._update_apply_reminder()
 
     def _install_asi_mod(self, path: Path) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
