@@ -196,8 +196,11 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                     restore_ts()
 
                 # Track PAMT updates needed
+                new_paz_size = None
+                if new_offset != entry.offset:
+                    new_paz_size = new_offset + actual_comp
                 if actual_comp != entry.comp_size or new_offset != entry.offset:
-                    pamt_updates.append((entry, actual_comp, new_offset))
+                    pamt_updates.append((entry, actual_comp, new_offset, new_paz_size))
 
                 logger.info("Repacked: %s (comp=%d->%d, orig=%d, enc=%s)",
                             inner_path, entry.comp_size, actual_comp,
@@ -218,20 +221,33 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     return work_dir
 
 
-def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int]]) -> None:
-    """Update comp_size and offset fields in a PAMT file.
+def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int, int | None]]) -> None:
+    """Update comp_size, offset, and PAZ size fields in a PAMT file.
 
     PAMT file records are 20 bytes: node_ref(4) + offset(4) + comp_size(4) + orig_size(4) + flags(4).
     """
     data = bytearray(pamt_path.read_bytes())
 
-    for entry, new_comp_size, new_offset in updates:
+    for entry, new_comp_size, new_offset, new_paz_size in updates:
+        # Update PAZ size table if PAZ grew
+        if new_paz_size is not None:
+            paz_index = entry.paz_index
+            paz_count = struct.unpack_from('<I', data, 4)[0]
+            if paz_index < paz_count:
+                table_off = 16
+                for i in range(paz_index):
+                    table_off += 8
+                    if i < paz_count - 1:
+                        table_off += 4
+                size_off = table_off + 4
+                struct.pack_into('<I', data, size_off, new_paz_size)
+                logger.info("Updated PAMT PAZ[%d] size to %d", paz_index, new_paz_size)
+
         search = struct.pack('<IIII', entry.offset, entry.comp_size, entry.orig_size, entry.flags)
         idx = data.find(search)
         if idx < 0:
             logger.warning("Could not find PAMT record for %s", entry.path)
             continue
-        # offset is at idx, comp_size at idx + 4
         struct.pack_into('<I', data, idx, new_offset)
         struct.pack_into('<I', data, idx + 4, new_comp_size)
         logger.info("Updated PAMT for %s: offset %d->%d, comp %d->%d",
