@@ -721,15 +721,23 @@ class MainWindow(QMainWindow):
             if match:
                 mid, mname = match
                 reply = QMessageBox.question(
-                    self, "Update Existing Mod?",
+                    self, "Mod Already Installed",
                     f"'{mname}' is already installed.\n\n"
-                    "Update it with the new version?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    "Do you want to update it with the new version?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel,
                 )
                 if reply == QMessageBox.StandardButton.Yes:
                     existing_mod_id = mid
                     self._mod_manager.clear_deltas(existing_mod_id)
                     logger.info("Updating existing mod %d (%s)", existing_mod_id, mname)
+                elif reply == QMessageBox.StandardButton.No:
+                    # Install as a new mod (different name)
+                    pass
+                else:
+                    # Cancel — don't install at all
+                    self.statusBar().showMessage("Import cancelled.", 5000)
+                    return
 
         # Check if this is a script-based mod — needs to run on main thread
         # so the user can interact with the cmd window
@@ -1210,12 +1218,7 @@ class MainWindow(QMainWindow):
         self._check_header.set_label(label)
 
     def _find_existing_mod(self, path: Path) -> tuple[int, str] | None:
-        """Check if a dropped mod matches an already-installed mod.
-
-        Uses two strategies:
-        1. Name matching (normalized — ignores hyphens, underscores, case)
-        2. File overlap — if the new mod targets the same game files as an
-           installed mod, it's the same mod regardless of name.
+        """Check if a dropped mod matches an already-installed mod by name.
 
         Returns (mod_id, mod_name) or None.
         """
@@ -1226,7 +1229,7 @@ class MainWindow(QMainWindow):
         def _normalize(s: str) -> str:
             return s.lower().strip().replace("-", " ").replace("_", " ")
 
-        # --- Strategy 1: Name matching ---
+        # Get the mod name from the drop
         drop_name = path.stem.lower()
         modinfo = _read_modinfo(path) if path.is_dir() else None
         if modinfo and modinfo.get("name"):
@@ -1242,68 +1245,14 @@ class MainWindow(QMainWindow):
 
         drop_norm = _normalize(drop_name)
         for m in self._mod_manager.list_mods():
-            if _normalize(m["name"]) in drop_norm or drop_norm in _normalize(m["name"]):
+            mod_norm = _normalize(m["name"])
+            # Both directions must be at least 4 chars to avoid short substring false positives
+            if len(mod_norm) >= 4 and mod_norm in drop_norm:
+                return (m["id"], m["name"])
+            if len(drop_norm) >= 4 and drop_norm in mod_norm:
                 return (m["id"], m["name"])
 
-        # --- Strategy 2: File overlap for JSON patch mods ---
-        new_targets: set[str] = set()
-        jp_data = None
-        if path.suffix.lower() == ".json":
-            jp_data = detect_json_patch(path)
-        elif path.is_dir():
-            jp_data = detect_json_patch(path)
-
-        if jp_data and jp_data.get("patches"):
-            for patch in jp_data["patches"]:
-                new_targets.add(patch["game_file"].lower())
-
-        if new_targets:
-            # Compare against each installed mod's target files
-            for m in self._mod_manager.list_mods():
-                details = self._mod_manager.get_mod_details(m["id"])
-                if not details:
-                    continue
-                existing_files = set()
-                for cf in details.get("changed_files", []):
-                    fp = cf.get("file_path", "")
-                    # Extract game file path from PAZ path (e.g., 0008/0.paz -> check PAMT)
-                    existing_files.add(fp.lower())
-
-                # For JSON mods, also check if the installed mod's deltas touch
-                # the same PAZ directories as the new mod's targets
-                existing_dirs = {f.split("/")[0] for f in existing_files if "/" in f}
-                # Map game_file to PAZ directory by searching PAMT
-                new_dirs = self._resolve_target_dirs(new_targets)
-
-                overlap = existing_dirs & new_dirs
-                if overlap and len(overlap) >= len(new_dirs) * 0.5:
-                    return (m["id"], m["name"])
-
         return None
-
-    def _resolve_target_dirs(self, game_files: set[str]) -> set[str]:
-        """Map game file paths (e.g., 'gamedata/iteminfo.pabgb') to PAZ directory numbers."""
-        dirs: set[str] = set()
-        if not self._game_dir:
-            return dirs
-        vanilla_dir = self._game_dir / "CDMods" / "vanilla"
-        search_dir = vanilla_dir if vanilla_dir.exists() else self._game_dir
-        try:
-            from cdumm.archive.paz_parse import parse_pamt
-            for d in sorted(search_dir.iterdir()):
-                if not d.is_dir() or not d.name.isdigit():
-                    continue
-                pamt = d / "0.pamt"
-                if not pamt.exists():
-                    continue
-                entries = parse_pamt(str(pamt), paz_dir=str(d))
-                for e in entries:
-                    if e.path.lower() in game_files:
-                        dirs.add(d.name)
-                        break
-        except Exception:
-            pass
-        return dirs
 
     def _on_toggle_all(self) -> None:
         """Toggle all mods on/off."""
