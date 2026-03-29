@@ -22,7 +22,7 @@ from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.0.0"
+from cdumm import __version__ as APP_VERSION
 
 
 def generate_bug_report(db: Database | None, game_dir: Path | None,

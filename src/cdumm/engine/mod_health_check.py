@@ -211,13 +211,17 @@ def _check_paz_sizes(
         pamt_size = struct.unpack_from("<I", data, off + 4)[0]
         off += 8
 
-        # Find the actual PAZ file (in mod or game dir)
+        # Find the actual PAZ file (in mod, vanilla backup, or game dir)
         paz_rel = f"{dir_name}/{i}.paz"
         if paz_rel in mod_files:
             actual_size = mod_files[paz_rel].stat().st_size
         else:
+            # Use vanilla backup if available (game dir may be modded/updated)
+            vanilla_paz = game_dir / "CDMods" / "vanilla" / dir_name / f"{i}.paz"
             game_paz = game_dir / dir_name / f"{i}.paz"
-            if game_paz.exists():
+            if vanilla_paz.exists():
+                actual_size = vanilla_paz.stat().st_size
+            elif game_paz.exists():
                 actual_size = game_paz.stat().st_size
             else:
                 continue
@@ -256,14 +260,18 @@ def _check_duplicate_paths(
 
     dir_name = pamt_rel.split("/")[0]
     mod_dir = str(pamt_path.parent)
-    game_pamt = game_dir / dir_name / "0.pamt"
+    # Prefer vanilla backup over current game files
+    vanilla_pamt = game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt"
+    game_pamt = vanilla_pamt if vanilla_pamt.exists() else game_dir / dir_name / "0.pamt"
+    vanilla_paz_dir = game_dir / "CDMods" / "vanilla" / dir_name
+    paz_dir = str(vanilla_paz_dir) if vanilla_paz_dir.exists() else str(game_dir / dir_name)
 
     if not game_pamt.exists():
         return []
 
     try:
         mod_entries = parse_pamt(str(pamt_path), paz_dir=mod_dir)
-        van_entries = parse_pamt(str(game_pamt), paz_dir=str(game_dir / dir_name))
+        van_entries = parse_pamt(str(game_pamt), paz_dir=paz_dir)
     except Exception as e:
         logger.warning("Failed to parse PAMT for duplicate check: %s", e)
         return []
@@ -432,7 +440,8 @@ def _check_version_mismatch(
         return []
 
     dir_name = pamt_rel.split("/")[0]
-    game_pamt = game_dir / dir_name / "0.pamt"
+    vanilla_pamt = game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt"
+    game_pamt = vanilla_pamt if vanilla_pamt.exists() else game_dir / dir_name / "0.pamt"
     if not game_pamt.exists():
         return []
 
@@ -618,7 +627,8 @@ def _fix_duplicate_pamt(
         return None
 
     dir_name = pamt_rel.split("/")[0]
-    game_pamt = game_dir / dir_name / "0.pamt"
+    vanilla_pamt = game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt"
+    game_pamt = vanilla_pamt if vanilla_pamt.exists() else game_dir / dir_name / "0.pamt"
     if not game_pamt.exists():
         return None
 
