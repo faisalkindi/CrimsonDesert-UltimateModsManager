@@ -1936,9 +1936,58 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Refresh stale vanilla backups — if game files changed (e.g., after
+        # Steam verify), the old backups may contain modded data. Replace them
+        # with the current (clean) game files so future imports work correctly.
+        self._refresh_vanilla_backups()
+
         self._update_snapshot_status()
         self.statusBar().showMessage(f"Snapshot complete: {count} files indexed. You can now import mods.", 10000)
         logger.info("Snapshot finished and UI updated")
+
+    def _refresh_vanilla_backups(self) -> None:
+        """Replace stale vanilla backups with current game files.
+
+        Only runs when no mods are applied (game files are clean).
+        After Steam verify + rescan, old backups may contain modded data
+        from a dirty snapshot — replace them with the verified files.
+        """
+        if not self._game_dir or not self._vanilla_dir or not self._vanilla_dir.exists():
+            return
+        if not self._db:
+            return
+
+        # Safety: only refresh when no mods are enabled — game files must be clean
+        enabled_count = self._db.connection.execute(
+            "SELECT COUNT(*) FROM mods WHERE enabled = 1"
+        ).fetchone()[0]
+        if enabled_count > 0:
+            logger.debug("Skipping vanilla backup refresh — %d mods enabled", enabled_count)
+            return
+
+        import shutil
+        refreshed = 0
+        for backup in self._vanilla_dir.rglob("*"):
+            if not backup.is_file():
+                continue
+            if backup.name.endswith(".vranges"):
+                continue
+            rel = backup.relative_to(self._vanilla_dir)
+            game_file = self._game_dir / rel
+            if not game_file.exists():
+                continue
+            # Size difference is a definite mismatch
+            if backup.stat().st_size != game_file.stat().st_size:
+                shutil.copy2(game_file, backup)
+                refreshed += 1
+                logger.info("Refreshed stale vanilla backup: %s (size %d -> %d)",
+                            rel, backup.stat().st_size, game_file.stat().st_size)
+        if refreshed:
+            logger.info("Refreshed %d stale vanilla backup(s)", refreshed)
+            # Purge range backups too — they reference old byte positions
+            for vr in self._vanilla_dir.rglob("*.vranges"):
+                vr.unlink()
+                logger.info("Purged stale range backup: %s", vr.name)
 
     # --- Change Game Directory ---
     def _on_change_game_dir(self) -> None:
