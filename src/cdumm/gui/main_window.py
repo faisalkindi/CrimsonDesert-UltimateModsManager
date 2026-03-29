@@ -206,6 +206,74 @@ class MainWindow(QMainWindow):
         if self._snapshot and self._snapshot.has_snapshot() and self._game_dir:
             self._purge_corrupted_backups()
             self._check_game_version_mismatches()
+        self._check_bad_standalone_imports()
+
+    def _check_bad_standalone_imports(self) -> None:
+        """Detect mods imported by v1.0.0 as broken standalone PAZ copies.
+
+        v1.0.0 stored JSON patch mods as full 954MB PAZ copies in new directories
+        instead of small byte-level deltas. These cause game crashes.
+        Telltale: is_new=1 delta for a .paz file >100MB.
+        """
+        if not self._db:
+            return
+        try:
+            cursor = self._db.connection.execute("""
+                SELECT DISTINCT m.id, m.name, md.file_path
+                FROM mod_deltas md JOIN mods m ON md.mod_id = m.id
+                WHERE md.is_new = 1 AND md.file_path LIKE '%%.paz'
+                  AND md.byte_end > 100000000
+            """)
+            bad_mods = {}
+            for mid, name, fpath in cursor.fetchall():
+                bad_mods[mid] = name
+
+            if not bad_mods:
+                return
+
+            names = "\n".join(f"  - {name}" for name in bad_mods.values())
+            reply = QMessageBox.warning(
+                self, "Mods Need Re-import",
+                f"The following mods were imported by an older version and may crash the game:\n\n"
+                f"{names}\n\n"
+                "They need to be uninstalled and re-imported to work correctly.\n\n"
+                "Uninstall them now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # Store bad mod IDs for removal after revert
+                self._bad_import_ids = list(bad_mods.keys())
+                self.statusBar().showMessage("Reverting to vanilla to clean up...", 15000)
+                # Revert to vanilla first, then remove bad mods and re-apply good ones
+                progress = ProgressDialog("Cleaning up broken mods...", self)
+                from cdumm.engine.apply_engine import RevertWorker
+                worker = RevertWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
+                thread = QThread()
+                self._run_worker(worker, thread, progress,
+                                 on_finished=self._on_bad_import_cleanup)
+        except Exception as e:
+            logger.debug("Bad standalone check failed: %s", e)
+
+    def _on_bad_import_cleanup(self) -> None:
+        """After revert completes, remove bad mods and re-apply the good ones."""
+        if hasattr(self, '_bad_import_ids'):
+            for mid in self._bad_import_ids:
+                self._mod_manager.remove_mod(mid)
+                logger.info("Removed bad standalone import: id=%d", mid)
+            count = len(self._bad_import_ids)
+            del self._bad_import_ids
+            # Untick removed mods (they're gone), keep others enabled
+            self._refresh_all()
+            # Re-apply remaining enabled mods
+            remaining = [m for m in self._mod_manager.list_mods() if m["enabled"]]
+            if remaining:
+                self.statusBar().showMessage(
+                    f"Removed {count} broken mod(s). Re-applying {len(remaining)} good mod(s)...", 15000)
+                self._on_apply()
+            else:
+                self._snapshot_applied_state()
+                self.statusBar().showMessage(
+                    f"Removed {count} broken mod(s). Please re-import them.", 15000)
 
     def _check_game_version_mismatches(self) -> None:
         """Warn about mods imported for a different game version."""
