@@ -714,6 +714,23 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Check if this is an update to an existing mod (before routing to script/PAZ)
+        existing_mod_id = None
+        if self._mod_manager:
+            match = self._find_existing_mod(path)
+            if match:
+                mid, mname = match
+                reply = QMessageBox.question(
+                    self, "Update Existing Mod?",
+                    f"'{mname}' is already installed.\n\n"
+                    "Update it with the new version?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    existing_mod_id = mid
+                    self._mod_manager.clear_deltas(existing_mod_id)
+                    logger.info("Updating existing mod %d (%s)", existing_mod_id, mname)
+
         # Check if this is a script-based mod — needs to run on main thread
         # so the user can interact with the cmd window
         from cdumm.engine.import_handler import detect_format, import_script_live
@@ -745,31 +762,8 @@ class MainWindow(QMainWindow):
                 is_script_mod = True
 
         if is_script_mod:
-            self._run_script_mod(path)
+            self._run_script_mod(path, existing_mod_id=existing_mod_id)
             return
-
-        # Check if this is an update to an existing mod (match by folder/zip name)
-        existing_mod_id = None
-        if self._mod_manager:
-            drop_name = path.stem.lower()
-            # Also read modinfo.json if present
-            from cdumm.engine.import_handler import _read_modinfo
-            modinfo = _read_modinfo(path) if path.is_dir() else None
-            if modinfo and modinfo.get("name"):
-                drop_name = modinfo["name"].lower()
-            for m in self._mod_manager.list_mods():
-                if m["name"].lower().strip() in drop_name or drop_name in m["name"].lower().strip():
-                    reply = QMessageBox.question(
-                        self, "Update Existing Mod?",
-                        f"'{m['name']}' is already installed.\n\n"
-                        "Update it with the new version?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        existing_mod_id = m["id"]
-                        self._mod_manager.clear_deltas(existing_mod_id)
-                        logger.info("Updating existing mod %d (%s)", existing_mod_id, m["name"])
-                    break
 
         # Regular PAZ mod — run on background thread
         progress = ProgressDialog("Importing Mod", self)
@@ -780,8 +774,16 @@ class MainWindow(QMainWindow):
         self._run_worker(worker, thread, progress,
                          on_finished=self._on_import_finished)
 
-    def _run_script_mod(self, path: Path) -> None:
+    def _run_script_mod(self, path: Path, existing_mod_id: int | None = None) -> None:
         """Handle script-based mods — launch script, poll for completion, capture changes."""
+        # If updating, remove the old mod entry first so the new one replaces it
+        if existing_mod_id is not None and self._mod_manager:
+            self._mod_manager.set_enabled(existing_mod_id, False)
+            # Apply to revert old mod's files before re-importing
+            # (handled by the script prep phase which restores vanilla)
+            self._mod_manager.remove_mod(existing_mod_id)
+            logger.info("Removed old mod %d for update", existing_mod_id)
+
         import tempfile
         import zipfile as _zf
         from cdumm.engine.import_handler import (
@@ -1206,6 +1208,102 @@ class MainWindow(QMainWindow):
         else:
             label = "◧"
         self._check_header.set_label(label)
+
+    def _find_existing_mod(self, path: Path) -> tuple[int, str] | None:
+        """Check if a dropped mod matches an already-installed mod.
+
+        Uses two strategies:
+        1. Name matching (normalized — ignores hyphens, underscores, case)
+        2. File overlap — if the new mod targets the same game files as an
+           installed mod, it's the same mod regardless of name.
+
+        Returns (mod_id, mod_name) or None.
+        """
+        from cdumm.engine.import_handler import _read_modinfo
+        from cdumm.engine.json_patch_handler import detect_json_patch
+        from cdumm.engine.crimson_browser_handler import detect_crimson_browser
+
+        def _normalize(s: str) -> str:
+            return s.lower().strip().replace("-", " ").replace("_", " ")
+
+        # --- Strategy 1: Name matching ---
+        drop_name = path.stem.lower()
+        modinfo = _read_modinfo(path) if path.is_dir() else None
+        if modinfo and modinfo.get("name"):
+            drop_name = modinfo["name"].lower()
+        elif path.suffix.lower() == ".json":
+            jp = detect_json_patch(path)
+            if jp and jp.get("name"):
+                drop_name = jp["name"].lower()
+        elif path.is_dir():
+            cb = detect_crimson_browser(path)
+            if cb and cb.get("id"):
+                drop_name = cb["id"].lower()
+
+        drop_norm = _normalize(drop_name)
+        for m in self._mod_manager.list_mods():
+            if _normalize(m["name"]) in drop_norm or drop_norm in _normalize(m["name"]):
+                return (m["id"], m["name"])
+
+        # --- Strategy 2: File overlap for JSON patch mods ---
+        new_targets: set[str] = set()
+        jp_data = None
+        if path.suffix.lower() == ".json":
+            jp_data = detect_json_patch(path)
+        elif path.is_dir():
+            jp_data = detect_json_patch(path)
+
+        if jp_data and jp_data.get("patches"):
+            for patch in jp_data["patches"]:
+                new_targets.add(patch["game_file"].lower())
+
+        if new_targets:
+            # Compare against each installed mod's target files
+            for m in self._mod_manager.list_mods():
+                details = self._mod_manager.get_mod_details(m["id"])
+                if not details:
+                    continue
+                existing_files = set()
+                for cf in details.get("changed_files", []):
+                    fp = cf.get("file_path", "")
+                    # Extract game file path from PAZ path (e.g., 0008/0.paz -> check PAMT)
+                    existing_files.add(fp.lower())
+
+                # For JSON mods, also check if the installed mod's deltas touch
+                # the same PAZ directories as the new mod's targets
+                existing_dirs = {f.split("/")[0] for f in existing_files if "/" in f}
+                # Map game_file to PAZ directory by searching PAMT
+                new_dirs = self._resolve_target_dirs(new_targets)
+
+                overlap = existing_dirs & new_dirs
+                if overlap and len(overlap) >= len(new_dirs) * 0.5:
+                    return (m["id"], m["name"])
+
+        return None
+
+    def _resolve_target_dirs(self, game_files: set[str]) -> set[str]:
+        """Map game file paths (e.g., 'gamedata/iteminfo.pabgb') to PAZ directory numbers."""
+        dirs: set[str] = set()
+        if not self._game_dir:
+            return dirs
+        vanilla_dir = self._game_dir / "CDMods" / "vanilla"
+        search_dir = vanilla_dir if vanilla_dir.exists() else self._game_dir
+        try:
+            from cdumm.archive.paz_parse import parse_pamt
+            for d in sorted(search_dir.iterdir()):
+                if not d.is_dir() or not d.name.isdigit():
+                    continue
+                pamt = d / "0.pamt"
+                if not pamt.exists():
+                    continue
+                entries = parse_pamt(str(pamt), paz_dir=str(d))
+                for e in entries:
+                    if e.path.lower() in game_files:
+                        dirs.add(d.name)
+                        break
+        except Exception:
+            pass
+        return dirs
 
     def _on_toggle_all(self) -> None:
         """Toggle all mods on/off."""
