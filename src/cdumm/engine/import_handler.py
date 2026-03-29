@@ -346,6 +346,13 @@ def import_from_zip(
             jp_work = Path(tmp) / "_jp_converted"
             converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
             if converted is not None:
+                has_files = any(converted.rglob("*")) if converted.exists() else False
+                if not has_files:
+                    result.error = (
+                        "This mod's changes are already present in your game files. "
+                        "Nothing to apply."
+                    )
+                    return result
                 jp_name = jp_data.get("name", mod_name)
                 jp_modinfo = {
                     "name": jp_data.get("name"),
@@ -415,6 +422,14 @@ def import_from_folder(
             jp_work = Path(jp_tmp) / "_jp_converted"
             converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
             if converted is not None:
+                has_files = any(converted.rglob("*")) if converted.exists() else False
+                if not has_files:
+                    result = ModImportResult(jp_data.get("name", mod_name))
+                    result.error = (
+                        "This mod's changes are already present in your game files. "
+                        "Nothing to apply."
+                    )
+                    return result
                 jp_name = jp_data.get("name", mod_name)
                 jp_modinfo = {
                     "name": jp_data.get("name"),
@@ -611,6 +626,15 @@ def import_from_json_patch(
             result.error = "Failed to apply JSON patches to game files."
             return result
 
+        # Check if any files were actually modified
+        has_files = any(converted.rglob("*")) if converted.exists() else False
+        if not has_files:
+            result.error = (
+                "This mod's changes are already present in your game files. "
+                "Nothing to apply — the game may have been updated to include these changes."
+            )
+            return result
+
         modinfo = {
             "name": patch_data.get("name"),
             "version": patch_data.get("version"),
@@ -727,12 +751,17 @@ def _process_extracted_files(
                 logger.info("Stored new file: %s (%d bytes)", rel_path, file_size)
                 continue
 
+            # Use vanilla backup if available (accurate base for delta),
+            # fall back to current game file
+            vanilla_backup = game_dir / "CDMods" / "vanilla" / rel_path.replace("/", "\\")
             vanilla_path = game_dir / rel_path.replace("/", "\\")
-            if not vanilla_path.exists():
+            if vanilla_backup.exists():
+                vanilla_bytes = vanilla_backup.read_bytes()
+            elif vanilla_path.exists():
+                vanilla_bytes = vanilla_path.read_bytes()
+            else:
                 logger.warning("Vanilla file not found for %s, skipping", rel_path)
                 continue
-
-            vanilla_bytes = vanilla_path.read_bytes()
             modified_bytes = extracted_path.read_bytes()
 
             # Auto-fix PAMT CRC if it's wrong (common mod authoring mistake)

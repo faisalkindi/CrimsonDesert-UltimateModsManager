@@ -46,7 +46,8 @@ class ConflictDetector:
         if len(enabled_mods) < 2:
             return conflicts
 
-        # Compare each pair of mods
+        # Compare each pair of mods (cap total conflicts to prevent UI freeze)
+        MAX_CONFLICTS = 200
         mod_ids = list(enabled_mods.keys())
         for i in range(len(mod_ids)):
             for j in range(i + 1, len(mod_ids)):
@@ -55,6 +56,10 @@ class ConflictDetector:
                     mod_ids[j], enabled_mods[mod_ids[j]],
                 )
                 conflicts.extend(pair_conflicts)
+                if len(conflicts) >= MAX_CONFLICTS:
+                    break
+            if len(conflicts) >= MAX_CONFLICTS:
+                break
 
         # Store conflicts in database
         self._save_conflicts(conflicts)

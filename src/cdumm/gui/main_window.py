@@ -119,6 +119,7 @@ class MainWindow(QMainWindow):
         self._active_progress: ProgressDialog | None = None
         self._needs_apply = False
         self._applied_state: dict[int, bool] = {}  # {mod_id: enabled} snapshot after last apply
+        self._snapshot_in_progress = False
         self._dispatcher = MainThreadDispatcher(parent=self)
 
         # Initialize managers if database is available
@@ -150,9 +151,7 @@ class MainWindow(QMainWindow):
         # Update check (delayed further to not compete with UI loading)
         QTimer.singleShot(5000, self._check_for_updates)
 
-        # Auto-snapshot on first run (after window is shown)
-        if self._snapshot and not self._snapshot.has_snapshot() and self._game_dir:
-            QTimer.singleShot(500, self._auto_snapshot_first_run)
+        # Auto-snapshot is handled by _deferred_startup
 
         # If previous session didn't close cleanly, offer bug report
         if crashed_last_time:
@@ -201,12 +200,263 @@ class MainWindow(QMainWindow):
 
     def _deferred_startup(self) -> None:
         """Run after window is visible — background status check and backup validation."""
+        if self._game_dir and self._db:
+            if self._check_one_time_reset():
+                return  # one-time reset in progress
+            if self._check_game_updated():
+                return  # game updated — reset in progress, skip other checks
+        # Auto-take snapshot if missing and game dir is set
+        if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
+            self._on_refresh_snapshot()
+            return  # snapshot in progress, other checks will run on next launch
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
         if self._snapshot and self._snapshot.has_snapshot() and self._game_dir:
             self._purge_corrupted_backups()
             self._check_game_version_mismatches()
         self._check_bad_standalone_imports()
+
+    def _check_one_time_reset(self) -> bool:
+        """One-time reset when upgrading to v1.0.7+.
+
+        All data from previous versions is potentially stale. Reset everything
+        but keep the mod list so users know what to re-import.
+        """
+        RESET_VERSION = "1.0.7"
+        try:
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+            last_reset = config.get("last_reset_version")
+            if last_reset and last_reset >= RESET_VERSION:
+                return False  # already reset for this version
+
+            # Check if there's any data to reset
+            has_data = self._db.connection.execute(
+                "SELECT COUNT(*) FROM snapshots").fetchone()[0] > 0
+            if not has_data:
+                config.set("last_reset_version", RESET_VERSION)
+                return False  # fresh install, nothing to reset
+
+            from cdumm import __version__
+            QMessageBox.information(
+                self, f"CDUMM v{__version__}",
+                "This update includes important fixes to how mods are stored.\n\n"
+                "Before continuing, please verify your game files through Steam:\n\n"
+                "  Steam → Right-click Crimson Desert → Properties\n"
+                "  → Installed Files → Verify integrity of game files\n\n"
+                "This ensures your game is in a clean state before re-scanning.",
+            )
+            reply = QMessageBox.question(
+                self, "Ready to continue?",
+                "Have you verified your game files through Steam?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.statusBar().showMessage(
+                    "Please verify game files through Steam, then restart the app.", 0)
+                return True  # block other checks but don't reset yet
+
+            from cdumm.engine.version_detector import detect_game_version
+            fp = detect_game_version(self._game_dir) or ""
+            self._reset_for_game_update(fp)
+            config.set("last_reset_version", RESET_VERSION)
+            return True
+        except Exception as e:
+            logger.debug("One-time reset check failed: %s", e)
+            return False
+
+    def _check_game_updated(self) -> bool:
+        """Detect if the game was updated since last launch.
+
+        Compares PAMT fingerprints. If changed, wipes all mod data
+        (backups, deltas, snapshot, database) and forces a fresh start.
+        Returns True if a reset was triggered.
+        """
+        try:
+            from cdumm.engine.version_detector import detect_game_version
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+
+            current = detect_game_version(self._game_dir)
+            if not current:
+                return False
+
+            stored = config.get("game_version_fingerprint")
+            game_changed = False
+
+            if stored is None:
+                # First time with this feature — save fingerprint.
+                config.set("game_version_fingerprint", current)
+            elif stored != current:
+                logger.info("Game fingerprint changed: %s -> %s", stored, current)
+                game_changed = True
+
+            # Even if fingerprint matches, check if snapshot is stale
+            # (catches Steam verify, manual file changes, etc.)
+            if not game_changed:
+                has_snapshot = self._db.connection.execute(
+                    "SELECT COUNT(*) FROM snapshots").fetchone()[0] > 0
+                if has_snapshot and self._snapshot_stale():
+                    logger.info("Snapshot stale — game files changed (Steam verify?)")
+                    game_changed = True
+
+            if not game_changed:
+                return False
+            QMessageBox.information(
+                self, "Game Files Changed",
+                "Your game files have changed (game update or Steam verify).\n\n"
+                "The app will now reset and re-scan your game files. "
+                "After that, just re-import your mods.\n\n"
+                "Note: Game updates can break mods. If a mod stops working "
+                "after updating, the mod may need to be updated by its author "
+                "for the new game version.",
+            )
+            self._reset_for_game_update(current)
+            return True
+        except Exception as e:
+            logger.debug("Game update check failed: %s", e)
+            return False
+
+    def _snapshot_stale(self) -> bool:
+        """Check if stored snapshot hashes match actual game files.
+
+        Checks critical files first (PAPGT, all PAMT files), then samples others.
+        """
+        try:
+            from cdumm.engine.snapshot_manager import hash_file
+            import os
+
+            cursor = self._db.connection.execute(
+                "SELECT file_path, file_hash FROM snapshots ORDER BY file_path")
+            all_rows = cursor.fetchall()
+            if not all_rows:
+                return False
+
+            # Priority files: PAPGT and all PAMT files (most likely to change)
+            priority = []
+            others = []
+            for row in all_rows:
+                if row[0].endswith(".papgt") or row[0].endswith(".pamt"):
+                    priority.append(row)
+                else:
+                    others.append(row)
+
+            # Sample some PAZ files too
+            step = max(1, len(others) // 10)
+            to_check = priority + others[::step]
+
+            for file_path, snap_hash in to_check:
+                game_file = self._game_dir / file_path.replace("/", os.sep)
+                if not game_file.exists():
+                    logger.info("Stale snapshot: %s missing", file_path)
+                    return True
+                current_hash, _ = hash_file(game_file)
+                if current_hash != snap_hash:
+                    logger.info("Stale snapshot: %s hash mismatch", file_path)
+                    return True
+            return False
+        except Exception as e:
+            logger.debug("Snapshot stale check failed: %s", e)
+            return False
+
+    def _reset_for_game_update(self, new_fingerprint: str) -> None:
+        """Wipe all mod data and start fresh for a new game version."""
+        import shutil
+        from cdumm.storage.config import Config
+
+        # Clear vanilla backups
+        if self._vanilla_dir.exists():
+            shutil.rmtree(self._vanilla_dir, ignore_errors=True)
+            logger.info("Cleared vanilla backups")
+
+        # Clear deltas
+        if self._deltas_dir.exists():
+            shutil.rmtree(self._deltas_dir, ignore_errors=True)
+            self._deltas_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Cleared mod deltas")
+
+        # Clear deltas and snapshots but KEEP mod entries (disabled, no data)
+        # so the user can see which mods they had and re-import them
+        self._db.connection.execute("DELETE FROM mod_deltas")
+        self._db.connection.execute("DELETE FROM snapshots")
+        self._db.connection.execute("UPDATE mods SET enabled = 0")
+        try:
+            self._db.connection.execute("DELETE FROM conflicts")
+        except Exception:
+            pass
+        self._db.connection.commit()
+        logger.info("Cleared deltas/snapshots, disabled all mods (kept mod list)")
+
+        # Clean up orphan mod directories (0036+) from game folder
+        # These are leftover from previous mod installs and may crash the game
+        for d in self._game_dir.iterdir():
+            if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                continue
+            dir_num = int(d.name)
+            if dir_num >= 36:
+                shutil.rmtree(d, ignore_errors=True)
+                logger.info("Removed orphan mod directory: %s", d.name)
+
+        # Restore vanilla PAPGT if we have a backup
+        vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
+        game_papgt = self._game_dir / "meta" / "0.papgt"
+        if vanilla_papgt.exists():
+            shutil.copy2(vanilla_papgt, game_papgt)
+            logger.info("Restored vanilla PAPGT")
+
+        # Save new fingerprint
+        config = Config(self._db)
+        config.set("game_version_fingerprint", new_fingerprint)
+        config.set("backups_verified", "0")
+
+        # Refresh UI
+        self._snapshot = SnapshotManager(self._db)
+        self._refresh_all()
+        self._snapshot_applied_state()
+
+        # Automatically take a fresh snapshot
+        self._on_refresh_snapshot_for_update()
+
+    def _on_refresh_snapshot_for_update(self) -> None:
+        """Take a snapshot automatically after game update reset."""
+        if not self._db or not self._game_dir:
+            return
+        if self._snapshot_in_progress:
+            return
+        self._snapshot_in_progress = True
+        progress = ProgressDialog("Scanning new game files...", self)
+        worker = SnapshotWorker(self._game_dir, self._db.db_path)
+        thread = QThread()
+        self._run_worker(worker, thread, progress,
+                         on_finished=self._on_update_snapshot_finished)
+
+    def _on_update_snapshot_finished(self, count: int) -> None:
+        """Snapshot after game update is done."""
+        self._on_snapshot_finished(count)
+        # Count mods that need re-importing
+        mod_count = 0
+        mod_names = []
+        if self._mod_manager:
+            mods = self._mod_manager.list_mods()
+            mod_count = len(mods)
+            mod_names = [m["name"] for m in mods[:10]]
+        if mod_count:
+            names_str = "\n".join(f"  - {n}" for n in mod_names)
+            if mod_count > 10:
+                names_str += f"\n  ... and {mod_count - 10} more"
+            QMessageBox.information(
+                self, "Ready",
+                f"Game files scanned ({count} files).\n\n"
+                f"You have {mod_count} mod(s) that need re-importing:\n\n"
+                f"{names_str}\n\n"
+                "Drop each mod onto the app to re-import it."
+            )
+        else:
+            QMessageBox.information(
+                self, "Ready",
+                f"Game files scanned ({count} files).\n\n"
+                "You can now import mods by dropping them onto the app."
+            )
 
     def _check_bad_standalone_imports(self) -> None:
         """Detect mods imported by v1.0.0 as broken standalone PAZ copies.
@@ -255,25 +505,32 @@ class MainWindow(QMainWindow):
             logger.debug("Bad standalone check failed: %s", e)
 
     def _on_bad_import_cleanup(self) -> None:
-        """After revert completes, remove bad mods and re-apply the good ones."""
+        """After revert completes, remove bad mods and disable all."""
         if hasattr(self, '_bad_import_ids'):
+            names = []
             for mid in self._bad_import_ids:
+                try:
+                    details = self._mod_manager.get_mod_details(mid)
+                    names.append(details["name"] if details else str(mid))
+                except Exception:
+                    names.append(str(mid))
                 self._mod_manager.remove_mod(mid)
                 logger.info("Removed bad standalone import: id=%d", mid)
             count = len(self._bad_import_ids)
             del self._bad_import_ids
-            # Untick removed mods (they're gone), keep others enabled
+            # Disable all mods since we reverted to vanilla
+            for m in self._mod_manager.list_mods():
+                if m["enabled"]:
+                    self._mod_manager.set_enabled(m["id"], False)
             self._refresh_all()
-            # Re-apply remaining enabled mods
-            remaining = [m for m in self._mod_manager.list_mods() if m["enabled"]]
-            if remaining:
-                self.statusBar().showMessage(
-                    f"Removed {count} broken mod(s). Re-applying {len(remaining)} good mod(s)...", 15000)
-                self._on_apply()
-            else:
-                self._snapshot_applied_state()
-                self.statusBar().showMessage(
-                    f"Removed {count} broken mod(s). Please re-import them.", 15000)
+            self._snapshot_applied_state()
+            QMessageBox.information(
+                self, "Cleanup Complete",
+                f"Removed {count} broken mod(s):\n"
+                + "\n".join(f"  - {n}" for n in names) +
+                "\n\nAll mods have been disabled. Re-enable your mods, "
+                "click Apply, then re-import the removed mods."
+            )
 
     def _check_game_version_mismatches(self) -> None:
         """Warn about mods imported for a different game version."""
@@ -481,7 +738,7 @@ class MainWindow(QMainWindow):
         tools_v.addWidget(tools_header)
 
         for label, slot in [
-            ("Refresh Snapshot", self._on_refresh_snapshot),
+            ("Rescan Game Files", self._on_refresh_snapshot),
             ("Change Game Directory", self._on_change_game_dir),
             ("Profiles", self._on_profiles),
             ("Export Mod List", self._on_export_list),
@@ -581,57 +838,11 @@ class MainWindow(QMainWindow):
             self._snapshot_label.setStyleSheet("color: gray;")
         elif self._snapshot.has_snapshot():
             count = self._snapshot.get_snapshot_count()
-            self._snapshot_label.setText(f"Snapshot: Valid ({count} files)")
+            self._snapshot_label.setText(f"Snapshot: {count} files")
             self._snapshot_label.setStyleSheet("color: green;")
-            # Check for game updates in background (deferred)
-            QTimer.singleShot(3000, self._check_snapshot_outdated_async)
         else:
-            self._snapshot_label.setText("Snapshot: Missing — click Refresh Snapshot")
-            self._snapshot_label.setStyleSheet("color: red; font-weight: bold;")
-
-    def _check_snapshot_outdated_async(self) -> None:
-        """Check if game was updated, then update the label."""
-        if self._check_snapshot_outdated():
-            count = self._snapshot.get_snapshot_count() if self._snapshot else 0
-            self._snapshot_label.setText(
-                f"Snapshot: OUTDATED — game was updated, click Refresh Snapshot ({count} files)")
-            self._snapshot_label.setStyleSheet("color: #FF9800; font-weight: bold;")
-
-    def _check_snapshot_outdated(self) -> bool:
-        """Check if the game was updated since the snapshot was taken.
-
-        Compares a few files that no mod touches against the snapshot.
-        If any differ, the game was updated and the snapshot is stale.
-        """
-        if not self._snapshot or not self._game_dir or not self._db:
-            return False
-        import os
-        from cdumm.engine.snapshot_manager import hash_file
-
-        # Get files that no mod touches
-        modded = self._db.connection.execute(
-            "SELECT DISTINCT file_path FROM mod_deltas").fetchall()
-        modded_set = {row[0] for row in modded}
-
-        # Check up to 3 unmodded files
-        cursor = self._db.connection.execute("SELECT file_path, file_hash FROM snapshots")
-        checked = 0
-        for file_path, snap_hash in cursor.fetchall():
-            if file_path in modded_set:
-                continue
-            game_file = self._game_dir / file_path.replace("/", os.sep)
-            if not game_file.exists():
-                return True  # file was removed = game changed
-            try:
-                current_hash, _ = hash_file(game_file)
-                if current_hash != snap_hash:
-                    return True
-            except Exception:
-                continue
-            checked += 1
-            if checked >= 3:
-                break
-        return False
+            self._snapshot_label.setText("Snapshot: Missing")
+            self._snapshot_label.setStyleSheet("color: #FF9800;")
 
     def _sync_db(self) -> None:
         """Sync main DB after a worker writes via WAL checkpoint."""
@@ -777,9 +988,8 @@ class MainWindow(QMainWindow):
         # since they add new directories rather than modifying existing files.
         # All other PAZ mods require a snapshot for delta generation.
         if not _is_standalone_paz_mod(path) and (not self._snapshot or not self._snapshot.has_snapshot()):
-            self.statusBar().showMessage(
-                "Snapshot required before importing PAZ mods. Click 'Refresh Snapshot' first.", 10000
-            )
+            self.statusBar().showMessage("Scanning game files first — please drop the mod again after.", 10000)
+            self._on_refresh_snapshot()
             return
 
         # Check if this is an update to an existing mod (before routing to script/PAZ)
@@ -796,9 +1006,12 @@ class MainWindow(QMainWindow):
                     | QMessageBox.StandardButton.Cancel,
                 )
                 if reply == QMessageBox.StandardButton.Yes:
-                    existing_mod_id = mid
-                    self._mod_manager.clear_deltas(existing_mod_id)
-                    logger.info("Updating existing mod %d (%s)", existing_mod_id, mname)
+                    # Save old mod's state, delete it, import fresh
+                    old_details = self._mod_manager.get_mod_details(mid)
+                    self._update_priority = old_details.get("priority", 0) if old_details else 0
+                    self._update_enabled = old_details.get("enabled", True) if old_details else True
+                    self._mod_manager.remove_mod(mid)
+                    logger.info("Removed old mod %d (%s) for update", mid, mname)
                 elif reply == QMessageBox.StandardButton.No:
                     # Install as a new mod (different name)
                     pass
@@ -1125,6 +1338,23 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.debug("Game version stamp failed (non-fatal): %s", e)
 
+            # Restore priority and enabled state if this was an update
+            if hasattr(self, '_update_priority'):
+                try:
+                    row = self._db.connection.execute("SELECT MAX(id) FROM mods").fetchone()
+                    if row and row[0]:
+                        new_id = row[0]
+                        self._db.connection.execute(
+                            "UPDATE mods SET priority = ?, enabled = ? WHERE id = ?",
+                            (self._update_priority, self._update_enabled, new_id))
+                        self._db.connection.commit()
+                        logger.info("Restored update state: priority=%d, enabled=%s",
+                                    self._update_priority, self._update_enabled)
+                except Exception as e:
+                    logger.debug("Restore update state failed: %s", e)
+                del self._update_priority
+                del self._update_enabled
+
             self._refresh_all()
             self._on_nav("PAZ Mods")
             self._on_apply()  # Auto-apply after import
@@ -1222,7 +1452,9 @@ class MainWindow(QMainWindow):
                     self._mod_manager.set_enabled(mod["id"], False)
         self._refresh_all()
         self._snapshot_applied_state()
-        self.statusBar().showMessage("Reverted to vanilla! All mods disabled.", 10000)
+        # Retake snapshot against clean vanilla files
+        self.statusBar().showMessage("Reverted to vanilla. Refreshing snapshot...", 10000)
+        self._on_refresh_snapshot()
 
     # --- Remove mod ---
     def _on_remove_mod(self, mod_id: int | None = None) -> None:
@@ -1260,17 +1492,35 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            # Disable mods first so the apply engine knows to revert their files,
-            # then remove them from the database after apply completes.
+            # Check if any mod has actual deltas that need reverting
+            has_deltas = False
             for mid, name in mods_to_remove:
-                self._mod_manager.set_enabled(mid, False)
-                logger.info("Disabled for uninstall: %s", name)
-            self._refresh_all()
-            self.statusBar().showMessage(
-                f"Uninstalling {len(mods_to_remove)} mod(s)...", 10000)
-            # Store IDs for removal after apply finishes
-            self._pending_removals = [mid for mid, _ in mods_to_remove]
-            self._on_apply()
+                count = self._db.connection.execute(
+                    "SELECT COUNT(*) FROM mod_deltas WHERE mod_id=?", (mid,)
+                ).fetchone()[0]
+                if count > 0:
+                    has_deltas = True
+                    break
+
+            if has_deltas:
+                # Disable mods first so the apply engine reverts their files,
+                # then remove them from the database after apply completes.
+                for mid, name in mods_to_remove:
+                    self._mod_manager.set_enabled(mid, False)
+                    logger.info("Disabled for uninstall: %s", name)
+                self._pending_removals = [mid for mid, _ in mods_to_remove]
+                self._refresh_all()
+                self.statusBar().showMessage(
+                    f"Uninstalling {len(mods_to_remove)} mod(s)...", 10000)
+                self._on_apply()
+            else:
+                # No deltas — just remove from database (empty mod entries from reset)
+                for mid, name in mods_to_remove:
+                    self._mod_manager.remove_mod(mid)
+                    logger.info("Removed empty mod entry: %s", name)
+                self._refresh_all()
+                self.statusBar().showMessage(
+                    f"Removed {len(mods_to_remove)} mod(s).", 10000)
 
     def _update_header_checkbox(self) -> None:
         """Sync the header checkbox label with current mod states."""
@@ -1603,6 +1853,9 @@ class MainWindow(QMainWindow):
     def _on_refresh_snapshot(self) -> None:
         if not self._db or not self._game_dir:
             return
+        if self._snapshot_in_progress:
+            return
+        self._snapshot_in_progress = True
 
         progress = ProgressDialog("Creating Vanilla Snapshot", self)
         worker = SnapshotWorker(self._game_dir, self._db.db_path)
@@ -1612,8 +1865,20 @@ class MainWindow(QMainWindow):
                          on_finished=self._on_snapshot_finished)
 
     def _on_snapshot_finished(self, count: int) -> None:
+        self._snapshot_in_progress = False
         logger.info("Snapshot callback: %d files", count)
         self._sync_db()
+
+        # Save game version fingerprint with the snapshot
+        try:
+            from cdumm.engine.version_detector import detect_game_version
+            from cdumm.storage.config import Config
+            fp = detect_game_version(self._game_dir)
+            if fp:
+                Config(self._db).set("game_version_fingerprint", fp)
+                logger.info("Saved game version fingerprint: %s", fp)
+        except Exception:
+            pass
 
         self._update_snapshot_status()
         self.statusBar().showMessage(f"Snapshot complete: {count} files indexed. You can now import mods.", 10000)
