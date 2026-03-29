@@ -16,6 +16,7 @@ import bsdiff4
 logger = logging.getLogger(__name__)
 
 SPARSE_MAGIC = b"SPRS"
+FULL_COPY_MAGIC = b"FULL"
 # Use sparse patch if files are same size and changed bytes < 1% of file
 SPARSE_THRESHOLD_RATIO = 0.01
 # Always use sparse for files > 500 MB (bsdiff would use too much RAM)
@@ -50,23 +51,25 @@ def generate_delta(vanilla_bytes: bytes, modified_bytes: bytes) -> bytes:
             return _make_sparse_patch_from_ranges(vanilla_bytes, modified_bytes, ranges)
 
     # Different sizes or large changes — use bsdiff4
-    # But skip if file is too large (would use 4x RAM)
+    # But skip if file is too large (would use too much RAM)
     if len(vanilla_bytes) > BSDIFF_SIZE_LIMIT:
-        # Force sparse even for different sizes — store the changed regions
-        ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
-        return _make_sparse_patch_from_ranges(vanilla_bytes, modified_bytes, ranges)
+        # For huge files with different sizes, store as full copy
+        logger.info("File too large for delta (%.1f MB, size changed), storing full copy",
+                    size_mb)
+        return FULL_COPY_MAGIC + modified_bytes
 
     try:
         return bsdiff4.diff(vanilla_bytes, modified_bytes)
     except (MemoryError, OSError, SystemError) as e:
-        logger.warning("bsdiff4 failed (%.1f MB file), falling back to sparse: %s",
+        logger.warning("bsdiff4 failed (%.1f MB file), storing full copy: %s",
                        len(vanilla_bytes) / 1048576, e)
-        ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
-        return _make_sparse_patch_from_ranges(vanilla_bytes, modified_bytes, ranges)
+        return FULL_COPY_MAGIC + modified_bytes
 
 
 def apply_delta(vanilla_bytes: bytes, delta_bytes: bytes) -> bytes:
     """Apply a delta to vanilla bytes, returning modified bytes."""
+    if delta_bytes[:4] == FULL_COPY_MAGIC:
+        return delta_bytes[4:]
     if delta_bytes[:4] == SPARSE_MAGIC:
         return _apply_sparse_patch(vanilla_bytes, delta_bytes)
     if delta_bytes[:8] == b"BSDIFF40":
@@ -84,6 +87,12 @@ def apply_delta_from_file(vanilla_bytes: bytes, delta_path: Path) -> bytes:
 
     with open(delta_path, "rb") as f:
         magic = f.read(4)
+
+    if magic == FULL_COPY_MAGIC:
+        # Full copy — just return the file contents after the magic
+        with open(delta_path, "rb") as f:
+            f.seek(4)
+            return f.read()
 
     if magic == SPARSE_MAGIC and file_size > 500 * 1024 * 1024:
         # Stream sparse patches from disk for large deltas

@@ -1589,6 +1589,10 @@ class MainWindow(QMainWindow):
         def _normalize(s: str) -> str:
             return s.lower().strip().replace("-", " ").replace("_", " ")
 
+        def _compact(s: str) -> str:
+            """Remove all spaces for matching concatenated names like CDLootMultiplier."""
+            return _normalize(s).replace(" ", "")
+
         # Get the mod name from the drop
         drop_name = path.stem.lower()
         modinfo = _read_modinfo(path) if path.is_dir() else None
@@ -1604,12 +1608,19 @@ class MainWindow(QMainWindow):
                 drop_name = cb["id"].lower()
 
         drop_norm = _normalize(drop_name)
+        drop_compact = _compact(drop_name)
         for m in self._mod_manager.list_mods():
             mod_norm = _normalize(m["name"])
-            # Both directions must be at least 4 chars to avoid short substring false positives
+            mod_compact = _compact(m["name"])
+            # Check with spaces (loot multiplier in cdlootmultiplier)
             if len(mod_norm) >= 4 and mod_norm in drop_norm:
                 return (m["id"], m["name"])
             if len(drop_norm) >= 4 and drop_norm in mod_norm:
+                return (m["id"], m["name"])
+            # Check without spaces (lootmultiplier in cdlootmultiplier)
+            if len(mod_compact) >= 4 and mod_compact in drop_compact:
+                return (m["id"], m["name"])
+            if len(drop_compact) >= 4 and drop_compact in mod_compact:
                 return (m["id"], m["name"])
 
         return None

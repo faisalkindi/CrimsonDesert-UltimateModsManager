@@ -313,7 +313,12 @@ class ScriptCaptureWorker(QObject):
                 modified_bytes = current_path.read_bytes()
 
                 delta_bytes = generate_delta(vanilla_bytes, modified_bytes)
-                byte_ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
+
+                # Skip expensive byte-range scan for full-copy deltas (huge files)
+                if delta_bytes[:4] == b"FULL":
+                    byte_ranges = [(0, len(modified_bytes))]
+                else:
+                    byte_ranges = get_changed_byte_ranges(vanilla_bytes, modified_bytes)
 
                 safe_name = rel_path.replace("/", "_") + ".bsdiff"
                 delta_path = self._deltas_dir / str(mod_id) / safe_name
@@ -483,7 +488,10 @@ class ScanChangesWorker(QObject):
                     continue
 
                 delta_bytes = generate_delta(base_bytes, modified_bytes)
-                byte_ranges = get_changed_byte_ranges(base_bytes, modified_bytes)
+                if delta_bytes[:4] == b"FULL":
+                    byte_ranges = [(0, len(modified_bytes))]
+                else:
+                    byte_ranges = get_changed_byte_ranges(base_bytes, modified_bytes)
 
                 safe_name = rel_path.replace("/", "_") + ".bsdiff"
                 delta_path = self._deltas_dir / str(mod_id) / safe_name
