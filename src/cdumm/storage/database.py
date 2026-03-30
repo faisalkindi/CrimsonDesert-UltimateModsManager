@@ -23,14 +23,15 @@ CREATE TABLE IF NOT EXISTS mods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     mod_type TEXT NOT NULL CHECK(mod_type IN ('paz', 'asi')),
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 0,
-    import_date TEXT NOT NULL DEFAULT (datetime('now')),
+    import_date TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     game_version_hash TEXT,
     source_path TEXT,
     author TEXT,
     version TEXT,
-    description TEXT
+    description TEXT,
+    configurable INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mod_deltas (
@@ -40,7 +41,24 @@ CREATE TABLE IF NOT EXISTS mod_deltas (
     delta_path TEXT NOT NULL,
     byte_start INTEGER,
     byte_end INTEGER,
-    is_new INTEGER NOT NULL DEFAULT 0
+    is_new INTEGER NOT NULL DEFAULT 0,
+    vanilla_hash TEXT,
+    entry_path TEXT
+);
+
+CREATE TABLE IF NOT EXISTS mod_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mod_id INTEGER NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+    selected_labels TEXT,
+    UNIQUE(mod_id)
+);
+
+CREATE TABLE IF NOT EXISTS mod_vanilla_sizes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mod_id INTEGER NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    vanilla_size INTEGER NOT NULL,
+    UNIQUE(mod_id, file_path)
 );
 
 CREATE TABLE IF NOT EXISTS conflicts (
@@ -126,6 +144,25 @@ class Database:
                 "ALTER TABLE mod_deltas ADD COLUMN is_new INTEGER NOT NULL DEFAULT 0"
             )
             logger.info("Migrated: added is_new column to mod_deltas")
+
+        if "vanilla_hash" not in delta_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_deltas ADD COLUMN vanilla_hash TEXT"
+            )
+            logger.info("Migrated: added vanilla_hash column to mod_deltas")
+
+        if "configurable" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN configurable INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migrated: added configurable column to mods")
+
+        # Add entry_path column to mod_deltas for entry-level deltas
+        if "entry_path" not in delta_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_deltas ADD COLUMN entry_path TEXT"
+            )
+            logger.info("Migrated: added entry_path column to mod_deltas")
 
     @property
     def connection(self) -> sqlite3.Connection:

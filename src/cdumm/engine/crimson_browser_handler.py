@@ -182,7 +182,7 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
 
             # Repack into the PAZ copy (allow size change for larger/smaller files)
             try:
-                payload, actual_comp = repack_entry_bytes(
+                payload, actual_comp, actual_orig = repack_entry_bytes(
                     plaintext, entry, allow_size_change=True)
 
                 new_offset = entry.offset
@@ -208,12 +208,14 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                 new_paz_size = None
                 if new_offset != entry.offset:
                     new_paz_size = new_offset + actual_comp
-                if actual_comp != entry.comp_size or new_offset != entry.offset:
-                    pamt_updates.append((entry, actual_comp, new_offset, new_paz_size))
+                if (actual_comp != entry.comp_size or new_offset != entry.offset
+                        or actual_orig != entry.orig_size):
+                    pamt_updates.append((entry, actual_comp, new_offset,
+                                         new_paz_size, actual_orig))
 
-                logger.info("Repacked: %s (comp=%d->%d, orig=%d, enc=%s)",
+                logger.info("Repacked: %s (comp=%d->%d, orig=%d->%d, enc=%s)",
                             inner_path, entry.comp_size, actual_comp,
-                            entry.orig_size, entry.encrypted)
+                            entry.orig_size, actual_orig, entry.encrypted)
             except Exception as e:
                 logger.error("Failed to repack '%s': %s", inner_path, e, exc_info=True)
                 return None
@@ -295,14 +297,14 @@ def _resolve_files_to_directories(
     return result
 
 
-def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int, int | None]]) -> None:
-    """Update comp_size, offset, and PAZ size fields in a PAMT file.
+def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int, int | None, int]]) -> None:
+    """Update comp_size, offset, orig_size, and PAZ size fields in a PAMT file.
 
     PAMT file records are 20 bytes: node_ref(4) + offset(4) + comp_size(4) + orig_size(4) + flags(4).
     """
     data = bytearray(pamt_path.read_bytes())
 
-    for entry, new_comp_size, new_offset, new_paz_size in updates:
+    for entry, new_comp_size, new_offset, new_paz_size, new_orig_size in updates:
         # Update PAZ size table if PAZ grew
         if new_paz_size is not None:
             paz_index = entry.paz_index
@@ -324,9 +326,12 @@ def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int
             continue
         struct.pack_into('<I', data, idx, new_offset)
         struct.pack_into('<I', data, idx + 4, new_comp_size)
-        logger.info("Updated PAMT for %s: offset %d->%d, comp %d->%d",
+        if new_orig_size != entry.orig_size:
+            struct.pack_into('<I', data, idx + 8, new_orig_size)
+        logger.info("Updated PAMT for %s: offset %d->%d, comp %d->%d, orig %d->%d",
                      entry.path, entry.offset, new_offset,
-                     entry.comp_size, new_comp_size)
+                     entry.comp_size, new_comp_size,
+                     entry.orig_size, new_orig_size)
 
     # Recompute PAMT hash
     from cdumm.archive.hashlittle import compute_pamt_hash

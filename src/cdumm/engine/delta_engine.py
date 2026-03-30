@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 SPARSE_MAGIC = b"SPRS"
 FULL_COPY_MAGIC = b"FULL"
+ENTRY_MAGIC = b"ENTR"  # Entry-level delta (decompressed content + PAMT metadata)
 # Use sparse patch if files are same size and changed bytes < 1% of file
 SPARSE_THRESHOLD_RATIO = 0.01
 # Always use sparse for files > 500 MB (bsdiff would use too much RAM)
@@ -255,3 +256,48 @@ def save_delta(delta_bytes: bytes, delta_path: Path) -> None:
 def load_delta(delta_path: Path) -> bytes:
     """Load delta bytes from disk."""
     return delta_path.read_bytes()
+
+
+# ── Entry-level deltas ──────────────────────────────────────────────
+# Stores decompressed file content + PAMT entry metadata.
+# Used by script mods so different entries in the same PAZ compose correctly.
+#
+# Format:
+#   ENTR (4 bytes magic)
+#   metadata_len (4 bytes LE)
+#   metadata JSON (metadata_len bytes)
+#   decompressed_content (rest of file)
+
+def save_entry_delta(content: bytes, metadata: dict, delta_path: Path) -> None:
+    """Save an entry-level delta (decompressed content + PAMT entry info)."""
+    import json
+    meta_json = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    buf = bytearray(ENTRY_MAGIC)
+    buf += struct.pack("<I", len(meta_json))
+    buf += meta_json
+    buf += content
+    delta_path.parent.mkdir(parents=True, exist_ok=True)
+    delta_path.write_bytes(bytes(buf))
+    logger.debug("Entry delta saved: %s (%d bytes content, entry=%s)",
+                 delta_path, len(content), metadata.get("entry_path", "?"))
+
+
+def load_entry_delta(delta_path: Path) -> tuple[bytes, dict]:
+    """Load an entry-level delta. Returns (decompressed_content, metadata)."""
+    import json
+    raw = delta_path.read_bytes()
+    if raw[:4] != ENTRY_MAGIC:
+        raise ValueError(f"Not an entry delta: {delta_path}")
+    meta_len = struct.unpack_from("<I", raw, 4)[0]
+    metadata = json.loads(raw[8:8 + meta_len])
+    content = raw[8 + meta_len:]
+    return content, metadata
+
+
+def is_entry_delta(delta_path: Path) -> bool:
+    """Check if a delta file is an entry-level delta."""
+    try:
+        with open(delta_path, "rb") as f:
+            return f.read(4) == ENTRY_MAGIC
+    except OSError:
+        return False

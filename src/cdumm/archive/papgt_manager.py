@@ -39,9 +39,11 @@ class PapgtManager:
     def rebuild(self, modified_pamts: dict[str, bytes] | None = None) -> bytes:
         """Rebuild PAPGT with correct hashes for all directories.
 
-        Always starts from the vanilla PAPGT to avoid stale entries from
-        previously enabled mods. New directory entries are added only for
-        directories in modified_pamts that aren't in vanilla.
+        Starts from the vanilla PAPGT structure, then:
+        1. Removes entries for directories that don't exist on disk
+           (cleaned-up mod directories)
+        2. Adds entries for new directories in modified_pamts
+        3. Updates all PAMT hashes
 
         Args:
             modified_pamts: dict of {dir_name: pamt_bytes} for directories
@@ -51,7 +53,7 @@ class PapgtManager:
         Returns:
             The rebuilt PAPGT bytes.
         """
-        # Use vanilla PAPGT as the base (avoids stale mod directory entries)
+        # Use vanilla PAPGT as the base structure
         base_path = self._vanilla_papgt if self._vanilla_papgt and self._vanilla_papgt.exists() else self._papgt_path
         if not base_path.exists():
             raise FileNotFoundError(f"PAPGT not found: {base_path}")
@@ -61,144 +63,114 @@ class PapgtManager:
         if len(papgt) < 12:
             raise ValueError("PAPGT file too small")
 
+        # Preserve header metadata (bytes 0:4 and 8:12 are NOT hashes)
+        header_meta0 = papgt[0:4]
+        header_meta8 = papgt[8:12]
+
         entry_start = 12
         entry_count = _find_entry_count(papgt, entry_start)
-        string_table_start = entry_start + entry_count * ENTRY_SIZE + 4  # +4 for size field
+        string_table_start = entry_start + entry_count * ENTRY_SIZE + 4
 
-        logger.info("PAPGT: %d directory entries, string table at %d",
-                     entry_count, string_table_start)
+        logger.info("PAPGT base: %d entries from %s", entry_count, base_path.name)
 
-        # Parse existing entries
-        entries: list[tuple[int, int, int, int]] = []  # (offset, flags, name_offset, pamt_hash)
+        # Parse existing entries with their directory names
+        parsed_entries: list[tuple[str, int, int]] = []  # (dir_name, flags, pamt_hash)
         for i in range(entry_count):
             pos = entry_start + i * ENTRY_SIZE
             flags = struct.unpack_from("<I", papgt, pos)[0]
             name_offset = struct.unpack_from("<I", papgt, pos + 4)[0]
             pamt_hash = struct.unpack_from("<I", papgt, pos + 8)[0]
-            entries.append((pos, flags, name_offset, pamt_hash))
-
-        # Build map of existing directory names
-        existing_dirs: dict[str, int] = {}  # dir_name -> entry index
-        for i, (_, _, name_offset, _) in enumerate(entries):
             dir_name = _read_string(papgt, string_table_start, name_offset)
             if dir_name:
-                existing_dirs[dir_name] = i
+                parsed_entries.append((dir_name, flags, pamt_hash))
 
-        # Find new directories from modified_pamts that aren't in PAPGT
-        new_dirs: list[str] = []
+        # Determine which directories should be in the PAPGT:
+        # - Keep entries where the PAMT exists on disk OR is in modified_pamts
+        # - Remove entries for directories that no longer exist (mod cleanup)
+        live_entries: list[tuple[str, int, int]] = []
+        removed = []
+        for dir_name, flags, pamt_hash in parsed_entries:
+            pamt_on_disk = (self._game_dir / dir_name / "0.pamt").exists()
+            in_modified = modified_pamts and dir_name in modified_pamts
+            if pamt_on_disk or in_modified:
+                live_entries.append((dir_name, flags, pamt_hash))
+            else:
+                removed.append(dir_name)
+
+        if removed:
+            logger.info("PAPGT: removing %d stale entries: %s", len(removed), removed)
+
+        # Add new directories from modified_pamts not already in PAPGT
+        existing_names = {e[0] for e in live_entries}
+        new_dirs = []
         if modified_pamts:
             for dir_name in sorted(modified_pamts.keys()):
-                if dir_name not in existing_dirs:
+                if dir_name not in existing_names:
                     new_dirs.append(dir_name)
 
+        # Use the most common flags for new entries
+        default_flags = 0x003FFF00
+        if live_entries:
+            flag_counts: dict[int, int] = {}
+            for _, flags, _ in live_entries:
+                flag_counts[flags] = flag_counts.get(flags, 0) + 1
+            default_flags = max(flag_counts, key=flag_counts.get)
+
         if new_dirs:
-            logger.info("PAPGT: adding %d new directory entries: %s",
-                         len(new_dirs), new_dirs)
-            papgt = self._add_new_entries(
-                papgt, entries, entry_start, entry_count,
-                string_table_start, new_dirs, modified_pamts)
-            # Re-parse after modification
-            entry_count = _find_entry_count(papgt, entry_start)
-            string_table_start = entry_start + entry_count * ENTRY_SIZE + 4
-            entries = []
-            for i in range(entry_count):
-                pos = entry_start + i * ENTRY_SIZE
-                flags = struct.unpack_from("<I", papgt, pos)[0]
-                name_offset = struct.unpack_from("<I", papgt, pos + 4)[0]
-                pamt_hash = struct.unpack_from("<I", papgt, pos + 8)[0]
-                entries.append((pos, flags, name_offset, pamt_hash))
-            existing_dirs = {}
-            for i, (_, _, name_offset, _) in enumerate(entries):
-                dir_name = _read_string(papgt, string_table_start, name_offset)
-                if dir_name:
-                    existing_dirs[dir_name] = i
+            logger.info("PAPGT: adding %d new entries: %s", len(new_dirs), new_dirs)
 
-        # Update each entry's PAMT hash
-        for dir_name, idx in existing_dirs.items():
-            entry_offset, flags, name_offset, old_hash = entries[idx]
+        # Build the complete entry list: new entries first, then existing
+        all_entries: list[tuple[str, int]] = []  # (dir_name, flags)
+        for dir_name in new_dirs:
+            all_entries.append((dir_name, default_flags))
+        for dir_name, flags, _ in live_entries:
+            all_entries.append((dir_name, flags))
 
+        # Build string table
+        string_table = bytearray()
+        name_offsets: dict[str, int] = {}
+        for dir_name, _ in all_entries:
+            if dir_name not in name_offsets:
+                name_offsets[dir_name] = len(string_table)
+                string_table += dir_name.encode("ascii") + b"\x00"
+
+        # Construct new PAPGT
+        result = bytearray()
+        result += header_meta0          # [0:4] metadata
+        result += b"\x00\x00\x00\x00"   # [4:8] hash placeholder
+        result += header_meta8          # [8:12] metadata
+
+        # Update entry count in header byte 8
+        new_count = len(all_entries)
+        result[8] = new_count & 0xFF
+
+        # Write entries
+        for dir_name, flags in all_entries:
+            # Compute PAMT hash
             if modified_pamts and dir_name in modified_pamts:
                 pamt_data = modified_pamts[dir_name]
             else:
                 pamt_path = self._game_dir / dir_name / "0.pamt"
-                if not pamt_path.exists():
-                    continue
-                pamt_data = pamt_path.read_bytes()
+                if pamt_path.exists():
+                    pamt_data = pamt_path.read_bytes()
+                else:
+                    pamt_data = b""
 
-            new_hash = compute_pamt_hash(pamt_data)
-            # Hash is at entry_offset + 8 (third field)
-            struct.pack_into("<I", papgt, entry_offset + 8, new_hash)
+            pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
+            result += struct.pack("<III", flags, name_offsets[dir_name], pamt_hash)
 
-            if new_hash != old_hash:
-                logger.info("PAPGT: updated %s hash 0x%08X -> 0x%08X",
-                           dir_name, old_hash, new_hash)
+        # Write string table size + string table
+        result += struct.pack("<I", len(string_table))
+        result += string_table
 
-        # Recompute PAPGT file hash at [4:8]
-        papgt_hash = compute_papgt_hash(bytes(papgt))
-        struct.pack_into("<I", papgt, 4, papgt_hash)
-        logger.info("PAPGT: file hash updated to 0x%08X", papgt_hash)
+        # Compute and write PAPGT file hash at [4:8]
+        papgt_hash = compute_papgt_hash(bytes(result))
+        struct.pack_into("<I", result, 4, papgt_hash)
 
-        return bytes(papgt)
+        logger.info("PAPGT rebuilt: %d entries (%d removed, %d added), hash=0x%08X",
+                     new_count, len(removed), len(new_dirs), papgt_hash)
 
-    def _add_new_entries(
-        self, papgt: bytearray,
-        entries: list[tuple[int, int, int, int]],
-        entry_start: int,
-        entry_count: int,
-        string_table_start: int,
-        new_dirs: list[str],
-        modified_pamts: dict[str, bytes],
-    ) -> bytearray:
-        """Add new directory entries to PAPGT for mod-added directories.
-
-        Inserts new 12-byte entries after existing ones, updates the string
-        table size field, and extends the string table.
-        """
-        # Read existing string table (after the 4-byte size field)
-        old_string_table = papgt[string_table_start:]
-
-        # Build new string additions
-        new_string_additions = bytearray()
-        new_dir_offsets: list[int] = []
-        for dir_name in new_dirs:
-            new_dir_offsets.append(len(old_string_table) + len(new_string_additions))
-            new_string_additions += dir_name.encode("ascii") + b"\x00"
-
-        # Use the most common flags from existing entries for new ones
-        default_flags = 0x003FFF00
-        if entries:
-            flag_counts: dict[int, int] = {}
-            for _, flags, _, _ in entries:
-                flag_counts[flags] = flag_counts.get(flags, 0) + 1
-            default_flags = max(flag_counts, key=flag_counts.get)
-
-        # Build new PAPGT — insert new entries FIRST (game processes in order)
-        result = bytearray(papgt[:entry_start])  # header (12 bytes)
-
-        # Write new entries first
-        for i, dir_name in enumerate(new_dirs):
-            pamt_data = modified_pamts.get(dir_name, b"")
-            pamt_hash = compute_pamt_hash(pamt_data) if pamt_data else 0
-            result += struct.pack("<III", default_flags, new_dir_offsets[i], pamt_hash)
-            logger.info("PAPGT: new entry for %s, hash=0x%08X, flags=0x%08X",
-                        dir_name, pamt_hash, default_flags)
-
-        # Then write existing entries (unchanged)
-        for _, flags, name_offset, pamt_hash in entries:
-            result += struct.pack("<III", flags, name_offset, pamt_hash)
-
-        # Write string table size field
-        new_string_table_size = len(old_string_table) + len(new_string_additions)
-        result += struct.pack("<I", new_string_table_size)
-
-        # Write string table (existing + new)
-        result += old_string_table + new_string_additions
-
-        # Update entry count at byte 8
-        new_entry_count = entry_count + len(new_dirs)
-        result[8] = new_entry_count
-
-        return result
+        return bytes(result)
 
 
 def _find_entry_count(papgt: bytearray, entry_start: int) -> int:

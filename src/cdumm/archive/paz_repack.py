@@ -223,7 +223,7 @@ def repack_entry(modified_path: str, entry: PazEntry,
 
 
 def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
-                       allow_size_change: bool = False) -> tuple[bytes, int]:
+                       allow_size_change: bool = False) -> tuple[bytes, int, int]:
     """Repack modified file content into the encrypted/compressed payload.
 
     Args:
@@ -233,28 +233,28 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
             compress as-is and return the actual size. Caller must update PAMT.
 
     Returns:
-        (payload_bytes, actual_comp_size) — payload padded to entry.comp_size,
-        actual_comp_size is the real compressed data length (may differ if padded).
+        (payload_bytes, actual_comp_size, actual_orig_size) — payload padded
+        to entry.comp_size, actual_comp_size is the real compressed data length,
+        actual_orig_size is the decompressed content size (may differ from
+        entry.orig_size if content grew).
     """
     basename = os.path.basename(entry.path)
     is_compressed = entry.compressed and entry.compression_type == 2
     actual_comp_size = entry.comp_size
+    actual_orig_size = entry.orig_size
 
     if is_compressed:
         if allow_size_change:
-            # Compress as-is without trying to match exact size
-            padded = _pad_to_orig_size(plaintext, entry.orig_size)
+            # Compress as-is — never modify or truncate content. If the mod
+            # file is larger than orig_size, use the actual size (caller
+            # must update orig_size in PAMT).
+            if len(plaintext) > entry.orig_size:
+                padded = plaintext
+                actual_orig_size = len(plaintext)
+            else:
+                padded = _pad_to_orig_size(plaintext, entry.orig_size)
             compressed = lz4.block.compress(padded, store_size=False)
             actual_comp_size = len(compressed)
-            if actual_comp_size > entry.comp_size:
-                # Try stripping trailing whitespace from text files to reduce size
-                ext = os.path.splitext(basename)[1].lower()
-                if ext in ('.css', '.html', '.thtml', '.xml', '.json', '.txt'):
-                    stripped = _strip_whitespace_to_fit(
-                        plaintext, entry.comp_size, entry.orig_size)
-                    if stripped is not None:
-                        compressed = lz4.block.compress(stripped, store_size=False)
-                        actual_comp_size = len(compressed)
             if actual_comp_size > entry.comp_size:
                 # Data doesn't fit in the original slot — return it unsized.
                 # Caller must append to end of PAZ and update PAMT offset.
@@ -283,6 +283,7 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
             if allow_size_change:
                 # Uncompressed file larger than slot — caller must append to PAZ
                 actual_comp_size = len(plaintext)
+                actual_orig_size = len(plaintext)
                 payload = plaintext
             else:
                 raise ValueError(
@@ -294,4 +295,4 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
     if entry.encrypted:
         payload = encrypt(payload, basename)
 
-    return payload, actual_comp_size
+    return payload, actual_comp_size, actual_orig_size

@@ -116,11 +116,34 @@ def main() -> int:
         splash = show_splash()
         app.processEvents()
 
+    splash.showMessage("  Checking game state...", 0x0081)
+    app.processEvents()
+
+    # Run heavy startup checks DURING splash (before UI shows)
+    # so the window is responsive immediately when it appears.
+    game_path = Path(game_dir)
+    from cdumm.engine.snapshot_manager import SnapshotManager
+    snapshot = SnapshotManager(db)
+
+    startup_context = {"stale": False, "has_snapshot": snapshot.has_snapshot()}
+
+    if startup_context["has_snapshot"]:
+        splash.showMessage("  Verifying game files...", 0x0081)
+        app.processEvents()
+
+        # Check game version fingerprint (fast — just reads a config value)
+        from cdumm.engine.version_detector import detect_game_version
+        current_fp = detect_game_version(game_path)
+        stored_fp = config.get("game_version_fingerprint")
+        if stored_fp and current_fp and stored_fp != current_fp:
+            startup_context["game_updated"] = True
+
     splash.showMessage("  Building UI...", 0x0081)
     app.processEvents()
 
     from cdumm.gui.main_window import MainWindow
-    window = MainWindow(db=db, game_dir=Path(game_dir), app_data_dir=APP_DATA_DIR)
+    window = MainWindow(db=db, game_dir=game_path, app_data_dir=APP_DATA_DIR,
+                        startup_context=startup_context)
     window.show()
     splash.finish(window)
 

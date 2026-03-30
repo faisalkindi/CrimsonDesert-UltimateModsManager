@@ -51,7 +51,7 @@ class ImportWidget(QWidget):
     def dropEvent(self, event) -> None:
         self._label.setStyleSheet(DROP_DEFAULT)
         urls = event.mimeData().urls()
-        if urls:
-            path = Path(urls[0].toLocalFile())
+        for url in urls:
+            path = Path(url.toLocalFile())
             logger.info("File dropped for import: %s", path)
             self.file_dropped.emit(path)

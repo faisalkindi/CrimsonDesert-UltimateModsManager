@@ -19,7 +19,7 @@ class ModManager:
         """List all mods ordered by priority (load order), optionally filtered by type."""
         query = (
             "SELECT id, name, mod_type, enabled, priority, import_date, "
-            "game_version_hash, source_path, author, version, description "
+            "game_version_hash, source_path, author, version, description, configurable "
             "FROM mods"
         )
         if mod_type:
@@ -33,6 +33,7 @@ class ModManager:
                 "enabled": bool(row[3]), "priority": row[4], "import_date": row[5],
                 "game_version_hash": row[6], "source_path": row[7],
                 "author": row[8], "version": row[9], "description": row[10],
+                "configurable": bool(row[11]) if len(row) > 11 else False,
             }
             for row in cursor.fetchall()
         ]
@@ -47,18 +48,31 @@ class ModManager:
         logger.info("Mod %d %s", mod_id, "enabled" if enabled else "disabled")
 
     def remove_mod(self, mod_id: int) -> None:
-        """Remove a mod and its deltas from the manager."""
-        # Get mod name for logging
-        cursor = self._db.connection.execute("SELECT name FROM mods WHERE id = ?", (mod_id,))
+        """Remove a mod and its deltas from the manager.
+
+        Files are NOT reverted here — the caller must Apply after removing
+        to revert game files. We disable the mod first and keep its delta
+        entries until after the next Apply reverts them, then clean up.
+        """
+        cursor = self._db.connection.execute("SELECT name, enabled FROM mods WHERE id = ?", (mod_id,))
         row = cursor.fetchone()
         mod_name = row[0] if row else f"Mod {mod_id}"
+        was_enabled = bool(row[1]) if row else False
+
+        if was_enabled:
+            # Disable first — next Apply will revert its files
+            self._db.connection.execute(
+                "UPDATE mods SET enabled = 0 WHERE id = ?", (mod_id,))
+            self._db.connection.commit()
+            logger.info("Disabled for removal: %s (id=%d) — Apply needed to revert files",
+                        mod_name, mod_id)
 
         # Delete delta files from disk
         delta_dir = self._deltas_dir / str(mod_id)
         if delta_dir.exists():
             shutil.rmtree(delta_dir)
 
-        # Database cascade handles mod_deltas and conflicts
+        # Delete from DB (cascade removes mod_deltas and conflicts)
         self._db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
         self._db.connection.commit()
         logger.info("Removed mod: %s (id=%d)", mod_name, mod_id)

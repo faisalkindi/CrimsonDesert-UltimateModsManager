@@ -143,6 +143,8 @@ class ModListModel(QAbstractTableModel):
             if col == COL_ORDER:
                 return str(index.row() + 1)
             if col == COL_NAME:
+                if mod.get("configurable"):
+                    return f"⚙ {mod['name']}"
                 return mod["name"]
             if col == COL_AUTHOR:
                 return mod.get("author") or ""
@@ -158,7 +160,7 @@ class ModListModel(QAbstractTableModel):
                 details = self._mod_manager.get_mod_details(mod["id"])
                 return str(len(details["changed_files"])) if details else "0"
             if col == COL_DATE:
-                return mod["import_date"][:10] if mod["import_date"] else ""
+                return mod["import_date"][:16] if mod["import_date"] else ""
 
         if role == Qt.ItemDataRole.ForegroundRole and col == COL_STATUS:
             status = self._status_cache.get(mod["id"], "")

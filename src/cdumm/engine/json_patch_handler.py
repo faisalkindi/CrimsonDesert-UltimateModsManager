@@ -83,13 +83,21 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
         f.seek(entry.offset)
         raw = f.read(entry.comp_size)
 
-    # Decrypt if needed (XML files)
-    if entry.encrypted:
-        raw = decrypt(raw, os.path.basename(entry.path))
+    basename = os.path.basename(entry.path)
 
-    # Decompress if needed
     if entry.compressed and entry.compression_type == 2:
-        raw = lz4_decompress(raw, entry.orig_size)
+        # Try decompress first (no decrypt). If the PAMT encrypted flag
+        # is wrong, this will fail and we fall back to decrypt+decompress.
+        try:
+            return lz4_decompress(raw, entry.orig_size)
+        except Exception:
+            # Decryption needed — decrypt then decompress
+            decrypted = decrypt(raw, basename)
+            return lz4_decompress(decrypted, entry.orig_size)
+
+    # Not compressed — try raw first, then decrypted
+    if entry.encrypted:
+        raw = decrypt(raw, basename)
 
     return raw
 
@@ -183,7 +191,7 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
             plaintext = _extract_from_paz(entry)
         except Exception as e:
             logger.error("Failed to extract %s: %s", game_file, e, exc_info=True)
-            return None
+            raise RuntimeError(f"Failed to extract {game_file}: {e}") from e
 
         # Apply byte patches
         modified = bytearray(plaintext)
@@ -198,7 +206,7 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
         # Use allow_size_change=True because byte patches change the LZ4
         # compression ratio slightly — we'll update PAMT to match.
         try:
-            payload, actual_comp = repack_entry_bytes(
+            payload, actual_comp, actual_orig = repack_entry_bytes(
                 bytes(modified), entry, allow_size_change=True)
         except Exception as e:
             logger.error("Failed to repack %s: %s", game_file, e, exc_info=True)
@@ -240,7 +248,8 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
             pamt_dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(pamt_src, pamt_dst)
 
-        if (actual_comp != entry.comp_size or new_offset != entry.offset) and pamt_dst.exists():
+        if (actual_comp != entry.comp_size or new_offset != entry.offset
+                or actual_orig != entry.orig_size) and pamt_dst.exists():
             # If we appended to PAZ, pass the new file size so PAMT PAZ table is updated
             new_paz_size = None
             if new_offset != entry.offset:
@@ -318,8 +327,15 @@ def _update_pamt_record(pamt_path: Path, entry: PazEntry,
 
 
 def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
-    """Search all PAMT indices for a specific game file path."""
+    """Search all PAMT indices for a specific game file path.
+
+    Tries exact match, suffix match, and basename match (PAMT flattens
+    directory structure, so mod paths may be deeper than PAMT paths).
+    """
     game_file_lower = game_file.lower().replace("\\", "/")
+    game_basename = game_file_lower.rsplit("/", 1)[-1]
+
+    basename_match = None
 
     for d in sorted(game_dir.iterdir()):
         if not d.is_dir() or not d.name.isdigit():
@@ -330,11 +346,26 @@ def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
         try:
             entries = parse_pamt(str(pamt), paz_dir=str(d))
             for e in entries:
-                if e.path.lower().replace("\\", "/") == game_file_lower:
+                ep = e.path.lower().replace("\\", "/")
+                # Exact match
+                if ep == game_file_lower:
                     return e
-                # Also try matching just the suffix
-                if e.path.lower().replace("\\", "/").endswith("/" + game_file_lower):
+                # PAMT path is suffix of game_file (mod uses deeper path)
+                if game_file_lower.endswith("/" + ep) or game_file_lower.endswith(ep):
                     return e
+                # game_file is suffix of PAMT path
+                if ep.endswith("/" + game_file_lower):
+                    return e
+                # Basename match (last resort — only if unique)
+                if ep.rsplit("/", 1)[-1] == game_basename:
+                    if basename_match is None:
+                        basename_match = e
+                    else:
+                        basename_match = False  # ambiguous
         except Exception:
             continue
+
+    if basename_match and basename_match is not False:
+        logger.info("Matched '%s' to '%s' by basename", game_file, basename_match.path)
+        return basename_match
     return None

@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -49,6 +50,7 @@ class SnapshotWorker(QObject):
     progress_updated = Signal(int, str)  # percent, message
     finished = Signal(int)  # total files hashed
     error_occurred = Signal(str)
+    activity = Signal(str, str, str)  # category, message, detail — for activity log
 
     def __init__(self, game_dir: Path, db_path: Path) -> None:
         super().__init__()
@@ -68,7 +70,40 @@ class SnapshotWorker(QObject):
             self.error_occurred.emit(f"Snapshot creation failed: {e}")
 
     def _create_snapshot(self) -> None:
-        self.progress_updated.emit(0, "Scanning game directories...")
+        self.progress_updated.emit(0, "Checking for mod artifacts...")
+
+        # Check for signs of modding BEFORE snapshotting.
+        problems = self._check_pre_snapshot()
+
+        # Mod directories (0036+) are never part of vanilla — Steam verify
+        # doesn't remove them. Clean these up automatically (safe) but
+        # block on actual file modifications (not safe to auto-fix).
+        import shutil
+        real_problems = []
+        for p in problems:
+            if p.startswith("Mod directory"):
+                dir_name = p.split("/")[0].replace("Mod directory ", "")
+                d = self._game_dir / dir_name
+                if d.exists():
+                    shutil.rmtree(d, ignore_errors=True)
+                    logger.info("Removed mod directory before snapshot: %s", dir_name)
+                    self.progress_updated.emit(1, f"Removed mod directory {dir_name}/")
+                    self.activity.emit("cleanup",
+                                       f"Removed mod directory {dir_name}/",
+                                       "Not part of vanilla game — created by mods")
+            else:
+                real_problems.append(p)
+
+        if real_problems:
+            problem_list = "\n".join(f"  - {p}" for p in real_problems)
+            self.error_occurred.emit(
+                f"Cannot create snapshot — game files appear to be modded:\n\n"
+                f"{problem_list}\n\n"
+                f"Please verify game files through Steam first, then try again."
+            )
+            return
+
+        self.progress_updated.emit(2, "Scanning game directories...")
 
         # Collect all files to hash
         files_to_hash: list[tuple[Path, str]] = []  # (abs_path, relative_posix_path)
@@ -97,6 +132,107 @@ class SnapshotWorker(QObject):
         pathc = self._game_dir / PATHC_FILE
         if pathc.exists():
             files_to_hash.append((pathc, PATHC_FILE))
+
+        total = len(files_to_hash)
+        if total == 0:
+            self.error_occurred.emit(
+                "No PAZ/PAMT/PAPGT files found in game directory.\n\n"
+                f"Searched: {self._game_dir}\n"
+                "Expected directories: 0000-0032 with .paz and .pamt files."
+            )
+            return
+
+        # Calculate total bytes for accurate progress
+        total_bytes = sum(f.stat().st_size for f, _ in files_to_hash)
+        total_gb = total_bytes / (1024 ** 3)
+        logger.info("Snapshot: %d files, %.1f GB to hash", total, total_gb)
+        self.progress_updated.emit(3, f"Found {total} files ({total_gb:.1f} GB). Hashing...")
+
+        # Clear existing snapshot
+        self._thread_db.connection.execute("DELETE FROM snapshots")
+
+        bytes_hashed = 0
+        last_pct = -1
+
+        for i, (abs_path, rel_path) in enumerate(files_to_hash):
+            file_size_bytes = abs_path.stat().st_size
+            file_size_mb = file_size_bytes / (1024 * 1024)
+            logger.debug("Hashing [%d/%d]: %s (%.0f MB)", i + 1, total, rel_path, file_size_mb)
+
+            def on_chunk(chunk_bytes_read, chunk_total, _rel=rel_path, _i=i,
+                         _base=bytes_hashed, _fmb=file_size_mb):
+                nonlocal last_pct
+                overall = _base + chunk_bytes_read
+                pct = int(overall / total_bytes * 100) if total_bytes > 0 else 0
+                if pct != last_pct:
+                    last_pct = pct
+                    chunk_pct = int(chunk_bytes_read / chunk_total * 100) if chunk_total > 0 else 100
+                    self.progress_updated.emit(
+                        pct,
+                        f"[{_i + 1}/{total}] {_rel} ({_fmb:.0f} MB) — {chunk_pct}%"
+                    )
+
+            file_hash, file_size = hash_file(abs_path, progress_callback=on_chunk)
+            bytes_hashed += file_size
+
+            self._thread_db.connection.execute(
+                "INSERT OR REPLACE INTO snapshots (file_path, file_hash, file_size) "
+                "VALUES (?, ?, ?)",
+                (rel_path, file_hash, file_size),
+            )
+
+            pct = int(bytes_hashed / total_bytes * 100) if total_bytes > 0 else 0
+            self.progress_updated.emit(pct, f"[{i + 1}/{total}] {rel_path} — done")
+            logger.debug("Hashed: %s -> %s", rel_path, file_hash[:16])
+
+        self._thread_db.connection.commit()
+        logger.info("Snapshot complete: %d files hashed", total)
+        self.finished.emit(total)
+
+    def _check_pre_snapshot(self) -> list[str]:
+        """Check for signs that game files are modded.
+
+        Returns a list of problems found. Empty list = safe to snapshot.
+        Never modifies game files — only reports.
+        """
+        problems = []
+
+        # 1. Check for mod-created directories (0036+)
+        for d in sorted(self._game_dir.iterdir()):
+            if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                continue
+            if int(d.name) >= 36:
+                files = list(d.iterdir())
+                if files:
+                    problems.append(
+                        f"Mod directory {d.name}/ exists ({len(files)} files)")
+
+        # 2. Check PAPGT for mod entries (vanilla has 33 entries, ~577 bytes)
+        game_papgt = self._game_dir / "meta" / "0.papgt"
+        if game_papgt.exists():
+            papgt_data = game_papgt.read_bytes()
+            if len(papgt_data) >= 12:
+                entry_count = papgt_data[8]
+                if entry_count > 35:  # vanilla has 33 entries
+                    problems.append(
+                        f"PAPGT has {entry_count} entries (vanilla has ~33)")
+
+        # 3. Check if CDMods/vanilla backup exists (means mods were applied before)
+        vanilla_dir = self._game_dir / "CDMods" / "vanilla"
+        if vanilla_dir.exists() and any(vanilla_dir.rglob("*")):
+            # Backups exist — check if game files differ from backups
+            for backup in vanilla_dir.rglob("*"):
+                if not backup.is_file() or backup.name.endswith(".vranges"):
+                    continue
+                rel = str(backup.relative_to(vanilla_dir)).replace("\\", "/")
+                game_file = self._game_dir / rel.replace("/", os.sep)
+                if game_file.exists():
+                    if game_file.stat().st_size != backup.stat().st_size:
+                        problems.append(
+                            f"{rel}: size {game_file.stat().st_size} "
+                            f"differs from vanilla backup {backup.stat().st_size}")
+
+        return problems
 
         total = len(files_to_hash)
         if total == 0:

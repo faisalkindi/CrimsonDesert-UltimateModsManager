@@ -8,12 +8,55 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.2.1",
+        "version": "1.4.0",
         "date": "2026-03-30",
         "notes": [
-            "Fixed stale vanilla backups causing 'nothing to apply' when re-importing mods",
-            "Vanilla backups are now refreshed automatically after Steam verify + rescan",
-            "ASI Loader detection now recognizes version.dll, dinput8.dll, dsound.dll (not just winmm.dll)",
+            # ── Mod Composition Engine (NEW) ──
+            "Script mods now captured at PAMT entry level — mods that change different files in the same PAZ compose correctly",
+            "Multiple script mods modifying the same PAZ no longer corrupt each other",
+            "PAMT index rebuilt from entry-level changes during Apply instead of raw byte diffs",
+            "Apply now processes PAZ files first, then rebuilds PAMT, then PAPGT — correct dependency order",
+            # ── Conflict Detection & Safety ──
+            "Dangerous byte-range overlaps shown as a blocking warning before Apply — lists every conflict and winner",
+            "Apply preview — shows exactly what files will be changed before modifying anything",
+            "Post-apply integrity verification — checks PAPGT hash, PAMT entries, and PAZ bounds",
+            "Safety net catches orphaned modded files left by removed mods and restores them",
+            # ── Game Update Detection ──
+            "Game update/hotfix detection now shows Steam build ID in the notification",
+            "Automatic reset and rescan when game files change (update, hotfix, or Steam verify)",
+            "Mod version mismatch warnings — flags mods imported for a different game version",
+            # ── Reliability Overhaul ──
+            "PAPGT always rebuilt from scratch — never restored from stale backup",
+            "PAPGT rebuild removes entries for deleted mod directories (fixes reinstall errors)",
+            "Vanilla backups validated against snapshot before creation (rejects modded files)",
+            "Snapshot refuses to run on modded files — blocks with clear error message",
+            "Orphan mod directories (0036+) cleaned up automatically",
+            "Corrupted vanilla backups detected and purged on startup",
+            "PAMT hash always recomputed after composing multiple mod deltas",
+            # ── Trust & Transparency ──
+            "Verify Game State tool — scan all files and see what's vanilla vs modded",
+            "Activity Log tab — persistent, color-coded history of every action across sessions",
+            "No more silent snapshot refresh — always asks before rescanning",
+            # ── New Formats & Import ──
+            "JSON preset picker — choose which variant when a mod has labeled presets",
+            "7z archive support",
+            "Batch import — drop multiple mods at once, imported sequentially",
+            "New mods import as disabled — must enable and Apply explicitly",
+            # ── ASI Mods ──
+            "ASI Loader detection recognizes version.dll, dinput8.dll, dsound.dll",
+            "Bundled ASI Loader auto-install when missing",
+            # ── UX Improvements ──
+            "Script capture progress now shows per-file scanning status instead of freezing at 0%",
+            "Configurable mods show gear icon in mod list",
+            "Import date shows local time instead of UTC",
+            "Leftover .bak files from mod scripts detected and offered for cleanup",
+            # ── Bug Fixes ──
+            "Fixed script mods leaving game files modded after capture — vanilla restored automatically",
+            "Fixed CB mod content truncation — mod files are never modified or stripped",
+            "Fixed FULL_COPY delta ordering — applied before SPRS patches from other mods",
+            "Fixed ASI panel not showing installed plugins after loader install",
+            "Fixed binary search wizard crash on round 10 (NameError in result display)",
+            "Fixed uninstall not reverting game files (now disables, applies, then deletes)",
         ],
     },
     {

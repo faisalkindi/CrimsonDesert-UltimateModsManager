@@ -32,12 +32,14 @@ class ModImportResult:
 
 
 def detect_format(path: Path) -> str:
-    """Detect import format: 'zip', 'folder', 'script', 'json_patch', 'bsdiff', or 'unknown'."""
+    """Detect import format: 'zip', '7z', 'folder', 'script', 'json_patch', 'bsdiff', or 'unknown'."""
     if path.is_dir():
         return "folder"
     suffix = path.suffix.lower()
     if suffix == ".zip":
         return "zip"
+    if suffix == ".7z":
+        return "7z"
     if suffix in (".bat", ".py"):
         return "script"
     if suffix == ".json":
@@ -52,6 +54,9 @@ def detect_format(path: Path) -> str:
                 return "zip"
         except zipfile.BadZipFile:
             pass
+    # Check if it's a rar
+    if suffix == ".rar":
+        return "unknown"  # TODO: add rar support
     return "unknown"
 
 
@@ -305,6 +310,105 @@ def _next_paz_directory(game_dir: Path) -> str:
             _assigned_dirs.add(n)
             return f"{n:04d}"
     return "0100"  # fallback
+
+
+def import_from_7z(
+    archive_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Import a mod from a 7z archive by extracting and treating as folder."""
+    mod_name = archive_path.stem
+    result = ModImportResult(mod_name)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        try:
+            import py7zr
+            with py7zr.SevenZipFile(archive_path, 'r') as z:
+                z.extractall(tmp_path)
+        except Exception as e:
+            result.error = f"Failed to extract 7z: {e}"
+            return result
+
+        # Delegate to import_from_zip's internal logic (same flow)
+        return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
+                                      mod_name, existing_mod_id)
+
+
+def _import_from_extracted(
+    tmp_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    mod_name: str, existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Common import logic for extracted archives (zip/7z)."""
+    result = ModImportResult(mod_name)
+
+    # Check for Crimson Browser format and convert if needed
+    cb_manifest = detect_crimson_browser(tmp_path)
+    if cb_manifest is not None:
+        cb_work = tmp_path.parent / "_cb_converted"
+        converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work)
+        if converted is not None:
+            cb_name = cb_manifest.get("id", mod_name)
+            modinfo = _read_modinfo(tmp_path)
+            if modinfo and modinfo.get("name"):
+                cb_name = modinfo["name"]
+            return _process_extracted_files(
+                converted, game_dir, db, snapshot, deltas_dir, cb_name,
+                existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    # Check for JSON byte-patch format
+    jp_data = detect_json_patch(tmp_path)
+    if jp_data is not None:
+        jp_work = tmp_path.parent / "_jp_converted"
+        converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
+        if converted is not None:
+            has_files = any(converted.rglob("*")) if converted.exists() else False
+            if not has_files:
+                result.error = "This mod's changes are already present in your game files."
+                return result
+            jp_name = jp_data.get("name", mod_name)
+            jp_modinfo = {
+                "name": jp_data.get("name"), "version": jp_data.get("version"),
+                "author": jp_data.get("author"), "description": jp_data.get("description"),
+            }
+            return _process_extracted_files(
+                converted, game_dir, db, snapshot, deltas_dir, jp_name,
+                existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+
+    # Check for DDS texture mod
+    tex_info = detect_texture_mod(tmp_path)
+    if tex_info is not None:
+        tex_work = tmp_path.parent / "_tex_converted"
+        converted = convert_texture_mod(tex_info, game_dir, tex_work)
+        if converted is not None:
+            tex_name = tex_info.get("name", mod_name)
+            modinfo = _read_modinfo(tmp_path)
+            if modinfo and modinfo.get("name"):
+                tex_name = modinfo["name"]
+            return _process_extracted_files(
+                converted, game_dir, db, snapshot, deltas_dir, tex_name,
+                existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    # Check for scripts
+    scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
+    if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
+        result.error = "This archive contains a script mod. It should be handled by the script mod flow."
+        return result
+
+    # Detect multi-variant
+    variant = _find_best_variant(tmp_path)
+    if variant:
+        logger.info("Multi-variant archive, using: %s", variant.name)
+        tmp_path = variant
+        mod_name = f"{mod_name} ({variant.name})"
+
+    modinfo = _read_modinfo(tmp_path)
+    if modinfo and modinfo.get("name"):
+        mod_name = modinfo["name"]
+
+    return _process_extracted_files(
+        tmp_path, game_dir, db, snapshot, deltas_dir, mod_name,
+        existing_mod_id=existing_mod_id, modinfo=modinfo)
 
 
 def import_from_zip(
@@ -816,13 +920,24 @@ def _process_extracted_files(
             delta_path = deltas_dir / str(mod_id) / safe_name
             save_delta(delta_bytes, delta_path)
 
-            # Store each byte range as a separate mod_delta entry
+            # Store each byte range with a hash of the vanilla bytes at that range.
+            # This allows checking if a game update invalidated the mod's patches.
+            import hashlib
             for byte_start, byte_end in byte_ranges:
+                vanilla_chunk = vanilla_bytes[byte_start:byte_end]
+                vh = hashlib.sha256(vanilla_chunk).hexdigest()[:16]
                 db.connection.execute(
-                    "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end, is_new) "
-                    "VALUES (?, ?, ?, ?, ?, 0)",
-                    (mod_id, rel_path, str(delta_path), byte_start, byte_end),
+                    "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end, is_new, vanilla_hash) "
+                    "VALUES (?, ?, ?, ?, ?, 0, ?)",
+                    (mod_id, rel_path, str(delta_path), byte_start, byte_end, vh),
                 )
+
+            # Store vanilla file size for this file (for game update detection)
+            db.connection.execute(
+                "INSERT OR IGNORE INTO mod_vanilla_sizes (mod_id, file_path, vanilla_size) "
+                "VALUES (?, ?, ?)",
+                (mod_id, rel_path, len(vanilla_bytes)),
+            )
 
             result.changed_files.append({
                 "file_path": rel_path,

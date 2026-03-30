@@ -72,11 +72,19 @@ class AsiPanel(QWidget):
             self._loader_label.setText("ASI Loader: Installed")
             self._loader_label.setStyleSheet("color: #48A858; font-weight: 600;")
         else:
-            self._loader_label.setText("ASI Loader: Missing (winmm.dll)")
-            self._loader_label.setStyleSheet("color: #D04848; font-weight: 600;")
+            # Try to auto-install bundled ASI loader
+            self._install_bundled_loader()
+            if self._asi_mgr.has_loader():
+                self._loader_label.setText("ASI Loader: Installed (auto)")
+                self._loader_label.setStyleSheet("color: #48A858; font-weight: 600;")
+            else:
+                self._loader_label.setText("ASI Loader: Missing")
+                self._loader_label.setStyleSheet("color: #D04848; font-weight: 600;")
 
         self._plugins = self._asi_mgr.scan()
         conflicts = self._asi_mgr.detect_conflicts(self._plugins)
+
+        # Populate table
 
         self._table.setSortingEnabled(False)
         self._table.setRowCount(len(self._plugins))
@@ -110,6 +118,25 @@ class AsiPanel(QWidget):
 
         self._table.setSortingEnabled(True)
         self._table.resizeColumnsToContents()
+
+    def _install_bundled_loader(self) -> None:
+        """Install the bundled ASI loader (winmm.dll) to bin64."""
+        import sys, shutil
+        if getattr(sys, 'frozen', False):
+            bundled = Path(sys._MEIPASS) / "asi_loader" / "winmm.dll"
+        else:
+            bundled = Path(__file__).resolve().parents[3] / "asi_loader" / "winmm.dll"
+        if not bundled.exists():
+            return
+        dst = self._asi_mgr._bin64 / "winmm.dll"
+        if dst.exists():
+            return
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bundled, dst)
+            logger.info("Auto-installed bundled ASI loader: %s", dst)
+        except Exception as e:
+            logger.warning("Failed to install ASI loader: %s", e)
 
     def _get_plugin_at_row(self, row: int):
         item = self._table.item(row, 0)

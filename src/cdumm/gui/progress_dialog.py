@@ -53,6 +53,8 @@ class ProgressDialog(QDialog):
         self._status_label.setText(message)
         self._detail_label.setText(f"{percent}% complete")
 
+    set_progress = update_progress
+
     @Slot()
     def on_finished(self) -> None:
         self._progress_bar.setValue(100)
