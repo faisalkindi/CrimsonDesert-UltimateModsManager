@@ -42,15 +42,24 @@ class _StatusWorker(QObject):
         self._deltas_dir = deltas_dir
 
     def run(self) -> None:
-        from cdumm.storage.database import Database
-        db = Database(self._db_path)
-        db.initialize()
-        mgr = ModManager(db, self._deltas_dir)
-        results = {}
-        for mid in self._mod_ids:
-            results[mid] = mgr.get_mod_game_status(mid, self._game_dir)
-        db.close()
-        self.finished.emit(results)
+        try:
+            from cdumm.storage.database import Database
+            db = Database(self._db_path)
+            db.initialize()
+            mgr = ModManager(db, self._deltas_dir)
+            results = {}
+            for mid in self._mod_ids:
+                try:
+                    results[mid] = mgr.get_mod_game_status(mid, self._game_dir)
+                except Exception as e:
+                    logger.warning("Status check failed for mod %d: %s", mid, e)
+                    results[mid] = "disabled"
+            db.close()
+            self.finished.emit(results)
+        except Exception as e:
+            logger.error("StatusWorker crashed: %s", e, exc_info=True)
+            # Emit fallback so UI doesn't stay stuck on "checking..."
+            self.finished.emit({mid: "disabled" for mid in self._mod_ids})
 
 
 class ModListModel(QAbstractTableModel):

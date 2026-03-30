@@ -254,6 +254,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Trigger background status check for mod list
+        if hasattr(self, "_mod_list_model"):
+            self._mod_list_model.refresh_statuses()
+
     def _check_one_time_reset(self) -> bool:
         """One-time migrations when upgrading to a new major version.
 
