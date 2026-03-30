@@ -703,14 +703,95 @@ def import_from_bsdiff(
 ) -> ModImportResult:
     """Import a mod distributed as a bsdiff patch file.
 
-    The patch filename should indicate which file it targets (e.g., 0008_0.paz.bsdiff).
+    Auto-detects which game file the patch targets by trying to apply it
+    against each file in the snapshot. Uses the bsdiff output size to
+    narrow candidates first (fast), then tries actual patching.
     """
+    import struct
+    import bsdiff4
+
     mod_name = patch_path.stem
     result = ModImportResult(mod_name)
 
-    # For now, store the delta directly — the user needs to have named it correctly
-    # or we detect the target from metadata
     delta_bytes = patch_path.read_bytes()
+
+    # Validate it's actually a bsdiff
+    if not delta_bytes[:8] == b"BSDIFF40":
+        result.error = "Not a valid bsdiff4 patch file."
+        return result
+
+    # Read expected output size from bsdiff header (offset 16, 8 bytes LE)
+    new_size = struct.unpack("<q", delta_bytes[16:24])[0]
+    logger.info("bsdiff patch '%s': expected output size = %d bytes", mod_name, new_size)
+
+    # Find the target game file by trying to apply the patch.
+    # First, narrow candidates by checking which files exist in the snapshot.
+    # Then try applying the patch — only the correct source file will succeed.
+    cursor = db.connection.execute("SELECT file_path, file_size FROM snapshots")
+    candidates = cursor.fetchall()
+
+    target_path = None
+    patched_bytes = None
+
+    # Try filename-encoded path first (e.g., "0035_0.paz.bsdiff" → "0035/0.paz")
+    stem = patch_path.stem
+    # Handle double extension like "0035_0.paz.bsdiff" where stem is "0035_0.paz"
+    if "." in stem:
+        stem = stem.rsplit(".", 1)[0]
+    encoded_path = stem.replace("_", "/")
+    for file_path, file_size in candidates:
+        if file_path == encoded_path:
+            game_file = game_dir / file_path.replace("/", "\\")
+            if game_file.exists():
+                try:
+                    source = game_file.read_bytes()
+                    patched_bytes = bsdiff4.patch(source, delta_bytes)
+                    target_path = file_path
+                    logger.info("bsdiff target found by filename: %s", target_path)
+                    break
+                except Exception:
+                    pass
+
+    # If filename didn't work, try all snapshot files (filter by output size)
+    if target_path is None:
+        logger.info("Filename match failed, trying %d snapshot files...", len(candidates))
+        for file_path, file_size in candidates:
+            # Skip files that can't possibly match — bsdiff patches typically
+            # produce output close to the original size
+            if file_size is not None and abs(file_size - new_size) > file_size * 0.5:
+                continue
+
+            game_file = game_dir / file_path.replace("/", "\\")
+            if not game_file.exists():
+                continue
+
+            try:
+                source = game_file.read_bytes()
+                patched_bytes = bsdiff4.patch(source, delta_bytes)
+                target_path = file_path
+                logger.info("bsdiff target found by brute-force: %s", target_path)
+                break
+            except Exception:
+                continue
+
+    if target_path is None:
+        result.error = (
+            "Could not find which game file this patch targets.\n\n"
+            "The bsdiff patch didn't match any game file in the snapshot.\n"
+            "Make sure your game files are verified through Steam."
+        )
+        return result
+
+    # Generate our own delta (vanilla → patched) so it goes through the
+    # standard apply pipeline with proper byte-range tracking
+    vanilla_file = game_dir / "CDMods" / "vanilla" / target_path.replace("/", "\\")
+    if vanilla_file.exists():
+        vanilla_bytes = vanilla_file.read_bytes()
+    else:
+        vanilla_bytes = (game_dir / target_path.replace("/", "\\")).read_bytes()
+
+    our_delta = generate_delta(vanilla_bytes, patched_bytes)
+    byte_ranges = get_changed_byte_ranges(vanilla_bytes, patched_bytes)
 
     # Store mod in database
     priority = _next_priority(db)
@@ -720,20 +801,31 @@ def import_from_bsdiff(
     )
     mod_id = cursor.lastrowid
 
-    # Store the delta
-    delta_dest = deltas_dir / str(mod_id) / patch_path.name
-    save_delta(delta_bytes, delta_dest)
+    safe_name = target_path.replace("/", "_") + ".delta"
+    delta_dest = deltas_dir / str(mod_id) / safe_name
+    save_delta(our_delta, delta_dest)
+
+    for bs, be in byte_ranges:
+        db.connection.execute(
+            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (mod_id, target_path, str(delta_dest), bs, be),
+        )
 
     db.connection.execute(
-        "INSERT INTO mod_deltas (mod_id, file_path, delta_path) VALUES (?, ?, ?)",
-        (mod_id, patch_path.stem.replace("_", "/"), str(delta_dest)),
+        "INSERT OR IGNORE INTO mod_vanilla_sizes (mod_id, file_path, vanilla_size) "
+        "VALUES (?, ?, ?)",
+        (mod_id, target_path, len(vanilla_bytes)),
     )
     db.connection.commit()
 
     result.changed_files.append({
-        "file_path": patch_path.stem.replace("_", "/"),
+        "file_path": target_path,
         "delta_path": str(delta_dest),
+        "byte_ranges": byte_ranges,
     })
+    logger.info("bsdiff import: %s targets %s (%d byte ranges)",
+                mod_name, target_path, len(byte_ranges))
     return result
 
 
