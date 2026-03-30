@@ -2250,14 +2250,17 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            # Check if any mod was actually applied (enabled AND game files modified).
-            # If the mod was never enabled/applied, just delete it — no Apply needed.
+            # Check if any mod was actually applied (enabled AND has delta data).
+            # If the mod has no deltas (e.g. after a version migration that
+            # wiped delta data), just delete it — no Apply needed.
             needs_apply = False
             for mid, name in mods_to_remove:
                 mod_row = self._db.connection.execute(
                     "SELECT enabled FROM mods WHERE id = ?", (mid,)).fetchone()
-                if mod_row and mod_row[0]:
-                    # Mod is enabled — it may have been applied to game files
+                delta_count = self._db.connection.execute(
+                    "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = ?", (mid,)).fetchone()[0]
+                if mod_row and mod_row[0] and delta_count > 0:
+                    # Mod is enabled AND has delta data — needs Apply to revert
                     needs_apply = True
                     break
 
