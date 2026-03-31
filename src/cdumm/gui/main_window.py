@@ -625,26 +625,17 @@ class MainWindow(QMainWindow):
             return False
 
     def _reset_for_game_update(self, new_fingerprint: str) -> None:
-        """Wipe all mod data and start fresh for a new game version."""
+        """Reset for a new game version while KEEPING mod data.
+
+        Mod deltas and DB entries are preserved — users just need to
+        re-enable and Apply after the rescan. Only vanilla backups and
+        snapshot are cleared (they're version-specific).
+        """
         import shutil
         from cdumm.storage.config import Config
 
-        # Step 1: Restore vanilla files BEFORE wiping backups
-        # This ensures the snapshot is taken against clean game files
-        if self._vanilla_dir.exists():
-            for backup_file in self._vanilla_dir.rglob("*"):
-                if not backup_file.is_file() or backup_file.suffix == ".vranges":
-                    continue
-                rel = backup_file.relative_to(self._vanilla_dir)
-                game_file = self._game_dir / rel
-                try:
-                    game_file.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(backup_file, game_file)
-                except Exception:
-                    pass
-            logger.info("Restored vanilla files from backup")
-
-        # Step 2: Clean up orphan mod directories (0036+)
+        # Step 1: Clean up orphan mod directories (0036+) from game dir
+        # These were created by mods — the new game version won't have them
         for d in self._game_dir.iterdir():
             if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
                 continue
@@ -652,32 +643,23 @@ class MainWindow(QMainWindow):
                 shutil.rmtree(d, ignore_errors=True)
                 logger.info("Removed orphan mod directory: %s", d.name)
 
-        # Step 3: Restore vanilla PAPGT
-        vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
-        game_papgt = self._game_dir / "meta" / "0.papgt"
-        if vanilla_papgt.exists():
-            shutil.copy2(vanilla_papgt, game_papgt)
-            logger.info("Restored vanilla PAPGT")
-
-        # Step 4: NOW wipe backups and deltas
+        # Step 2: Clear vanilla backups (they're for the old game version)
         if self._vanilla_dir.exists():
             shutil.rmtree(self._vanilla_dir, ignore_errors=True)
-            logger.info("Cleared vanilla backups")
-        if self._deltas_dir.exists():
-            shutil.rmtree(self._deltas_dir, ignore_errors=True)
-            self._deltas_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Cleared mod deltas")
+            logger.info("Cleared vanilla backups (old game version)")
 
-        # Step 5: Clear database but KEEP mod entries (disabled, no data)
-        self._db.connection.execute("DELETE FROM mod_deltas")
+        # Step 3: Clear snapshot (needs fresh rescan against new game files)
         self._db.connection.execute("DELETE FROM snapshots")
-        self._db.connection.execute("UPDATE mods SET enabled = 0")
         try:
             self._db.connection.execute("DELETE FROM conflicts")
         except Exception:
             pass
+
+        # Step 4: Disable all mods but KEEP their deltas and DB entries.
+        # Users just re-enable and Apply after rescan.
+        self._db.connection.execute("UPDATE mods SET enabled = 0")
         self._db.connection.commit()
-        logger.info("Cleared deltas/snapshots, disabled all mods (kept mod list)")
+        logger.info("Game update: cleared backups/snapshot, disabled mods (kept mod data)")
 
         # Save new fingerprint
         config = Config(self._db)

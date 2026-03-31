@@ -83,31 +83,32 @@ def main() -> int:
     from cdumm.storage.database import Database
     from cdumm.storage.config import Config
 
-    # Migrate from old cdmm AppData if this is an upgrade
-    old_app_data = Path.home() / "AppData" / "Local" / "cdmm"
-    old_db = old_app_data / "cdmm.db"
-    new_db = APP_DATA_DIR / "cdumm.db"
-    if old_db.exists() and not new_db.exists():
-        import shutil
-        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old_db, new_db)
-        logger.info("Migrated database from %s to %s", old_db, new_db)
+    # Find game directory first — DB lives in CDMods/ inside game dir
+    from cdumm.storage.config import Config as _TmpConfig
 
-    db = Database(new_db)
-    db.initialize()
-    logger.info("Database initialized at %s", db.db_path)
+    # Check for existing DB in AppData (pre-v1.7 installs)
+    old_appdata_db = APP_DATA_DIR / "cdumm.db"
+    old_cdmm_db = Path.home() / "AppData" / "Local" / "cdmm" / "cdmm.db"
 
-    config = Config(db)
+    # Try to find game_dir from existing DB
+    game_dir = None
+    for old_db in [old_appdata_db, old_cdmm_db]:
+        if old_db.exists() and game_dir is None:
+            try:
+                tmp_db = Database(old_db)
+                tmp_db.initialize()
+                game_dir = _TmpConfig(tmp_db).get("game_directory")
+                tmp_db.close()
+            except Exception:
+                pass
 
-    # First-run: game directory setup
-    game_dir = config.get("game_directory")
     if game_dir is None:
+        # First-run: game directory setup
         splash.close()
         from PySide6.QtWidgets import QDialog
         from cdumm.gui.setup_dialog import SetupDialog
         dialog = SetupDialog()
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.game_directory:
-            config.set("game_directory", str(dialog.game_directory))
             game_dir = str(dialog.game_directory)
             logger.info("Game directory configured: %s", game_dir)
         else:
@@ -116,12 +117,39 @@ def main() -> int:
         splash = show_splash()
         app.processEvents()
 
+    game_path = Path(game_dir)
+    cdmods_dir = game_path / "CDMods"
+    cdmods_dir.mkdir(parents=True, exist_ok=True)
+    new_db = cdmods_dir / "cdumm.db"
+
+    # Migrate from old AppData location if needed.
+    # Check if new DB is empty/fresh (small) vs already populated.
+    import shutil
+    new_db_is_fresh = not new_db.exists() or new_db.stat().st_size < 200_000
+    if new_db_is_fresh:
+        for old_db in [old_appdata_db, old_cdmm_db]:
+            if old_db.exists() and old_db.stat().st_size > 200_000:
+                if new_db.exists():
+                    new_db.unlink()
+                shutil.copy2(old_db, new_db)
+                logger.info("Migrated database from %s to %s", old_db, new_db)
+                break
+
+    db = Database(new_db)
+    db.initialize()
+    logger.info("Database initialized at %s", db.db_path)
+
+    config = Config(db)
+
+    # Ensure game_dir is saved in the new DB
+    if config.get("game_directory") != game_dir:
+        config.set("game_directory", game_dir)
+
     splash.showMessage("  Checking game state...", 0x0081)
     app.processEvents()
 
     # Run heavy startup checks DURING splash (before UI shows)
     # so the window is responsive immediately when it appears.
-    game_path = Path(game_dir)
     from cdumm.engine.snapshot_manager import SnapshotManager
     snapshot = SnapshotManager(db)
 

@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "1.7.0",
+        "date": "2026-03-31",
+        "notes": [
+            "Mods survive game updates — no more re-importing after every hotfix",
+            "Database moved to CDMods/ in game directory — everything in one place",
+            "Existing installs migrated automatically from AppData",
+        ],
+    },
+    {
         "version": "1.6.3",
         "date": "2026-03-31",
         "notes": [
