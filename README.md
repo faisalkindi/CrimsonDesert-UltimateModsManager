@@ -4,7 +4,7 @@ A desktop mod manager for **Crimson Desert** that handles the game's PAZ/PAMT/PA
 
 **Works with Steam.** Xbox Game Pass installations are detected but currently limited by platform restrictions (read-only game files).
 
-![Screenshot](https://raw.githubusercontent.com/faisalkindi/CrimsonDesert-UltimateModsManager/master/screenshots/app.png)
+![Screenshot](https://raw.githubusercontent.com/faisalkindi/CrimsonDesert-UltimateModsManager/master/screenshots/app.png?v=2)
 
 ## Features
 
