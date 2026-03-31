@@ -31,7 +31,7 @@ class SetupDialog(QDialog):
 
         path_row = QHBoxLayout()
         self._path_edit = QLineEdit()
-        self._path_edit.setPlaceholderText("E:\\SteamLibrary\\steamapps\\common\\Crimson Desert")
+        self._path_edit.setPlaceholderText("Steam or Xbox Game Pass install folder")
         self._path_edit.textChanged.connect(self._on_path_changed)
         path_row.addWidget(self._path_edit)
 

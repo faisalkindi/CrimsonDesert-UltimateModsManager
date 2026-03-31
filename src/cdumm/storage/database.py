@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS mod_deltas (
     byte_end INTEGER,
     is_new INTEGER NOT NULL DEFAULT 0,
     vanilla_hash TEXT,
-    entry_path TEXT
+    entry_path TEXT,
+    json_patches TEXT
 );
 
 CREATE TABLE IF NOT EXISTS mod_config (
@@ -163,6 +164,13 @@ class Database:
                 "ALTER TABLE mod_deltas ADD COLUMN entry_path TEXT"
             )
             logger.info("Migrated: added entry_path column to mod_deltas")
+
+        # Add json_patches column for JSON patch merge support
+        if "json_patches" not in delta_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_deltas ADD COLUMN json_patches TEXT"
+            )
+            logger.info("Migrated: added json_patches column to mod_deltas")
 
     @property
     def connection(self) -> sqlite3.Connection:

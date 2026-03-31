@@ -563,14 +563,26 @@ class ApplyWorker(QObject):
         - FULL_COPY/bsdiff: replace entire file
         - SPRS: sparse byte-level patches
 
+        JSON patch merging: when multiple mods have json_patches data for the
+        same decompressed game file, their patches are merged at the decompressed
+        level (three-way merge against vanilla) instead of last-wins at PAZ level.
+
         ENTR deltas are applied first (different entries compose perfectly),
         then byte-level deltas on top for backward compatibility.
         """
         from cdumm.engine.delta_engine import ENTRY_MAGIC, load_entry_delta
 
-        # Separate entry-level and byte-level deltas
-        entry_deltas = [d for d in deltas if d.get("entry_path")]
-        byte_deltas = [d for d in deltas if not d.get("entry_path")]
+        # Check for JSON patch merge opportunities BEFORE byte-level composition.
+        # If multiple mods have json_patches for the same game file, merge them
+        # into a single ENTR-style delta, then skip their byte deltas.
+        merged_deltas, remaining_deltas = self._merge_json_patch_deltas(
+            file_path, deltas)
+
+        # Separate entry-level and byte-level deltas from remaining
+        entry_deltas = [d for d in remaining_deltas if d.get("entry_path")]
+        # Include merged deltas as entry deltas
+        entry_deltas.extend(merged_deltas)
+        byte_deltas = [d for d in remaining_deltas if not d.get("entry_path")]
 
         # Get vanilla content
         full_vanilla = self._vanilla_dir / file_path.replace("/", "\\")
@@ -656,6 +668,132 @@ class ApplyWorker(QObject):
             current = apply_delta_from_file(current, Path(d["delta_path"]))
         return current
 
+    def _merge_json_patch_deltas(
+        self, file_path: str, deltas: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """Merge JSON patches from multiple mods targeting the same game file.
+
+        When multiple mods have json_patches for the same decompressed entry
+        (e.g., both patching iteminfo.pabgb), their patches are merged using
+        three-way merge against vanilla: each mod's non-overlapping changes
+        are all applied, overlapping bytes go to the higher-priority mod.
+
+        Returns (merged_entry_deltas, remaining_deltas).
+        merged_entry_deltas: synthetic ENTR-style dicts with merged content
+        remaining_deltas: deltas not involved in merging (pass through as-is)
+        """
+        import json
+        from cdumm.archive.paz_parse import parse_pamt, PazEntry
+        from cdumm.archive.paz_repack import repack_entry_bytes
+        from cdumm.engine.delta_engine import save_entry_delta
+
+        # Collect all deltas with json_patches, grouped by game_file
+        patches_by_game_file: dict[str, list[tuple[dict, dict]]] = {}
+        deltas_with_patches: set[str] = set()  # delta_paths involved in merging
+
+        for d in deltas:
+            jp = d.get("json_patches")
+            if not jp:
+                continue
+            try:
+                patch_info = json.loads(jp)
+                game_file = patch_info.get("entry_path") or patch_info.get("game_file")
+                if game_file:
+                    patches_by_game_file.setdefault(game_file, []).append(
+                        (d, patch_info))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Only merge when 2+ mods patch the same game file
+        merge_targets = {gf: patches for gf, patches in patches_by_game_file.items()
+                         if len(patches) >= 2}
+
+        if not merge_targets:
+            return [], deltas  # nothing to merge
+
+        merged_deltas = []
+        for game_file, mod_patches in merge_targets.items():
+            # Find the PAMT entry for this game file
+            pamt_dir = file_path.split("/")[0]
+            vanilla_dir = self._game_dir / "CDMods" / "vanilla"
+            base_dir = vanilla_dir if vanilla_dir.exists() else self._game_dir
+
+            from cdumm.engine.json_patch_handler import _find_pamt_entry, _extract_from_paz
+            entry = _find_pamt_entry(game_file, base_dir)
+            if not entry:
+                logger.warning("JSON merge: can't find PAMT entry for %s", game_file)
+                continue
+
+            # Extract vanilla decompressed content
+            try:
+                # Use vanilla PAZ for extraction
+                van_paz = base_dir / pamt_dir / f"{entry.paz_index}.paz"
+                van_entry = PazEntry(
+                    path=entry.path, paz_file=str(van_paz),
+                    offset=entry.offset, comp_size=entry.comp_size,
+                    orig_size=entry.orig_size, flags=entry.flags,
+                    paz_index=entry.paz_index,
+                )
+                vanilla_content = _extract_from_paz(van_entry)
+            except Exception as e:
+                logger.warning("JSON merge: can't extract vanilla %s: %s",
+                               game_file, e)
+                continue
+
+            # Three-way merge: apply ALL patches from ALL mods to vanilla.
+            # Patches are already sorted by priority (from _get_file_deltas ORDER BY).
+            # Apply lowest priority first, highest last (highest wins at overlaps).
+            merged = bytearray(vanilla_content)
+            all_changes = []
+            mod_names = []
+            for d, patch_info in reversed(mod_patches):  # reversed = lowest priority first
+                changes = patch_info.get("changes", [])
+                all_changes.extend(changes)
+                mod_names.append(d.get("mod_name", "?"))
+                deltas_with_patches.add(d["delta_path"])
+
+            # Apply all patches — later patches (higher priority) overwrite earlier ones
+            for change in all_changes:
+                offset = change.get("offset", 0)
+                patched_hex = change.get("patched", "")
+                try:
+                    patched_bytes = bytes.fromhex(patched_hex)
+                    if offset + len(patched_bytes) <= len(merged):
+                        merged[offset:offset + len(patched_bytes)] = patched_bytes
+                except (ValueError, IndexError):
+                    continue
+
+            if bytes(merged) == vanilla_content:
+                continue  # no actual changes after merge
+
+            # Create a synthetic ENTR-style delta for the merged content
+            metadata = {
+                "pamt_dir": pamt_dir,
+                "entry_path": entry.path,
+                "paz_index": entry.paz_index,
+                "compression_type": entry.compression_type,
+                "flags": entry.flags,
+                "vanilla_offset": entry.offset,
+                "vanilla_comp_size": entry.comp_size,
+                "vanilla_orig_size": entry.orig_size,
+            }
+
+            merged_deltas.append({
+                "entry_path": entry.path,
+                "delta_path": None,  # content is in-memory
+                "_merged_content": bytes(merged),
+                "_merged_metadata": metadata,
+                "mod_name": " + ".join(mod_names),
+            })
+
+            logger.info("JSON merge: %s — merged %d patches from %s",
+                        game_file, len(all_changes), ", ".join(mod_names))
+
+        # Build remaining deltas: exclude those that were merged
+        remaining = [d for d in deltas if d["delta_path"] not in deltas_with_patches]
+
+        return merged_deltas, remaining
+
     def _apply_entry_deltas(self, file_path: str, buf: bytearray,
                             entry_deltas: list[dict]) -> bytes:
         """Apply entry-level deltas to a PAZ file buffer.
@@ -678,11 +816,18 @@ class ApplyWorker(QObject):
             by_entry[d["entry_path"]] = d
 
         for entry_path, d in by_entry.items():
-            try:
-                content, metadata = load_entry_delta(Path(d["delta_path"]))
-            except Exception as e:
-                logger.warning("Failed to load entry delta %s: %s",
-                               d["delta_path"], e)
+            # Support both on-disk ENTR deltas and in-memory merged content
+            if d.get("_merged_content") is not None:
+                content = d["_merged_content"]
+                metadata = d["_merged_metadata"]
+            elif d.get("delta_path"):
+                try:
+                    content, metadata = load_entry_delta(Path(d["delta_path"]))
+                except Exception as e:
+                    logger.warning("Failed to load entry delta %s: %s",
+                                   d["delta_path"], e)
+                    continue
+            else:
                 continue
 
             entry = PazEntry(
@@ -897,7 +1042,7 @@ class ApplyWorker(QObject):
         """Get all deltas for enabled mods, grouped by file path."""
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name, "
-            "md.is_new, md.entry_path "
+            "md.is_new, md.entry_path, md.json_patches "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
@@ -907,7 +1052,7 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        for file_path, delta_path, mod_name, is_new, entry_path in cursor.fetchall():
+        for file_path, delta_path, mod_name, is_new, entry_path, json_patches in cursor.fetchall():
             if delta_path in seen_deltas:
                 continue
             seen_deltas.add(delta_path)
@@ -918,6 +1063,8 @@ class ApplyWorker(QObject):
             }
             if entry_path:
                 d["entry_path"] = entry_path
+            if json_patches:
+                d["json_patches"] = json_patches
             file_deltas.setdefault(file_path, []).append(d)
 
         return file_deltas

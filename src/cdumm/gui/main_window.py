@@ -222,7 +222,7 @@ class MainWindow(QMainWindow):
                 self._on_refresh_snapshot(skip_verify_prompt=True)
             else:
                 self.statusBar().showMessage(
-                    "Please verify game files through Steam, then restart the app.", 0)
+                    "Please verify game files (Steam: Verify Integrity / Xbox: Repair), then restart.", 0)
             return
 
         self._check_bad_standalone_imports()
@@ -394,7 +394,7 @@ class MainWindow(QMainWindow):
                 )
                 if reply != QMessageBox.StandardButton.Yes:
                     self.statusBar().showMessage(
-                        "Please verify game files through Steam, then restart the app.", 0)
+                        "Please verify game files (Steam: Verify Integrity / Xbox: Repair), then restart.", 0)
                     return True
 
                 from cdumm.engine.version_detector import detect_game_version
@@ -453,7 +453,7 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             self.statusBar().showMessage(
-                "Please verify game files through Steam, then restart the app.", 0)
+                "Please verify game files (Steam: Verify Integrity / Xbox: Repair), then restart.", 0)
             return True  # block startup but don't mark as done
 
         logger.info("v1.3.0 migration: cleaning vanilla backups")
