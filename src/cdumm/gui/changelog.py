@@ -9,11 +9,17 @@ from PySide6.QtWidgets import (
 CHANGELOG = [
     {
         "version": "1.7.0",
-        "date": "2026-03-31",
+        "date": "2026-04-01",
         "notes": [
-            "Mods survive game updates — no more re-importing after every hotfix",
+            "Mods survive game updates — auto-reimported from stored sources after rescan",
             "Database moved to CDMods/ in game directory — everything in one place",
-            "Existing installs migrated automatically from AppData",
+            "File hashing 16x faster with xxh3_128",
+            "Verify Game State detects in-place mods (same size, different content)",
+            "Stale vanilla backups auto-cleaned after Steam verify",
+            "Game-running check no longer gives false positives",
+            "Duplicate mods and orphaned files cleaned up on startup",
+            "About tab with update indicator and links",
+            "Resizable columns, readable progress bar",
         ],
     },
     {

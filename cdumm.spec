@@ -4,7 +4,9 @@
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=[],
+    binaries=[
+        ('C:/Users/faisa/AppData/Local/Programs/Python/Python313/Lib/site-packages/xxhash/_xxhash.cp313-win_amd64.pyd', 'xxhash'),
+    ],
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader')],
     hiddenimports=[
         'cdumm.gui.main_window',
@@ -16,7 +18,7 @@ a = Analysis(
         'cdumm.gui.test_mod_dialog',
         'cdumm.gui.workers',
         'cdumm.gui.bug_report',
-        'xxhash',
+        'xxhash', 'xxhash._xxhash',
         'cdumm.engine.snapshot_manager',
         'cdumm.engine.delta_engine',
         'cdumm.engine.import_handler',

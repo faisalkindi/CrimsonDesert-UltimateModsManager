@@ -39,6 +39,10 @@ class ProgressDialog(QDialog):
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(True)
         self._progress_bar.setFormat("%p% complete")
+        self._progress_bar.setStyleSheet(
+            "QProgressBar { text-align: center; color: black; }"
+            "QProgressBar::chunk { background-color: #D4A43C; }"
+        )
         layout.addWidget(self._progress_bar)
 
         self._detail_label = QLabel("")

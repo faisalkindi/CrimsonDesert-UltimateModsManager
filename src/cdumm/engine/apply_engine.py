@@ -1399,6 +1399,10 @@ class ApplyWorker(QObject):
         for file_path, delta_path, mod_name, is_new, entry_path, json_patches in cursor.fetchall():
             if delta_path in seen_deltas:
                 continue
+            # Skip deltas whose files are missing (zombie entries from old resets)
+            if not Path(delta_path).exists():
+                logger.warning("Skipping missing delta: %s (%s)", delta_path, mod_name)
+                continue
             seen_deltas.add(delta_path)
             d = {
                 "delta_path": delta_path,

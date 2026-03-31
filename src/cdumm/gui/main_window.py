@@ -655,11 +655,24 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Step 4: Disable all mods but KEEP their deltas and DB entries.
-        # Users just re-enable and Apply after rescan.
+        # Step 4: Clear old deltas (they're against the old vanilla)
+        if self._deltas_dir.exists():
+            shutil.rmtree(self._deltas_dir, ignore_errors=True)
+            self._deltas_dir.mkdir(parents=True, exist_ok=True)
+        self._db.connection.execute("DELETE FROM mod_deltas")
+
+        # Step 5: Disable all mods
         self._db.connection.execute("UPDATE mods SET enabled = 0")
         self._db.connection.commit()
-        logger.info("Game update: cleared backups/snapshot, disabled mods (kept mod data)")
+        logger.info("Game update: cleared backups/deltas/snapshot, disabled mods")
+
+        # Step 6: Auto-reimport mods from stored sources (after rescan completes).
+        # This is deferred — the rescan callback will trigger _auto_reimport_mods.
+        sources_dir = self._cdmods_dir / "sources"
+        if sources_dir.exists() and any(sources_dir.iterdir()):
+            self._pending_auto_reimport = True
+            logger.info("Auto-reimport scheduled: %d mod sources found",
+                        sum(1 for _ in sources_dir.iterdir()))
 
         # Save new fingerprint
         config = Config(self._db)
@@ -1421,11 +1434,8 @@ class MainWindow(QMainWindow):
                     self._update_enabled = old_details.get("enabled", True) if old_details else True
                     self._mod_manager.remove_mod(mid)
                     logger.info("Removed old mod %d (%s) for update", mid, mname)
-                elif reply == QMessageBox.StandardButton.No:
-                    # Install as a new mod (different name)
-                    pass
                 else:
-                    # Cancel — don't install at all
+                    # No or Cancel — don't install
                     self.statusBar().showMessage("Import cancelled.", 5000)
                     return
 
@@ -2037,23 +2047,45 @@ class MainWindow(QMainWindow):
     def _check_game_running(self) -> bool:
         """Check if the game is running. Returns True if safe to proceed.
 
-        Uses a fast lock-file check on the game exe instead of tasklist
-        (which takes 1-5 seconds on Windows).
+        Uses process name check via ctypes (fast, no subprocess).
         """
-        game_exe = self._game_dir / "bin64" / "CrimsonDesert.exe"
-        if game_exe.exists():
-            try:
-                # Try to open the exe for writing — fails if game is running
-                with open(game_exe, "r+b"):
-                    pass
-                return True
-            except (PermissionError, OSError):
-                QMessageBox.warning(
-                    self, "Game Is Running",
-                    "Crimson Desert is currently running.\n\n"
-                    "Please close the game before applying mods.",
-                    QMessageBox.StandardButton.Ok)
-                return False
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+
+            # Get list of all PIDs
+            arr = (ctypes.wintypes.DWORD * 4096)()
+            cb_needed = ctypes.wintypes.DWORD()
+            psapi.EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr), ctypes.byref(cb_needed))
+            num_pids = cb_needed.value // ctypes.sizeof(ctypes.wintypes.DWORD)
+
+            for i in range(num_pids):
+                pid = arr[i]
+                if pid == 0:
+                    continue
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not handle:
+                    continue
+                try:
+                    buf = ctypes.create_unicode_buffer(260)
+                    size = ctypes.wintypes.DWORD(260)
+                    if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                        if buf.value.lower().endswith("crimsondesert.exe"):
+                            kernel32.CloseHandle(handle)
+                            QMessageBox.warning(
+                                self, "Game Is Running",
+                                "Crimson Desert is currently running.\n\n"
+                                "Please close the game before applying mods.",
+                                QMessageBox.StandardButton.Ok)
+                            return False
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception:
+            pass  # If check fails, let the user proceed
         return True
 
     def _on_apply(self) -> None:
@@ -2959,6 +2991,79 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Snapshot complete: {count} files indexed. You can now import mods.", 10000)
         logger.info("Snapshot finished and UI updated")
         self._log_activity("snapshot", f"Game files scanned: {count} files indexed")
+
+        # Auto-reimport mods from stored sources after game update
+        if getattr(self, '_pending_auto_reimport', False):
+            self._pending_auto_reimport = False
+            QTimer.singleShot(1000, self._auto_reimport_mods)
+
+    def _auto_reimport_mods(self) -> None:
+        """Re-import all mods from stored sources after a game update."""
+        from cdumm.engine.import_handler import (
+            _process_extracted_files, detect_format, import_from_json_patch,
+        )
+        from cdumm.engine.json_patch_handler import detect_json_patch
+
+        sources_dir = self._cdmods_dir / "sources"
+        if not sources_dir.exists():
+            return
+
+        # Get all mods with their source paths
+        mods = self._db.connection.execute(
+            "SELECT id, name, source_path, priority FROM mods "
+            "ORDER BY priority").fetchall()
+
+        reimported = 0
+        failed = 0
+        for mod_id, mod_name, source_path, priority in mods:
+            # Check if source exists in CDMods/sources/<mod_id>/
+            src = sources_dir / str(mod_id)
+            if not src.exists() or not any(src.iterdir()):
+                # Try the stored source_path as fallback
+                if source_path and Path(source_path).exists():
+                    src = Path(source_path)
+                else:
+                    logger.warning("No source for %s (id=%d), skipping", mod_name, mod_id)
+                    failed += 1
+                    continue
+
+            try:
+                self.statusBar().showMessage(
+                    f"Re-importing {mod_name}...", 0)
+                logger.info("Auto-reimporting: %s from %s", mod_name, src)
+
+                # Detect if it's a JSON patch
+                json_data = detect_json_patch(src)
+                if json_data:
+                    result = import_from_json_patch(
+                        src, self._game_dir, self._db,
+                        self._snapshot, self._deltas_dir,
+                        existing_mod_id=mod_id)
+                else:
+                    result = _process_extracted_files(
+                        src, self._game_dir, self._db,
+                        self._snapshot, self._deltas_dir,
+                        mod_name, existing_mod_id=mod_id)
+
+                if result.error:
+                    logger.warning("Auto-reimport failed for %s: %s",
+                                   mod_name, result.error)
+                    failed += 1
+                else:
+                    reimported += 1
+                    logger.info("Auto-reimported: %s (%d files)",
+                                mod_name, len(result.changed_files))
+            except Exception as e:
+                logger.warning("Auto-reimport error for %s: %s", mod_name, e)
+                failed += 1
+
+        self._refresh_all()
+        msg = f"Auto-reimported {reimported} mod(s) after game update."
+        if failed:
+            msg += f" {failed} mod(s) need manual re-import."
+        self.statusBar().showMessage(msg, 15000)
+        self._log_activity("import", msg)
+        logger.info(msg)
 
     def _refresh_vanilla_backups(self) -> None:
         """Validate and refresh vanilla backups against the snapshot.

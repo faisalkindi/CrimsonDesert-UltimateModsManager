@@ -178,15 +178,59 @@ class ModManager:
         return "not applied"
 
     def cleanup_orphaned_deltas(self) -> None:
-        """Remove delta folders on disk that have no matching mod in the DB."""
-        if not self._deltas_dir.exists():
-            return
-        cursor = self._db.connection.execute("SELECT id FROM mods")
-        valid_ids = {str(row[0]) for row in cursor.fetchall()}
-        for entry in self._deltas_dir.iterdir():
-            if entry.is_dir() and entry.name not in valid_ids:
-                shutil.rmtree(entry)
-                logger.info("Cleaned up orphaned delta folder: %s", entry.name)
+        """Remove delta folders on disk that have no matching mod in the DB.
+        Also clean up DB entries pointing to missing delta files."""
+        import os
+
+        if self._deltas_dir.exists():
+            cursor = self._db.connection.execute("SELECT id FROM mods")
+            valid_ids = {str(row[0]) for row in cursor.fetchall()}
+            for entry in self._deltas_dir.iterdir():
+                if entry.is_dir() and entry.name not in valid_ids:
+                    shutil.rmtree(entry)
+                    logger.info("Cleaned up orphaned delta folder: %s", entry.name)
+
+        # Clean up DB entries pointing to missing delta files (zombie entries
+        # from old game update resets that deleted files but kept DB rows)
+        rows = self._db.connection.execute(
+            "SELECT md.id, md.delta_path, m.name FROM mod_deltas md "
+            "JOIN mods m ON m.id = md.mod_id").fetchall()
+        missing_ids = []
+        for md_id, dp, name in rows:
+            if not os.path.exists(dp):
+                missing_ids.append(md_id)
+        if missing_ids:
+            placeholders = ",".join("?" * len(missing_ids))
+            self._db.connection.execute(
+                f"DELETE FROM mod_deltas WHERE id IN ({placeholders})",
+                missing_ids)
+            self._db.connection.commit()
+            logger.info("Cleaned up %d orphaned delta DB entries", len(missing_ids))
+
+        # Clean up orphaned source folders
+        sources_dir = self._deltas_dir.parent / "sources"
+        if sources_dir.exists():
+            valid_ids = {str(row[0]) for row in
+                         self._db.connection.execute("SELECT id FROM mods").fetchall()}
+            for entry in sources_dir.iterdir():
+                if entry.is_dir() and entry.name not in valid_ids:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    logger.info("Cleaned up orphaned source folder: %s", entry.name)
+
+        # Remove duplicate mods (same name, keep highest priority / newest)
+        dupes = self._db.connection.execute(
+            "SELECT name, COUNT(*) as cnt FROM mods "
+            "GROUP BY name HAVING cnt > 1").fetchall()
+        for name, cnt in dupes:
+            rows = self._db.connection.execute(
+                "SELECT id, priority FROM mods WHERE name = ? ORDER BY priority ASC",
+                (name,)).fetchall()
+            # Keep the first (highest priority = lowest number), remove the rest
+            keep_id = rows[0][0]
+            for mod_id, _ in rows[1:]:
+                self.remove_mod(mod_id)
+                logger.info("Removed duplicate mod: %s (id=%d, kept id=%d)",
+                            name, mod_id, keep_id)
 
     def rename_mod(self, mod_id: int, new_name: str) -> None:
         """Rename a mod."""

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QProgressDialog,
 )
 
-from cdumm.engine.snapshot_manager import hash_file
+from cdumm.engine.snapshot_manager import hash_file, hash_matches
 from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -71,15 +71,14 @@ class VerifyWorker(QObject):
                     })
                     continue
 
-                # Hash check for small files (<50MB), size-only for large
-                if snap_size < 50 * 1024 * 1024:
-                    actual_hash, _ = hash_file(game_file)
-                    if actual_hash != snap_hash:
-                        results["modded"].append({
-                            "path": file_path,
-                            "reason": "content differs (same size)",
-                        })
-                        continue
+                # Full hash check for all files — xxhash makes this fast
+                # even for 900MB PAZ files (~0.1s per file)
+                if not hash_matches(game_file, snap_hash):
+                    results["modded"].append({
+                        "path": file_path,
+                        "reason": "content differs (same size)",
+                    })
+                    continue
 
                 results["vanilla"].append(file_path)
 

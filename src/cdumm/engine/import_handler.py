@@ -1029,6 +1029,21 @@ def _process_extracted_files(
         )
         mod_id = cursor.lastrowid
 
+    # Archive mod source files for auto-reimport after game updates.
+    # Copy the extracted files to CDMods/sources/<mod_id>/ so the mod
+    # can be re-imported without the user providing the original files.
+    sources_dir = deltas_dir.parent / "sources" / str(mod_id)
+    try:
+        if sources_dir.exists():
+            shutil.rmtree(sources_dir)
+        shutil.copytree(extracted_dir, sources_dir, dirs_exist_ok=True)
+        db.connection.execute(
+            "UPDATE mods SET source_path = ? WHERE id = ?",
+            (str(sources_dir), mod_id))
+        logger.info("Archived mod source: %s -> %s", mod_name, sources_dir)
+    except Exception as e:
+        logger.warning("Failed to archive mod source: %s", e)
+
     total_matches = len(matches)
     for match_idx, (rel_path, extracted_path, is_new) in enumerate(matches):
         pct = int((match_idx / max(total_matches, 1)) * 90) + 5
