@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.6.2",
+        "version": "1.6.3",
         "date": "2026-03-31",
         "notes": [
+            "Fixed decompression error when importing JSON mods on modded game files",
+            "CDUMM now retries extraction with fresh offsets when vanilla offsets don't match",
             "Mods that both use directory 0036 (like PlayStation Icons + Clean Kills) now work together",
             "Each standalone mod gets its own directory and all are added to PAPGT correctly",
             "After updating: Disable all → Apply → Re-enable all → Apply",
