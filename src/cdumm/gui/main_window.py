@@ -1636,9 +1636,11 @@ class MainWindow(QMainWindow):
         """Backup/restore/pre-hash complete — now launch the script."""
         if pre_hashes is None:
             self._script_pre_hashes = None
+            self._script_pre_stats = {}
             logger.info("No targets, launching script directly")
         else:
             self._script_pre_hashes = pre_hashes
+            self._script_pre_stats = self._capture_file_stats(pre_hashes)
             logger.info("Prep done: %d files hashed", len(pre_hashes))
         self._launch_script(self._pending_script_path)
 
@@ -1646,8 +1648,21 @@ class MainWindow(QMainWindow):
         """Pre-hash complete — now launch the script."""
         self._sync_db()
         self._script_pre_hashes = pre_hashes
+        self._script_pre_stats = self._capture_file_stats(pre_hashes)
         logger.info("Pre-hash done: %d files", len(pre_hashes))
         self._launch_script(self._pending_script_path)
+
+    def _capture_file_stats(self, pre_hashes: dict) -> dict[str, tuple[int, float]]:
+        """Capture size+mtime for all game files — used for fast change detection."""
+        stats = {}
+        for rel_path in pre_hashes:
+            game_file = self._game_dir / rel_path.replace("/", "\\")
+            try:
+                st = game_file.stat()
+                stats[rel_path] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+        return stats
 
     def _launch_script(self, script_path: Path) -> None:
         """Phase 2: Launch the script in a visible cmd window (non-blocking)."""
@@ -1703,6 +1718,7 @@ class MainWindow(QMainWindow):
             worker = ScriptCaptureWorker(
                 self._script_mod_name, self._script_pre_hashes,
                 self._game_dir, self._db.db_path, self._deltas_dir,
+                pre_stats=getattr(self, '_script_pre_stats', None),
             )
         else:
             # No pre-hashes — use scan-based capture
@@ -1945,21 +1961,25 @@ class MainWindow(QMainWindow):
 
     # --- Apply ---
     def _check_game_running(self) -> bool:
-        """Check if the game is running. Returns True if safe to proceed."""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq CrimsonDesert.exe", "/NH"],
-                capture_output=True, text=True, timeout=5)
-            if "CrimsonDesert.exe" in result.stdout:
-                reply = QMessageBox.warning(
+        """Check if the game is running. Returns True if safe to proceed.
+
+        Uses a fast lock-file check on the game exe instead of tasklist
+        (which takes 1-5 seconds on Windows).
+        """
+        game_exe = self._game_dir / "bin64" / "CrimsonDesert.exe"
+        if game_exe.exists():
+            try:
+                # Try to open the exe for writing — fails if game is running
+                with open(game_exe, "r+b"):
+                    pass
+                return True
+            except (PermissionError, OSError):
+                QMessageBox.warning(
                     self, "Game Is Running",
                     "Crimson Desert is currently running.\n\n"
                     "Please close the game before applying mods.",
                     QMessageBox.StandardButton.Ok)
                 return False
-        except Exception:
-            pass
         return True
 
     def _on_apply(self) -> None:
@@ -1969,47 +1989,9 @@ class MainWindow(QMainWindow):
         if not self._check_game_running():
             return
 
-        # Check for dangerous byte-range overlaps between enabled mods
-        if self._conflict_detector:
-            conflicts = self._conflict_detector.detect_all()
-            byte_conflicts = [c for c in conflicts if c.level == "byte_range"]
-            if byte_conflicts:
-                lines = []
-                seen = set()
-                for c in byte_conflicts:
-                    key = (c.mod_a_name, c.mod_b_name, c.file_path)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    lines.append(
-                        f"  {c.mod_a_name} + {c.mod_b_name}\n"
-                        f"    in {c.file_path} (winner: {c.winner_name})"
-                    )
-                warning = (
-                    f"{len(seen)} byte-range overlap(s) detected:\n\n"
-                    + "\n".join(lines[:10])
-                    + ("\n  ..." if len(lines) > 10 else "")
-                    + "\n\nOverlapping mods may produce incorrect results. "
-                    "The higher-priority mod wins at each overlap.\n\n"
-                    "Apply anyway?"
-                )
-                reply = QMessageBox.warning(
-                    self, "Mod Overlap Warning", warning,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply != QMessageBox.StandardButton.Yes:
-                    return
-
-        # Show preview of what Apply will do
-        preview = self._build_apply_preview()
-        if preview:
-            reply = QMessageBox.question(
-                self, "Apply Preview",
-                f"Apply will make the following changes:\n\n{preview}\n\nProceed?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        # Conflicts are shown in the conflict view at the bottom of the window.
+        # No need to block Apply with a warning dialog — overlaps are resolved
+        # by load order and the winner is shown in the UI.
 
         progress = ProgressDialog("Applying Mods", self)
         worker = ApplyWorker(self._game_dir, self._vanilla_dir, self._db.db_path)

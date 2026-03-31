@@ -302,8 +302,21 @@ class ApplyWorker(QObject):
         self.progress_updated.emit(0, f"Applying {total_files} file(s)...")
 
         # Ensure vanilla backups exist BEFORE any modifications.
-        self.progress_updated.emit(2, "Backing up vanilla byte ranges...")
-        self._ensure_backups(file_deltas, revert_files)
+        # Skip if all backups already exist (common case after first apply).
+        needs_backup = False
+        for file_path in all_files:
+            delta_infos = file_deltas.get(file_path, [])
+            if all(d.get("is_new") for d in delta_infos) and delta_infos:
+                continue
+            full_path = self._vanilla_dir / file_path.replace("/", "\\")
+            range_path = self._vanilla_dir / (file_path.replace("/", "_") + RANGE_BACKUP_EXT)
+            if not full_path.exists() and not range_path.exists():
+                needs_backup = True
+                break
+
+        if needs_backup:
+            self.progress_updated.emit(2, "Backing up vanilla files...")
+            self._ensure_backups(file_deltas, revert_files)
         # Ensure PAMT backups for directories with entry-level deltas
         for pamt_dir in entry_pamt_dirs:
             pamt_path = f"{pamt_dir}/0.pamt"
@@ -348,11 +361,31 @@ class ApplyWorker(QObject):
                                     file_path, new_deltas[-1]["mod_name"])
                     continue
 
+                # Fast-track: single mod with FULL_COPY delta — stream-copy
+                # directly instead of loading 900MB+ into memory
+                if len(mod_deltas) == 1 and not mod_deltas[0].get("entry_path"):
+                    dp = Path(mod_deltas[0]["delta_path"])
+                    try:
+                        with open(dp, "rb") as f:
+                            magic = f.read(4)
+                        if magic == b"FULL" and dp.stat().st_size > 50 * 1024 * 1024:
+                            # Stream the FULL_COPY content directly to staging
+                            with open(dp, "rb") as f:
+                                f.seek(4)  # skip FULL magic
+                                result_bytes = f.read()
+                            txn.stage_file(file_path, result_bytes)
+                            logger.info("Fast-track apply: %s (%.1f MB)",
+                                        file_path, len(result_bytes) / 1048576)
+                            continue
+                    except OSError:
+                        pass
+
                 result_bytes = self._compose_file(file_path, mod_deltas)
                 if result_bytes is None:
                     continue
 
                 txn.stage_file(file_path, result_bytes)
+
 
             # ── Phase 2: Compose PAMT files (entry updates + byte deltas) ──
             # Collect all PAMTs that need processing
@@ -425,11 +458,78 @@ class ApplyWorker(QObject):
                 if file_path.endswith(".pamt"):
                     modified_pamts[file_path.split("/")[0]] = vanilla_bytes
 
-            # ── Phase 4: Rebuild PAPGT ─────────────────────────────────
-            self.progress_updated.emit(85, "Rebuilding PAPGT integrity chain...")
+            # ── Phase 3b: Safety net — restore orphaned modded files ────
+            # Files can be left modded if a previous CDUMM version modified
+            # them without recording a delta (e.g., PAMT PAZ size updates).
+            # Scan all files with vanilla backups and restore any that differ
+            # from the snapshot but aren't managed by an enabled mod.
+            if not file_deltas:  # only when reverting everything
+                try:
+                    import os
+                    from cdumm.engine.snapshot_manager import hash_file
+                    snap_cursor = self._db.connection.execute(
+                        "SELECT file_path, file_hash, file_size FROM snapshots")
+                    already_staged = set(txn.staged_files()) if hasattr(txn, 'staged_files') else set()
+                    for rel, snap_hash, snap_size in snap_cursor.fetchall():
+                        if rel == "meta/0.papgt":
+                            continue  # handled in Phase 4
+                        if rel in already_staged:
+                            continue  # already being reverted
+                        game_file = self._game_dir / rel.replace("/", os.sep)
+                        if not game_file.exists():
+                            continue
+                        try:
+                            actual_size = game_file.stat().st_size
+                            needs_restore = False
+                            if actual_size != snap_size:
+                                needs_restore = True
+                            elif actual_size < 50 * 1024 * 1024:
+                                # Small file — quick hash check
+                                h, _ = hash_file(game_file)
+                                if h != snap_hash:
+                                    needs_restore = True
+                            if needs_restore:
+                                vanilla = self._get_vanilla_bytes(rel)
+                                if vanilla:
+                                    txn.stage_file(rel, vanilla)
+                                    if rel.endswith(".pamt"):
+                                        modified_pamts[rel.split("/")[0]] = vanilla
+                                    logger.info("Safety net: restored orphan %s", rel)
+                        except OSError:
+                            pass
+                except Exception as e:
+                    logger.debug("Safety net scan failed: %s", e)
+
+            # ── Phase 4: PAPGT ─────────────────────────────────────────
+            self.progress_updated.emit(90, "Updating PAPGT...")
+
+            # Check if any mod has a PAPGT delta (overlay mods that add
+            # new directories ship their own PAPGT with correct entries/ordering)
+            papgt_deltas = file_deltas.get("meta/0.papgt", [])
+            mod_papgt_data = None
+            if papgt_deltas:
+                # Apply mod PAPGT deltas to vanilla to get the mod's PAPGT
+                vanilla_papgt_path = self._vanilla_dir / "meta" / "0.papgt"
+                if vanilla_papgt_path.exists():
+                    base = vanilla_papgt_path.read_bytes()
+                else:
+                    base = (self._game_dir / "meta" / "0.papgt").read_bytes()
+                for d in papgt_deltas:
+                    dp = d.get("delta_path")
+                    if dp and Path(dp).exists():
+                        if d.get("is_new"):
+                            mod_papgt_data = Path(dp).read_bytes()
+                        else:
+                            base = apply_delta_from_file(base, Path(dp))
+                            mod_papgt_data = base
+                if mod_papgt_data:
+                    logger.info("Using mod PAPGT as rebuild base (%d bytes, %d entries)",
+                                len(mod_papgt_data), mod_papgt_data[8])
+
             papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
-                papgt_bytes = papgt_mgr.rebuild(modified_pamts)
+                papgt_bytes = papgt_mgr.rebuild(
+                    modified_pamts, mod_papgt=mod_papgt_data)
                 txn.stage_file("meta/0.papgt", papgt_bytes)
             except FileNotFoundError:
                 logger.warning("PAPGT not found, skipping rebuild")
@@ -454,6 +554,26 @@ class ApplyWorker(QObject):
         poisons the entire restore chain.
         """
         self._vanilla_dir.mkdir(parents=True, exist_ok=True)
+
+        # Always back up PAPGT — it's rebuilt on every Apply and the rebuild
+        # produces different bytes from vanilla. Need the original for Revert.
+        papgt_backup = self._vanilla_dir / "meta" / "0.papgt"
+        if not papgt_backup.exists():
+            game_papgt = self._game_dir / "meta" / "0.papgt"
+            if game_papgt.exists():
+                # Validate against snapshot before backing up
+                snap = self._db.connection.execute(
+                    "SELECT file_hash, file_size FROM snapshots WHERE file_path = ?",
+                    ("meta/0.papgt",)).fetchone()
+                if snap:
+                    try:
+                        actual_size = game_papgt.stat().st_size
+                        if actual_size == snap[1]:
+                            papgt_backup.parent.mkdir(parents=True, exist_ok=True)
+                            _backup_copy(game_papgt, papgt_backup)
+                            logger.info("Full vanilla backup: meta/0.papgt")
+                    except OSError:
+                        pass
 
         # Load snapshot hashes for validation
         snap_hashes: dict[str, tuple[str, int]] = {}
@@ -893,13 +1013,24 @@ class ApplyWorker(QObject):
             for d, _ in patches:
                 already_files.add(d["delta_path"])
 
-        # Group byte-range deltas by approximate region (same file, overlapping ranges)
+        # Group byte-range deltas by approximate region (same file, overlapping ranges).
+        # Skip FULL_COPY deltas — they replace the entire file and are handled
+        # correctly by _compose_file's standard full_replace logic.
         from collections import defaultdict
         range_deltas = []
         for d in deltas:
             if d["delta_path"] in already_files:
                 continue
             if d.get("entry_path") or d.get("is_new") or d.get("json_patches"):
+                continue
+            # Skip FULL_COPY deltas (byte_start=0 and huge range = full file)
+            try:
+                dp = Path(d["delta_path"])
+                with open(dp, "rb") as f:
+                    magic = f.read(4)
+                if magic == b"FULL":
+                    continue
+            except Exception:
                 continue
             # Read byte range from DB
             try:

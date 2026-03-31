@@ -36,10 +36,12 @@ class PapgtManager:
         self._papgt_path = game_dir / "meta" / "0.papgt"
         self._vanilla_papgt = vanilla_dir / "meta" / "0.papgt" if vanilla_dir else None
 
-    def rebuild(self, modified_pamts: dict[str, bytes] | None = None) -> bytes:
+    def rebuild(self, modified_pamts: dict[str, bytes] | None = None,
+                mod_papgt: bytes | None = None) -> bytes:
         """Rebuild PAPGT with correct hashes for all directories.
 
-        Starts from the vanilla PAPGT structure, then:
+        Starts from the vanilla PAPGT structure (or mod-shipped PAPGT if
+        provided), then:
         1. Removes entries for directories that don't exist on disk
            (cleaned-up mod directories)
         2. Adds entries for new directories in modified_pamts
@@ -47,18 +49,25 @@ class PapgtManager:
 
         Args:
             modified_pamts: dict of {dir_name: pamt_bytes} for directories
-                           that have been modified by mods. If None, reads
-                           all PAMT files from disk.
+                           that have been modified by mods.
+            mod_papgt: if a mod ships its own PAPGT (e.g., overlay mods that
+                      add new directories), use it as the base instead of
+                      vanilla. The mod's PAPGT includes the correct entries
+                      and ordering for the new directories.
 
         Returns:
             The rebuilt PAPGT bytes.
         """
-        # Use vanilla PAPGT as the base structure
-        base_path = self._vanilla_papgt if self._vanilla_papgt and self._vanilla_papgt.exists() else self._papgt_path
-        if not base_path.exists():
-            raise FileNotFoundError(f"PAPGT not found: {base_path}")
-
-        papgt = bytearray(base_path.read_bytes())
+        # Use mod-shipped PAPGT as base if available (it includes new dirs
+        # with correct flags and ordering). Otherwise use vanilla.
+        if mod_papgt and len(mod_papgt) >= 12:
+            papgt = bytearray(mod_papgt)
+            logger.info("PAPGT rebuild using mod-shipped base (%d bytes)", len(mod_papgt))
+        else:
+            base_path = self._vanilla_papgt if self._vanilla_papgt and self._vanilla_papgt.exists() else self._papgt_path
+            if not base_path.exists():
+                raise FileNotFoundError(f"PAPGT not found: {base_path}")
+            papgt = bytearray(base_path.read_bytes())
 
         if len(papgt) < 12:
             raise ValueError("PAPGT file too small")
@@ -71,7 +80,8 @@ class PapgtManager:
         entry_count = _find_entry_count(papgt, entry_start)
         string_table_start = entry_start + entry_count * ENTRY_SIZE + 4
 
-        logger.info("PAPGT base: %d entries from %s", entry_count, base_path.name)
+        base_name = "mod-shipped" if mod_papgt else base_path.name
+        logger.info("PAPGT base: %d entries from %s", entry_count, base_name)
 
         # Parse existing entries with their directory names
         parsed_entries: list[tuple[str, int, int]] = []  # (dir_name, flags, pamt_hash)
@@ -101,60 +111,14 @@ class PapgtManager:
             logger.info("PAPGT: removing %d stale entries: %s", len(removed), removed)
 
         # Add new directories from modified_pamts not already in PAPGT.
-        # Skip directories whose PAMT entries duplicate paths from existing
-        # directories — these are overlay mods meant for file-copy installers
-        # and adding them to PAPGT causes duplicate entry crashes.
+        # When a mod ships its own PAPGT (mod_papgt), new dirs are already
+        # in the base — don't add them again.
         existing_names = {e[0] for e in live_entries}
         new_dirs = []
-        if modified_pamts:
-            # Collect all entry paths from existing PAMTs
-            existing_entry_paths: set[str] = set()
-            for dir_name, _, _ in live_entries:
-                try:
-                    from cdumm.archive.paz_parse import parse_pamt
-                    pamt_path = self._game_dir / dir_name / "0.pamt"
-                    if pamt_path.exists():
-                        entries = parse_pamt(str(pamt_path), str(self._game_dir / dir_name))
-                        for e in entries:
-                            existing_entry_paths.add(e.path.lower())
-                except Exception:
-                    pass
-
+        if modified_pamts and not mod_papgt:
             for dir_name in sorted(modified_pamts.keys()):
-                if dir_name in existing_names:
-                    continue
-                # Check if new dir's PAMT has entries that duplicate existing paths
-                try:
-                    pamt_data = modified_pamts[dir_name]
-                    import tempfile, os
-                    # Write temp PAMT to parse it
-                    tmp_dir = self._game_dir / dir_name
-                    tmp_pamt = tmp_dir / "0.pamt"
-                    pamt_existed = tmp_pamt.exists()
-                    if not pamt_existed:
-                        tmp_dir.mkdir(parents=True, exist_ok=True)
-                        tmp_pamt.write_bytes(pamt_data)
-                    try:
-                        from cdumm.archive.paz_parse import parse_pamt
-                        new_entries = parse_pamt(str(tmp_pamt), str(tmp_dir))
-                        new_paths = {e.path.lower() for e in new_entries}
-                        overlap = new_paths & existing_entry_paths
-                        if overlap:
-                            logger.info(
-                                "PAPGT: skipping %s — %d/%d entries duplicate "
-                                "existing paths (e.g. %s)",
-                                dir_name, len(overlap), len(new_paths),
-                                next(iter(overlap)))
-                            continue
-                    finally:
-                        if not pamt_existed and tmp_pamt.exists():
-                            tmp_pamt.unlink()
-                            if tmp_dir.exists() and not any(tmp_dir.iterdir()):
-                                tmp_dir.rmdir()
-                except Exception as e:
-                    logger.warning("PAPGT: failed to check %s for duplicates: %s",
-                                   dir_name, e)
-                new_dirs.append(dir_name)
+                if dir_name not in existing_names:
+                    new_dirs.append(dir_name)
 
         # Use the last directory's flag pattern for new entries.
         # High-numbered dirs use power-of-2 flags, not the common 0x003FFF00.
@@ -191,20 +155,37 @@ class PapgtManager:
         new_count = len(all_entries)
         result[8] = new_count & 0xFF
 
-        # Write entries
+        # Write entries — reuse existing hashes for unchanged directories
+        # (avoids reading and hashing ALL PAMT files on every Apply)
+        existing_hashes = {d: h for d, _, h in parsed_entries}
+        modified_set = set(modified_pamts.keys()) if modified_pamts else set()
+        rehashed = 0
+
         for dir_name, flags in all_entries:
-            # Compute PAMT hash
-            if modified_pamts and dir_name in modified_pamts:
+            if dir_name in modified_set:
+                # PAMT was modified — recompute hash from new data
                 pamt_data = modified_pamts[dir_name]
-            else:
+                pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
+                rehashed += 1
+            elif dir_name in existing_hashes:
+                # Unchanged — reuse hash from base PAPGT (no I/O needed)
+                pamt_hash = existing_hashes[dir_name]
+            elif dir_name in new_dirs:
+                # New directory — read and hash its PAMT
                 pamt_path = self._game_dir / dir_name / "0.pamt"
                 if pamt_path.exists():
                     pamt_data = pamt_path.read_bytes()
+                    pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
                 else:
-                    pamt_data = b""
+                    pamt_hash = 0
+                rehashed += 1
+            else:
+                pamt_hash = 0
 
-            pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
             result += struct.pack("<III", flags, name_offsets[dir_name], pamt_hash)
+
+        if rehashed:
+            logger.info("PAPGT: rehashed %d/%d directories", rehashed, len(all_entries))
 
         # Write string table size + string table
         result += struct.pack("<I", len(string_table))

@@ -46,6 +46,9 @@ class ImportWorker(QObject):
             self.progress_updated.emit(0, f"Detected format: {fmt}")
             logger.info("ImportWorker: format=%s path=%s", fmt, self._mod_path)
 
+            from cdumm.engine.import_handler import set_import_progress_cb
+            set_import_progress_cb(lambda pct, msg: self.progress_updated.emit(pct, msg))
+
             if fmt == "zip":
                 result = import_from_zip(
                     self._mod_path, self._game_dir, db, snapshot, self._deltas_dir,
@@ -277,13 +280,16 @@ class ScriptCaptureWorker(QObject):
     error_occurred = Signal(str)
 
     def __init__(self, mod_name: str, pre_hashes: dict[str, str],
-                 game_dir: Path, db_path: Path, deltas_dir: Path) -> None:
+                 game_dir: Path, db_path: Path, deltas_dir: Path,
+                 pre_stats: dict[str, tuple[int, float]] | None = None) -> None:
         super().__init__()
         self._mod_name = mod_name
         self._pre_hashes = pre_hashes
         self._game_dir = game_dir
         self._db_path = db_path
         self._deltas_dir = deltas_dir
+        # pre_stats: {rel_path: (size, mtime)} captured before script ran
+        self._pre_stats = pre_stats or {}
 
     def run(self) -> None:
         try:
@@ -294,21 +300,41 @@ class ScriptCaptureWorker(QObject):
             db.initialize()
 
             total_files = len(self._pre_hashes)
-            self.progress_updated.emit(0, f"Scanning {total_files} game files...")
+            self.progress_updated.emit(0, f"Detecting changes...")
 
-            # Find which files changed
+            # Find which files changed using fast size+mtime check first.
+            # Only hash files whose size or mtime changed — skips reading
+            # 900MB PAZ files that the script didn't touch.
             changed: list[str] = []
+            skipped = 0
             for file_idx, (rel_path, old_hash) in enumerate(self._pre_hashes.items()):
-                if file_idx % 5 == 0 or file_idx == total_files - 1:
+                if file_idx % 20 == 0:
                     pct = int((file_idx / max(total_files, 1)) * 18)
                     self.progress_updated.emit(
-                        pct, f"Scanning file {file_idx + 1}/{total_files}...")
+                        pct, f"Checking {file_idx + 1}/{total_files}...")
 
                 game_file = self._game_dir / rel_path.replace("/", "\\")
-                if game_file.exists():
-                    new_hash, _ = _hash_file(game_file)
-                    if new_hash != old_hash:
-                        changed.append(rel_path)
+                if not game_file.exists():
+                    continue
+
+                # Fast path: if size+mtime unchanged, file wasn't touched
+                pre = self._pre_stats.get(rel_path)
+                if pre:
+                    try:
+                        st = game_file.stat()
+                        if st.st_size == pre[0] and st.st_mtime == pre[1]:
+                            skipped += 1
+                            continue
+                    except OSError:
+                        pass
+
+                # Size or mtime changed — need full hash to confirm
+                new_hash, _ = _hash_file(game_file)
+                if new_hash != old_hash:
+                    changed.append(rel_path)
+
+            logger.info("Change detection: %d changed, %d skipped (size+mtime match), %d total",
+                        len(changed), skipped, total_files)
 
             if not changed:
                 result = ModImportResult(self._mod_name)
