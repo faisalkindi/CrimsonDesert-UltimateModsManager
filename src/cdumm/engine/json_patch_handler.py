@@ -20,10 +20,25 @@ Format:
         ]
     }
 
+Signature-based dynamic offsets (optional):
+    If a patch entry has a "signature" field, the handler searches the
+    decompressed file for that hex byte pattern. Change offsets are then
+    relative to the END of the signature match instead of absolute.
+    This survives game updates that shift data around.
+
+    {
+        "game_file": "gamedata/inventory.pabgb",
+        "signature": "090000004368617261637465720001",
+        "changes": [
+            {"offset": 0, "label": "...", "original": "3200", "patched": "b400"},
+            {"offset": 2, "label": "...", "original": "f000", "patched": "bc02"}
+        ]
+    }
+
 Offsets are into the DECOMPRESSED file content. The handler:
 1. Finds each target file in the game's PAMT index
 2. Extracts and decompresses it from the PAZ
-3. Applies all byte patches
+3. Applies all byte patches (absolute or signature-relative)
 4. Recompresses and repacks into a PAZ copy
 5. Returns modified PAZ files for standard CDUMM delta import
 """
@@ -102,14 +117,32 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
     return raw
 
 
-def _apply_byte_patches(data: bytearray, changes: list[dict]) -> int:
+def _apply_byte_patches(data: bytearray, changes: list[dict],
+                        signature: str | None = None) -> int:
     """Apply byte patches to decompressed file data.
+
+    If signature is provided, find it in data and treat change offsets
+    as relative to the end of the signature match. Otherwise offsets
+    are absolute.
 
     Returns number of patches applied.
     """
+    base_offset = 0
+    if signature:
+        sig_bytes = bytes.fromhex(signature)
+        idx = bytes(data).find(sig_bytes)
+        if idx < 0:
+            logger.error("Signature %s not found in data (%d bytes)",
+                         signature[:40] + "..." if len(signature) > 40 else signature,
+                         len(data))
+            return 0
+        base_offset = idx + len(sig_bytes)
+        logger.info("Signature found at offset %d, patches relative to %d",
+                     idx, base_offset)
+
     applied = 0
     for change in changes:
-        offset = change["offset"]
+        offset = base_offset + change["offset"]
         patched_hex = change["patched"]
         patched_bytes = bytes.fromhex(patched_hex)
 
@@ -187,27 +220,37 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
                      entry.comp_size, entry.orig_size)
 
         # Extract and decompress the file.
-        # If the vanilla PAZ backup doesn't exist, fall back to game dir.
+        # If the vanilla PAZ backup doesn't exist, fall back to game dir
+        # AND re-lookup the entry using the game PAMT (correct offsets for
+        # the current game PAZ state, which may have other mods applied).
         try:
             if not os.path.exists(entry.paz_file):
-                game_paz = str(game_dir / os.path.basename(os.path.dirname(entry.paz_file))
-                               / os.path.basename(entry.paz_file))
-                if os.path.exists(game_paz):
-                    logger.info("Vanilla PAZ not found, using game dir: %s", game_paz)
-                    entry = PazEntry(
-                        path=entry.path, paz_file=game_paz,
-                        offset=entry.offset, comp_size=entry.comp_size,
-                        orig_size=entry.orig_size, flags=entry.flags,
-                        paz_index=entry.paz_index,
-                    )
+                game_entry = _find_pamt_entry(game_file, game_dir)
+                if game_entry:
+                    logger.info("Vanilla PAZ not found, using game dir for %s", game_file)
+                    entry = game_entry
+                    entry_cache[game_file.lower()] = entry
             plaintext = _extract_from_paz(entry)
         except Exception as e:
-            logger.error("Failed to extract %s: %s", game_file, e, exc_info=True)
-            raise RuntimeError(f"Failed to extract {game_file}: {e}") from e
+            # If extraction fails (e.g., offsets wrong from modded PAZ),
+            # try game dir with fresh PAMT lookup as last resort
+            try:
+                game_entry = _find_pamt_entry(game_file, game_dir)
+                if game_entry:
+                    logger.info("Retrying extraction from game dir for %s", game_file)
+                    plaintext = _extract_from_paz(game_entry)
+                    entry = game_entry
+                    entry_cache[game_file.lower()] = entry
+                else:
+                    raise
+            except Exception:
+                logger.error("Failed to extract %s: %s", game_file, e, exc_info=True)
+                raise RuntimeError(f"Failed to extract {game_file}: {e}") from e
 
         # Apply byte patches
         modified = bytearray(plaintext)
-        applied = _apply_byte_patches(modified, changes)
+        signature = patch.get("signature")
+        applied = _apply_byte_patches(modified, changes, signature=signature)
         logger.info("Applied %d/%d patches to %s", applied, len(changes), game_file)
 
         if bytes(modified) == plaintext:
