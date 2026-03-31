@@ -126,22 +126,13 @@ class PresetPickerDialog(QDialog):
 def has_labeled_changes(data: dict) -> bool:
     """Check if a JSON patch mod has configurable options.
 
-    Returns True for:
-    - Grouped presets with [BracketPrefix] pattern (mutually exclusive)
-    - 10+ labeled changes (clearly a toggle/customization mod)
+    Returns True ONLY for grouped presets with [BracketPrefix] pattern
+    (mutually exclusive options like [2x] Loot, [5x] Loot).
 
-    Regular mods with 1-9 labeled changes are just annotated, not configurable.
+    Plain labeled changes (like "ID: Soul_TwoHandSpear") are just
+    descriptions — not configurable options. Don't show the picker for those.
     """
-    if _detect_preset_groups(data) is not None:
-        return True
-
-    # Count total labeled changes across all patches
-    label_count = 0
-    for patch in data.get("patches", []):
-        for c in patch.get("changes", []):
-            if isinstance(c, dict) and "label" in c:
-                label_count += 1
-    return label_count >= 10
+    return _detect_preset_groups(data) is not None
 
 
 def _detect_preset_groups(data: dict) -> dict[str, list[int]] | None:

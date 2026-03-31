@@ -8,6 +8,19 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "1.6.1",
+        "date": "2026-03-31",
+        "notes": [
+            "JSON mods no longer fail when vanilla PAZ backup doesn't exist",
+            "Variant mods like Fat Stacks now show a picker to choose which option to install",
+            "Mods with plain labels no longer incorrectly show the preset picker",
+            "Standalone mods (Free Gliding, LET ME SLEEP, etc.) now work — new directories placed first in PAPGT",
+            "New mod directories use correct flags matching what mod authors expect",
+            "All columns in the mod list are now resizable by dragging",
+            "After updating: Disable all → Apply → Re-enable all → Apply for changes to take effect",
+        ],
+    },
+    {
         "version": "1.6.0",
         "date": "2026-03-31",
         "notes": [

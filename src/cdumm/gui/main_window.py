@@ -865,7 +865,10 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         from PySide6.QtWidgets import QFrame, QStackedWidget, QHeaderView
         from PySide6.QtCore import QSortFilterProxyModel
-        from cdumm.gui.mod_list_model import COL_ORDER, COL_FILES, COL_NAME
+        from cdumm.gui.mod_list_model import (
+            COL_ENABLED, COL_ORDER, COL_NAME, COL_AUTHOR, COL_VERSION,
+            COL_STATUS, COL_FILES, COL_DATE,
+        )
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -977,9 +980,19 @@ class MainWindow(QMainWindow):
             self._check_header = _CheckHeader(Qt.Orientation.Horizontal, self._mod_table)
             self._check_header.toggle_requested.connect(self._on_toggle_all)
             self._mod_table.setHorizontalHeader(self._check_header)
-            self._check_header.setStretchLastSection(False)
-            self._check_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            self._check_header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+            self._check_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            self._check_header.setStretchLastSection(True)
+            # Fixed-size columns auto-fit to header, rest are draggable
+            self._check_header.setSectionResizeMode(COL_ENABLED, QHeaderView.ResizeMode.Fixed)
+            self._mod_table.setColumnWidth(COL_ENABLED, 30)
+            self._mod_table.setColumnWidth(COL_ORDER, 45)
+            # Fit content columns to header text width at minimum
+            self._mod_table.setColumnWidth(COL_NAME, 180)
+            self._mod_table.setColumnWidth(COL_AUTHOR, 110)
+            self._mod_table.setColumnWidth(COL_VERSION, 65)
+            self._mod_table.setColumnWidth(COL_STATUS, 130)
+            self._mod_table.setColumnWidth(COL_FILES, 45)
+            # Import Date stretches via setStretchLastSection
             self._mod_table.doubleClicked.connect(self._on_mod_double_clicked)
             splitter.addWidget(self._mod_table)
         else:
@@ -1428,6 +1441,32 @@ class MainWindow(QMainWindow):
                     path = scripts[0]
             self._run_script_mod(path, existing_mod_id=existing_mod_id)
             return
+
+        # Check for variant folders (e.g. Fat Stacks with 2x, 5x, 10x subfolders).
+        # Each subfolder contains the same game files — let user pick which one.
+        if path.is_dir():
+            variants = []
+            for sub in sorted(path.iterdir()):
+                if sub.is_dir() and not sub.name.startswith((".", "_")):
+                    has_game = any(
+                        (sub / f"{i:04d}").is_dir() for i in range(100)
+                    ) or (sub / "meta").is_dir()
+                    if has_game:
+                        variants.append(sub)
+            if len(variants) > 1:
+                from PySide6.QtWidgets import QInputDialog
+                names = [v.name for v in variants]
+                chosen, ok = QInputDialog.getItem(
+                    self, "Choose Variant",
+                    f"This mod has {len(variants)} variants.\n"
+                    "Choose which one to install:",
+                    names, 0, False)
+                if ok and chosen:
+                    path = variants[names.index(chosen)]
+                    logger.info("User selected variant: %s", path.name)
+                else:
+                    self.statusBar().showMessage("Import cancelled.", 5000)
+                    return
 
         # Check for multiple JSON presets — let user pick one
         # For zips, extract to temp first to scan for presets

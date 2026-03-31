@@ -186,8 +186,20 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
                      os.path.basename(entry.paz_file),
                      entry.comp_size, entry.orig_size)
 
-        # Extract and decompress the file
+        # Extract and decompress the file.
+        # If the vanilla PAZ backup doesn't exist, fall back to game dir.
         try:
+            if not os.path.exists(entry.paz_file):
+                game_paz = str(game_dir / os.path.basename(os.path.dirname(entry.paz_file))
+                               / os.path.basename(entry.paz_file))
+                if os.path.exists(game_paz):
+                    logger.info("Vanilla PAZ not found, using game dir: %s", game_paz)
+                    entry = PazEntry(
+                        path=entry.path, paz_file=game_paz,
+                        offset=entry.offset, comp_size=entry.comp_size,
+                        orig_size=entry.orig_size, flags=entry.flags,
+                        paz_index=entry.paz_index,
+                    )
             plaintext = _extract_from_paz(entry)
         except Exception as e:
             logger.error("Failed to extract %s: %s", game_file, e, exc_info=True)

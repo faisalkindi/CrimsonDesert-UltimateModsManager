@@ -111,31 +111,28 @@ class PapgtManager:
             logger.info("PAPGT: removing %d stale entries: %s", len(removed), removed)
 
         # Add new directories from modified_pamts not already in PAPGT.
-        # When a mod ships its own PAPGT (mod_papgt), new dirs are already
-        # in the base — don't add them again.
         existing_names = {e[0] for e in live_entries}
         new_dirs = []
-        if modified_pamts and not mod_papgt:
+        if modified_pamts:
             for dir_name in sorted(modified_pamts.keys()):
                 if dir_name not in existing_names:
                     new_dirs.append(dir_name)
 
-        # Use the last directory's flag pattern for new entries.
-        # High-numbered dirs use power-of-2 flags, not the common 0x003FFF00.
-        if live_entries:
-            last_flags = live_entries[-1][1]
-        else:
-            last_flags = 0x003FFF00
+        # New mod directories use 0x003FFF00 (same as vanilla data dirs 0000-0017).
+        # This matches what mod authors use when they ship their own PAPGT.
+        new_dir_flags = 0x003FFF00
 
         if new_dirs:
             logger.info("PAPGT: adding %d new entries: %s", len(new_dirs), new_dirs)
 
-        # Build the complete entry list: existing first, then new at end
+        # Build the complete entry list: NEW dirs first (so they override
+        # existing entries — game loads PAPGT in order, first match wins),
+        # then existing dirs.
         all_entries: list[tuple[str, int]] = []  # (dir_name, flags)
+        for dir_name in new_dirs:
+            all_entries.append((dir_name, new_dir_flags))
         for dir_name, flags, _ in live_entries:
             all_entries.append((dir_name, flags))
-        for dir_name in new_dirs:
-            all_entries.append((dir_name, last_flags))
 
         # Build string table
         string_table = bytearray()
