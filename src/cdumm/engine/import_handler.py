@@ -877,7 +877,75 @@ def import_from_json_patch(
             converted, game_dir, db, snapshot, deltas_dir, mod_name,
             existing_mod_id=existing_mod_id, modinfo=modinfo)
 
+        # Store original JSON patch data for three-way merge support.
+        # This lets the apply engine merge patches from multiple mods that
+        # modify the same decompressed game file instead of last-wins.
+        if not result.error and patch_data.get("patches"):
+            _store_json_patches(db, result, patch_data, game_dir)
+
     return result
+
+
+def _store_json_patches(db: Database, result, patch_data: dict, game_dir: Path) -> None:
+    """Store original JSON patch data in mod_deltas for three-way merge.
+
+    Maps each game_file in the JSON to its mod_deltas row via PAMT lookup,
+    then stores the changes array as json_patches.
+    """
+    import json
+    from cdumm.engine.json_patch_handler import _find_pamt_entry
+
+    # Get the mod_id from the result's changed files
+    if not result.changed_files:
+        return
+
+    # Find mod_id from the first delta
+    first_delta = result.changed_files[0].get("delta_path")
+    if not first_delta:
+        return
+    row = db.connection.execute(
+        "SELECT mod_id FROM mod_deltas WHERE delta_path = ? LIMIT 1",
+        (first_delta,)).fetchone()
+    if not row:
+        return
+    mod_id = row[0]
+
+    vanilla_dir = game_dir / "CDMods" / "vanilla"
+    base_dir = vanilla_dir if vanilla_dir.exists() else game_dir
+
+    for patch in patch_data.get("patches", []):
+        game_file = patch.get("game_file")
+        changes = patch.get("changes")
+        if not game_file or not changes:
+            continue
+
+        # Find which PAZ file contains this game file
+        entry = _find_pamt_entry(game_file, base_dir)
+        if not entry:
+            continue
+
+        # The PAZ file path in mod_deltas
+        import os
+        pamt_dir = os.path.basename(os.path.dirname(entry.paz_file))
+        paz_file_path = f"{pamt_dir}/{entry.paz_index}.paz"
+
+        # Store the patches JSON on the matching mod_deltas row
+        patches_json = json.dumps({
+            "game_file": game_file,
+            "entry_path": entry.path,
+            "changes": changes,
+        })
+
+        # Update all mod_deltas rows for this mod + PAZ file
+        db.connection.execute(
+            "UPDATE mod_deltas SET json_patches = ? "
+            "WHERE mod_id = ? AND file_path LIKE ?",
+            (patches_json, mod_id, f"{pamt_dir}/%"),
+        )
+
+    db.connection.commit()
+    logger.info("Stored JSON patch data for mod %d (%d patches)",
+                mod_id, len(patch_data.get("patches", [])))
 
 
 def _process_extracted_files(
