@@ -100,31 +100,78 @@ class PapgtManager:
         if removed:
             logger.info("PAPGT: removing %d stale entries: %s", len(removed), removed)
 
-        # Add new directories from modified_pamts not already in PAPGT
+        # Add new directories from modified_pamts not already in PAPGT.
+        # Skip directories whose PAMT entries duplicate paths from existing
+        # directories — these are overlay mods meant for file-copy installers
+        # and adding them to PAPGT causes duplicate entry crashes.
         existing_names = {e[0] for e in live_entries}
         new_dirs = []
         if modified_pamts:
-            for dir_name in sorted(modified_pamts.keys()):
-                if dir_name not in existing_names:
-                    new_dirs.append(dir_name)
+            # Collect all entry paths from existing PAMTs
+            existing_entry_paths: set[str] = set()
+            for dir_name, _, _ in live_entries:
+                try:
+                    from cdumm.archive.paz_parse import parse_pamt
+                    pamt_path = self._game_dir / dir_name / "0.pamt"
+                    if pamt_path.exists():
+                        entries = parse_pamt(str(pamt_path), str(self._game_dir / dir_name))
+                        for e in entries:
+                            existing_entry_paths.add(e.path.lower())
+                except Exception:
+                    pass
 
-        # Use the most common flags for new entries
-        default_flags = 0x003FFF00
+            for dir_name in sorted(modified_pamts.keys()):
+                if dir_name in existing_names:
+                    continue
+                # Check if new dir's PAMT has entries that duplicate existing paths
+                try:
+                    pamt_data = modified_pamts[dir_name]
+                    import tempfile, os
+                    # Write temp PAMT to parse it
+                    tmp_dir = self._game_dir / dir_name
+                    tmp_pamt = tmp_dir / "0.pamt"
+                    pamt_existed = tmp_pamt.exists()
+                    if not pamt_existed:
+                        tmp_dir.mkdir(parents=True, exist_ok=True)
+                        tmp_pamt.write_bytes(pamt_data)
+                    try:
+                        from cdumm.archive.paz_parse import parse_pamt
+                        new_entries = parse_pamt(str(tmp_pamt), str(tmp_dir))
+                        new_paths = {e.path.lower() for e in new_entries}
+                        overlap = new_paths & existing_entry_paths
+                        if overlap:
+                            logger.info(
+                                "PAPGT: skipping %s — %d/%d entries duplicate "
+                                "existing paths (e.g. %s)",
+                                dir_name, len(overlap), len(new_paths),
+                                next(iter(overlap)))
+                            continue
+                    finally:
+                        if not pamt_existed and tmp_pamt.exists():
+                            tmp_pamt.unlink()
+                            if tmp_dir.exists() and not any(tmp_dir.iterdir()):
+                                tmp_dir.rmdir()
+                except Exception as e:
+                    logger.warning("PAPGT: failed to check %s for duplicates: %s",
+                                   dir_name, e)
+                new_dirs.append(dir_name)
+
+        # Use the last directory's flag pattern for new entries.
+        # High-numbered dirs use power-of-2 flags, not the common 0x003FFF00.
         if live_entries:
-            flag_counts: dict[int, int] = {}
-            for _, flags, _ in live_entries:
-                flag_counts[flags] = flag_counts.get(flags, 0) + 1
-            default_flags = max(flag_counts, key=flag_counts.get)
+            last_flags = live_entries[-1][1]
+        else:
+            last_flags = 0x003FFF00
 
         if new_dirs:
             logger.info("PAPGT: adding %d new entries: %s", len(new_dirs), new_dirs)
 
-        # Build the complete entry list: new entries first, then existing
+        # Build the complete entry list: existing first, then new at end
         all_entries: list[tuple[str, int]] = []  # (dir_name, flags)
-        for dir_name in new_dirs:
-            all_entries.append((dir_name, default_flags))
         for dir_name, flags, _ in live_entries:
             all_entries.append((dir_name, flags))
+        for dir_name in new_dirs:
+            all_entries.append((dir_name, last_flags))
 
         # Build string table
         string_table = bytearray()
