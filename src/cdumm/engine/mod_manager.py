@@ -171,8 +171,8 @@ class ModManager:
                 "SELECT file_hash FROM snapshots WHERE file_path = ?", (file_path,)).fetchone()
             if snap is None:
                 continue
-            current_hash, _ = hash_file(game_file)
-            if current_hash != snap[0]:
+            from cdumm.engine.snapshot_manager import hash_matches
+            if not hash_matches(game_file, snap[0]):
                 return "active"
 
         return "not applied"

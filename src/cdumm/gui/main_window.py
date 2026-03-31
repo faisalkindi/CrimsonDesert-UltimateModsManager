@@ -874,7 +874,7 @@ class MainWindow(QMainWindow):
         sb_layout.addSpacing(12)
 
         self._nav_buttons = []
-        for label, tooltip in [("PAZ Mods", "PAZ Archive Mods"), ("ASI Mods", "ASI Plugin Mods"), ("Log", "Activity Log"), ("Tools", "Tools & Settings")]:
+        for label, tooltip in [("PAZ Mods", "PAZ Archive Mods"), ("ASI Mods", "ASI Plugin Mods"), ("Log", "Activity Log"), ("Tools", "Tools & Settings"), ("About", "About CDUMM")]:
             btn = QPushButton(label)
             btn.setToolTip(tooltip)
             btn.setCheckable(True)
@@ -1040,6 +1040,59 @@ class MainWindow(QMainWindow):
         tools_v.addStretch()
         self._pages.addWidget(tools_page)
 
+        # ── Page 4: About CDUMM ──
+        about_page = QWidget()
+        about_v = QVBoxLayout(about_page)
+        about_v.setContentsMargins(20, 20, 20, 20)
+        about_v.setSpacing(16)
+
+        from cdumm import __version__ as _about_ver
+        about_title = QLabel(f"Crimson Desert Ultimate Mods Manager")
+        about_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #D4A43C;")
+        about_v.addWidget(about_title)
+
+        about_ver = QLabel(f"Version {_about_ver}")
+        about_ver.setStyleSheet("font-size: 13px; color: #888;")
+        about_v.addWidget(about_ver)
+
+        # Update status indicator — big and visible
+        self._about_update_label = QLabel("Checking for updates...")
+        self._about_update_label.setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #888; "
+            "padding: 12px; border: 1px solid #333; border-radius: 8px; "
+            "background: #1A1D23;")
+        about_v.addWidget(self._about_update_label)
+
+        about_v.addSpacing(8)
+
+        # Links
+        import webbrowser
+        links_label = QLabel("Links")
+        links_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #D8DEE9;")
+        about_v.addWidget(links_label)
+
+        for text, url in [
+            ("GitHub Releases — Download Latest", "https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases"),
+            ("NexusMods Page", "https://www.nexusmods.com/crimsondesert/mods/207"),
+            ("NexusMods Posts & Discussion", "https://www.nexusmods.com/crimsondesert/mods/207?tab=posts"),
+            ("Report a Bug", "https://www.nexusmods.com/crimsondesert/mods/207?tab=bugs"),
+        ]:
+            link_btn = QPushButton(text)
+            link_btn.setFixedHeight(36)
+            link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            link_btn.clicked.connect(lambda checked, u=url: webbrowser.open(u))
+            about_v.addWidget(link_btn)
+
+        about_v.addStretch()
+
+        # Credits
+        credits = QLabel("by kindiboy")
+        credits.setStyleSheet("color: #555; font-size: 11px;")
+        credits.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        about_v.addWidget(credits)
+
+        self._pages.addWidget(about_page)
+
         # Fake tabs reference for tab switching on import
         self._tabs = self._pages
 
@@ -1077,7 +1130,7 @@ class MainWindow(QMainWindow):
 
     def _on_nav(self, label: str) -> None:
         """Switch pages via sidebar navigation."""
-        page_map = {"PAZ Mods": 0, "ASI Mods": 1, "Log": 2, "Tools": 3}
+        page_map = {"PAZ Mods": 0, "ASI Mods": 1, "Log": 2, "Tools": 3, "About": 4}
         idx = page_map.get(label, 0)
         self._pages.setCurrentIndex(idx)
         for nav_label, btn in self._nav_buttons:
@@ -3210,7 +3263,9 @@ class MainWindow(QMainWindow):
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        self._update_found = False
         worker.update_available.connect(self._on_update_available)
+        worker.finished.connect(self._on_update_check_done)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda: setattr(self, '_update_thread', None))
@@ -3218,7 +3273,35 @@ class MainWindow(QMainWindow):
         self._update_worker = worker
         thread.start()
 
+    def _on_update_check_done(self) -> None:
+        if not self._update_found:
+            if hasattr(self, '_about_update_label'):
+                self._about_update_label.setText("\u2714  CDUMM is up to date")
+                self._about_update_label.setStyleSheet(
+                    "font-size: 15px; font-weight: bold; color: #4CAF50; "
+                    "padding: 12px; border: 1px solid #4CAF50; border-radius: 8px; "
+                    "background: #1A2E1A;")
+            self._set_about_nav_indicator("green")
+
     def _on_update_available(self, info: dict) -> None:
+        self._update_found = True
+        tag = info.get("tag", "new version")
+        if hasattr(self, '_about_update_label'):
+            self._about_update_label.setText(
+                f"\u26A0  Update available: {tag}\n"
+                "Go to GitHub Releases to download.")
+            self._about_update_label.setStyleSheet(
+                "font-size: 15px; font-weight: bold; color: #F44336; "
+                "padding: 12px; border: 1px solid #F44336; border-radius: 8px; "
+                "background: #2E1A1A;")
+        self._set_about_nav_indicator("red")
+
+    def _set_about_nav_indicator(self, color: str) -> None:
+        """Update the About sidebar button with a colored dot."""
+        for label, btn in self._nav_buttons:
+            if label == "About":
+                dot = "\U0001F7E2" if color == "green" else "\U0001F534"
+                btn.setText(f"About {dot}")
         download_url = info.get("download_url", "")
         if download_url:
             reply = QMessageBox.question(

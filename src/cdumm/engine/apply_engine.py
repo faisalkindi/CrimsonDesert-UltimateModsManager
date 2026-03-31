@@ -466,7 +466,7 @@ class ApplyWorker(QObject):
             if not file_deltas:  # only when reverting everything
                 try:
                     import os
-                    from cdumm.engine.snapshot_manager import hash_file
+                    from cdumm.engine.snapshot_manager import hash_file, hash_matches
                     snap_cursor = self._db.connection.execute(
                         "SELECT file_path, file_hash, file_size FROM snapshots")
                     already_staged = set(txn.staged_files()) if hasattr(txn, 'staged_files') else set()
@@ -485,8 +485,7 @@ class ApplyWorker(QObject):
                                 needs_restore = True
                             elif actual_size < 50 * 1024 * 1024:
                                 # Small file — quick hash check
-                                h, _ = hash_file(game_file)
-                                if h != snap_hash:
+                                if not hash_matches(game_file, snap_hash):
                                     needs_restore = True
                             if needs_restore:
                                 vanilla = self._get_vanilla_bytes(rel)

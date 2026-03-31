@@ -1,4 +1,10 @@
 import hashlib
+
+try:
+    import xxhash
+    _USE_XXHASH = True
+except ImportError:
+    _USE_XXHASH = False
 import logging
 import os
 from pathlib import Path
@@ -19,18 +25,32 @@ PATHC_FILE = "meta/0.pathc"
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks for hashing
 
 
-def hash_file(path: Path, progress_callback=None) -> tuple[str, int]:
-    """Compute SHA-256 hash of a file using chunked reads.
+def hash_matches(path: Path, stored_hash: str) -> bool:
+    """Check if a file matches a stored hash, auto-detecting the algorithm.
+
+    xxh3_128 digests are 32 chars, SHA-256 are 64 chars.
+    """
+    algo = "sha256" if len(stored_hash) == 64 else "xxh3"
+    current, _ = hash_file(path, algo=algo)
+    return current == stored_hash
+
+
+def hash_file(path: Path, progress_callback=None, algo: str = "auto") -> tuple[str, int]:
+    """Hash a file using xxh3_128 (fast) or SHA-256 (fallback).
 
     Args:
         path: File to hash.
-        progress_callback: Optional callable(bytes_read, total_bytes) called per chunk.
+        progress_callback: Optional callable(bytes_read, total_bytes) per chunk.
+        algo: "auto" (xxhash if available), "sha256", or "xxh3".
 
     Returns:
         (hex_digest, file_size)
     """
     file_size = path.stat().st_size
-    h = hashlib.sha256()
+    if algo == "sha256" or (algo == "auto" and not _USE_XXHASH):
+        h = hashlib.sha256()
+    else:
+        h = xxhash.xxh3_128()
     bytes_read = 0
     with open(path, "rb") as f:
         while True:
@@ -217,10 +237,14 @@ class SnapshotWorker(QObject):
                     problems.append(
                         f"PAPGT has {entry_count} entries (vanilla has ~33)")
 
-        # 3. Check if CDMods/vanilla backup exists (means mods were applied before)
+        # 3. Check if CDMods/vanilla backup exists (means mods were applied before).
+        # If backups have different sizes from game files, the backups are
+        # stale (from a previous game version). Delete them — the user just
+        # verified through Steam so the game files ARE vanilla now.
+        import shutil as _shutil
         vanilla_dir = self._game_dir / "CDMods" / "vanilla"
         if vanilla_dir.exists() and any(vanilla_dir.rglob("*")):
-            # Backups exist — check if game files differ from backups
+            stale_backups = []
             for backup in vanilla_dir.rglob("*"):
                 if not backup.is_file() or backup.name.endswith(".vranges"):
                     continue
@@ -228,9 +252,17 @@ class SnapshotWorker(QObject):
                 game_file = self._game_dir / rel.replace("/", os.sep)
                 if game_file.exists():
                     if game_file.stat().st_size != backup.stat().st_size:
-                        problems.append(
-                            f"{rel}: size {game_file.stat().st_size} "
-                            f"differs from vanilla backup {backup.stat().st_size}")
+                        stale_backups.append(backup)
+            if stale_backups:
+                # Backups are from an old game version — delete them
+                for b in stale_backups:
+                    b.unlink(missing_ok=True)
+                    logger.info("Deleted stale backup: %s", b)
+                # Also delete range backups which are version-specific
+                for vr in vanilla_dir.rglob("*.vranges"):
+                    vr.unlink(missing_ok=True)
+                logger.info("Cleared %d stale vanilla backups (game was updated)",
+                            len(stale_backups))
 
         return problems
 

@@ -16,6 +16,7 @@ a = Analysis(
         'cdumm.gui.test_mod_dialog',
         'cdumm.gui.workers',
         'cdumm.gui.bug_report',
+        'xxhash',
         'cdumm.engine.snapshot_manager',
         'cdumm.engine.delta_engine',
         'cdumm.engine.import_handler',
