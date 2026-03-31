@@ -504,27 +504,61 @@ class ApplyWorker(QObject):
             self.progress_updated.emit(90, "Updating PAPGT...")
 
             # Check if any mod has a PAPGT delta (overlay mods that add
-            # new directories ship their own PAPGT with correct entries/ordering)
+            # new directories ship their own PAPGT with correct entries/ordering).
+            # BUT: skip mod-shipped PAPGTs from remapped mods — their PAPGT
+            # references the original dir (e.g. 0036) not the remapped one
+            # (e.g. 0043), so it's stale and would break other mods.
             papgt_deltas = file_deltas.get("meta/0.papgt", [])
             mod_papgt_data = None
             if papgt_deltas:
-                # Apply mod PAPGT deltas to vanilla to get the mod's PAPGT
-                vanilla_papgt_path = self._vanilla_dir / "meta" / "0.papgt"
-                if vanilla_papgt_path.exists():
-                    base = vanilla_papgt_path.read_bytes()
-                else:
-                    base = (self._game_dir / "meta" / "0.papgt").read_bytes()
+                # Check if the mod that ships PAPGT was remapped
+                # by looking at whether its other files use the directory
+                # referenced in its PAPGT or a different (remapped) one.
+                use_mod_papgt = True
                 for d in papgt_deltas:
                     dp = d.get("delta_path")
-                    if dp and Path(dp).exists():
-                        if d.get("is_new"):
-                            mod_papgt_data = Path(dp).read_bytes()
-                        else:
-                            base = apply_delta_from_file(base, Path(dp))
-                            mod_papgt_data = base
-                if mod_papgt_data:
-                    logger.info("Using mod PAPGT as rebuild base (%d bytes, %d entries)",
-                                len(mod_papgt_data), mod_papgt_data[8])
+                    if not dp:
+                        continue
+                    # Find which mod this PAPGT belongs to
+                    mod_row = self._db.connection.execute(
+                        "SELECT mod_id FROM mod_deltas WHERE delta_path = ? LIMIT 1",
+                        (dp,)).fetchone()
+                    if not mod_row:
+                        continue
+                    # Get the mod's actual file paths (non-PAPGT)
+                    mod_files = self._db.connection.execute(
+                        "SELECT DISTINCT file_path FROM mod_deltas "
+                        "WHERE mod_id = ? AND file_path != 'meta/0.papgt'",
+                        (mod_row[0],)).fetchall()
+                    mod_dirs = {f[0].split("/")[0] for f in mod_files}
+                    # If any mod dir is >= 0036 and NOT 0036, the mod was remapped
+                    has_remapped = any(
+                        d.isdigit() and len(d) == 4 and int(d) >= 36 and d != "0036"
+                        for d in mod_dirs
+                    )
+                    if has_remapped:
+                        use_mod_papgt = False
+                        logger.info("Skipping mod-shipped PAPGT — mod was remapped "
+                                    "(dirs: %s)", mod_dirs)
+                        break
+
+                if use_mod_papgt:
+                    vanilla_papgt_path = self._vanilla_dir / "meta" / "0.papgt"
+                    if vanilla_papgt_path.exists():
+                        base = vanilla_papgt_path.read_bytes()
+                    else:
+                        base = (self._game_dir / "meta" / "0.papgt").read_bytes()
+                    for d in papgt_deltas:
+                        dp = d.get("delta_path")
+                        if dp and Path(dp).exists():
+                            if d.get("is_new"):
+                                mod_papgt_data = Path(dp).read_bytes()
+                            else:
+                                base = apply_delta_from_file(base, Path(dp))
+                                mod_papgt_data = base
+                    if mod_papgt_data:
+                        logger.info("Using mod PAPGT as rebuild base (%d bytes, %d entries)",
+                                    len(mod_papgt_data), mod_papgt_data[8])
 
             papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
