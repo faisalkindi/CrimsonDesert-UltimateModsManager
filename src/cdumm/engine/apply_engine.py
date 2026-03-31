@@ -671,26 +671,36 @@ class ApplyWorker(QObject):
     def _merge_json_patch_deltas(
         self, file_path: str, deltas: list[dict],
     ) -> tuple[list[dict], list[dict]]:
-        """Merge JSON patches from multiple mods targeting the same game file.
+        """Merge multiple mods that modify the same decompressed game file.
 
-        When multiple mods have json_patches for the same decompressed entry
-        (e.g., both patching iteminfo.pabgb), their patches are merged using
-        three-way merge against vanilla: each mod's non-overlapping changes
-        are all applied, overlapping bytes go to the higher-priority mod.
+        Two paths:
+        1. Fast path (v1.5.0+ imports): json_patches data is stored — apply
+           all patches from all mods to vanilla content directly.
+        2. Fallback (pre-v1.5.0 imports): no json_patches data — apply each
+           mod's byte delta to vanilla independently, diff each result against
+           vanilla to derive per-mod patches, then three-way merge.
+
+        Both paths produce a merged decompressed content that contains all
+        non-overlapping changes. Overlapping bytes go to the higher-priority mod.
 
         Returns (merged_entry_deltas, remaining_deltas).
-        merged_entry_deltas: synthetic ENTR-style dicts with merged content
-        remaining_deltas: deltas not involved in merging (pass through as-is)
         """
         import json
-        from cdumm.archive.paz_parse import parse_pamt, PazEntry
-        from cdumm.archive.paz_repack import repack_entry_bytes
-        from cdumm.engine.delta_engine import save_entry_delta
+        from cdumm.archive.paz_parse import PazEntry
+        from cdumm.engine.delta_engine import apply_delta_from_file
 
-        # Collect all deltas with json_patches, grouped by game_file
+        pamt_dir = file_path.split("/")[0]
+        vanilla_dir = self._game_dir / "CDMods" / "vanilla"
+        base_dir = vanilla_dir if vanilla_dir.exists() else self._game_dir
+
+        # ── Step 1: Find which deltas overlap at the same PAMT entry ──
+        # Group deltas by the PAMT entry they modify (via byte range overlap
+        # or json_patches entry_path).
+        # For JSON mods, multiple deltas for the same PAZ often target the
+        # same compressed entry — detect this via overlapping byte ranges.
+
+        # Collect json_patches info (fast path)
         patches_by_game_file: dict[str, list[tuple[dict, dict]]] = {}
-        deltas_with_patches: set[str] = set()  # delta_paths involved in merging
-
         for d in deltas:
             jp = d.get("json_patches")
             if not jp:
@@ -704,29 +714,28 @@ class ApplyWorker(QObject):
             except (json.JSONDecodeError, TypeError):
                 continue
 
-        # Only merge when 2+ mods patch the same game file
-        merge_targets = {gf: patches for gf, patches in patches_by_game_file.items()
-                         if len(patches) >= 2}
+        # Check for fast-path merges (2+ mods with json_patches for same file)
+        fast_merges = {gf: patches for gf, patches in patches_by_game_file.items()
+                       if len(patches) >= 2}
 
-        if not merge_targets:
-            return [], deltas  # nothing to merge
+        # Check for fallback merges: 2+ mods with overlapping byte ranges
+        # but no json_patches data. Group by byte range overlap.
+        fallback_groups = self._find_overlapping_delta_groups(deltas, fast_merges)
 
+        if not fast_merges and not fallback_groups:
+            return [], deltas
+
+        from cdumm.engine.json_patch_handler import _find_pamt_entry, _extract_from_paz
         merged_deltas = []
-        for game_file, mod_patches in merge_targets.items():
-            # Find the PAMT entry for this game file
-            pamt_dir = file_path.split("/")[0]
-            vanilla_dir = self._game_dir / "CDMods" / "vanilla"
-            base_dir = vanilla_dir if vanilla_dir.exists() else self._game_dir
+        deltas_to_exclude: set[str] = set()
 
-            from cdumm.engine.json_patch_handler import _find_pamt_entry, _extract_from_paz
+        # ── Fast path: merge using stored JSON patch data ──
+        for game_file, mod_patches in fast_merges.items():
             entry = _find_pamt_entry(game_file, base_dir)
             if not entry:
-                logger.warning("JSON merge: can't find PAMT entry for %s", game_file)
                 continue
 
-            # Extract vanilla decompressed content
             try:
-                # Use vanilla PAZ for extraction
                 van_paz = base_dir / pamt_dir / f"{entry.paz_index}.paz"
                 van_entry = PazEntry(
                     path=entry.path, paz_file=str(van_paz),
@@ -740,34 +749,124 @@ class ApplyWorker(QObject):
                                game_file, e)
                 continue
 
-            # Three-way merge: apply ALL patches from ALL mods to vanilla.
-            # Patches are already sorted by priority (from _get_file_deltas ORDER BY).
-            # Apply lowest priority first, highest last (highest wins at overlaps).
+            # Apply all patches: lowest priority first, highest last (wins)
             merged = bytearray(vanilla_content)
-            all_changes = []
             mod_names = []
-            for d, patch_info in reversed(mod_patches):  # reversed = lowest priority first
-                changes = patch_info.get("changes", [])
-                all_changes.extend(changes)
+            for d, patch_info in reversed(mod_patches):
+                for change in patch_info.get("changes", []):
+                    offset = change.get("offset", 0)
+                    try:
+                        patched = bytes.fromhex(change.get("patched", ""))
+                        if offset + len(patched) <= len(merged):
+                            merged[offset:offset + len(patched)] = patched
+                    except (ValueError, IndexError):
+                        continue
                 mod_names.append(d.get("mod_name", "?"))
-                deltas_with_patches.add(d["delta_path"])
+                deltas_to_exclude.add(d["delta_path"])
 
-            # Apply all patches — later patches (higher priority) overwrite earlier ones
-            for change in all_changes:
-                offset = change.get("offset", 0)
-                patched_hex = change.get("patched", "")
+            if bytes(merged) != vanilla_content:
+                merged_deltas.append(self._make_merged_entry(
+                    entry, pamt_dir, bytes(merged), mod_names))
+                logger.info("JSON merge (fast): %s from %s",
+                            game_file, ", ".join(mod_names))
+
+        # ── Fallback: derive patches by diffing each mod's result vs vanilla ──
+        for entry_key, group_deltas in fallback_groups.items():
+            # entry_key is (pamt_dir, approximate_offset)
+            # All deltas in the group overlap at roughly the same PAZ region.
+            # Find which PAMT entry they target by parsing the PAMT.
+            entry = self._find_entry_at_offset(
+                pamt_dir, group_deltas[0], base_dir)
+            if not entry:
+                continue
+
+            try:
+                van_paz = base_dir / pamt_dir / f"{entry.paz_index}.paz"
+                van_entry = PazEntry(
+                    path=entry.path, paz_file=str(van_paz),
+                    offset=entry.offset, comp_size=entry.comp_size,
+                    orig_size=entry.orig_size, flags=entry.flags,
+                    paz_index=entry.paz_index,
+                )
+                vanilla_content = _extract_from_paz(van_entry)
+            except Exception as e:
+                logger.warning("JSON merge fallback: can't extract %s: %s",
+                               entry.path, e)
+                continue
+
+            # Get vanilla PAZ bytes to apply each mod's delta independently
+            van_paz_path = base_dir / pamt_dir / f"{entry.paz_index}.paz"
+            if not van_paz_path.exists():
+                van_paz_path = self._game_dir / pamt_dir / f"{entry.paz_index}.paz"
+            if not van_paz_path.exists():
+                continue
+            vanilla_paz = van_paz_path.read_bytes()
+
+            # Three-way merge: for each mod, apply its delta to vanilla PAZ,
+            # extract the entry, diff against vanilla decompressed content.
+            # Collect per-byte changes, then merge.
+            merged = bytearray(vanilla_content)
+            mod_names = []
+
+            # Apply lowest priority first (reversed — deltas are sorted high-pri first)
+            for d in reversed(group_deltas):
                 try:
-                    patched_bytes = bytes.fromhex(patched_hex)
-                    if offset + len(patched_bytes) <= len(merged):
-                        merged[offset:offset + len(patched_bytes)] = patched_bytes
-                except (ValueError, IndexError):
+                    mod_paz = apply_delta_from_file(
+                        vanilla_paz, Path(d["delta_path"]))
+                    # Extract the entry from the mod's PAZ
+                    mod_entry = PazEntry(
+                        path=entry.path, paz_file="",
+                        offset=entry.offset, comp_size=entry.comp_size,
+                        orig_size=entry.orig_size, flags=entry.flags,
+                        paz_index=entry.paz_index,
+                    )
+                    # Read from mod PAZ bytes at the entry offset
+                    raw = mod_paz[mod_entry.offset:
+                                  mod_entry.offset + mod_entry.comp_size]
+                    # Decompress
+                    import os
+                    from cdumm.archive.paz_crypto import decrypt, lz4_decompress
+                    basename = os.path.basename(entry.path)
+                    if entry.compressed and entry.compression_type == 2:
+                        try:
+                            mod_content = lz4_decompress(raw, entry.orig_size)
+                        except Exception:
+                            decrypted = decrypt(raw, basename)
+                            mod_content = lz4_decompress(decrypted, entry.orig_size)
+                    elif entry.encrypted:
+                        mod_content = decrypt(raw, basename)
+                    else:
+                        mod_content = raw
+
+                    # Three-way merge: only apply bytes that THIS mod changed
+                    for i in range(min(len(vanilla_content), len(mod_content))):
+                        if mod_content[i] != vanilla_content[i]:
+                            merged[i] = mod_content[i]
+
+                    mod_names.append(d.get("mod_name", "?"))
+                    deltas_to_exclude.add(d["delta_path"])
+                except Exception as e:
+                    logger.debug("JSON merge fallback: failed for %s: %s",
+                                 d.get("mod_name", "?"), e)
                     continue
 
-            if bytes(merged) == vanilla_content:
-                continue  # no actual changes after merge
+            if len(mod_names) >= 2 and bytes(merged) != vanilla_content:
+                merged_deltas.append(self._make_merged_entry(
+                    entry, pamt_dir, bytes(merged), mod_names))
+                logger.info("JSON merge (fallback): %s from %s",
+                            entry.path, ", ".join(mod_names))
 
-            # Create a synthetic ENTR-style delta for the merged content
-            metadata = {
+        remaining = [d for d in deltas if d["delta_path"] not in deltas_to_exclude]
+        return merged_deltas, remaining
+
+    def _make_merged_entry(self, entry, pamt_dir: str,
+                           content: bytes, mod_names: list[str]) -> dict:
+        """Create a synthetic ENTR-style delta dict for merged content."""
+        return {
+            "entry_path": entry.path,
+            "delta_path": None,
+            "_merged_content": content,
+            "_merged_metadata": {
                 "pamt_dir": pamt_dir,
                 "entry_path": entry.path,
                 "paz_index": entry.paz_index,
@@ -776,23 +875,104 @@ class ApplyWorker(QObject):
                 "vanilla_offset": entry.offset,
                 "vanilla_comp_size": entry.comp_size,
                 "vanilla_orig_size": entry.orig_size,
-            }
+            },
+            "mod_name": " + ".join(mod_names),
+        }
 
-            merged_deltas.append({
-                "entry_path": entry.path,
-                "delta_path": None,  # content is in-memory
-                "_merged_content": bytes(merged),
-                "_merged_metadata": metadata,
-                "mod_name": " + ".join(mod_names),
-            })
+    def _find_overlapping_delta_groups(
+        self, deltas: list[dict], already_merged: dict,
+    ) -> dict[tuple, list[dict]]:
+        """Find groups of 2+ deltas with overlapping byte ranges and no json_patches.
 
-            logger.info("JSON merge: %s — merged %d patches from %s",
-                        game_file, len(all_changes), ", ".join(mod_names))
+        Returns {(pamt_dir, approx_offset): [deltas]} for groups that need
+        fallback merging.
+        """
+        # Skip deltas already handled by fast-path or that have entry_path
+        already_files = set()
+        for gf, patches in already_merged.items():
+            for d, _ in patches:
+                already_files.add(d["delta_path"])
 
-        # Build remaining deltas: exclude those that were merged
-        remaining = [d for d in deltas if d["delta_path"] not in deltas_with_patches]
+        # Group byte-range deltas by approximate region (same file, overlapping ranges)
+        from collections import defaultdict
+        range_deltas = []
+        for d in deltas:
+            if d["delta_path"] in already_files:
+                continue
+            if d.get("entry_path") or d.get("is_new") or d.get("json_patches"):
+                continue
+            # Read byte range from DB
+            try:
+                row = self._db.connection.execute(
+                    "SELECT byte_start, byte_end FROM mod_deltas WHERE delta_path = ? LIMIT 1",
+                    (d["delta_path"],)).fetchone()
+                if row and row[0] is not None:
+                    range_deltas.append((row[0], row[1], d))
+            except Exception:
+                continue
 
-        return merged_deltas, remaining
+        if len(range_deltas) < 2:
+            return {}
+
+        # Find overlapping pairs
+        range_deltas.sort(key=lambda x: x[0])
+        groups: dict[int, list[dict]] = {}
+        used = set()
+
+        for i in range(len(range_deltas)):
+            if i in used:
+                continue
+            s1, e1, d1 = range_deltas[i]
+            group = [d1]
+            group_id = i
+            for j in range(i + 1, len(range_deltas)):
+                if j in used:
+                    continue
+                s2, e2, d2 = range_deltas[j]
+                if s2 < e1:  # overlap
+                    group.append(d2)
+                    used.add(j)
+                    e1 = max(e1, e2)
+            if len(group) >= 2:
+                used.add(i)
+                groups[s1] = group
+
+        # Convert to keyed format
+        pamt_dir = ""
+        if groups:
+            pamt_dir = list(groups.values())[0][0].get("delta_path", "").split("/")[-1]
+            # Actually get from file_path
+        result = {}
+        for offset, grp in groups.items():
+            result[("", offset)] = grp
+
+        return result
+
+    def _find_entry_at_offset(self, pamt_dir: str, delta: dict,
+                              base_dir) -> "PazEntry | None":
+        """Find the PAMT entry whose compressed data occupies a given PAZ offset."""
+        from cdumm.archive.paz_parse import parse_pamt
+
+        try:
+            row = self._db.connection.execute(
+                "SELECT byte_start, byte_end FROM mod_deltas WHERE delta_path = ? LIMIT 1",
+                (delta["delta_path"],)).fetchone()
+            if not row or row[0] is None:
+                return None
+            target_offset = row[0]
+
+            pamt_path = base_dir / pamt_dir / "0.pamt"
+            if not pamt_path.exists():
+                return None
+
+            entries = parse_pamt(str(pamt_path), str(base_dir / pamt_dir))
+            # Find entry whose offset range contains our target
+            for e in entries:
+                if e.offset <= target_offset < e.offset + e.comp_size:
+                    return e
+        except Exception as e:
+            logger.debug("Failed to find entry at offset: %s", e)
+        return None
 
     def _apply_entry_deltas(self, file_path: str, buf: bytearray,
                             entry_deltas: list[dict]) -> bytes:
