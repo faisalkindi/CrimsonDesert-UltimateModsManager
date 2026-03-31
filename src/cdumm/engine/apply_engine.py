@@ -473,9 +473,13 @@ class ApplyWorker(QObject):
             if all(d.get("is_new") for d in delta_infos) and delta_infos:
                 continue
 
+            # PAMT files always get full backups — they're small (<14MB)
+            # and range backups are unreliable when the PAMT structure changes.
+            # ENTR deltas also need full backups (entry-level composition).
             has_bsdiff = self._has_bsdiff_delta(file_path)
+            needs_full = has_bsdiff or file_path.endswith(".pamt")
 
-            if has_bsdiff:
+            if needs_full:
                 full_path = self._vanilla_dir / file_path.replace("/", "\\")
                 if not full_path.exists():
                     game_path = self._game_dir / file_path.replace("/", "\\")
@@ -1008,14 +1012,22 @@ class RevertWorker(QObject):
                     shutil.rmtree(d, ignore_errors=True)
                     logger.info("Removed orphan mod directory: %s", d.name)
 
-            # Rebuild PAPGT from scratch (not from backups which may be stale)
-            self.progress_updated.emit(92, "Rebuilding PAPGT...")
-            papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
-            try:
-                papgt_bytes = papgt_mgr.rebuild()
-                txn.stage_file("meta/0.papgt", papgt_bytes)
-            except FileNotFoundError:
-                pass
+            # Restore vanilla PAPGT from backup if available.
+            # Rebuilding from scratch can produce slightly different bytes
+            # (different hash) than the original, which Verify flags as modded.
+            self.progress_updated.emit(92, "Restoring PAPGT...")
+            vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
+            if vanilla_papgt.exists():
+                txn.stage_file("meta/0.papgt", vanilla_papgt.read_bytes())
+                logger.info("Restored vanilla PAPGT from backup")
+            else:
+                # No backup — rebuild from scratch as fallback
+                papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
+                try:
+                    papgt_bytes = papgt_mgr.rebuild()
+                    txn.stage_file("meta/0.papgt", papgt_bytes)
+                except FileNotFoundError:
+                    pass
 
             self.progress_updated.emit(95, "Committing revert...")
             txn.commit()
