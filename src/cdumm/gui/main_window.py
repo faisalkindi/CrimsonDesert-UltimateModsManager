@@ -254,9 +254,110 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Check for missing PAMT full backups (upgrade from older versions)
+        self._check_pamt_backups()
+
         # Trigger background status check for mod list
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
+
+    def _check_pamt_backups(self) -> None:
+        """Detect missing full PAMT backups and create them or prompt for Steam verify.
+
+        Older versions used range backups for PAMTs which can't fully restore
+        vanilla. This checks every PAMT that mods touch and ensures a full
+        backup exists. If the game file is currently vanilla (matches snapshot),
+        the backup is created silently. If it's modded, the user is prompted.
+        """
+        if not self._db or not self._game_dir or not self._vanilla_dir:
+            return
+        if not self._snapshot or not self._snapshot.has_snapshot():
+            return
+
+        try:
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+            if config.get("pamt_backups_checked") == "1":
+                return  # Already checked this install
+
+            # Find all PAMT files that mods touch
+            cursor = self._db.connection.execute(
+                "SELECT DISTINCT file_path FROM mod_deltas "
+                "WHERE file_path LIKE '%.pamt'")
+            mod_pamts = [row[0] for row in cursor.fetchall()]
+            if not mod_pamts:
+                config.set("pamt_backups_checked", "1")
+                return
+
+            missing = []
+            for pamt_path in mod_pamts:
+                full_backup = self._vanilla_dir / pamt_path.replace("/", "\\")
+                if not full_backup.exists():
+                    missing.append(pamt_path)
+
+            if not missing:
+                config.set("pamt_backups_checked", "1")
+                return
+
+            # Try to create backups from current game files if they match snapshot
+            from cdumm.engine.snapshot_manager import hash_file
+            created = 0
+            still_missing = []
+            for pamt_path in missing:
+                game_file = self._game_dir / pamt_path.replace("/", "\\")
+                if not game_file.exists():
+                    continue
+                snap = self._db.connection.execute(
+                    "SELECT file_hash, file_size FROM snapshots WHERE file_path = ?",
+                    (pamt_path,)).fetchone()
+                if not snap:
+                    continue
+
+                # Quick size check
+                try:
+                    if game_file.stat().st_size != snap[1]:
+                        still_missing.append(pamt_path)
+                        continue
+                except OSError:
+                    still_missing.append(pamt_path)
+                    continue
+
+                # Full hash check (PAMTs are small, <14MB)
+                current_hash, _ = hash_file(game_file)
+                if current_hash == snap[0]:
+                    # Game file IS vanilla — create backup silently
+                    backup_path = self._vanilla_dir / pamt_path.replace("/", "\\")
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    import shutil
+                    shutil.copy2(game_file, backup_path)
+                    created += 1
+                    logger.info("Created missing PAMT backup: %s", pamt_path)
+                else:
+                    still_missing.append(pamt_path)
+
+            if created:
+                self._log_activity("backup",
+                    f"Created {created} missing PAMT backup(s)",
+                    "Upgraded from range backups to full backups")
+
+            if still_missing:
+                QMessageBox.information(
+                    self, "Vanilla Backup Incomplete",
+                    f"{len(still_missing)} PAMT file(s) are currently modded and have "
+                    f"no full vanilla backup:\n\n"
+                    + "\n".join(f"  {p}" for p in still_missing[:5])
+                    + ("\n  ..." if len(still_missing) > 5 else "")
+                    + "\n\nTo fix this:\n"
+                    "1. Steam → Right-click Crimson Desert → Properties\n"
+                    "   → Installed Files → Verify integrity of game files\n"
+                    "2. Restart CDUMM — it will create the missing backups\n\n"
+                    "Until then, Revert to Vanilla may not fully restore these files.",
+                )
+            else:
+                config.set("pamt_backups_checked", "1")
+
+        except Exception as e:
+            logger.debug("PAMT backup check failed: %s", e)
 
     def _check_one_time_reset(self) -> bool:
         """One-time migrations when upgrading to a new major version.
