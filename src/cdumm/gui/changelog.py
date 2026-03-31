@@ -8,6 +8,24 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "1.6.0",
+        "date": "2026-03-31",
+        "notes": [
+            "Import is dramatically faster — large files use streaming comparison",
+            "Apply responds instantly — removed blocking dialogs and slow process checks",
+            "PAPGT integrity check only rehashes directories that changed (not all 33)",
+            "Revert now guarantees ALL files return to vanilla — safety net catches orphaned files",
+            "Multiple mods modifying the same PAZ compose correctly (FULL + sparse patches)",
+            "Overlay mods like Helmet and Armor Hider now work (mod-shipped PAPGT preserved)",
+            "JSON mods patching the same file get changes merged (e.g. Stamina + Fat Stacks)",
+            ".bsdiff patches auto-detect target game file — no special naming needed",
+            "PAPGT backed up before first Apply — Revert restores exact vanilla copy",
+            "Xbox Game Pass game directory detection",
+            "Import progress shows per-file status instead of freezing at 0%",
+            "Conflicts shown in panel instead of blocking popup",
+        ],
+    },
+    {
         "version": "1.4.0",
         "date": "2026-03-30",
         "notes": [
