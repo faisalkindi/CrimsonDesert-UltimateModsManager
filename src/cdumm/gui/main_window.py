@@ -154,6 +154,11 @@ class MainWindow(QMainWindow):
         # Update check (delayed further to not compete with UI loading)
         QTimer.singleShot(5000, self._check_for_updates)
 
+        # Re-check for updates every 4 hours (for users who leave the app open)
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._check_for_updates)
+        self._update_timer.start(4 * 60 * 60 * 1000)  # 4 hours in ms
+
         # Auto-snapshot is handled by _deferred_startup
 
         # If previous session didn't close cleanly, offer bug report
@@ -1110,6 +1115,16 @@ class MainWindow(QMainWindow):
         self._tabs = self._pages
 
         content_v.addWidget(self._pages)
+
+        # ── Persistent Update Banner (hidden by default) ──
+        self._update_banner = QLabel("")
+        self._update_banner.setStyleSheet(
+            "background: #8B0000; color: white; font-size: 13px; "
+            "font-weight: bold; padding: 8px 16px; border: none;")
+        self._update_banner.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_banner.setVisible(False)
+        self._update_banner.mousePressEvent = lambda e: self._on_banner_clicked()
+        content_v.addWidget(self._update_banner)
 
         # ── Action Bar ──
         action_bar = QFrame()
@@ -3361,9 +3376,13 @@ class MainWindow(QMainWindow):
             f"{len(mods)} mods in list, {missing} not installed:\n\n" + "\n".join(lines))
 
     # --- Update Check ---
+    # Versions at or below this have known game-breaking bugs and must update.
+    _MINIMUM_SAFE_VERSION = "1.7.0"
+
     def _check_for_updates(self) -> None:
         from cdumm import __version__
         from cdumm.engine.update_checker import UpdateCheckWorker
+        logger.info("Checking for updates (current: v%s)", __version__)
         worker = UpdateCheckWorker(__version__)
         thread = QThread()
         worker.moveToThread(thread)
@@ -3387,19 +3406,81 @@ class MainWindow(QMainWindow):
                     "padding: 12px; border: 1px solid #4CAF50; border-radius: 8px; "
                     "background: #1A2E1A;")
             self._set_about_nav_indicator("green")
+            if hasattr(self, '_update_banner'):
+                self._update_banner.setVisible(False)
 
     def _on_update_available(self, info: dict) -> None:
         self._update_found = True
+        self._pending_update_info = info
         tag = info.get("tag", "new version")
+
+        # Update About tab
         if hasattr(self, '_about_update_label'):
             self._about_update_label.setText(
                 f"\u26A0  Update available: {tag}\n"
-                "Go to GitHub Releases to download.")
+                "Click the red banner at the bottom to update.")
             self._about_update_label.setStyleSheet(
                 "font-size: 15px; font-weight: bold; color: #F44336; "
                 "padding: 12px; border: 1px solid #F44336; border-radius: 8px; "
                 "background: #2E1A1A;")
         self._set_about_nav_indicator("red")
+
+        # Show persistent banner — always visible until they update
+        if hasattr(self, '_update_banner'):
+            self._update_banner.setText(
+                f"\u26A0  Update available: {tag} — click here to update now")
+            self._update_banner.setVisible(True)
+
+        # Check if this version is critically outdated
+        from cdumm import __version__
+        from cdumm.engine.update_checker import _version_newer
+        is_critical = _version_newer(self._MINIMUM_SAFE_VERSION, __version__)
+
+        if is_critical:
+            # Force update — this version has known game-breaking bugs
+            download_url = info.get("download_url", "")
+            if download_url:
+                QMessageBox.critical(
+                    self, "Critical Update Required",
+                    f"You are running v{__version__} which has known issues "
+                    f"that can break your game.\n\n"
+                    f"Version {tag} fixes these problems.\n\n"
+                    "The update will download and install now.")
+                self._download_and_apply_update(download_url)
+            else:
+                import webbrowser
+                QMessageBox.critical(
+                    self, "Critical Update Required",
+                    f"You are running v{__version__} which has known issues "
+                    f"that can break your game.\n\n"
+                    f"Please download {tag} from GitHub.")
+                if info.get("url"):
+                    webbrowser.open(info["url"])
+        else:
+            # Normal update — ask once, then rely on banner
+            download_url = info.get("download_url", "")
+            if download_url:
+                reply = QMessageBox.question(
+                    self, "Update Available",
+                    f"A new version is available: {tag}\n\n"
+                    f"{info.get('body', '')[:300]}\n\n"
+                    "Download and install now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._download_and_apply_update(download_url)
+
+    def _on_banner_clicked(self) -> None:
+        """User clicked the persistent update banner."""
+        info = getattr(self, '_pending_update_info', None)
+        if not info:
+            return
+        download_url = info.get("download_url", "")
+        if download_url:
+            self._download_and_apply_update(download_url)
+        elif info.get("url"):
+            import webbrowser
+            webbrowser.open(info["url"])
 
     def _set_about_nav_indicator(self, color: str) -> None:
         """Update the About sidebar button with a colored dot."""
@@ -3407,27 +3488,6 @@ class MainWindow(QMainWindow):
             if label == "About":
                 dot = "\U0001F7E2" if color == "green" else "\U0001F534"
                 btn.setText(f"About {dot}")
-        download_url = info.get("download_url", "")
-        if download_url:
-            reply = QMessageBox.question(
-                self, "Update Available",
-                f"A new version is available: {info['tag']}\n\n"
-                f"{info['body'][:300]}\n\n"
-                "Download and install automatically?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self._download_and_apply_update(download_url)
-        else:
-            import webbrowser
-            reply = QMessageBox.information(
-                self, "Update Available",
-                f"A new version is available: {info['tag']}\n\n"
-                "Open the download page?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes and info.get("url"):
-                webbrowser.open(info["url"])
 
     def _download_and_apply_update(self, download_url: str) -> None:
         from cdumm.engine.update_checker import UpdateDownloadWorker
@@ -3439,17 +3499,19 @@ class MainWindow(QMainWindow):
 
     def _on_update_downloaded(self, new_exe_path) -> None:
         if not new_exe_path:
-            QMessageBox.warning(self, "Update Failed", "Download failed. Try again later.")
+            # Download failed — fall back to opening browser
+            import webbrowser
+            QMessageBox.warning(
+                self, "Download Failed",
+                "Automatic download failed. Opening the download page instead.")
+            info = getattr(self, '_pending_update_info', {})
+            if info.get("url"):
+                webbrowser.open(info["url"])
             return
         from pathlib import Path
         from cdumm.engine.update_checker import apply_update
-        reply = QMessageBox.question(
-            self, "Update Ready",
-            "Update downloaded. The app will close and install the update.\nPlease relaunch CDUMM after the update window closes.\n\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            apply_update(Path(str(new_exe_path)))
+        # Apply immediately — no second confirmation needed
+        apply_update(Path(str(new_exe_path)))
 
     # --- View Mod Contents ---
     def _show_mod_contents(self, mod_id: int) -> None:
