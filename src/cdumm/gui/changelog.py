@@ -8,6 +8,19 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "1.7.1",
+        "date": "2026-04-01",
+        "notes": [
+            "Fixed auto-update dialog not showing — users on old versions now get prompted correctly",
+            "Fixed 'too many SQL variables' crash on startup for users with many mods",
+            "Persistent red update banner at the bottom — stays visible until you update",
+            "Critical versions (below v1.7.0) are force-updated — no option to skip",
+            "Update download applies immediately — no second confirmation dialog",
+            "If automatic download fails, opens the browser to GitHub releases as fallback",
+            "Re-checks for updates every 4 hours for users who leave the app open",
+        ],
+    },
+    {
         "version": "1.7.0",
         "date": "2026-04-01",
         "notes": [

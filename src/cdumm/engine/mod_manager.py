@@ -200,10 +200,13 @@ class ModManager:
             if not os.path.exists(dp):
                 missing_ids.append(md_id)
         if missing_ids:
-            placeholders = ",".join("?" * len(missing_ids))
-            self._db.connection.execute(
-                f"DELETE FROM mod_deltas WHERE id IN ({placeholders})",
-                missing_ids)
+            # Batch deletes to avoid SQLite's variable limit (~999)
+            for i in range(0, len(missing_ids), 500):
+                batch = missing_ids[i:i + 500]
+                placeholders = ",".join("?" * len(batch))
+                self._db.connection.execute(
+                    f"DELETE FROM mod_deltas WHERE id IN ({placeholders})",
+                    batch)
             self._db.connection.commit()
             logger.info("Cleaned up %d orphaned delta DB entries", len(missing_ids))
 
