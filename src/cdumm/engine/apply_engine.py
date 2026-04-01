@@ -126,18 +126,61 @@ def _save_range_backup(game_dir: Path, vanilla_dir: Path,
     """Save vanilla bytes at specific byte ranges from the game file.
 
     Stored in sparse format: SPRS + count + (offset, length, data)*
+
+    If a backup already exists, merges new ranges into it — reads any
+    not-yet-backed-up positions from the current game file (which must
+    still be vanilla at those positions, since backups run before apply).
     """
     game_file = game_dir / file_path.replace("/", "\\")
     if not game_file.exists():
         return
 
     backup_path = vanilla_dir / (file_path.replace("/", "_") + RANGE_BACKUP_EXT)
-    if backup_path.exists():
-        return  # already backed up
-
-    # Merge overlapping ranges and sort
     merged = _merge_ranges(byte_ranges)
 
+    if backup_path.exists():
+        # Load existing backup, find ranges not yet covered
+        existing = _load_range_backup(vanilla_dir, file_path)
+        if existing:
+            covered: set[tuple[int, int]] = set()
+            for offset, data in existing:
+                covered.add((offset, offset + len(data)))
+            # Find new ranges not covered by existing backup
+            new_ranges: list[tuple[int, int]] = []
+            for start, end in merged:
+                # Check if this range is already fully covered
+                is_covered = any(
+                    cs <= start and ce >= end for cs, ce in covered)
+                if not is_covered:
+                    new_ranges.append((start, end))
+            if not new_ranges:
+                return  # all ranges already backed up
+
+            # Read new range data from game file and rebuild backup
+            all_entries: list[tuple[int, bytes]] = list(existing)
+            with open(game_file, "rb") as f:
+                for start, end in new_ranges:
+                    f.seek(start)
+                    all_entries.append((start, f.read(end - start)))
+
+            # Rebuild backup file with all entries, deduplicating
+            seen_offsets: dict[int, bytes] = {}
+            for offset, data in all_entries:
+                if offset not in seen_offsets or len(data) > len(seen_offsets[offset]):
+                    seen_offsets[offset] = data
+            sorted_entries = sorted(seen_offsets.items())
+
+            buf = bytearray(SPARSE_MAGIC)
+            buf += struct.pack("<I", len(sorted_entries))
+            for offset, data in sorted_entries:
+                buf += struct.pack("<QI", offset, len(data))
+                buf += data
+            backup_path.write_bytes(bytes(buf))
+            logger.info("Range backup updated: %s (+%d new ranges)",
+                        file_path, len(new_ranges))
+            return
+
+    # First backup — create from scratch
     buf = bytearray(SPARSE_MAGIC)
     buf += struct.pack("<I", len(merged))
 
@@ -1424,6 +1467,7 @@ class RevertWorker(QObject):
     progress_updated = Signal(int, str)
     finished = Signal()
     error_occurred = Signal(str)
+    warning = Signal(str)
 
     def __init__(self, game_dir: Path, vanilla_dir: Path, db_path: Path) -> None:
         super().__init__()
@@ -1462,6 +1506,7 @@ class RevertWorker(QObject):
         txn = TransactionalIO(self._game_dir, staging_dir)
 
         reverted = 0
+        failed_files: list[str] = []
         try:
             for i, file_path in enumerate(mod_files):
                 pct = int((i / total) * 90)
@@ -1482,6 +1527,7 @@ class RevertWorker(QObject):
                     reverted += 1
                 else:
                     logger.warning("Cannot revert %s — no backup found", file_path)
+                    failed_files.append(file_path)
 
             if reverted == 0:
                 self.error_occurred.emit(
@@ -1516,16 +1562,36 @@ class RevertWorker(QObject):
                 txn.stage_file("meta/0.papgt", vanilla_papgt.read_bytes())
                 logger.info("Restored vanilla PAPGT from backup")
             else:
-                # No backup — rebuild from scratch as fallback
+                # No backup — rebuild with vanilla PAMT hashes.
+                # Since we're reverting, feed all backed-up PAMT data so
+                # the rebuild recomputes every hash against vanilla PAMTs
+                # (not the modded hashes from the current PAPGT).
                 papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
+                vanilla_pamts: dict[str, bytes] = {}
+                for fp in mod_files:
+                    if fp.endswith(".pamt"):
+                        pamt_bytes = self._get_vanilla_bytes(fp)
+                        if pamt_bytes:
+                            dir_name = fp.split("/")[0]
+                            vanilla_pamts[dir_name] = pamt_bytes
                 try:
-                    papgt_bytes = papgt_mgr.rebuild()
+                    papgt_bytes = papgt_mgr.rebuild(
+                        modified_pamts=vanilla_pamts if vanilla_pamts else None)
                     txn.stage_file("meta/0.papgt", papgt_bytes)
+                    logger.info("Rebuilt PAPGT for revert (rehashed %d PAMTs)",
+                                len(vanilla_pamts))
                 except FileNotFoundError:
                     pass
 
             self.progress_updated.emit(95, "Committing revert...")
             txn.commit()
+
+            if failed_files:
+                self.warning.emit(
+                    f"{len(failed_files)} file(s) could not be reverted "
+                    f"(no backup found). Use Steam 'Verify Integrity' to "
+                    f"fully restore: {', '.join(failed_files[:5])}"
+                    + (f" (+{len(failed_files)-5} more)" if len(failed_files) > 5 else ""))
 
             self.progress_updated.emit(100, "Revert complete!")
             self.finished.emit()

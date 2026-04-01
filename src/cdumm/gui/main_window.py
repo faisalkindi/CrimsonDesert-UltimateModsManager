@@ -775,6 +775,8 @@ class MainWindow(QMainWindow):
                 from cdumm.engine.apply_engine import RevertWorker
                 worker = RevertWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
                 thread = QThread()
+                worker.warning.connect(
+                    lambda msg: self._dispatcher.call(self._show_revert_warning, msg))
                 self._run_worker(worker, thread, progress,
                                  on_finished=self._on_bad_import_cleanup)
         except Exception as e:
@@ -2366,8 +2368,13 @@ class MainWindow(QMainWindow):
         worker = RevertWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
         thread = QThread()
 
+        worker.warning.connect(
+            lambda msg: self._dispatcher.call(self._show_revert_warning, msg))
         self._run_worker(worker, thread, progress,
                          on_finished=self._on_revert_finished)
+
+    def _show_revert_warning(self, msg: str) -> None:
+        QMessageBox.warning(self, "Revert Incomplete", msg)
 
     def _on_revert_finished(self) -> None:
         # Untick all mods so the UI matches the vanilla state

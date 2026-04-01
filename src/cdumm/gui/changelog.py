@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "1.7.2",
+        "date": "2026-04-01",
+        "notes": [
+            "Fixed Revert leaving files modded — range backups now accumulate when new mods touch the same file",
+            "Fixed PAPGT rebuild during Revert using stale modded hashes — now recomputes from vanilla PAMTs",
+            "Revert now warns if any files couldn't be restored and advises Steam Verify",
+        ],
+    },
+    {
         "version": "1.7.1",
         "date": "2026-04-01",
         "notes": [
