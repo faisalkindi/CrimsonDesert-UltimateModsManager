@@ -11,6 +11,7 @@ CHANGELOG = [
         "version": "1.7.2",
         "date": "2026-04-01",
         "notes": [
+            "Loose file mods now supported — mods with mod.json + files/ directory (e.g. Mute Vendor Music) import correctly",
             "Fixed Revert leaving files modded — range backups now accumulate when new mods touch the same file",
             "Fixed PAPGT rebuild during Revert using stale modded hashes — now recomputes from vanilla PAMTs",
             "Revert now warns if any files couldn't be restored and advises Steam Verify",

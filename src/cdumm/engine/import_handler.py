@@ -144,6 +144,40 @@ def _try_convert_crimson_browser(
     return converted
 
 
+def detect_loose_file_mod(path: Path) -> dict | None:
+    """Detect mods that ship loose game files with a mod.json metadata file.
+
+    Format: mod.json (with "modinfo" key) + files/ directory containing
+    replacement files at their PAMT paths (e.g., files/0004/sound/.../file.wem).
+
+    Returns a CB-compatible manifest dict for convert_to_paz_mod, or None.
+    """
+    for candidate in [path, *[d for d in path.iterdir() if d.is_dir()]]:
+        mod_json = candidate / "mod.json"
+        files_dir = candidate / "files"
+        if not mod_json.exists() or not files_dir.exists():
+            continue
+        try:
+            with open(mod_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "modinfo" in data:
+                # Translate to CB-compatible manifest
+                modinfo = data["modinfo"]
+                manifest = {
+                    "format": "loose_file_mod",
+                    "id": modinfo.get("title", candidate.name),
+                    "files_dir": "files",
+                    "_manifest_path": mod_json,
+                    "_base_dir": candidate,
+                    "_modinfo": modinfo,
+                }
+                logger.info("Detected loose file mod: %s", manifest["id"])
+                return manifest
+        except Exception:
+            continue
+    return None
+
+
 def _match_game_files(
     extracted_dir: Path, game_dir: Path, snapshot: SnapshotManager
 ) -> list[tuple[str, Path, bool]]:
@@ -369,6 +403,22 @@ def _import_from_extracted(
                 converted, game_dir, db, snapshot, deltas_dir, cb_name,
                 existing_mod_id=existing_mod_id, modinfo=modinfo)
 
+    # Check for loose file mod (mod.json + files/ directory)
+    lfm = detect_loose_file_mod(tmp_path)
+    if lfm is not None:
+        lfm_work = tmp_path.parent / "_lfm_converted"
+        converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
+        if converted is not None:
+            mi = lfm.get("_modinfo", {})
+            lfm_name = mi.get("title", mod_name)
+            lfm_modinfo = {
+                "name": mi.get("title"), "version": mi.get("version"),
+                "author": mi.get("author"), "description": mi.get("description"),
+            }
+            return _process_extracted_files(
+                converted, game_dir, db, snapshot, deltas_dir, lfm_name,
+                existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+
     # Check for JSON byte-patch format
     jp_data = detect_json_patch(tmp_path)
     if jp_data is not None:
@@ -549,6 +599,23 @@ def import_from_folder(
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, cb_name,
                     existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    # Check for loose file mod (mod.json + files/ directory)
+    lfm = detect_loose_file_mod(folder_path)
+    if lfm is not None:
+        with tempfile.TemporaryDirectory() as lfm_tmp:
+            lfm_work = Path(lfm_tmp) / "_lfm_converted"
+            converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
+            if converted is not None:
+                mi = lfm.get("_modinfo", {})
+                lfm_name = mi.get("title", mod_name)
+                lfm_modinfo = {
+                    "name": mi.get("title"), "version": mi.get("version"),
+                    "author": mi.get("author"), "description": mi.get("description"),
+                }
+                return _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, lfm_name,
+                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
 
     # Check for JSON byte-patch format in folder
     jp_data = detect_json_patch(folder_path)
