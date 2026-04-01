@@ -277,7 +277,12 @@ class TogglePickerDialog(QDialog):
             scroll_layout.addWidget(radio)
 
             if detail_parts:
-                detail = QLabel("  " + ", ".join(detail_parts))
+                MAX_SHOWN = 3
+                if len(detail_parts) <= MAX_SHOWN:
+                    summary = ", ".join(detail_parts)
+                else:
+                    summary = ", ".join(detail_parts[:MAX_SHOWN]) + f"  (+{len(detail_parts) - MAX_SHOWN} more)"
+                detail = QLabel("  " + summary)
                 detail.setStyleSheet("color: #788090; font-size: 11px; padding-left: 20px;")
                 detail.setWordWrap(True)
                 scroll_layout.addWidget(detail)
