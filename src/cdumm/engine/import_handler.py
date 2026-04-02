@@ -144,6 +144,164 @@ def _try_convert_crimson_browser(
     return converted
 
 
+def _try_paz_entry_import(
+    mod_paz_path: Path, vanilla_paz_path: Path, rel_path: str,
+    extracted_dir: Path, game_dir: Path, mod_id: int, db,
+    deltas_dir: Path, result,
+) -> bool:
+    """Decompose a modified PAZ file into ENTR deltas per PAMT entry.
+
+    Instead of storing a FULL_COPY or SPRS delta of the entire PAZ,
+    this compares each PAMT entry's decompressed content against vanilla
+    and stores only the changed entries as ENTR deltas. This way two mods
+    modifying different entries in the same PAZ compose correctly.
+
+    Returns True if successful, False to fall back to byte-level deltas.
+    """
+    from cdumm.archive.paz_parse import parse_pamt
+    from cdumm.archive.paz_crypto import lz4_decompress, decrypt
+    from cdumm.engine.delta_engine import save_entry_delta
+    import os
+
+    dir_name = rel_path.split("/")[0]  # e.g. "0008"
+    paz_index = int(rel_path.split("/")[1].split(".")[0])  # e.g. 0 from "0.paz"
+
+    # Find PAMTs — mod's PAMT (if shipped) or vanilla PAMT
+    vanilla_pamt = game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt"
+    if not vanilla_pamt.exists():
+        vanilla_pamt = game_dir / dir_name / "0.pamt"
+    if not vanilla_pamt.exists():
+        logger.debug("No PAMT found for %s, skipping entry-level import", rel_path)
+        return False
+
+    mod_pamt = extracted_dir / dir_name / "0.pamt"
+    if not mod_pamt.exists():
+        # Mod doesn't ship a PAMT — use vanilla PAMT for both
+        mod_pamt = vanilla_pamt
+
+    try:
+        van_entries = parse_pamt(str(vanilla_pamt), paz_dir=str(
+            (game_dir / "CDMods" / "vanilla" / dir_name)
+            if (game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt").exists()
+            else (game_dir / dir_name)))
+        mod_entries = parse_pamt(str(mod_pamt), paz_dir=str(extracted_dir / dir_name)
+                                 if mod_pamt != vanilla_pamt
+                                 else str(game_dir / dir_name))
+    except Exception as e:
+        logger.debug("Failed to parse PAMTs for %s: %s", rel_path, e)
+        return False
+
+    # Filter to entries in this specific PAZ file
+    van_by_path = {e.path: e for e in van_entries if e.paz_index == paz_index}
+    mod_by_path = {e.path: e for e in mod_entries if e.paz_index == paz_index}
+
+    if not van_by_path or not mod_by_path:
+        logger.debug("No entries for PAZ index %d in %s", paz_index, rel_path)
+        return False
+
+    def _extract_entry(entry, paz_path):
+        """Extract and decompress a single entry from a PAZ file."""
+        with open(paz_path, "rb") as f:
+            f.seek(entry.offset)
+            raw = f.read(entry.comp_size)
+        if entry.compressed and entry.compression_type == 2:
+            try:
+                return lz4_decompress(raw, entry.orig_size)
+            except Exception:
+                basename = os.path.basename(entry.path)
+                decrypted = decrypt(raw, basename)
+                return lz4_decompress(decrypted, entry.orig_size)
+        if entry.encrypted:
+            return decrypt(raw, os.path.basename(entry.path))
+        return raw
+
+    changed = 0
+    paz_file_path = f"{dir_name}/{paz_index}.paz"
+
+    # Compare entries between mod and vanilla
+    for entry_path, mod_entry in mod_by_path.items():
+        van_entry = van_by_path.get(entry_path)
+        if van_entry is None:
+            continue  # New entry — handled separately
+
+        try:
+            # Quick check: if comp_size and offset are identical, skip
+            if (mod_entry.offset == van_entry.offset
+                    and mod_entry.comp_size == van_entry.comp_size):
+                # Same position and size — likely unchanged, but verify
+                # by reading raw bytes (fast, no decompression)
+                with open(mod_paz_path, "rb") as f:
+                    f.seek(mod_entry.offset)
+                    mod_raw = f.read(mod_entry.comp_size)
+                with open(vanilla_paz_path, "rb") as f:
+                    f.seek(van_entry.offset)
+                    van_raw = f.read(van_entry.comp_size)
+                if mod_raw == van_raw:
+                    continue
+
+            # Entry differs — decompress both and store mod's content
+            van_content = _extract_entry(van_entry, vanilla_paz_path)
+            mod_content = _extract_entry(mod_entry, mod_paz_path)
+
+            if van_content == mod_content:
+                continue  # Decompressed content is the same
+
+            # Detect encryption: if vanilla needed decryption, mark it
+            encrypted = van_entry.encrypted
+            if not encrypted and van_entry.compressed and van_entry.compression_type == 2:
+                try:
+                    with open(vanilla_paz_path, "rb") as f:
+                        f.seek(van_entry.offset)
+                        probe = f.read(min(van_entry.comp_size, 4096))
+                    lz4_decompress(probe, van_entry.orig_size if van_entry.comp_size <= 4096 else 8192)
+                except Exception:
+                    encrypted = True
+
+            metadata = {
+                "pamt_dir": dir_name,
+                "entry_path": van_entry.path,
+                "paz_index": van_entry.paz_index,
+                "compression_type": van_entry.compression_type,
+                "flags": van_entry.flags,
+                "vanilla_offset": van_entry.offset,
+                "vanilla_comp_size": van_entry.comp_size,
+                "vanilla_orig_size": van_entry.orig_size,
+                "encrypted": encrypted,
+            }
+
+            safe_name = van_entry.path.replace("/", "_") + ".entr"
+            delta_path = deltas_dir / str(mod_id) / safe_name
+            save_entry_delta(mod_content, metadata, delta_path)
+
+            db.connection.execute(
+                "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+                "byte_start, byte_end, entry_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (mod_id, paz_file_path, str(delta_path),
+                 van_entry.offset, van_entry.offset + van_entry.comp_size,
+                 van_entry.path))
+
+            result.changed_files.append({
+                "file_path": paz_file_path,
+                "entry_path": van_entry.path,
+                "delta_path": str(delta_path),
+            })
+            changed += 1
+
+        except Exception as e:
+            logger.warning("Entry comparison failed for %s: %s", entry_path, e)
+            continue
+
+    if changed == 0:
+        logger.debug("No changed entries in %s, falling back to byte-level", rel_path)
+        return False
+
+    db.connection.commit()
+    logger.info("Entry-level PAZ import: %s — %d/%d entries changed",
+                rel_path, changed, len(mod_by_path))
+    return True
+
+
 def detect_loose_file_mod(path: Path) -> dict | None:
     """Detect mods that ship loose game files with a mod.json metadata file.
 
@@ -1107,11 +1265,17 @@ def _process_extracted_files(
         logger.warning("Failed to archive mod source: %s", e)
 
     total_matches = len(matches)
+    _paz_entr_handled: set[str] = set()  # PAZ/PAMT files handled by entry-level import
     for match_idx, (rel_path, extracted_path, is_new) in enumerate(matches):
         pct = int((match_idx / max(total_matches, 1)) * 90) + 5
         size_mb = extracted_path.stat().st_size / 1048576
         _emit_progress(pct, f"Processing {rel_path} ({size_mb:.0f} MB)...")
         try:
+            # Skip files already handled by entry-level PAZ decomposition
+            if rel_path in _paz_entr_handled:
+                logger.info("Skipping %s — handled by entry-level PAZ import", rel_path)
+                continue
+
             if is_new:
                 # New file — store full copy, no delta needed
                 safe_name = rel_path.replace("/", "_") + ".newfile"
@@ -1155,6 +1319,22 @@ def _process_extracted_files(
 
             mod_size = extracted_path.stat().st_size
             van_size = vanilla_source.stat().st_size
+
+            # ── Entry-level decomposition for PAZ files ──────────────
+            # Instead of storing byte-level diffs of the entire PAZ, decompose
+            # into ENTR deltas per PAMT entry. This way two mods modifying
+            # different entries in the same PAZ compose correctly.
+            if rel_path.endswith(".paz") and mod_size > 10 * 1024 * 1024:
+                entr_ok = _try_paz_entry_import(
+                    extracted_path, vanilla_source, rel_path,
+                    extracted_dir, game_dir, mod_id, db, deltas_dir, result)
+                if entr_ok:
+                    # Also mark the corresponding PAMT as handled — the apply
+                    # engine rebuilds it from ENTR delta updates
+                    _paz_entr_handled.add(rel_path)
+                    pamt_rel = rel_path.rsplit("/", 1)[0] + "/0.pamt"
+                    _paz_entr_handled.add(pamt_rel)
+                    continue
 
             # ── Fast-track for different-size large files ─────────────
             # When the mod file is a different size from vanilla, it's a true

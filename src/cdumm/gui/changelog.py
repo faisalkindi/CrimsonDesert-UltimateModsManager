@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.7.7",
+        "version": "1.8.0",
         "date": "2026-04-02",
         "notes": [
+            "PAZ replacement mods now decompose into entry-level deltas — mods modifying different entries in the same PAZ no longer conflict",
             "Fixed slow/laggy UI — mod list no longer queries database on every cell paint",
             "Added database indexes for mod_deltas and conflicts tables",
             "Build spec no longer has hardcoded paths — other contributors can build from source",
