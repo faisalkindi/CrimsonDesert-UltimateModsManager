@@ -161,13 +161,16 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                            offset, len(data))
             continue
 
-        # Optionally verify original bytes match
+        # Verify original bytes match — skip patch if they don't.
+        # This prevents silent corruption when an older CDUMM version
+        # ignores the "signature" field and treats offsets as absolute.
         if "original" in change:
             original_bytes = bytes.fromhex(change["original"])
             actual = data[offset:offset + len(original_bytes)]
             if actual != original_bytes:
-                logger.debug("Original mismatch at %d: expected %s, got %s (applying anyway)",
-                             offset, change["original"], actual.hex())
+                logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
+                               offset, change["original"], actual.hex())
+                continue
 
         data[offset:offset + len(patched_bytes)] = patched_bytes
         applied += 1
