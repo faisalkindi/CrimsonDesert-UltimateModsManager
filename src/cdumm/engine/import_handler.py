@@ -419,24 +419,27 @@ def _import_from_extracted(
                 converted, game_dir, db, snapshot, deltas_dir, lfm_name,
                 existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
 
-    # Check for JSON byte-patch format
+    # Check for JSON byte-patch format — use ENTR deltas for proper composition
     jp_data = detect_json_patch(tmp_path)
     if jp_data is not None:
-        jp_work = tmp_path.parent / "_jp_converted"
-        converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
-        if converted is not None:
-            has_files = any(converted.rglob("*")) if converted.exists() else False
-            if not has_files:
-                result.error = "This mod's changes are already present in your game files."
-                return result
-            jp_name = jp_data.get("name", mod_name)
-            jp_modinfo = {
-                "name": jp_data.get("name"), "version": jp_data.get("version"),
-                "author": jp_data.get("author"), "description": jp_data.get("description"),
-            }
-            return _process_extracted_files(
-                converted, game_dir, db, snapshot, deltas_dir, jp_name,
-                existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+        from cdumm.engine.json_patch_handler import import_json_as_entr
+        jp_name = jp_data.get("name", mod_name)
+        jp_modinfo = {
+            "name": jp_data.get("name"), "version": jp_data.get("version"),
+            "author": jp_data.get("author"), "description": jp_data.get("description"),
+        }
+        if jp_modinfo.get("name"):
+            jp_name = jp_modinfo["name"]
+        entr_result = import_json_as_entr(
+            jp_data, game_dir, db, deltas_dir, jp_name,
+            existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+        if entr_result is not None:
+            result = ModImportResult(jp_name)
+            result.changed_files = entr_result["changed_files"]
+            if jp_data.get("patches"):
+                _store_json_patches(db, result, jp_data, game_dir)
+            return result
+        # Fall through if ENTR import failed
 
     # Check for DDS texture mod
     tex_info = detect_texture_mod(tmp_path)
@@ -617,31 +620,26 @@ def import_from_folder(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
                     existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
 
-    # Check for JSON byte-patch format in folder
+    # Check for JSON byte-patch format in folder — use ENTR deltas
     jp_data = detect_json_patch(folder_path)
     if jp_data is not None:
-        with tempfile.TemporaryDirectory() as jp_tmp:
-            jp_work = Path(jp_tmp) / "_jp_converted"
-            converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
-            if converted is not None:
-                has_files = any(converted.rglob("*")) if converted.exists() else False
-                if not has_files:
-                    result = ModImportResult(jp_data.get("name", mod_name))
-                    result.error = (
-                        "This mod's changes are already present in your game files. "
-                        "Nothing to apply."
-                    )
-                    return result
-                jp_name = jp_data.get("name", mod_name)
-                jp_modinfo = {
-                    "name": jp_data.get("name"),
-                    "version": jp_data.get("version"),
-                    "author": jp_data.get("author"),
-                    "description": jp_data.get("description"),
-                }
-                return _process_extracted_files(
-                    converted, game_dir, db, snapshot, deltas_dir, jp_name,
-                    existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+        from cdumm.engine.json_patch_handler import import_json_as_entr
+        jp_name = jp_data.get("name", mod_name)
+        jp_modinfo = {
+            "name": jp_data.get("name"), "version": jp_data.get("version"),
+            "author": jp_data.get("author"), "description": jp_data.get("description"),
+        }
+        if jp_modinfo.get("name"):
+            jp_name = jp_modinfo["name"]
+        entr_result = import_json_as_entr(
+            jp_data, game_dir, db, deltas_dir, jp_name,
+            existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+        if entr_result is not None:
+            result = ModImportResult(jp_name)
+            result.changed_files = entr_result["changed_files"]
+            if jp_data.get("patches"):
+                _store_json_patches(db, result, jp_data, game_dir)
+            return result
 
     # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
     tex_info = detect_texture_mod(folder_path)
@@ -915,10 +913,11 @@ def import_from_json_patch(
 ) -> ModImportResult:
     """Import a mod from a JSON byte-patch file.
 
-    The JSON contains patches against specific game files (offsets into
-    decompressed content). The handler extracts the target file from PAZ,
-    applies patches, repacks, and generates deltas.
+    Uses ENTR (entry-level) deltas so multiple JSON mods modifying
+    different entries in the same PAZ compose correctly.
     """
+    from cdumm.engine.json_patch_handler import import_json_as_entr
+
     patch_data = detect_json_patch(json_path if json_path.is_file() else json_path)
     if patch_data is None:
         result = ModImportResult(json_path.stem)
@@ -926,42 +925,38 @@ def import_from_json_patch(
         return result
 
     mod_name = patch_data.get("name", json_path.stem)
+    modinfo = {
+        "name": patch_data.get("name"),
+        "version": patch_data.get("version"),
+        "author": patch_data.get("author"),
+        "description": patch_data.get("description"),
+    }
+    if modinfo.get("name"):
+        mod_name = modinfo["name"]
+
+    entr_result = import_json_as_entr(
+        patch_data, game_dir, db, deltas_dir, mod_name,
+        existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    if entr_result is None:
+        result = ModImportResult(mod_name)
+        result.error = "Failed to apply JSON patches to game files."
+        return result
+
+    if not entr_result["changed_files"]:
+        result = ModImportResult(mod_name)
+        result.error = (
+            "This mod's changes are already present in your game files. "
+            "Nothing to apply — the game may have been updated to include these changes."
+        )
+        return result
+
     result = ModImportResult(mod_name)
+    result.changed_files = entr_result["changed_files"]
 
-    with tempfile.TemporaryDirectory() as tmp:
-        work_dir = Path(tmp) / "_patched"
-        converted = convert_json_patch_to_paz(patch_data, game_dir, work_dir)
-        if converted is None:
-            result.error = "Failed to apply JSON patches to game files."
-            return result
-
-        # Check if any files were actually modified
-        has_files = any(converted.rglob("*")) if converted.exists() else False
-        if not has_files:
-            result.error = (
-                "This mod's changes are already present in your game files. "
-                "Nothing to apply — the game may have been updated to include these changes."
-            )
-            return result
-
-        modinfo = {
-            "name": patch_data.get("name"),
-            "version": patch_data.get("version"),
-            "author": patch_data.get("author"),
-            "description": patch_data.get("description"),
-        }
-        if modinfo.get("name"):
-            mod_name = modinfo["name"]
-
-        result = _process_extracted_files(
-            converted, game_dir, db, snapshot, deltas_dir, mod_name,
-            existing_mod_id=existing_mod_id, modinfo=modinfo)
-
-        # Store original JSON patch data for three-way merge support.
-        # This lets the apply engine merge patches from multiple mods that
-        # modify the same decompressed game file instead of last-wins.
-        if not result.error and patch_data.get("patches"):
-            _store_json_patches(db, result, patch_data, game_dir)
+    # Store original JSON patch data for three-way merge support
+    if patch_data.get("patches"):
+        _store_json_patches(db, result, patch_data, game_dir)
 
     return result
 

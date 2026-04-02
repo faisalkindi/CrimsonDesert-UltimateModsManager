@@ -434,3 +434,142 @@ def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
         logger.info("Matched '%s' to '%s' by basename", game_file, basename_match.path)
         return basename_match
     return None
+
+
+def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
+                        mod_name: str, existing_mod_id: int | None = None,
+                        modinfo: dict | None = None) -> dict | None:
+    """Import a JSON patch mod as ENTR deltas instead of FULL_COPY PAZ deltas.
+
+    This produces entry-level deltas that compose correctly when multiple
+    mods modify different entries in the same PAZ file.
+
+    Returns a result dict with mod_id and changed_files, or None on failure.
+    """
+    from cdumm.engine.delta_engine import save_entry_delta
+
+    patches = patch_data["patches"]
+    vanilla_dir = game_dir / "CDMods" / "vanilla"
+    if not vanilla_dir.exists():
+        vanilla_dir = game_dir
+
+    # Create mod entry in DB
+    priority = db.connection.execute(
+        "SELECT COALESCE(MAX(priority), 0) + 1 FROM mods").fetchone()[0]
+    author = modinfo.get("author") if modinfo else patch_data.get("author")
+    version = modinfo.get("version") if modinfo else patch_data.get("version")
+    description = modinfo.get("description") if modinfo else patch_data.get("description")
+
+    if existing_mod_id:
+        mod_id = existing_mod_id
+        # Clear existing deltas for re-import
+        db.connection.execute("DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+        import shutil
+        old_delta_dir = deltas_dir / str(mod_id)
+        if old_delta_dir.exists():
+            shutil.rmtree(old_delta_dir)
+    else:
+        cursor = db.connection.execute(
+            "INSERT INTO mods (name, mod_type, priority, author, version, description) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (mod_name, "paz", priority, author, version, description))
+        mod_id = cursor.lastrowid
+
+    changed_files = []
+    entry_cache: dict[str, PazEntry] = {}
+
+    for patch in patches:
+        game_file = patch["game_file"]
+        changes = patch["changes"]
+        if not changes:
+            continue
+
+        # Find PAMT entry
+        if game_file.lower() not in entry_cache:
+            entry = _find_pamt_entry(game_file, vanilla_dir)
+            if entry is None:
+                entry = _find_pamt_entry(game_file, game_dir)
+            if entry:
+                entry_cache[game_file.lower()] = entry
+
+        entry = entry_cache.get(game_file.lower())
+        if entry is None:
+            logger.error("Could not find '%s' in any PAMT index", game_file)
+            # Rollback
+            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+            db.connection.commit()
+            return None
+
+        # Extract and decompress
+        try:
+            if not os.path.exists(entry.paz_file):
+                game_entry = _find_pamt_entry(game_file, game_dir)
+                if game_entry:
+                    entry = game_entry
+                    entry_cache[game_file.lower()] = entry
+            plaintext = _extract_from_paz(entry)
+        except Exception as e:
+            try:
+                game_entry = _find_pamt_entry(game_file, game_dir)
+                if game_entry:
+                    plaintext = _extract_from_paz(game_entry)
+                    entry = game_entry
+                    entry_cache[game_file.lower()] = entry
+                else:
+                    raise
+            except Exception:
+                logger.error("Failed to extract %s: %s", game_file, e)
+                db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+                db.connection.commit()
+                return None
+
+        # Apply byte patches
+        modified = bytearray(plaintext)
+        signature = patch.get("signature")
+        applied = _apply_byte_patches(modified, changes, signature=signature)
+        logger.info("Applied %d/%d patches to %s", applied, len(changes), game_file)
+
+        if bytes(modified) == plaintext:
+            logger.info("No changes after patching %s, skipping", game_file)
+            continue
+
+        # Determine PAZ file path for this entry
+        pamt_dir = Path(entry.paz_file).parent.name
+        paz_file_path = f"{pamt_dir}/{entry.paz_index}.paz"
+
+        # Save as ENTR delta
+        metadata = {
+            "pamt_dir": pamt_dir,
+            "entry_path": entry.path,
+            "paz_index": entry.paz_index,
+            "compression_type": entry.compression_type,
+            "flags": entry.flags,
+            "vanilla_offset": entry.offset,
+            "vanilla_comp_size": entry.comp_size,
+            "vanilla_orig_size": entry.orig_size,
+            "encrypted": entry.encrypted,
+        }
+
+        safe_name = entry.path.replace("/", "_") + ".entr"
+        delta_path = deltas_dir / str(mod_id) / safe_name
+        save_entry_delta(bytes(modified), metadata, delta_path)
+
+        # DB entry
+        db.connection.execute(
+            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+            "byte_start, byte_end, entry_path) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (mod_id, paz_file_path, str(delta_path),
+             entry.offset, entry.offset + entry.comp_size, entry.path))
+
+        changed_files.append({
+            "file_path": paz_file_path,
+            "entry_path": entry.path,
+            "delta_path": str(delta_path),
+        })
+
+        logger.info("ENTR delta: %s in %s (comp=%d, orig=%d)",
+                     entry.path, paz_file_path, entry.comp_size, entry.orig_size)
+
+    db.connection.commit()
+    return {"mod_id": mod_id, "changed_files": changed_files, "name": mod_name}
