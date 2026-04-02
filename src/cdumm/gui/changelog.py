@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.7.3",
+        "version": "1.7.4",
         "date": "2026-04-02",
         "notes": [
+            "JSON mods no longer crash when sharing a PAZ file — Trust Me + Loot Multiplier etc. now compose correctly",
+            "JSON mods produce entry-level deltas instead of copying the entire 955MB PAZ",
             "Fixed Dark Map and other CSS mods crashing the game — encrypted files were being repacked without encryption",
             "Loose file mods now supported — mods with mod.json + files/ directory (e.g. Mute Vendor Music) import correctly",
             "Fixed Revert leaving files modded — range backups now accumulate when new mods touch the same file",
