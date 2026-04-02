@@ -1071,6 +1071,7 @@ class ApplyWorker(QObject):
                 "vanilla_offset": entry.offset,
                 "vanilla_comp_size": entry.comp_size,
                 "vanilla_orig_size": entry.orig_size,
+                "encrypted": entry.encrypted,
             },
             "mod_name": " + ".join(mod_names),
         }
@@ -1225,6 +1226,7 @@ class ApplyWorker(QObject):
                 orig_size=metadata["vanilla_orig_size"],
                 flags=metadata["flags"],
                 paz_index=metadata["paz_index"],
+                _encrypted_override=metadata.get("encrypted"),
             )
 
             try:

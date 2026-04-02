@@ -565,6 +565,7 @@ class ScriptCaptureWorker(QObject):
                     "vanilla_offset": ref_entry.offset if van_entry else 0,
                     "vanilla_comp_size": ref_entry.comp_size if van_entry else 0,
                     "vanilla_orig_size": ref_entry.orig_size if van_entry else 0,
+                    "encrypted": ref_entry.encrypted,
                 }
 
                 safe_name = mod_entry.path.replace("/", "_") + ".entr"

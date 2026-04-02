@@ -16,7 +16,7 @@ Library usage:
 import os
 import struct
 import fnmatch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -29,6 +29,7 @@ class PazEntry:
     orig_size: int      # Original decompressed size
     flags: int          # Raw PAMT flags
     paz_index: int      # PAZ file index (from flags & 0xFF)
+    _encrypted_override: bool | None = field(default=None, repr=False)
 
     @property
     def compressed(self) -> bool:
@@ -41,7 +42,14 @@ class PazEntry:
 
     @property
     def encrypted(self) -> bool:
-        """XML files in encrypted folders are ChaCha20-encrypted."""
+        """Whether this entry is ChaCha20-encrypted.
+
+        The PAMT has no reliable encrypted flag — the heuristic (XML only)
+        misses some files. When extraction detects actual encryption,
+        set _encrypted_override = True so repack re-encrypts correctly.
+        """
+        if self._encrypted_override is not None:
+            return self._encrypted_override
         return self.path.lower().endswith('.xml')
 
 

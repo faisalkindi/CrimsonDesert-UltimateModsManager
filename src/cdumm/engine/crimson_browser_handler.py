@@ -180,6 +180,20 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             # Read the modified file
             plaintext = source_file.read_bytes()
 
+            # Detect if the original PAZ entry is actually encrypted
+            # even when entry.encrypted says False (heuristic misses non-XML files)
+            if not entry.encrypted and entry.compressed and entry.compression_type == 2:
+                try:
+                    with open(paz_src, 'rb') as probe_f:
+                        probe_f.seek(entry.offset)
+                        probe_raw = probe_f.read(min(entry.comp_size, 4096))
+                    from cdumm.archive.paz_crypto import lz4_decompress
+                    lz4_decompress(probe_raw, entry.orig_size if entry.comp_size <= 4096 else 8192)
+                except Exception:
+                    # Decompress failed → file is encrypted
+                    entry._encrypted_override = True
+                    logger.info("Detected encryption for %s (flag was False)", entry.path)
+
             # Repack into the PAZ copy (allow size change for larger/smaller files)
             try:
                 payload, actual_comp, actual_orig = repack_entry_bytes(

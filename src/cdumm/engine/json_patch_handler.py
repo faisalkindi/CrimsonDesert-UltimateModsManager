@@ -93,7 +93,11 @@ def detect_json_patch(path: Path) -> dict | None:
 
 
 def _extract_from_paz(entry: PazEntry) -> bytes:
-    """Read a file entry from its PAZ archive and return decompressed plaintext."""
+    """Read a file entry from its PAZ archive and return decompressed plaintext.
+
+    If the PAMT encrypted flag is wrong (file is actually encrypted),
+    corrects entry.encrypted so repack_entry_bytes will re-encrypt.
+    """
     with open(entry.paz_file, "rb") as f:
         f.seek(entry.offset)
         raw = f.read(entry.comp_size)
@@ -108,7 +112,13 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
         except Exception:
             # Decryption needed — decrypt then decompress
             decrypted = decrypt(raw, basename)
-            return lz4_decompress(decrypted, entry.orig_size)
+            result = lz4_decompress(decrypted, entry.orig_size)
+            # Fix the entry so repack knows to re-encrypt
+            if not entry._encrypted_override:
+                logger.info("Corrected encrypted flag for %s (was False, actually encrypted)",
+                            entry.path)
+                entry._encrypted_override = True
+            return result
 
     # Not compressed — try raw first, then decrypted
     if entry.encrypted:
