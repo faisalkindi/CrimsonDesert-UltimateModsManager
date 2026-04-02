@@ -78,6 +78,8 @@ class ModListModel(QAbstractTableModel):
         self._deltas_dir = deltas_dir
         self._mods: list[dict] = []
         self._status_cache: dict[int, str] = {}
+        self._file_count_cache: dict[int, int] = {}
+        self._conflict_status_cache: dict[int, str] = {}
         self._status_thread: QThread | None = None
         self.refresh()
 
@@ -86,6 +88,8 @@ class ModListModel(QAbstractTableModel):
         self._mods = self._mod_manager.list_mods()
         # Set placeholder — real status computed after window is shown
         self._status_cache = {mod["id"]: "checking..." for mod in self._mods}
+        self._file_count_cache = self._mod_manager.get_file_counts()
+        self._conflict_status_cache = self._conflict_detector.get_all_mod_statuses()
         self.endResetModel()
 
     def refresh_statuses(self) -> None:
@@ -161,13 +165,12 @@ class ModListModel(QAbstractTableModel):
                 return mod.get("version") or ""
             if col == COL_STATUS:
                 status = self._status_cache.get(mod["id"], "")
-                conflict = self._conflict_detector.get_mod_status(mod["id"])
+                conflict = self._conflict_status_cache.get(mod["id"], "clean")
                 if conflict in ("conflict", "resolved"):
                     return f"{status} ({conflict})"
                 return status
             if col == COL_FILES:
-                details = self._mod_manager.get_mod_details(mod["id"])
-                return str(len(details["changed_files"])) if details else "0"
+                return str(self._file_count_cache.get(mod["id"], 0))
             if col == COL_DATE:
                 return mod["import_date"][:16] if mod["import_date"] else ""
 
@@ -249,6 +252,14 @@ class ModListModel(QAbstractTableModel):
         self.refresh_statuses()
         self.mod_toggled.emit()
         return True
+
+    def refresh_conflict_cache(self) -> None:
+        """Update conflict status cache from database. Call after detect_all()."""
+        self._conflict_status_cache = self._conflict_detector.get_all_mod_statuses()
+        if self._mods:
+            top = self.index(0, COL_STATUS)
+            bottom = self.index(len(self._mods) - 1, COL_STATUS)
+            self.dataChanged.emit(top, bottom)
 
     def get_mod_at_row(self, row: int) -> dict | None:
         if 0 <= row < len(self._mods):

@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS profile_mods (
     priority INTEGER NOT NULL DEFAULT 0,
     UNIQUE(profile_id, mod_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_mod_deltas_mod_id ON mod_deltas(mod_id);
+CREATE INDEX IF NOT EXISTS idx_mod_deltas_file_path ON mod_deltas(file_path);
+CREATE INDEX IF NOT EXISTS idx_conflicts_mod_a_id ON conflicts(mod_a_id);
+CREATE INDEX IF NOT EXISTS idx_conflicts_mod_b_id ON conflicts(mod_b_id);
 """
 
 

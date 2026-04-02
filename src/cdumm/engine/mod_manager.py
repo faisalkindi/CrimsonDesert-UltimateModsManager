@@ -242,6 +242,12 @@ class ModManager:
         self._db.connection.commit()
         logger.info("Renamed mod %d to '%s'", mod_id, new_name)
 
+    def get_file_counts(self) -> dict[int, int]:
+        """Get delta file counts for all mods in a single query."""
+        cursor = self._db.connection.execute(
+            "SELECT mod_id, COUNT(*) FROM mod_deltas GROUP BY mod_id")
+        return dict(cursor.fetchall())
+
     def get_mod_count(self) -> int:
         cursor = self._db.connection.execute("SELECT COUNT(*) FROM mods")
         return cursor.fetchone()[0]

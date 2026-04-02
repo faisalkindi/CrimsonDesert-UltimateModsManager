@@ -8,9 +8,12 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.7.5",
+        "version": "1.7.7",
         "date": "2026-04-02",
         "notes": [
+            "Fixed slow/laggy UI — mod list no longer queries database on every cell paint",
+            "Added database indexes for mod_deltas and conflicts tables",
+            "Build spec no longer has hardcoded paths — other contributors can build from source",
             "Patches with mismatched original bytes are now skipped instead of applied blindly",
             "JSON mods no longer crash when sharing a PAZ file — Trust Me + Loot Multiplier etc. now compose correctly",
             "JSON mods produce entry-level deltas instead of copying the entire 955MB PAZ",

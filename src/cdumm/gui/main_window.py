@@ -1245,6 +1245,8 @@ class MainWindow(QMainWindow):
             conflicts = self._conflict_detector.detect_all()
             logger.debug("_refresh_all: updating conflict view (%d conflicts)", len(conflicts))
             self._conflict_view.update_conflicts(conflicts)
+            if hasattr(self, "_mod_list_model"):
+                self._mod_list_model.refresh_conflict_cache()
         logger.debug("_refresh_all: updating snapshot status")
         self._update_snapshot_status()
         self._update_header_checkbox()

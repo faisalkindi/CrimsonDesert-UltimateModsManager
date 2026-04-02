@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for Crimson Desert Ultimate Mods Manager
 
+import importlib.util
+_xxhash_spec = importlib.util.find_spec('xxhash._xxhash')
+_xxhash_binaries = [(_xxhash_spec.origin, 'xxhash')] if _xxhash_spec else []
+
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=[
-        ('C:/Users/faisa/AppData/Local/Programs/Python/Python313/Lib/site-packages/xxhash/_xxhash.cp313-win_amd64.pyd', 'xxhash'),
-    ],
+    binaries=_xxhash_binaries,
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader')],
     hiddenimports=[
         'cdumm.gui.main_window',

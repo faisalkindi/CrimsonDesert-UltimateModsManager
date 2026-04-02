@@ -283,6 +283,26 @@ class ConflictDetector:
             return "clean"  # PAPGT is auto-handled
         return "clean"
 
+    def get_all_mod_statuses(self) -> dict[int, str]:
+        """Batch-compute conflict status for all mods in a single query."""
+        cursor = self._db.connection.execute(
+            "SELECT mod_a_id, mod_b_id, level, winner_id FROM conflicts")
+        mod_levels: dict[int, set[str]] = {}
+        mod_has_winner: dict[int, bool] = {}
+        for mod_a_id, mod_b_id, level, winner_id in cursor.fetchall():
+            for mid in (mod_a_id, mod_b_id):
+                mod_levels.setdefault(mid, set()).add(level)
+                if winner_id is not None:
+                    mod_has_winner[mid] = True
+
+        statuses: dict[int, str] = {}
+        for mid, levels in mod_levels.items():
+            if "byte_range" in levels:
+                statuses[mid] = "resolved" if mod_has_winner.get(mid) else "conflict"
+            else:
+                statuses[mid] = "clean"
+        return statuses
+
     def get_conflicts_for_mod(self, mod_id: int) -> list[Conflict]:
         """Get all conflicts involving a specific mod."""
         cursor = self._db.connection.execute(
