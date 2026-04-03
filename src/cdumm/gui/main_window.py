@@ -3563,7 +3563,10 @@ class MainWindow(QMainWindow):
                 if info.get("url"):
                     webbrowser.open(info["url"])
         else:
-            # Normal update — ask once, then rely on banner
+            # Normal update — ask once, then rely on banner for reminders
+            if getattr(self, '_update_dialog_shown', False):
+                return  # already asked this session, don't nag
+            self._update_dialog_shown = True
             download_url = info.get("download_url", "")
             if download_url:
                 reply = QMessageBox.question(
