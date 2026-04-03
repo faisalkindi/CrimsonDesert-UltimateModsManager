@@ -154,10 +154,10 @@ class MainWindow(QMainWindow):
         # Update check (delayed further to not compete with UI loading)
         QTimer.singleShot(5000, self._check_for_updates)
 
-        # Re-check for updates every 4 hours (for users who leave the app open)
+        # Re-check for updates every 15 minutes (for users who leave the app open)
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._check_for_updates)
-        self._update_timer.start(4 * 60 * 60 * 1000)  # 4 hours in ms
+        self._update_timer.start(15 * 60 * 1000)  # 15 minutes in ms
 
         # Auto-snapshot is handled by _deferred_startup
 
