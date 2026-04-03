@@ -8,10 +8,10 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.8.6",
+        "version": "1.8.7",
         "date": "2026-04-03",
         "notes": [
-            "Added diagnostic logging to JSON import — bug reports will now show exactly where import hangs",
+            "Fixed JSON import crash — preset picker had a variable rename bug that silently killed all labeled JSON imports",
             "Detects and offers to clean up stale data from old CDUMM versions in AppData",
             "Warns when game is installed under Program Files (admin restrictions can cause mod issues)",
             "Update check interval reduced to 15 minutes (was 4 hours)",

@@ -325,7 +325,7 @@ class TogglePickerDialog(QDialog):
                 detail.setWordWrap(True)
                 scroll_layout.addWidget(detail)
 
-            self._radio_buttons.append((radio, group_name, patch_indices))
+            self._radio_buttons.append((radio, group_name, indices))
 
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
