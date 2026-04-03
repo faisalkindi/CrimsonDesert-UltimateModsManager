@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.8.0",
-        "date": "2026-04-02",
+        "version": "1.8.1",
+        "date": "2026-04-03",
         "notes": [
+            "Fixed v1.8.0 regression — encryption probe was falsely marking all large entries as encrypted, causing game crashes on every mod",
             "PAZ replacement mods now decompose into entry-level deltas — mods modifying different entries in the same PAZ no longer conflict",
             "Fixed slow/laggy UI — mod list no longer queries database on every cell paint",
             "Added database indexes for mod_deltas and conflicts tables",

@@ -246,14 +246,15 @@ def _try_paz_entry_import(
             if van_content == mod_content:
                 continue  # Decompressed content is the same
 
-            # Detect encryption: if vanilla needed decryption, mark it
+            # Detect encryption: try decompressing the vanilla entry.
+            # If decompress fails, the entry is encrypted.
             encrypted = van_entry.encrypted
             if not encrypted and van_entry.compressed and van_entry.compression_type == 2:
                 try:
                     with open(vanilla_paz_path, "rb") as f:
                         f.seek(van_entry.offset)
-                        probe = f.read(min(van_entry.comp_size, 4096))
-                    lz4_decompress(probe, van_entry.orig_size if van_entry.comp_size <= 4096 else 8192)
+                        raw = f.read(van_entry.comp_size)
+                    lz4_decompress(raw, van_entry.orig_size)
                 except Exception:
                     encrypted = True
 
