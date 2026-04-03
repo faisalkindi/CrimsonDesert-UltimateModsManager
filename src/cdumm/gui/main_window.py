@@ -3118,6 +3118,90 @@ class MainWindow(QMainWindow):
             self._pending_auto_reimport = False
             QTimer.singleShot(1000, self._auto_reimport_mods)
 
+    def _auto_migrate_after_update(self) -> None:
+        """Revert and reimport all mods after a CDUMM version update.
+
+        Old deltas from previous versions may use incompatible formats
+        (FULL_COPY instead of ENTR, wrong encryption, stale PAPGT hashes).
+        This ensures mods are stored in the current version's format.
+        """
+        if not self._mod_manager or not self._game_dir:
+            return
+
+        # Check if any mods have stored sources for reimport
+        sources_dir = self._cdmods_dir / "sources"
+        mods = self._db.connection.execute(
+            "SELECT id, name, source_path FROM mods").fetchall()
+        has_sources = any(
+            (sources_dir / str(mid)).exists() or (sp and Path(sp).exists())
+            for mid, _, sp in mods
+        )
+        if not has_sources:
+            return
+
+        reply = QMessageBox.question(
+            self, "CDUMM Updated",
+            f"CDUMM was updated and the internal mod format has changed.\n\n"
+            f"Your {len(mods)} mod(s) need to be reimported to work correctly\n"
+            f"with the new version. This will revert to vanilla and reimport\n"
+            f"all mods automatically. Your mod list and settings are preserved.\n\n"
+            f"Reimport now? (Recommended)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Save mod state before revert
+        mod_states = []
+        for mod in self._mod_manager.list_mods():
+            mod_states.append({
+                "id": mod["id"],
+                "name": mod["name"],
+                "enabled": mod["enabled"],
+                "priority": mod["priority"],
+            })
+
+        # Revert to vanilla
+        self.statusBar().showMessage("Reverting to vanilla for reimport...", 0)
+        try:
+            from cdumm.engine.apply_engine import RevertWorker
+            from cdumm.storage.database import Database
+            revert_db = Database(self._db.db_path)
+            revert_db.initialize()
+            worker = RevertWorker.__new__(RevertWorker)
+            worker._game_dir = self._game_dir
+            worker._vanilla_dir = self._vanilla_dir
+            worker._db = revert_db
+            worker._revert()
+            revert_db.close()
+        except Exception as e:
+            logger.warning("Auto-migrate revert failed: %s", e)
+
+        # Reimport all mods
+        self.statusBar().showMessage("Reimporting mods with new format...", 0)
+        self._auto_reimport_mods()
+
+        # Restore enabled/disabled state
+        for state in mod_states:
+            try:
+                # Find the reimported mod by name
+                row = self._db.connection.execute(
+                    "SELECT id FROM mods WHERE name = ?",
+                    (state["name"],)).fetchone()
+                if row:
+                    self._db.connection.execute(
+                        "UPDATE mods SET enabled = ?, priority = ? WHERE id = ?",
+                        (1 if state["enabled"] else 0, state["priority"], row[0]))
+            except Exception:
+                pass
+        self._db.connection.commit()
+
+        self._refresh_all()
+        self._log_activity("migrate",
+                           f"Auto-migrated {len(mods)} mod(s) after CDUMM update")
+        self.statusBar().showMessage(
+            f"Migrated {len(mods)} mod(s) to new format.", 15000)
+
     def _auto_reimport_mods(self) -> None:
         """Re-import all mods from stored sources after a game update."""
         from cdumm.engine.import_handler import (
@@ -3403,7 +3487,9 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _check_show_update_notes(self) -> None:
-        """Show patch notes if the app was just updated."""
+        """Show patch notes if the app was just updated.
+        Also triggers auto-reimport of mods so they use the new format.
+        """
         if not self._db:
             return
         config = Config(self._db)
@@ -3412,6 +3498,11 @@ class MainWindow(QMainWindow):
         if last_seen != __version__ and CHANGELOG:
             config.set("last_seen_version", __version__)
             QTimer.singleShot(500, self._show_update_notes)
+
+            # Auto-migrate mods to new format after version update.
+            # Old deltas from previous versions may use incompatible formats.
+            if last_seen and self._mod_manager and self._mod_manager.get_mod_count() > 0:
+                QTimer.singleShot(1500, self._auto_migrate_after_update)
 
     def _show_update_notes(self) -> None:
         dialog = PatchNotesDialog(self, latest_only=True)
