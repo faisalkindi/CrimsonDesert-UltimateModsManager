@@ -585,27 +585,17 @@ class ApplyWorker(QObject):
                         break
 
                 if use_mod_papgt:
-                    vanilla_papgt_path = self._vanilla_dir / "meta" / "0.papgt"
-                    if vanilla_papgt_path.exists():
-                        base = vanilla_papgt_path.read_bytes()
-                    else:
-                        base = (self._game_dir / "meta" / "0.papgt").read_bytes()
-                    for d in papgt_deltas:
-                        dp = d.get("delta_path")
-                        if dp and Path(dp).exists():
-                            if d.get("is_new"):
-                                mod_papgt_data = Path(dp).read_bytes()
-                            else:
-                                base = apply_delta_from_file(base, Path(dp))
-                                mod_papgt_data = base
-                    if mod_papgt_data:
-                        logger.info("Using mod PAPGT as rebuild base (%d bytes, %d entries)",
-                                    len(mod_papgt_data), mod_papgt_data[8])
+                    # Don't use mod PAPGT as the full rebuild base.
+                    # Mod-shipped PAPGTs often have string table formats that
+                    # our parser can't handle, causing all vanilla directories
+                    # to be removed. Instead, just ensure the mod's new
+                    # directories exist on disk and let rebuild discover them.
+                    logger.info("Mod ships PAPGT — new directories will be "
+                                "discovered from disk during rebuild")
 
             papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
-                papgt_bytes = papgt_mgr.rebuild(
-                    modified_pamts, mod_papgt=mod_papgt_data)
+                papgt_bytes = papgt_mgr.rebuild(modified_pamts)
                 txn.stage_file("meta/0.papgt", papgt_bytes)
             except FileNotFoundError:
                 logger.warning("PAPGT not found, skipping rebuild")

@@ -8,10 +8,10 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.8.9",
+        "version": "1.9.0",
         "date": "2026-04-03",
         "notes": [
-            "Fixed PAPGT stale hash crash with mod shipped PAPGT files. Hashes for vanilla directories are now verified against actual PAMT files instead of blindly trusted from the mod",
+            "Fixed critical PAPGT crash with standalone mods (Better Minimap, Better Trade Menu, Better Inventory UI, save editors). Mod shipped PAPGTs were being parsed incorrectly, removing all 33 vanilla directories and leaving only the mod's directory. PAPGT is now always built from vanilla base with new directories discovered from disk.",
             "Update dialog only shows once per session, no more repeated popups every 15 minutes",
             "Fixed JSON import crash — preset picker had a variable rename bug that silently killed all labeled JSON imports",
             "Detects and offers to clean up stale data from old CDUMM versions in AppData",

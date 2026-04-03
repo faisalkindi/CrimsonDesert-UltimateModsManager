@@ -110,13 +110,32 @@ class PapgtManager:
         if removed:
             logger.info("PAPGT: removing %d stale entries: %s", len(removed), removed)
 
-        # Add new directories from modified_pamts not already in PAPGT.
+        # Add new directories not already in PAPGT.
+        # Sources: modified_pamts AND directories on disk with a PAMT file
+        # (standalone mods create 0036+ directories with their own PAZ/PAMT).
         existing_names = {e[0] for e in live_entries}
         new_dirs = []
         if modified_pamts:
             for dir_name in sorted(modified_pamts.keys()):
                 if dir_name not in existing_names:
                     new_dirs.append(dir_name)
+                    existing_names.add(dir_name)
+
+        # Scan for new directories on disk (0036+) not in PAPGT
+        try:
+            for d in sorted(self._game_dir.iterdir()):
+                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                    continue
+                if int(d.name) < 36:
+                    continue  # vanilla directories, already in PAPGT
+                if d.name in existing_names:
+                    continue  # already covered
+                if (d / "0.pamt").exists():
+                    new_dirs.append(d.name)
+                    existing_names.add(d.name)
+                    logger.info("PAPGT: discovered new directory on disk: %s", d.name)
+        except OSError:
+            pass
 
         # New mod directories use 0x003FFF00 (same as vanilla data dirs 0000-0017).
         # This matches what mod authors use when they ship their own PAPGT.
