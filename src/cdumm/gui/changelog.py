@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.8.4",
+        "version": "1.8.5",
         "date": "2026-04-03",
         "notes": [
+            "Detects and offers to clean up stale data from old CDUMM versions in AppData",
+            "Warns when game is installed under Program Files (admin restrictions can cause mod issues)",
             "Update check interval reduced to 15 minutes (was 4 hours)",
             "Epic Games Store support — CDUMM now auto-detects Crimson Desert installed via Epic",
             "Improved Xbox Game Pass detection — scans .GamingRoot drives",
