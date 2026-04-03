@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.9.1",
+        "version": "1.9.2",
         "date": "2026-04-03",
         "notes": [
+            "Fixed game directory not persisting between launches. The setup dialog no longer appears every time you open CDUMM.",
             "Auto migration after update. When CDUMM updates, it offers to revert and reimport all mods automatically so they use the new internal format. Mod list, enabled state, and load order are preserved.",
             "Fixed critical PAPGT crash with standalone mods (Better Minimap, Better Trade Menu, Better Inventory UI, save editors). Mod shipped PAPGTs were being parsed incorrectly, removing all 33 vanilla directories and leaving only the mod's directory. PAPGT is now always built from vanilla base with new directories discovered from disk.",
             "Update dialog only shows once per session, no more repeated popups every 15 minutes",

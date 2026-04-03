@@ -86,21 +86,39 @@ def main() -> int:
     # Find game directory first — DB lives in CDMods/ inside game dir
     from cdumm.storage.config import Config as _TmpConfig
 
+    # Persistent game_dir pointer in AppData (survives CDMods deletion)
+    _game_dir_file = APP_DATA_DIR / "game_dir.txt"
+
     # Check for existing DB in AppData (pre-v1.7 installs)
     old_appdata_db = APP_DATA_DIR / "cdumm.db"
-    old_cdmm_db = Path.home() / "AppData" / "Local" / "cdmm" / "cdmm.db"
+    old_cdmm_db = Path.home() / "AppData" / "Local" / "cdmm" / "cdumm.db"
 
-    # Try to find game_dir from existing DB
+    # Try to find game_dir: pointer file first, then old DBs
     game_dir = None
-    for old_db in [old_appdata_db, old_cdmm_db]:
-        if old_db.exists() and game_dir is None:
-            try:
-                tmp_db = Database(old_db)
-                tmp_db.initialize()
-                game_dir = _TmpConfig(tmp_db).get("game_directory")
-                tmp_db.close()
-            except Exception:
-                pass
+
+    # Method 1: Read from persistent pointer file
+    if _game_dir_file.exists():
+        try:
+            saved = _game_dir_file.read_text(encoding="utf-8").strip()
+            if saved and Path(saved).exists():
+                game_dir = saved
+                logger.info("Game directory from pointer: %s", game_dir)
+        except Exception:
+            pass
+
+    # Method 2: Check old AppData DBs (pre-v1.7 migration)
+    if game_dir is None:
+        for old_db in [old_appdata_db, old_cdmm_db]:
+            if old_db.exists():
+                try:
+                    tmp_db = Database(old_db)
+                    tmp_db.initialize()
+                    game_dir = _TmpConfig(tmp_db).get("game_directory")
+                    tmp_db.close()
+                except Exception:
+                    pass
+                if game_dir:
+                    break
 
     if game_dir is None:
         # First-run: game directory setup
@@ -141,9 +159,14 @@ def main() -> int:
 
     config = Config(db)
 
-    # Ensure game_dir is saved in the new DB
+    # Ensure game_dir is saved in the new DB and pointer file
     if config.get("game_directory") != game_dir:
         config.set("game_directory", game_dir)
+    try:
+        _game_dir_file.parent.mkdir(parents=True, exist_ok=True)
+        _game_dir_file.write_text(game_dir, encoding="utf-8")
+    except Exception:
+        pass
 
     splash.showMessage("  Checking game state...", 0x0081)
     app.processEvents()
