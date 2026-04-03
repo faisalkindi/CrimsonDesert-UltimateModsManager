@@ -152,10 +152,13 @@ class PapgtManager:
         new_count = len(all_entries)
         result[8] = new_count & 0xFF
 
-        # Write entries — reuse existing hashes for unchanged directories
-        # (avoids reading and hashing ALL PAMT files on every Apply)
+        # Write entries — verify and rehash as needed.
+        # When using a mod-shipped PAPGT as base, its hashes for vanilla
+        # directories may be stale (mod built on older game version).
+        # Always verify existing hashes against the actual PAMT on disk.
         existing_hashes = {d: h for d, _, h in parsed_entries}
         modified_set = set(modified_pamts.keys()) if modified_pamts else set()
+        is_mod_base = mod_papgt is not None
         rehashed = 0
 
         for dir_name, flags in all_entries:
@@ -164,9 +167,22 @@ class PapgtManager:
                 pamt_data = modified_pamts[dir_name]
                 pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
                 rehashed += 1
-            elif dir_name in existing_hashes:
-                # Unchanged — reuse hash from base PAPGT (no I/O needed)
+            elif dir_name in existing_hashes and not is_mod_base:
+                # Vanilla base — reuse hash (trusted, no I/O needed)
                 pamt_hash = existing_hashes[dir_name]
+            elif dir_name in existing_hashes and is_mod_base:
+                # Mod-shipped base — verify hash against actual PAMT on disk
+                pamt_path = self._game_dir / dir_name / "0.pamt"
+                if pamt_path.exists():
+                    pamt_data = pamt_path.read_bytes()
+                    actual_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
+                    if actual_hash != existing_hashes[dir_name]:
+                        pamt_hash = actual_hash
+                        rehashed += 1
+                    else:
+                        pamt_hash = existing_hashes[dir_name]
+                else:
+                    pamt_hash = existing_hashes[dir_name]
             elif dir_name in new_dirs:
                 # New directory — read and hash its PAMT
                 pamt_path = self._game_dir / dir_name / "0.pamt"

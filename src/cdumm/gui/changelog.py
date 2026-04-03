@@ -8,10 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.8.8",
+        "version": "1.8.9",
         "date": "2026-04-03",
         "notes": [
-            "Update dialog only shows once per session — no more repeated popups every 15 minutes",
+            "Fixed PAPGT stale hash crash with mod shipped PAPGT files. Hashes for vanilla directories are now verified against actual PAMT files instead of blindly trusted from the mod",
+            "Update dialog only shows once per session, no more repeated popups every 15 minutes",
             "Fixed JSON import crash — preset picker had a variable rename bug that silently killed all labeled JSON imports",
             "Detects and offers to clean up stale data from old CDUMM versions in AppData",
             "Warns when game is installed under Program Files (admin restrictions can cause mod issues)",
