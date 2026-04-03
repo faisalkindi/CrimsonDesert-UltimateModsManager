@@ -141,35 +141,57 @@ def _detect_preset_groups(data: dict) -> dict[str, list[int]] | None:
     Returns {group_name: [patch_indices]} if grouped presets found, None if
     independent toggles.
 
-    Pattern: multiple patches targeting the same game_file, with labels
-    starting with [GroupName].
+    Supports two patterns:
+    1. Multiple patches targeting the same game_file, each with [GroupName] labels
+    2. Single patch with changes labeled [GroupName] — groups changes by prefix
+
+    For pattern 2, returns negative indices (-1, -2, ...) as sentinel values
+    so _on_accept knows to filter changes within the patch, not filter patches.
     """
     import re
     patches = data.get("patches", [])
-    if len(patches) < 2:
+    if not patches:
         return None
 
-    # Check if multiple patches target the same file
-    files = [p.get("game_file") for p in patches]
-    if len(set(files)) > 1:
-        return None  # different files = independent, not presets
+    # Pattern 1: multiple patches with bracket prefixes
+    if len(patches) >= 2:
+        files = [p.get("game_file") for p in patches]
+        if len(set(files)) == 1:
+            groups: dict[str, list[int]] = {}
+            all_have_prefix = True
+            for i, patch in enumerate(patches):
+                changes = patch.get("changes", [])
+                if not changes or "label" not in changes[0]:
+                    all_have_prefix = False
+                    break
+                label = changes[0].get("label", "")
+                match = re.match(r'\[([^\]]+)\]', label)
+                if match:
+                    groups.setdefault(match.group(1), []).append(i)
+                else:
+                    all_have_prefix = False
+                    break
+            if all_have_prefix and len(groups) >= 2:
+                return groups
 
-    # Check for [GroupName] prefix pattern in labels
-    groups: dict[str, list[int]] = {}
-    for i, patch in enumerate(patches):
-        changes = patch.get("changes", [])
-        if not changes or "label" not in changes[0]:
-            return None
-        label = changes[0].get("label", "")
-        match = re.match(r'\[([^\]]+)\]', label)
-        if match:
-            group_name = match.group(1)
-            groups.setdefault(group_name, []).append(i)
-        else:
-            return None  # no group prefix = not grouped presets
+    # Pattern 2: single patch with bracket-labeled changes (groups within one patch)
+    if len(patches) == 1:
+        changes = patches[0].get("changes", [])
+        if len(changes) >= 2:
+            groups = {}
+            all_have_prefix = True
+            for i, c in enumerate(changes):
+                label = c.get("label", "")
+                match = re.match(r'\[([^\]]+)\]', label)
+                if match:
+                    groups.setdefault(match.group(1), []).append(i)
+                else:
+                    all_have_prefix = False
+                    break
+            if all_have_prefix and len(groups) >= 2:
+                # Use _CHANGE_GROUPS marker so _on_accept filters changes, not patches
+                return {"_change_groups": True, **groups}
 
-    if len(groups) >= 2:
-        return groups
     return None
 
 
@@ -249,21 +271,37 @@ class TogglePickerDialog(QDialog):
         scroll_layout.setContentsMargins(12, 12, 12, 12)
         scroll_layout.setSpacing(8)
 
-        self._radio_buttons: list[tuple] = []  # (radio, group_name, patch_indices)
+        self._is_change_groups = bool(self._groups.get("_change_groups"))
+        self._radio_buttons: list[tuple] = []  # (radio, group_name, indices)
         first = True
-        for group_name, patch_indices in self._groups.items():
+        for group_name, indices in self._groups.items():
+            if group_name == "_change_groups":
+                continue  # skip marker key
             # Collect details about this preset
             patches = self._data["patches"]
             detail_parts = []
             group_labels = []
-            for idx in patch_indices:
-                for c in patches[idx].get("changes", []):
-                    label = c.get("label", "")
-                    group_labels.append(label)
-                    import re
-                    clean = re.sub(r'^\[[^\]]+\]\s*', '', label)
-                    if clean:
-                        detail_parts.append(clean)
+            if self._is_change_groups:
+                # Indices are change indices within patches[0]
+                changes = patches[0].get("changes", [])
+                for idx in indices:
+                    if idx < len(changes):
+                        label = changes[idx].get("label", "")
+                        group_labels.append(label)
+                        import re
+                        clean = re.sub(r'^\[[^\]]+\]\s*', '', label)
+                        if clean:
+                            detail_parts.append(clean)
+            else:
+                # Indices are patch indices
+                for idx in indices:
+                    for c in patches[idx].get("changes", []):
+                        label = c.get("label", "")
+                        group_labels.append(label)
+                        import re
+                        clean = re.sub(r'^\[[^\]]+\]\s*', '', label)
+                        if clean:
+                            detail_parts.append(clean)
 
             radio = QRadioButton(f"{group_name}")
             radio.setStyleSheet("color: #D4A43C; font-size: 13px; font-weight: bold; padding: 4px;")
@@ -361,15 +399,24 @@ class TogglePickerDialog(QDialog):
         filtered = copy.deepcopy(self._data)
 
         if self._groups:
-            # Preset mode — keep only the selected group's patches
+            # Preset mode — keep only the selected group's content
             selected_indices = set()
-            for radio, group_name, patch_indices in self._radio_buttons:
+            for radio, group_name, indices in self._radio_buttons:
                 if radio.isChecked():
-                    selected_indices.update(patch_indices)
-            filtered["patches"] = [
-                p for i, p in enumerate(filtered["patches"])
-                if i in selected_indices
-            ]
+                    selected_indices.update(indices)
+            if self._is_change_groups:
+                # Single-patch mod: filter changes within the patch
+                for patch in filtered["patches"]:
+                    patch["changes"] = [
+                        c for i, c in enumerate(patch.get("changes", []))
+                        if i in selected_indices
+                    ]
+            else:
+                # Multi-patch mod: filter entire patches
+                filtered["patches"] = [
+                    p for i, p in enumerate(filtered["patches"])
+                    if i in selected_indices
+                ]
         else:
             # Toggle mode — keep only checked changes
             selected_changes = [change for cb, change in self._checkboxes if cb.isChecked()]

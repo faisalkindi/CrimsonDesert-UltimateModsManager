@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.8.1",
+        "version": "1.8.2",
         "date": "2026-04-03",
         "notes": [
+            "Partially compressed textures now supported — DDS mods with split header+body compression (type 0x01) work correctly",
+            "Fixed preset picker auto-selecting first option — single-patch mods with bracket-labeled variants now show radio buttons instead of checkboxes",
             "Fixed v1.8.0 regression — encryption probe was falsely marking all large entries as encrypted, causing game crashes on every mod",
             "PAZ replacement mods now decompose into entry-level deltas — mods modifying different entries in the same PAZ no longer conflict",
             "Fixed slow/laggy UI — mod list no longer queries database on every cell paint",

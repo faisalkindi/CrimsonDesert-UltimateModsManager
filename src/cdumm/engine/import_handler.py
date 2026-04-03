@@ -204,6 +204,16 @@ def _try_paz_entry_import(
         with open(paz_path, "rb") as f:
             f.seek(entry.offset)
             raw = f.read(entry.comp_size)
+        if entry.compressed and entry.compression_type == 1:
+            # DDS split: 128-byte header (raw) + LZ4 compressed body
+            header = raw[:128]
+            comp_body = raw[128:]
+            body_orig = entry.orig_size - 128
+            try:
+                body = lz4_decompress(comp_body, body_orig)
+            except Exception:
+                body = lz4_decompress(decrypt(comp_body, os.path.basename(entry.path)), body_orig)
+            return header + body
         if entry.compressed and entry.compression_type == 2:
             try:
                 return lz4_decompress(raw, entry.orig_size)

@@ -1023,7 +1023,17 @@ class ApplyWorker(QObject):
                     import os
                     from cdumm.archive.paz_crypto import decrypt, lz4_decompress
                     basename = os.path.basename(entry.path)
-                    if entry.compressed and entry.compression_type == 2:
+                    if entry.compressed and entry.compression_type == 1:
+                        # DDS split: 128-byte header + LZ4 body
+                        header = raw[:128]
+                        comp_body = raw[128:]
+                        body_orig = entry.orig_size - 128
+                        try:
+                            body = lz4_decompress(comp_body, body_orig)
+                        except Exception:
+                            body = lz4_decompress(decrypt(comp_body, basename), body_orig)
+                        mod_content = header + body
+                    elif entry.compressed and entry.compression_type == 2:
                         try:
                             mod_content = lz4_decompress(raw, entry.orig_size)
                         except Exception:

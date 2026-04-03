@@ -97,6 +97,9 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
 
     If the PAMT encrypted flag is wrong (file is actually encrypted),
     corrects entry.encrypted so repack_entry_bytes will re-encrypt.
+
+    Handles compression type 0x01 (128-byte DDS header + LZ4 body)
+    and type 0x02 (fully LZ4 compressed).
     """
     with open(entry.paz_file, "rb") as f:
         f.seek(entry.offset)
@@ -104,16 +107,30 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
 
     basename = os.path.basename(entry.path)
 
+    if entry.compressed and entry.compression_type == 1:
+        # DDS split: 128-byte header (raw) + LZ4 compressed body
+        DDS_HEADER_SIZE = 128
+        header = raw[:DDS_HEADER_SIZE]
+        compressed_body = raw[DDS_HEADER_SIZE:]
+        body_orig_size = entry.orig_size - DDS_HEADER_SIZE
+        try:
+            body = lz4_decompress(compressed_body, body_orig_size)
+        except Exception:
+            decrypted = decrypt(compressed_body, basename)
+            body = lz4_decompress(decrypted, body_orig_size)
+            if not entry._encrypted_override:
+                logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
+                            entry.path)
+                entry._encrypted_override = True
+        return header + body
+
     if entry.compressed and entry.compression_type == 2:
-        # Try decompress first (no decrypt). If the PAMT encrypted flag
-        # is wrong, this will fail and we fall back to decrypt+decompress.
+        # Fully LZ4 compressed
         try:
             return lz4_decompress(raw, entry.orig_size)
         except Exception:
-            # Decryption needed — decrypt then decompress
             decrypted = decrypt(raw, basename)
             result = lz4_decompress(decrypted, entry.orig_size)
-            # Fix the entry so repack knows to re-encrypt
             if not entry._encrypted_override:
                 logger.info("Corrected encrypted flag for %s (was False, actually encrypted)",
                             entry.path)

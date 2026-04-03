@@ -239,15 +239,51 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
         entry.orig_size if content grew).
     """
     basename = os.path.basename(entry.path)
-    is_compressed = entry.compressed and entry.compression_type == 2
+    is_compressed = entry.compressed and entry.compression_type in (1, 2)
+    is_dds_split = entry.compression_type == 1  # 128-byte header + LZ4 body
+    DDS_HEADER_SIZE = 128
     actual_comp_size = entry.comp_size
     actual_orig_size = entry.orig_size
 
     if is_compressed:
-        if allow_size_change:
-            # Compress as-is — never modify or truncate content. If the mod
-            # file is larger than orig_size, use the actual size (caller
-            # must update orig_size in PAMT).
+        if is_dds_split:
+            # Type 0x01: 128-byte DDS header (raw) + LZ4 compressed body
+            header = plaintext[:DDS_HEADER_SIZE]
+            body = plaintext[DDS_HEADER_SIZE:]
+            body_orig = entry.orig_size - DDS_HEADER_SIZE
+            body_comp_budget = entry.comp_size - DDS_HEADER_SIZE
+
+            if allow_size_change:
+                if len(body) > body_orig:
+                    padded_body = body
+                    actual_orig_size = DDS_HEADER_SIZE + len(body)
+                else:
+                    padded_body = _pad_to_orig_size(body, body_orig)
+                compressed_body = lz4.block.compress(padded_body, store_size=False)
+                actual_comp_size = DDS_HEADER_SIZE + len(compressed_body)
+                if actual_comp_size > entry.comp_size:
+                    payload = header + compressed_body
+                elif actual_comp_size < entry.comp_size:
+                    pad_size = entry.comp_size - actual_comp_size
+                    try:
+                        with open(entry.paz_file, 'rb') as f:
+                            f.seek(entry.offset + actual_comp_size)
+                            original_tail = f.read(pad_size)
+                        payload = header + compressed_body + original_tail
+                    except Exception:
+                        payload = header + compressed_body + b'\x00' * pad_size
+                else:
+                    payload = header + compressed_body
+            else:
+                adjusted_body = _match_compressed_size(
+                    body, body_comp_budget, body_orig)
+                compressed_body = lz4.block.compress(adjusted_body, store_size=False)
+                if len(compressed_body) != body_comp_budget:
+                    raise ValueError(
+                        f"DDS body size mismatch: {len(compressed_body)} != {body_comp_budget}")
+                payload = header + compressed_body
+        elif allow_size_change:
+            # Type 0x02: fully LZ4 compressed
             if len(plaintext) > entry.orig_size:
                 padded = plaintext
                 actual_orig_size = len(plaintext)
@@ -256,11 +292,8 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
             compressed = lz4.block.compress(padded, store_size=False)
             actual_comp_size = len(compressed)
             if actual_comp_size > entry.comp_size:
-                # Data doesn't fit in the original slot — return it unsized.
-                # Caller must append to end of PAZ and update PAMT offset.
                 payload = compressed
             elif actual_comp_size < entry.comp_size:
-                # Pad with original PAZ tail bytes to fill the slot
                 pad_size = entry.comp_size - actual_comp_size
                 try:
                     with open(entry.paz_file, 'rb') as f:
