@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
                     "Please verify game files (Steam: Verify Integrity / Xbox: Repair), then restart.", 0)
             return
 
+        self._check_stale_appdata()
+        self._check_program_files_warning()
         self._check_bad_standalone_imports()
         self._check_show_update_notes()
 
@@ -265,6 +267,99 @@ class MainWindow(QMainWindow):
         # Trigger background status check for mod list
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
+
+    def _check_stale_appdata(self) -> None:
+        """Detect stale data in %LocalAppData%/cdumm from old versions.
+
+        Since v1.7.0, CDUMM stores everything in CDMods/ inside the game
+        directory. Old %LocalAppData%/cdumm data can conflict or confuse
+        users. Offer to clean it up.
+        """
+        try:
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+            if config.get("stale_appdata_checked"):
+                return
+
+            appdata_dir = Path.home() / "AppData" / "Local" / "cdumm"
+            if not appdata_dir.exists():
+                config.set("stale_appdata_checked", "1")
+                return
+
+            # Check if there's actual mod data (deltas, vanilla backups)
+            has_stale = False
+            for name in ["deltas", "vanilla", "cdumm.db"]:
+                if (appdata_dir / name).exists():
+                    has_stale = True
+                    break
+
+            if not has_stale:
+                config.set("stale_appdata_checked", "1")
+                return
+
+            # Calculate size
+            total_size = 0
+            try:
+                for f in appdata_dir.rglob("*"):
+                    if f.is_file():
+                        total_size += f.stat().st_size
+            except Exception:
+                pass
+            size_mb = total_size / (1024 * 1024)
+
+            reply = QMessageBox.question(
+                self, "Old Data Found",
+                f"Found leftover data from an older CDUMM version in:\n"
+                f"{appdata_dir}\n"
+                f"({size_mb:.0f} MB)\n\n"
+                f"Since v1.7.0, all mod data is stored in the CDMods folder\n"
+                f"inside your game directory. This old data is no longer needed.\n\n"
+                f"Delete it to free up space?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                import shutil
+                for name in ["deltas", "vanilla", "cdumm.db"]:
+                    target = appdata_dir / name
+                    if target.is_dir():
+                        shutil.rmtree(target, ignore_errors=True)
+                    elif target.is_file():
+                        target.unlink(missing_ok=True)
+                self.statusBar().showMessage(
+                    f"Cleaned up {size_mb:.0f} MB of old data.", 10000)
+                self._log_activity("cleanup",
+                                   f"Removed stale AppData ({size_mb:.0f} MB)")
+
+            config.set("stale_appdata_checked", "1")
+        except Exception as e:
+            logger.debug("Stale appdata check failed: %s", e)
+
+    def _check_program_files_warning(self) -> None:
+        """Warn if game is installed under Program Files (admin restrictions)."""
+        try:
+            if not self._game_dir:
+                return
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+            if config.get("program_files_warned"):
+                return
+
+            game_path = str(self._game_dir).lower()
+            if "program files" not in game_path:
+                return
+
+            QMessageBox.warning(
+                self, "Game Location Warning",
+                "Your game is installed under Program Files, which has\n"
+                "restricted write permissions on Windows.\n\n"
+                "This can cause issues with mod backups and configuration.\n"
+                "If you experience problems, consider moving your Steam\n"
+                "library to a different location (e.g. C:\\SteamLibrary).\n\n"
+                "Steam → Settings → Storage → Add a new library folder"
+            )
+            config.set("program_files_warned", "1")
+        except Exception as e:
+            logger.debug("Program Files warning check failed: %s", e)
 
     def _check_pamt_backups(self) -> None:
         """Detect missing full PAMT backups and create them or prompt for Steam verify.
