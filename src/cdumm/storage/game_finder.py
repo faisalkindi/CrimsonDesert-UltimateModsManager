@@ -1,5 +1,7 @@
+import json
 import logging
 import re
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,11 @@ XBOX_GAME_NAMES = [
     "Crimson Desert",
     "PearlAbyss.CrimsonDesert",
     "CrimsonDesert",
+]
+
+# Epic Games Store display names to match
+EPIC_GAME_NAMES = [
+    "crimson desert",
 ]
 
 
@@ -52,24 +59,36 @@ def _find_xbox_game_pass() -> list[Path]:
     """Search for Crimson Desert installed via Xbox Game Pass / Microsoft Store.
 
     Xbox Game Pass games can be installed at:
-    - C:/XboxGames/<GameName>/Content/
-    - D:/XboxGames/<GameName>/Content/
-    - Custom paths set in Xbox app
+    - {drive}:/XboxGames/<GameName>/Content/
+    - Custom paths set in Xbox app (detected via .GamingRoot files)
     - C:/Program Files/ModifiableWindowsApps/<GameName>/
-    - C:/Program Files/WindowsApps/<PublisherId>/ (usually locked)
     """
     candidates: list[Path] = []
 
+    # Find drives with .GamingRoot (Xbox app marks these)
+    gaming_drives: list[str] = []
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        # XboxGames folder (most common for Game Pass)
+        root = Path(f"{letter}:/")
+        try:
+            if (root / ".GamingRoot").exists():
+                gaming_drives.append(letter)
+        except OSError:
+            continue
+
+    # Search gaming drives and all drives for XboxGames folder
+    search_letters = set(gaming_drives) | set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    for letter in search_letters:
         for name in XBOX_GAME_NAMES:
             for sub in ["Content", ""]:
                 xbox_path = Path(f"{letter}:/XboxGames/{name}")
                 if sub:
                     xbox_path = xbox_path / sub
-                if (xbox_path / GAME_EXE).exists():
-                    candidates.append(xbox_path)
-                    logger.info("Found Crimson Desert (Xbox) at %s", xbox_path)
+                try:
+                    if (xbox_path / GAME_EXE).exists():
+                        candidates.append(xbox_path)
+                        logger.info("Found Crimson Desert (Xbox) at %s", xbox_path)
+                except OSError:
+                    continue
 
     # ModifiableWindowsApps (accessible Game Pass location)
     for base in ["C:/Program Files/ModifiableWindowsApps",
@@ -83,14 +102,78 @@ def _find_xbox_game_pass() -> list[Path]:
                         if (d / GAME_EXE).exists():
                             candidates.append(d)
                             logger.info("Found Crimson Desert (WindowsApps) at %s", d)
-            except PermissionError:
+            except (PermissionError, OSError):
                 pass
 
     return candidates
 
 
+def _find_epic_games() -> list[Path]:
+    """Search for Crimson Desert installed via Epic Games Store.
+
+    Epic stores manifest .item files (JSON) in a Manifests folder.
+    Each manifest has DisplayName and InstallLocation fields.
+    """
+    candidates: list[Path] = []
+
+    # Find manifest directory from registry or default paths
+    manifest_dirs: list[Path] = []
+
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\WOW6432Node\Epic Games\EpicGamesLauncher"
+            ) as key:
+                app_data = winreg.QueryValueEx(key, "AppDataPath")[0]
+                manifest_dirs.append(Path(app_data) / "Manifests")
+        except Exception:
+            pass
+
+    # Fallback paths
+    manifest_dirs.append(
+        Path("C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests"))
+    local_app = Path.home() / "AppData" / "Local" / "EpicGamesLauncher" / "Saved" / "Config"
+    # Also check the common programdata path variant
+    manifest_dirs.append(
+        Path("C:/ProgramData/Epic/UnrealEngineLauncher/LauncherInstalled.dat").parent)
+
+    for manifest_dir in manifest_dirs:
+        if not manifest_dir.exists():
+            continue
+        try:
+            for item_file in manifest_dir.glob("*.item"):
+                try:
+                    data = json.loads(item_file.read_text(encoding="utf-8"))
+                    display_name = data.get("DisplayName", "")
+                    install_loc = data.get("InstallLocation", "")
+                    if not display_name or not install_loc:
+                        continue
+                    if any(n in display_name.lower() for n in EPIC_GAME_NAMES):
+                        game_path = Path(install_loc)
+                        if (game_path / GAME_EXE).exists():
+                            candidates.append(game_path)
+                            logger.info("Found Crimson Desert (Epic) at %s", game_path)
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # Fallback: check common Epic install locations
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        for folder in ["Epic Games", "EpicGames"]:
+            for name in ["CrimsonDesert", "Crimson Desert"]:
+                epic_path = Path(f"{letter}:/{folder}/{name}")
+                if epic_path not in candidates and (epic_path / GAME_EXE).exists():
+                    candidates.append(epic_path)
+                    logger.info("Found Crimson Desert (Epic fallback) at %s", epic_path)
+
+    return candidates
+
+
 def find_game_directories() -> list[Path]:
-    """Search Steam and Xbox Game Pass for Crimson Desert install."""
+    """Search Steam, Epic Games Store, and Xbox for Crimson Desert install."""
     candidates: list[Path] = []
 
     # Steam detection
@@ -109,11 +192,27 @@ def find_game_directories() -> list[Path]:
     else:
         logger.info("No Steam root found in default locations")
 
+    # Epic Games Store detection
+    epic_candidates = _find_epic_games()
+    candidates.extend(epic_candidates)
+
     # Xbox Game Pass detection
     xbox_candidates = _find_xbox_game_pass()
     candidates.extend(xbox_candidates)
 
-    return candidates
+    # Deduplicate by resolved path
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for c in candidates:
+        try:
+            key = str(c.resolve()).lower()
+        except Exception:
+            key = str(c).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    return unique
 
 
 def validate_game_directory(path: Path) -> bool:
@@ -124,6 +223,12 @@ def validate_game_directory(path: Path) -> bool:
 def is_steam_install(game_dir: Path) -> bool:
     """Check if the game directory is a Steam installation."""
     return "steamapps" in str(game_dir).lower()
+
+
+def is_epic_install(game_dir: Path) -> bool:
+    """Check if the game directory is an Epic Games Store installation."""
+    path_lower = str(game_dir).lower()
+    return "epic games" in path_lower or "epicgames" in path_lower
 
 
 def is_xbox_install(game_dir: Path) -> bool:
