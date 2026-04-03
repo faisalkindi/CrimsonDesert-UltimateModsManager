@@ -181,10 +181,18 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
         # Verify original bytes match — skip patch if they don't.
         # This prevents silent corruption when an older CDUMM version
         # ignores the "signature" field and treats offsets as absolute.
+        # Exception: if the patched bytes already match, the mod is already
+        # applied (e.g. reimporting on modded game files). Count it as applied.
         if "original" in change:
             original_bytes = bytes.fromhex(change["original"])
             actual = data[offset:offset + len(original_bytes)]
             if actual != original_bytes:
+                # Check if already patched
+                actual_at_patch = data[offset:offset + len(patched_bytes)]
+                if actual_at_patch == patched_bytes:
+                    logger.debug("Already patched at %d, keeping as-is", offset)
+                    applied += 1
+                    continue
                 logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
                                offset, change["original"], actual.hex())
                 continue
