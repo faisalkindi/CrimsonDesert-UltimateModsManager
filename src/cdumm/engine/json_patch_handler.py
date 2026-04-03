@@ -469,9 +469,12 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
     from cdumm.engine.delta_engine import save_entry_delta
 
     patches = patch_data["patches"]
+    logger.info("import_json_as_entr: starting '%s' (%d patches)", mod_name, len(patches))
+
     vanilla_dir = game_dir / "CDMods" / "vanilla"
     if not vanilla_dir.exists():
         vanilla_dir = game_dir
+        logger.info("import_json_as_entr: no vanilla dir, using game dir")
 
     # Create mod entry in DB
     priority = db.connection.execute(
@@ -505,12 +508,16 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             continue
 
         # Find PAMT entry
+        logger.info("import_json_as_entr: looking up '%s' in PAMTs", game_file)
         if game_file.lower() not in entry_cache:
             entry = _find_pamt_entry(game_file, vanilla_dir)
             if entry is None:
                 entry = _find_pamt_entry(game_file, game_dir)
             if entry:
                 entry_cache[game_file.lower()] = entry
+                logger.info("import_json_as_entr: found '%s' in %s (offset=%d, comp=%d)",
+                            game_file, Path(entry.paz_file).parent.name,
+                            entry.offset, entry.comp_size)
 
         entry = entry_cache.get(game_file.lower())
         if entry is None:
@@ -521,13 +528,16 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             return None
 
         # Extract and decompress
+        logger.info("import_json_as_entr: extracting '%s' from %s", game_file, entry.paz_file)
         try:
             if not os.path.exists(entry.paz_file):
+                logger.info("import_json_as_entr: PAZ not found at %s, trying game dir", entry.paz_file)
                 game_entry = _find_pamt_entry(game_file, game_dir)
                 if game_entry:
                     entry = game_entry
                     entry_cache[game_file.lower()] = entry
             plaintext = _extract_from_paz(entry)
+            logger.info("import_json_as_entr: extracted %d bytes", len(plaintext))
         except Exception as e:
             try:
                 game_entry = _find_pamt_entry(game_file, game_dir)

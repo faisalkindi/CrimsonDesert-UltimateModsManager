@@ -1697,6 +1697,7 @@ class MainWindow(QMainWindow):
                 self._configurable_labels = []  # populated if picker shown
 
         if json_data and has_labeled_changes(json_data):
+            logger.info("JSON has labeled changes — showing picker dialog")
             dialog = TogglePickerDialog(json_data, self)
             if dialog.exec() and dialog.selected_data:
                 # Write filtered JSON to temp file and import that
@@ -1730,6 +1731,7 @@ class MainWindow(QMainWindow):
             shutil.rmtree(_label_tmp, ignore_errors=True)
 
         # Regular PAZ mod — run on background thread
+        logger.info("Starting import worker for: %s", path)
         progress = ProgressDialog("Importing Mod", self)
         worker = ImportWorker(path, self._game_dir, self._db.db_path, self._deltas_dir,
                               existing_mod_id=existing_mod_id)
