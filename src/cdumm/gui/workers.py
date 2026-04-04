@@ -936,3 +936,100 @@ class ModCheckWorker(QObject):
         except Exception as e:
             logger.error("Mod check failed: %s", e, exc_info=True)
             self.error_occurred.emit(str(e))
+
+
+class MigrateWorker(QObject):
+    """Background worker for revert + reimport migration after CDUMM update."""
+
+    progress_updated = Signal(int, str)
+    finished = Signal(int, int)  # (reimported, failed)
+    error_occurred = Signal(str)
+
+    def __init__(self, game_dir: Path, vanilla_dir: Path, cdmods_dir: Path,
+                 db_path: Path, deltas_dir: Path) -> None:
+        super().__init__()
+        self._game_dir = game_dir
+        self._vanilla_dir = vanilla_dir
+        self._cdmods_dir = cdmods_dir
+        self._db_path = db_path
+        self._deltas_dir = deltas_dir
+
+    def run(self) -> None:
+        try:
+            db = Database(self._db_path)
+            db.initialize()
+
+            # Step 1: Revert to vanilla
+            self.progress_updated.emit(5, "Reverting to vanilla...")
+            try:
+                from cdumm.engine.apply_engine import RevertWorker
+                rw = RevertWorker.__new__(RevertWorker)
+                rw._game_dir = self._game_dir
+                rw._vanilla_dir = self._vanilla_dir
+                rw._db = db
+                rw._revert()
+            except Exception as e:
+                logger.warning("Migration revert failed: %s", e)
+
+            # Step 2: Reimport all mods from stored sources
+            from cdumm.engine.import_handler import (
+                _process_extracted_files, import_from_json_patch,
+            )
+            from cdumm.engine.json_patch_handler import detect_json_patch
+            from cdumm.engine.snapshot_manager import SnapshotManager
+            snapshot = SnapshotManager(db)
+
+            sources_dir = self._cdmods_dir / "sources"
+            mods = db.connection.execute(
+                "SELECT id, name, source_path, priority FROM mods "
+                "ORDER BY priority").fetchall()
+
+            reimported = 0
+            failed = 0
+            total = len(mods)
+
+            for i, (mod_id, mod_name, source_path, priority) in enumerate(mods):
+                pct = int(10 + (i / max(total, 1)) * 85)
+                self.progress_updated.emit(pct, f"Reimporting {mod_name}...")
+
+                src = sources_dir / str(mod_id)
+                if not src.exists() or not any(src.iterdir()):
+                    if source_path and Path(source_path).exists():
+                        src = Path(source_path)
+                    else:
+                        logger.warning("No source for %s (id=%d), skipping",
+                                       mod_name, mod_id)
+                        failed += 1
+                        continue
+
+                try:
+                    logger.info("Auto-reimporting: %s from %s", mod_name, src)
+                    json_data = detect_json_patch(src)
+                    if json_data:
+                        result = import_from_json_patch(
+                            src, self._game_dir, db, snapshot, self._deltas_dir,
+                            existing_mod_id=mod_id)
+                    else:
+                        result = _process_extracted_files(
+                            src, self._game_dir, db, snapshot, self._deltas_dir,
+                            mod_name, existing_mod_id=mod_id)
+
+                    if result.error:
+                        logger.warning("Auto-reimport failed for %s: %s",
+                                       mod_name, result.error)
+                        failed += 1
+                    else:
+                        reimported += 1
+                        logger.info("Auto-reimported: %s (%d files)",
+                                    mod_name, len(result.changed_files))
+                except Exception as e:
+                    logger.warning("Auto-reimport error for %s: %s", mod_name, e)
+                    failed += 1
+
+            db.close()
+            self.progress_updated.emit(100, "Migration complete!")
+            self.finished.emit(reimported, failed)
+
+        except Exception as e:
+            logger.error("Migration failed: %s", e, exc_info=True)
+            self.error_occurred.emit(str(e))

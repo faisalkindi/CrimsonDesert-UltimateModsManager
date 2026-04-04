@@ -8,9 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "2.0.0",
+        "version": "2.0.1",
         "date": "2026-04-04",
         "notes": [
+            "Auto migration now runs on background thread with progress dialog instead of freezing the UI.",
+            "Configure now shows preset picker for multi-preset mods (like Trust Me) and auto-applies after selection.",
+            "Mod name updates to reflect current configuration after reconfiguring.",
+            "JSON mods now archive source files to CDMods/sources/ for auto-reimport and Configure support.",
+            "Notifies users on startup if mods are missing source files and need reimport.",
+            "Configurable flag only set for mods with real configurable options (not simple labeled descriptions).",
             "Rescan now clears stale vanilla backups automatically. After Steam verify, old backups from previous modded state are wiped so reverts always use clean data.",
             "Fixed JSON mods in ZIP archives using the old FULL_COPY path instead of entry level deltas. ZIP JSON mods now compose correctly like folder and standalone JSON imports.",
             "Consolidated duplicate extraction code into single decompress_entry utility.",

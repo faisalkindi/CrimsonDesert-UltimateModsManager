@@ -259,6 +259,7 @@ class MainWindow(QMainWindow):
 
         self._check_stale_appdata()
         self._check_program_files_warning()
+        self._check_missing_sources()
         self._check_bad_standalone_imports()
         self._check_show_update_notes()
 
@@ -360,6 +361,54 @@ class MainWindow(QMainWindow):
             config.set("stale_appdata_checked", "1")
         except Exception as e:
             logger.debug("Stale appdata check failed: %s", e)
+
+    def _check_missing_sources(self) -> None:
+        """Notify user about mods that have no stored source files.
+
+        Mods imported before source archiving was added can't be auto-reimported
+        after updates or reconfigured. The user needs to drag them in again once.
+        """
+        try:
+            if not self._db or not self._mod_manager:
+                return
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+            if config.get("missing_sources_checked"):
+                return
+
+            sources_dir = self._cdmods_dir / "sources"
+            mods = self._db.connection.execute(
+                "SELECT id, name, source_path FROM mods").fetchall()
+            missing = []
+            for mod_id, name, source_path in mods:
+                has_source = False
+                src_dir = sources_dir / str(mod_id)
+                if src_dir.exists():
+                    try:
+                        if any(src_dir.iterdir()):
+                            has_source = True
+                    except Exception:
+                        pass
+                if not has_source and source_path and Path(source_path).exists():
+                    has_source = True
+                if not has_source:
+                    missing.append(name)
+
+            if missing:
+                names = "\n".join(f"  • {n}" for n in missing[:10])
+                extra = f"\n  ...and {len(missing) - 10} more" if len(missing) > 10 else ""
+                QMessageBox.information(
+                    self, "Mods Need Re-import",
+                    f"These mods were imported on an older version and don't have\n"
+                    f"stored source files. They can't be auto-updated or reconfigured.\n\n"
+                    f"{names}{extra}\n\n"
+                    f"To fix this, remove each mod and drag the original download\n"
+                    f"file back in. You only need to do this once per mod."
+                )
+
+            config.set("missing_sources_checked", "1")
+        except Exception as e:
+            logger.debug("Missing sources check failed: %s", e)
 
     def _check_program_files_warning(self) -> None:
         """Warn if game is installed under Program Files (admin restrictions)."""
@@ -1711,17 +1760,20 @@ class MainWindow(QMainWindow):
 
         json_data = detect_json_patch(json_check_path)
 
-        # Mark for configurable flag even if we don't show picker
-        if json_data:
-            any_labels = any(
-                "label" in c
-                for p in json_data.get("patches", [])
-                for c in p.get("changes", [])
-                if isinstance(c, dict)
-            )
-            if any_labels:
+        # Mark for configurable flag only if the mod has real configurable options
+        if json_data and has_labeled_changes(json_data):
+            self._configurable_source = str(path)
+            self._configurable_labels = []  # populated if picker shown
+
+        # Also mark as configurable if source has multiple JSON presets
+        if not hasattr(self, '_configurable_source'):
+            from cdumm.gui.preset_picker import find_json_presets as _fp
+            _presets_check = _fp(json_check_path)
+            if len(_presets_check) <= 1 and json_check_path.is_file() and json_check_path.parent.is_dir():
+                _presets_check = _fp(json_check_path.parent)
+            if len(_presets_check) > 1:
                 self._configurable_source = str(path)
-                self._configurable_labels = []  # populated if picker shown
+                self._configurable_labels = []
 
         if json_data and has_labeled_changes(json_data):
             logger.info("JSON has labeled changes — showing picker dialog")
@@ -2814,8 +2866,28 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        json_data = detect_json_patch(check_path)
-        if not json_data or not has_labeled_changes(json_data):
+        # Check for multiple JSON presets in the source (e.g. Trust Me has 5 variants)
+        # If source is a single JSON file, also check parent dir for sibling presets
+        from cdumm.gui.preset_picker import find_json_presets, PresetPickerDialog
+        presets = find_json_presets(check_path)
+        if len(presets) <= 1 and check_path.is_file() and check_path.parent.is_dir():
+            parent_presets = find_json_presets(check_path.parent)
+            if len(parent_presets) > 1:
+                presets = parent_presets
+        if len(presets) > 1:
+            preset_dialog = PresetPickerDialog(presets, self)
+            if preset_dialog.exec() and preset_dialog.selected_data:
+                json_data = preset_dialog.selected_data
+                check_path = preset_dialog.selected_path
+            else:
+                if tmp_dir:
+                    import shutil
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                return
+        else:
+            json_data = detect_json_patch(check_path)
+
+        if not json_data:
             if tmp_dir:
                 import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2823,20 +2895,33 @@ class MainWindow(QMainWindow):
                                 "No configurable options found in this mod.")
             return
 
-        # Load previous selection
-        previous_labels = None
-        try:
-            import json as _json3
-            row = self._db.connection.execute(
-                "SELECT selected_labels FROM mod_config WHERE mod_id = ?",
-                (mod["id"],)).fetchone()
-            if row and row[0]:
-                previous_labels = _json3.loads(row[0])
-        except Exception:
+        # If mod has configurable labeled changes, show toggle picker
+        if not has_labeled_changes(json_data):
+            # No toggle needed, just reimport with the selected preset
             pass
+        else:
+            # Load previous selection
+            previous_labels = None
+            try:
+                import json as _json3
+                row = self._db.connection.execute(
+                    "SELECT selected_labels FROM mod_config WHERE mod_id = ?",
+                    (mod["id"],)).fetchone()
+                if row and row[0]:
+                    previous_labels = _json3.loads(row[0])
+            except Exception:
+                pass
 
-        dialog = TogglePickerDialog(json_data, self, previous_labels=previous_labels)
-        if dialog.exec() and dialog.selected_data:
+            toggle_dialog = TogglePickerDialog(json_data, self, previous_labels=previous_labels)
+            if toggle_dialog.exec() and toggle_dialog.selected_data:
+                json_data = toggle_dialog.selected_data
+            else:
+                if tmp_dir:
+                    import shutil
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                return
+
+        if json_data:
             import json as _json
             # Save old state
             old_priority = mod.get("priority", 0)
@@ -2846,13 +2931,13 @@ class MainWindow(QMainWindow):
             self._mod_manager.remove_mod(mod["id"])
 
             tmp_json = Path(tempfile.mktemp(suffix=".json", prefix="cdumm_reconfig_"))
-            write_data = dialog.selected_data.copy()
+            write_data = json_data.copy()
             write_data.pop("_json_path", None)
             tmp_json.write_text(_json.dumps(write_data, indent=2, default=str), encoding="utf-8")
             self._configurable_source = str(source_path)
             # Store new selection for future reconfigure
             new_labels = []
-            for patch in dialog.selected_data.get("patches", []):
+            for patch in json_data.get("patches", []):
                 for c in patch.get("changes", []):
                     if "label" in c:
                         new_labels.append(c["label"])
@@ -2863,20 +2948,24 @@ class MainWindow(QMainWindow):
             worker = ImportWorker(tmp_json, self._game_dir, self._db.db_path, self._deltas_dir)
             thread = QThread()
 
+            new_name = json_data.get("name", mod["name"])
+
             def on_done(result):
                 self._on_import_finished(result)
-                # Restore priority and name
+                # Restore priority, update name to reflect new config
                 try:
                     row = self._db.connection.execute("SELECT MAX(id) FROM mods").fetchone()
                     if row and row[0]:
                         self._db.connection.execute(
                             "UPDATE mods SET priority = ?, enabled = ?, name = ? WHERE id = ?",
-                            (old_priority, old_enabled, mod["name"], row[0]))
+                            (old_priority, old_enabled, new_name, row[0]))
                         self._db.connection.commit()
                     self._refresh_all()
                 except Exception:
                     pass
-                self._log_activity("import", f"Reconfigured: {mod['name']}")
+                self._log_activity("import", f"Reconfigured: {new_name}")
+                # Auto-apply so the new configuration takes effect immediately
+                QTimer.singleShot(500, self._on_apply)
 
             self._run_worker(worker, thread, progress, on_finished=on_done)
 
@@ -3159,16 +3248,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1000, self._auto_reimport_mods)
 
     def _auto_migrate_after_update(self) -> None:
-        """Revert and reimport all mods after a CDUMM version update.
-
-        Old deltas from previous versions may use incompatible formats
-        (FULL_COPY instead of ENTR, wrong encryption, stale PAPGT hashes).
-        This ensures mods are stored in the current version's format.
-        """
+        """Revert and reimport all mods after a CDUMM version update."""
         if not self._mod_manager or not self._game_dir:
             return
 
-        # Check if any mods have stored sources for reimport
         sources_dir = self._cdmods_dir / "sources"
         mods = self._db.connection.execute(
             "SELECT id, name, source_path FROM mods").fetchall()
@@ -3191,40 +3274,34 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # Save mod state before revert
+        # Save mod state before migration
         mod_states = []
         for mod in self._mod_manager.list_mods():
             mod_states.append({
-                "id": mod["id"],
                 "name": mod["name"],
                 "enabled": mod["enabled"],
                 "priority": mod["priority"],
             })
+        self._migrate_mod_states = mod_states
 
-        # Revert to vanilla
-        self.statusBar().showMessage("Reverting to vanilla for reimport...", 0)
-        try:
-            from cdumm.engine.apply_engine import RevertWorker
-            from cdumm.storage.database import Database
-            revert_db = Database(self._db.db_path)
-            revert_db.initialize()
-            worker = RevertWorker.__new__(RevertWorker)
-            worker._game_dir = self._game_dir
-            worker._vanilla_dir = self._vanilla_dir
-            worker._db = revert_db
-            worker._revert()
-            revert_db.close()
-        except Exception as e:
-            logger.warning("Auto-migrate revert failed: %s", e)
+        # Run on background thread with progress dialog
+        from cdumm.gui.workers import MigrateWorker
+        progress = ProgressDialog("Migrating Mods", self)
+        worker = MigrateWorker(
+            self._game_dir, self._vanilla_dir, self._cdmods_dir,
+            self._db.db_path, self._deltas_dir)
+        thread = QThread()
+        self._run_worker(worker, thread, progress,
+                         on_finished=self._on_migrate_finished)
 
-        # Reimport all mods
-        self.statusBar().showMessage("Reimporting mods with new format...", 0)
-        self._auto_reimport_mods()
+    def _on_migrate_finished(self, reimported: int, failed: int) -> None:
+        """Called after background migration completes."""
+        self._sync_db()
 
         # Restore enabled/disabled state
+        mod_states = getattr(self, '_migrate_mod_states', [])
         for state in mod_states:
             try:
-                # Find the reimported mod by name
                 row = self._db.connection.execute(
                     "SELECT id FROM mods WHERE name = ?",
                     (state["name"],)).fetchone()
@@ -3237,10 +3314,11 @@ class MainWindow(QMainWindow):
         self._db.connection.commit()
 
         self._refresh_all()
-        self._log_activity("migrate",
-                           f"Auto-migrated {len(mods)} mod(s) after CDUMM update")
-        self.statusBar().showMessage(
-            f"Migrated {len(mods)} mod(s) to new format.", 15000)
+        msg = f"Migrated {reimported} mod(s) to new format."
+        if failed:
+            msg += f" {failed} mod(s) need manual re-import."
+        self._log_activity("migrate", msg)
+        self.statusBar().showMessage(msg, 15000)
 
     def _auto_reimport_mods(self) -> None:
         """Re-import all mods from stored sources after a game update."""

@@ -641,5 +641,34 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         logger.info("ENTR delta: %s in %s (comp=%d, orig=%d)",
                      entry.path, paz_file_path, entry.comp_size, entry.orig_size)
 
+    # Archive JSON source for auto-reimport after game updates
+    sources_dir = deltas_dir.parent / "sources" / str(mod_id)
+    try:
+        import shutil
+        if sources_dir.exists():
+            shutil.rmtree(sources_dir)
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        # Copy the original JSON file and any sibling JSONs (for multi-preset mods)
+        json_path = patch_data.get("_json_path")
+        if json_path and Path(json_path).exists():
+            src = Path(json_path)
+            if src.is_file():
+                # Copy all sibling JSON files so Configure can show all presets
+                parent = src.parent
+                copied = False
+                for sibling in parent.glob("*.json"):
+                    shutil.copy2(sibling, sources_dir / sibling.name)
+                    copied = True
+                if not copied:
+                    shutil.copy2(src, sources_dir / src.name)
+            elif src.is_dir():
+                shutil.copytree(src, sources_dir, dirs_exist_ok=True)
+        db.connection.execute(
+            "UPDATE mods SET source_path = ? WHERE id = ?",
+            (str(sources_dir), mod_id))
+        logger.info("Archived JSON source: %s -> %s", mod_name, sources_dir)
+    except Exception as e:
+        logger.warning("Failed to archive JSON source: %s", e)
+
     db.connection.commit()
     return {"mod_id": mod_id, "changed_files": changed_files, "name": mod_name}
