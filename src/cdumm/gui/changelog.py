@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "2.0.2",
+        "version": "2.0.3",
         "date": "2026-04-04",
         "notes": [
+            "Fixed orphan mod directories not being cleaned up when mods are disabled via Apply. Directories like 0042/ are now removed before PAPGT rebuild so they don't get re-added.",
+            "Fixed stale PAPGT backup causing 'modded' state after revert. Backup size is validated against snapshot and rebuilt from scratch if stale.",
             "Bare loose file mods now detected without mod.json. Mods with files/NNNN/ structure (like Enhanced Internal Graphics) import correctly.",
             "Auto migration now runs on background thread with progress dialog instead of freezing the UI.",
             "Configure now shows preset picker for multi-preset mods (like Trust Me) and auto-applies after selection.",

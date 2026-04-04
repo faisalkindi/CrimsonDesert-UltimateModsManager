@@ -593,6 +593,38 @@ class ApplyWorker(QObject):
                     logger.info("Mod ships PAPGT — new directories will be "
                                 "discovered from disk during rebuild")
 
+            # Clean up orphan mod directories (0036+) not used by any enabled mod.
+            # Must happen before PAPGT rebuild so orphans aren't re-added.
+            enabled_dirs = set()
+            for fp in file_deltas:
+                d = fp.split("/")[0]
+                if d.isdigit() and len(d) == 4 and int(d) >= 36:
+                    enabled_dirs.add(d)
+            # Also include new files from enabled mods
+            for fp, deltas in file_deltas.items():
+                for d in deltas:
+                    if d.get("is_new"):
+                        mod_dir = fp.split("/")[0]
+                        if mod_dir.isdigit() and len(mod_dir) == 4:
+                            enabled_dirs.add(mod_dir)
+
+            for d in sorted(self._game_dir.iterdir()):
+                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                    continue
+                if int(d.name) < 36:
+                    continue
+                if d.name in enabled_dirs:
+                    continue
+                # Check if directory is in snapshot (vanilla)
+                snap_check = self._db.connection.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE file_path LIKE ?",
+                    (d.name + "/%",),
+                ).fetchone()[0]
+                if snap_check == 0:
+                    import shutil
+                    shutil.rmtree(d, ignore_errors=True)
+                    logger.info("Cleaned up orphan directory during apply: %s", d.name)
+
             papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
                 papgt_bytes = papgt_mgr.rebuild(modified_pamts)
@@ -1554,32 +1586,44 @@ class RevertWorker(QObject):
                     shutil.rmtree(d, ignore_errors=True)
                     logger.info("Removed orphan mod directory: %s", d.name)
 
-            # Restore vanilla PAPGT from backup if available.
-            # Rebuilding from scratch can produce slightly different bytes
-            # (different hash) than the original, which Verify flags as modded.
+            # Restore vanilla PAPGT.
+            # Always rebuild from scratch during revert to ensure only vanilla
+            # directories are included. The backup may be stale (created after
+            # a standalone mod added directory 0036+).
             self.progress_updated.emit(92, "Restoring PAPGT...")
             vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
-            if vanilla_papgt.exists():
+            snap_papgt = self._db.connection.execute(
+                "SELECT file_size FROM snapshots WHERE file_path = 'meta/0.papgt'"
+            ).fetchone()
+
+            # Use backup only if its size matches the snapshot (truly vanilla)
+            if (vanilla_papgt.exists() and snap_papgt
+                    and vanilla_papgt.stat().st_size == snap_papgt[0]):
                 txn.stage_file("meta/0.papgt", vanilla_papgt.read_bytes())
-                logger.info("Restored vanilla PAPGT from backup")
+                logger.info("Restored vanilla PAPGT from backup (size matches snapshot)")
             else:
-                # No backup — rebuild with vanilla PAMT hashes.
-                # Since we're reverting, feed all backed-up PAMT data so
-                # the rebuild recomputes every hash against vanilla PAMTs
-                # (not the modded hashes from the current PAPGT).
+                # Backup is stale or missing — rebuild with only vanilla directories.
+                # Feed vanilla PAMT data so all hashes are correct.
+                if vanilla_papgt.exists() and snap_papgt:
+                    logger.info("PAPGT backup stale (size %d != snapshot %d), rebuilding",
+                                vanilla_papgt.stat().st_size, snap_papgt[0])
                 papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
                 vanilla_pamts: dict[str, bytes] = {}
-                for fp in mod_files:
-                    if fp.endswith(".pamt"):
-                        pamt_bytes = self._get_vanilla_bytes(fp)
-                        if pamt_bytes:
-                            dir_name = fp.split("/")[0]
-                            vanilla_pamts[dir_name] = pamt_bytes
+                # Read all vanilla PAMTs from backed up or game files
+                for d in sorted(self._game_dir.iterdir()):
+                    if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                        continue
+                    if int(d.name) >= 36:
+                        continue  # skip mod directories
+                    pamt_path = f"{d.name}/0.pamt"
+                    pamt_bytes = self._get_vanilla_bytes(pamt_path)
+                    if pamt_bytes:
+                        vanilla_pamts[d.name] = pamt_bytes
                 try:
                     papgt_bytes = papgt_mgr.rebuild(
                         modified_pamts=vanilla_pamts if vanilla_pamts else None)
                     txn.stage_file("meta/0.papgt", papgt_bytes)
-                    logger.info("Rebuilt PAPGT for revert (rehashed %d PAMTs)",
+                    logger.info("Rebuilt vanilla PAPGT for revert (%d dirs)",
                                 len(vanilla_pamts))
                 except FileNotFoundError:
                     pass
