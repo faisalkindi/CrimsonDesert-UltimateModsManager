@@ -161,6 +161,7 @@ def _try_paz_entry_import(
     from cdumm.archive.paz_parse import parse_pamt
     from cdumm.archive.paz_crypto import lz4_decompress, decrypt
     from cdumm.engine.delta_engine import save_entry_delta
+    from cdumm.engine.json_patch_handler import _extract_from_paz
     import os
 
     dir_name = rel_path.split("/")[0]  # e.g. "0008"
@@ -201,29 +202,7 @@ def _try_paz_entry_import(
 
     def _extract_entry(entry, paz_path):
         """Extract and decompress a single entry from a PAZ file."""
-        with open(paz_path, "rb") as f:
-            f.seek(entry.offset)
-            raw = f.read(entry.comp_size)
-        if entry.compressed and entry.compression_type == 1:
-            # DDS split: 128-byte header (raw) + LZ4 compressed body
-            header = raw[:128]
-            comp_body = raw[128:]
-            body_orig = entry.orig_size - 128
-            try:
-                body = lz4_decompress(comp_body, body_orig)
-            except Exception:
-                body = lz4_decompress(decrypt(comp_body, os.path.basename(entry.path)), body_orig)
-            return header + body
-        if entry.compressed and entry.compression_type == 2:
-            try:
-                return lz4_decompress(raw, entry.orig_size)
-            except Exception:
-                basename = os.path.basename(entry.path)
-                decrypted = decrypt(raw, basename)
-                return lz4_decompress(decrypted, entry.orig_size)
-        if entry.encrypted:
-            return decrypt(raw, os.path.basename(entry.path))
-        return raw
+        return _extract_from_paz(entry, paz_path=str(paz_path))
 
     changed = 0
     paz_file_path = f"{dir_name}/{paz_index}.paz"
@@ -510,7 +489,12 @@ def _detect_standalone_mod(
     return remap if remap else None
 
 
-_assigned_dirs: set[int] = set()  # track dirs assigned in current session
+_assigned_dirs: set[int] = set()  # track dirs assigned in current import batch
+
+
+def clear_assigned_dirs() -> None:
+    """Clear the assigned directory tracker. Call after Apply completes."""
+    _assigned_dirs.clear()
 
 
 def _next_paz_directory(game_dir: Path) -> str:
@@ -521,11 +505,11 @@ def _next_paz_directory(game_dir: Path) -> str:
             existing.add(int(d.name))
     existing |= _assigned_dirs
     # Start from 36 (base game uses 0000-0035)
-    for n in range(36, 200):
+    for n in range(36, 9999):
         if n not in existing:
             _assigned_dirs.add(n)
             return f"{n:04d}"
-    return "0100"  # fallback
+    raise RuntimeError("No available PAZ directory numbers (36-9999 all used)")
 
 
 def import_from_7z(
@@ -603,6 +587,12 @@ def _import_from_extracted(
             jp_data, game_dir, db, deltas_dir, jp_name,
             existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
         if entr_result is not None:
+            if not entr_result["changed_files"]:
+                result = ModImportResult(jp_name)
+                result.error = (
+                    "This mod's changes are already present in your game files. "
+                    "Nothing to apply.")
+                return result
             result = ModImportResult(jp_name)
             result.changed_files = entr_result["changed_files"]
             if jp_data.get("patches"):
@@ -682,29 +672,30 @@ def import_from_zip(
                     existing_mod_id=existing_mod_id, modinfo=modinfo)
                 return result
 
-        # Check for JSON byte-patch format inside the zip
+        # Check for JSON byte-patch format — use ENTR deltas for proper composition
         jp_data = detect_json_patch(tmp_path)
         if jp_data is not None:
-            jp_work = Path(tmp) / "_jp_converted"
-            converted = convert_json_patch_to_paz(jp_data, game_dir, jp_work)
-            if converted is not None:
-                has_files = any(converted.rglob("*")) if converted.exists() else False
-                if not has_files:
+            from cdumm.engine.json_patch_handler import import_json_as_entr
+            jp_name = jp_data.get("name", mod_name)
+            jp_modinfo = {
+                "name": jp_data.get("name"), "version": jp_data.get("version"),
+                "author": jp_data.get("author"), "description": jp_data.get("description"),
+            }
+            if jp_modinfo.get("name"):
+                jp_name = jp_modinfo["name"]
+            entr_result = import_json_as_entr(
+                jp_data, game_dir, db, deltas_dir, jp_name,
+                existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+            if entr_result is not None:
+                if not entr_result["changed_files"]:
                     result.error = (
                         "This mod's changes are already present in your game files. "
-                        "Nothing to apply."
-                    )
+                        "Nothing to apply.")
                     return result
-                jp_name = jp_data.get("name", mod_name)
-                jp_modinfo = {
-                    "name": jp_data.get("name"),
-                    "version": jp_data.get("version"),
-                    "author": jp_data.get("author"),
-                    "description": jp_data.get("description"),
-                }
-                result = _process_extracted_files(
-                    converted, game_dir, db, snapshot, deltas_dir, jp_name,
-                    existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+                result = ModImportResult(jp_name)
+                result.changed_files = entr_result["changed_files"]
+                if jp_data.get("patches"):
+                    _store_json_patches(db, result, jp_data, game_dir)
                 return result
 
         # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
@@ -804,6 +795,12 @@ def import_from_folder(
             jp_data, game_dir, db, deltas_dir, jp_name,
             existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
         if entr_result is not None:
+            if not entr_result["changed_files"]:
+                result = ModImportResult(jp_name)
+                result.error = (
+                    "This mod's changes are already present in your game files. "
+                    "Nothing to apply.")
+                return result
             result = ModImportResult(jp_name)
             result.changed_files = entr_result["changed_files"]
             if jp_data.get("patches"):
@@ -1180,12 +1177,20 @@ def _store_json_patches(db: Database, result, patch_data: dict, game_dir: Path) 
             "changes": changes,
         })
 
-        # Update all mod_deltas rows for this mod + PAZ file
-        db.connection.execute(
+        # Update the specific mod_deltas row for this entry
+        # (scoped to entry_path to avoid overwriting other entries in same PAZ)
+        updated = db.connection.execute(
             "UPDATE mod_deltas SET json_patches = ? "
-            "WHERE mod_id = ? AND file_path LIKE ?",
-            (patches_json, mod_id, f"{pamt_dir}/%"),
-        )
+            "WHERE mod_id = ? AND entry_path = ?",
+            (patches_json, mod_id, entry.path),
+        ).rowcount
+        if not updated:
+            # Fallback for mods without entry_path (old SPRS deltas)
+            db.connection.execute(
+                "UPDATE mod_deltas SET json_patches = ? "
+                "WHERE mod_id = ? AND file_path LIKE ? AND json_patches IS NULL",
+                (patches_json, mod_id, f"{pamt_dir}/%"),
+            )
 
     db.connection.commit()
     logger.info("Stored JSON patch data for mod %d (%d patches)",

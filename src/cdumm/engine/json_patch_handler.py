@@ -92,23 +92,16 @@ def detect_json_patch(path: Path) -> dict | None:
     return None
 
 
-def _extract_from_paz(entry: PazEntry) -> bytes:
-    """Read a file entry from its PAZ archive and return decompressed plaintext.
+def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
+    """Decompress raw PAZ entry bytes based on the entry's compression type.
 
-    If the PAMT encrypted flag is wrong (file is actually encrypted),
-    corrects entry.encrypted so repack_entry_bytes will re-encrypt.
-
-    Handles compression type 0x01 (128-byte DDS header + LZ4 body)
-    and type 0x02 (fully LZ4 compressed).
+    Handles type 0x01 (DDS split: 128-byte header + LZ4 body),
+    type 0x02 (fully LZ4 compressed), and uncompressed entries.
+    Detects encryption automatically and corrects entry._encrypted_override.
     """
-    with open(entry.paz_file, "rb") as f:
-        f.seek(entry.offset)
-        raw = f.read(entry.comp_size)
-
     basename = os.path.basename(entry.path)
 
     if entry.compressed and entry.compression_type == 1:
-        # DDS split: 128-byte header (raw) + LZ4 compressed body
         DDS_HEADER_SIZE = 128
         header = raw[:DDS_HEADER_SIZE]
         compressed_body = raw[DDS_HEADER_SIZE:]
@@ -125,7 +118,6 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
         return header + body
 
     if entry.compressed and entry.compression_type == 2:
-        # Fully LZ4 compressed
         try:
             return lz4_decompress(raw, entry.orig_size)
         except Exception:
@@ -137,11 +129,30 @@ def _extract_from_paz(entry: PazEntry) -> bytes:
                 entry._encrypted_override = True
             return result
 
-    # Not compressed — try raw first, then decrypted
     if entry.encrypted:
-        raw = decrypt(raw, basename)
+        return decrypt(raw, basename)
 
     return raw
+
+
+def _extract_from_paz(entry: PazEntry, paz_path: str | None = None) -> bytes:
+    """Read a file entry from its PAZ archive and return decompressed plaintext.
+
+    Args:
+        entry: PAMT entry describing the file location and format
+        paz_path: override PAZ file path (default: entry.paz_file).
+                  Use when reading from a mod's PAZ copy instead of the game file.
+
+    If the PAMT encrypted flag is wrong (file is actually encrypted),
+    corrects entry.encrypted so repack_entry_bytes will re-encrypt.
+
+    Handles compression type 0x01 (128-byte DDS header + LZ4 body)
+    and type 0x02 (fully LZ4 compressed).
+    """
+    with open(paz_path or entry.paz_file, "rb") as f:
+        f.seek(entry.offset)
+        raw = f.read(entry.comp_size)
+    return decompress_entry(raw, entry)
 
 
 def _apply_byte_patches(data: bytearray, changes: list[dict],

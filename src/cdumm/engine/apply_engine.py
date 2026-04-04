@@ -1009,30 +1009,9 @@ class ApplyWorker(QObject):
                     # Read from mod PAZ bytes at the entry offset
                     raw = mod_paz[mod_entry.offset:
                                   mod_entry.offset + mod_entry.comp_size]
-                    # Decompress
-                    import os
-                    from cdumm.archive.paz_crypto import decrypt, lz4_decompress
-                    basename = os.path.basename(entry.path)
-                    if entry.compressed and entry.compression_type == 1:
-                        # DDS split: 128-byte header + LZ4 body
-                        header = raw[:128]
-                        comp_body = raw[128:]
-                        body_orig = entry.orig_size - 128
-                        try:
-                            body = lz4_decompress(comp_body, body_orig)
-                        except Exception:
-                            body = lz4_decompress(decrypt(comp_body, basename), body_orig)
-                        mod_content = header + body
-                    elif entry.compressed and entry.compression_type == 2:
-                        try:
-                            mod_content = lz4_decompress(raw, entry.orig_size)
-                        except Exception:
-                            decrypted = decrypt(raw, basename)
-                            mod_content = lz4_decompress(decrypted, entry.orig_size)
-                    elif entry.encrypted:
-                        mod_content = decrypt(raw, basename)
-                    else:
-                        mod_content = raw
+                    # Decompress using shared utility
+                    from cdumm.engine.json_patch_handler import decompress_entry
+                    mod_content = decompress_entry(raw, entry)
 
                     # Three-way merge: only apply bytes that THIS mod changed
                     for i in range(min(len(vanilla_content), len(mod_content))):
@@ -1306,7 +1285,12 @@ class ApplyWorker(QObject):
         return bytes(buf)
 
     def _get_vanilla_bytes(self, file_path: str) -> bytes | None:
-        """Get vanilla version of a file from backup (range or full)."""
+        """Get vanilla version of a file from backup (range or full).
+
+        Warning: range backup only covers positions that mods explicitly
+        touched. If the game file has modifications outside those positions
+        (from other mods or manual edits), those leak into the result.
+        """
         # Try full backup first
         full_path = self._vanilla_dir / file_path.replace("/", "\\")
         if full_path.exists():
@@ -1321,7 +1305,22 @@ class ApplyWorker(QObject):
         if range_entries:
             buf = bytearray(game_path.read_bytes())
             _apply_ranges_to_buf(buf, range_entries)
-            return bytes(buf)
+            result = bytes(buf)
+            # Verify reconstructed vanilla against snapshot
+            try:
+                snap = self._db.connection.execute(
+                    "SELECT file_hash FROM snapshots WHERE file_path = ?",
+                    (file_path,)).fetchone()
+                if snap:
+                    import xxhash
+                    h = xxhash.xxh3_128(result).hexdigest()
+                    if h != snap[0]:
+                        logger.warning(
+                            "Range-reconstructed vanilla for %s doesn't match snapshot "
+                            "(game file may have untracked modifications)", file_path)
+            except Exception:
+                pass
+            return result
 
         return None
 

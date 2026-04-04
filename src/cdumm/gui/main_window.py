@@ -1,6 +1,6 @@
 """Main application window — wires all components together."""
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
@@ -123,6 +123,33 @@ class MainWindow(QMainWindow):
         self._applied_state: dict[int, bool] = {}  # {mod_id: enabled} snapshot after last apply
         self._snapshot_in_progress = False
         self._dispatcher = MainThreadDispatcher(parent=self)
+
+        # Clean up stale staging directory from previous crash.
+        # Only clean if no other CDUMM instance is running (check lock file age).
+        if game_dir:
+            staging = game_dir / ".cdumm_staging"
+            if staging.exists():
+                lock_file = (Path.home() / "AppData" / "Local" / "cdumm" / ".running")
+                lock_is_stale = True
+                if lock_file.exists():
+                    try:
+                        lock_time = datetime.fromisoformat(
+                            lock_file.read_text(encoding="utf-8").strip())
+                        if datetime.now() - lock_time < timedelta(seconds=30):
+                            lock_is_stale = False  # another instance may be active
+                    except Exception:
+                        pass
+                if lock_is_stale:
+                    try:
+                        import shutil
+                        shutil.rmtree(staging, ignore_errors=True)
+                        logger.info("Cleaned up stale staging directory")
+                    except Exception:
+                        pass
+
+        # Clear stale import state from previous session
+        from cdumm.engine.import_handler import clear_assigned_dirs
+        clear_assigned_dirs()
 
         # Initialize managers if database is available
         if db:
@@ -3078,6 +3105,19 @@ class MainWindow(QMainWindow):
                 return
 
         self._snapshot_in_progress = True
+
+        # Clear stale vanilla backups. After a Steam verify the game files
+        # are clean, so any existing backups are from a previous modded state
+        # and would poison future reverts. Also clear range backups and
+        # old deltas so mods get reimported against the fresh baseline.
+        if self._vanilla_dir and self._vanilla_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(self._vanilla_dir, ignore_errors=True)
+                self._vanilla_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Cleared stale vanilla backups for fresh snapshot")
+            except Exception as e:
+                logger.warning("Failed to clear vanilla backups: %s", e)
 
         progress = ProgressDialog("Creating Vanilla Snapshot", self)
         worker = SnapshotWorker(self._game_dir, self._db.db_path)

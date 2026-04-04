@@ -108,6 +108,14 @@ class Database:
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.executescript(SCHEMA)
         self._migrate()
+        # Create indexes that depend on migrated columns (entry_path may not
+        # exist in pre-migration databases, so this must run after _migrate)
+        try:
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mod_deltas_entry_path "
+                "ON mod_deltas(entry_path)")
+        except Exception:
+            pass  # column doesn't exist yet on very old DBs
         self._connection.commit()
         logger.info("Database schema initialized")
 

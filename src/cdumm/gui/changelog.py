@@ -8,11 +8,21 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.9.4",
+        "version": "2.0.0",
         "date": "2026-04-04",
         "notes": [
-            "Per patch toggle now works for ALL labeled JSON mods, not just bracket prefixed ones. Mods like Crimson Wings AIO and custom weapon mods now show the checkbox picker so you can enable or disable individual changes.",
-            "Fixed mods importing with 'no data' when game files are already modded. Detects already applied patches and creates deltas correctly even without a vanilla backup to compare against.",
+            "Rescan now clears stale vanilla backups automatically. After Steam verify, old backups from previous modded state are wiped so reverts always use clean data.",
+            "Fixed JSON mods in ZIP archives using the old FULL_COPY path instead of entry level deltas. ZIP JSON mods now compose correctly like folder and standalone JSON imports.",
+            "Consolidated duplicate extraction code into single decompress_entry utility.",
+            "Range backup revert now verifies result against snapshot hash and warns if reconstruction may be incomplete.",
+            "Stale staging directory cleaned up on startup after crash.",
+            "Database entry_path index created safely after migration for old databases.",
+            "JSON patch merge metadata now scoped to specific entry instead of overwriting all entries in same directory.",
+            "Empty JSON imports now show error instead of creating a mod with no data.",
+            "Directory assignment ceiling raised from 200 to 9999 with proper error instead of silent collision.",
+            "Assigned directory numbers cleared on startup to prevent leaks across sessions.",
+            "Per patch toggle now works for ALL labeled JSON mods, not just bracket prefixed ones.",
+            "Fixed mods importing with 'no data' when game files are already modded.",
             "Fixed game directory not persisting between launches. The setup dialog no longer appears every time you open CDUMM.",
             "Auto migration after update. When CDUMM updates, it offers to revert and reimport all mods automatically so they use the new internal format. Mod list, enabled state, and load order are preserved.",
             "Fixed critical PAPGT crash with standalone mods (Better Minimap, Better Trade Menu, Better Inventory UI, save editors). Mod shipped PAPGTs were being parsed incorrectly, removing all 33 vanilla directories and leaving only the mod's directory. PAPGT is now always built from vanilla base with new directories discovered from disk.",
