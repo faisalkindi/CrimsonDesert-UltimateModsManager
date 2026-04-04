@@ -568,8 +568,29 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         logger.info("Applied %d/%d patches to %s", applied, len(changes), game_file)
 
         if bytes(modified) == plaintext:
-            logger.info("No changes after patching %s, skipping", game_file)
-            continue
+            # Content unchanged. Could mean: (a) patches had no effect, or
+            # (b) game file already has the patched values (mod already applied).
+            # For case (b), try to get vanilla content to compare against.
+            # If modified differs from vanilla, the mod IS doing something.
+            vanilla_content = None
+            if applied > 0:
+                try:
+                    van_entry = _find_pamt_entry(game_file, vanilla_dir)
+                    if van_entry and os.path.exists(van_entry.paz_file):
+                        vanilla_content = _extract_from_paz(van_entry)
+                except Exception:
+                    pass
+            if vanilla_content is not None and bytes(modified) != vanilla_content:
+                logger.info("Mod already applied to %s, using current content as delta", game_file)
+                # Content is correct (already patched), proceed to save delta
+            elif vanilla_content is None and applied > 0:
+                # No vanilla backup to compare against, but patches were
+                # detected as already applied. Trust the "already applied"
+                # detection and create the delta anyway.
+                logger.info("Mod likely already applied to %s (no vanilla to verify), creating delta", game_file)
+            else:
+                logger.info("No changes after patching %s, skipping", game_file)
+                continue
 
         # Determine PAZ file path for this entry
         pamt_dir = Path(entry.paz_file).parent.name

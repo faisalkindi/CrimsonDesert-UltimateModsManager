@@ -8,10 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "1.9.3",
-        "date": "2026-04-03",
+        "version": "1.9.4",
+        "date": "2026-04-04",
         "notes": [
-            "Fixed mods importing with 0 deltas when game files are already modded. Patches that are already applied are now detected and counted correctly instead of being skipped.",
+            "Per patch toggle now works for ALL labeled JSON mods, not just bracket prefixed ones. Mods like Crimson Wings AIO and custom weapon mods now show the checkbox picker so you can enable or disable individual changes.",
+            "Fixed mods importing with 'no data' when game files are already modded. Detects already applied patches and creates deltas correctly even without a vanilla backup to compare against.",
             "Fixed game directory not persisting between launches. The setup dialog no longer appears every time you open CDUMM.",
             "Auto migration after update. When CDUMM updates, it offers to revert and reimport all mods automatically so they use the new internal format. Mod list, enabled state, and load order are preserved.",
             "Fixed critical PAPGT crash with standalone mods (Better Minimap, Better Trade Menu, Better Inventory UI, save editors). Mod shipped PAPGTs were being parsed incorrectly, removing all 33 vanilla directories and leaving only the mod's directory. PAPGT is now always built from vanilla base with new directories discovered from disk.",
