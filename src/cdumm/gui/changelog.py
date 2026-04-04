@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "2.0.1",
+        "version": "2.0.2",
         "date": "2026-04-04",
         "notes": [
+            "Bare loose file mods now detected without mod.json. Mods with files/NNNN/ structure (like Enhanced Internal Graphics) import correctly.",
             "Auto migration now runs on background thread with progress dialog instead of freezing the UI.",
             "Configure now shows preset picker for multi-preset mods (like Trust Me) and auto-applies after selection.",
             "Mod name updates to reflect current configuration after reconfiguring.",

@@ -323,6 +323,29 @@ def detect_loose_file_mod(path: Path) -> dict | None:
                 return manifest
         except Exception:
             continue
+
+    # Pattern 2: files/NNNN/ structure without mod.json (bare loose file mod)
+    for candidate in [path, *[d for d in path.iterdir() if d.is_dir()]]:
+        files_dir = candidate / "files"
+        if not files_dir.exists() or not files_dir.is_dir():
+            continue
+        # Check if files/ contains numbered game directories
+        has_numbered = any(
+            d.is_dir() and d.name.isdigit() and len(d.name) == 4
+            for d in files_dir.iterdir()
+        )
+        if has_numbered:
+            manifest = {
+                "format": "loose_file_mod",
+                "id": candidate.name,
+                "files_dir": "files",
+                "_manifest_path": None,
+                "_base_dir": candidate,
+                "_modinfo": {"title": candidate.name},
+            }
+            logger.info("Detected bare loose file mod (no mod.json): %s", candidate.name)
+            return manifest
+
     return None
 
 
