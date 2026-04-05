@@ -1000,22 +1000,12 @@ class MigrateWorker(QObject):
                         has_source = True
 
                 if not has_source:
-                    # No source available. Clear old deltas so stale/wrong
-                    # deltas from previous versions don't crash the game.
-                    db.connection.execute(
-                        "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-                    db.connection.execute(
-                        "UPDATE mods SET enabled = 0 WHERE id = ?", (mod_id,))
-                    db.connection.commit()
-                    logger.warning("No source for %s (id=%d), cleared old deltas",
+                    # No source — can't reimport. Keep existing deltas as-is
+                    # (they may still work). Just log and skip.
+                    logger.warning("No source for %s (id=%d), keeping existing deltas",
                                    mod_name, mod_id)
                     failed += 1
                     continue
-
-                # Clear old deltas before reimport so stale data doesn't persist
-                db.connection.execute(
-                    "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-                db.connection.commit()
 
                 try:
                     logger.info("Auto-reimporting: %s from %s", mod_name, src)

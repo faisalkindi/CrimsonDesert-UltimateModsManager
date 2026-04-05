@@ -3524,21 +3524,10 @@ class MainWindow(QMainWindow):
                     has_source = True
 
             if not has_source:
-                # Clear old deltas so stale data doesn't crash the game
-                self._db.connection.execute(
-                    "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-                self._db.connection.execute(
-                    "UPDATE mods SET enabled = 0 WHERE id = ?", (mod_id,))
-                self._db.connection.commit()
-                logger.warning("No source for %s (id=%d), cleared old deltas",
+                logger.warning("No source for %s (id=%d), keeping existing deltas",
                                mod_name, mod_id)
                 failed += 1
                 continue
-
-            # Clear old deltas before reimport
-            self._db.connection.execute(
-                "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-            self._db.connection.commit()
 
             try:
                 self.statusBar().showMessage(
@@ -3807,9 +3796,14 @@ class MainWindow(QMainWindow):
             config.set("last_seen_version", __version__)
             QTimer.singleShot(500, self._show_update_notes)
 
-            # Auto-migrate mods to new format after version update.
-            # Old deltas from previous versions may use incompatible formats.
-            if last_seen and self._mod_manager and self._mod_manager.get_mod_count() > 0:
+            # Auto-migrate only when the delta format actually changes.
+            # This version number is bumped ONLY for breaking format changes,
+            # not for every code update. Prevents unnecessary reimports.
+            CURRENT_FORMAT_VERSION = "2"  # bump this when delta format changes
+            stored_format = config.get("migration_format_version") or "0"
+            if (stored_format != CURRENT_FORMAT_VERSION
+                    and self._mod_manager and self._mod_manager.get_mod_count() > 0):
+                config.set("migration_format_version", CURRENT_FORMAT_VERSION)
                 QTimer.singleShot(1500, self._auto_migrate_after_update)
 
     def _show_update_notes(self) -> None:
