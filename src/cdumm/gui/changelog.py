@@ -8,11 +8,21 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "2.0.3",
-        "date": "2026-04-04",
+        "version": "2.1.0",
+        "date": "2026-04-05",
         "notes": [
-            "Fixed orphan mod directories not being cleaned up when mods are disabled via Apply. Directories like 0042/ are now removed before PAPGT rebuild so they don't get re-added.",
-            "Fixed stale PAPGT backup causing 'modded' state after revert. Backup size is validated against snapshot and rebuilt from scratch if stale.",
+            "Fix Everything button in the action bar. One click to revert, clear backups, rescan, and reimport. Recommends Steam verify first.",
+            "Startup health check silently auto-fixes dirty game state (orphan directories, wrong PAPGT) when no mods are enabled.",
+            "Auto migration now clears old deltas before reimport. Mods with no source get disabled instead of keeping stale wrong deltas that crash the game.",
+            "Fixed configurable source leak between imports. Failed imports no longer pollute the next mod's source path or configure options.",
+            "Fixed source archiving for filtered JSON mods. Original source path is preserved so reimport and Configure work correctly.",
+            "Configure now shows preset picker for multi-preset mods (like Trust Me variants) and auto-applies after selection. Mod name updates to reflect current configuration.",
+            "Toggle picker only shows when changes target the same game file. Mods like LET ME SLEEP that patch multiple files no longer show a confusing options dialog.",
+            "Smarter configurable detection. Only mods with real options (multiple bracket groups in same file, or 10+ independent changes) show the gear icon.",
+            "Bare loose file mods now detected without mod.json (files/NNNN/ structure).",
+            "Notifies users on startup if mods are missing source files and need reimport.",
+            "Fixed orphan mod directories not cleaned up when mods disabled via Apply.",
+            "Fixed stale PAPGT backup causing modded state after revert.",
             "Bare loose file mods now detected without mod.json. Mods with files/NNNN/ structure (like Enhanced Internal Graphics) import correctly.",
             "Auto migration now runs on background thread with progress dialog instead of freezing the UI.",
             "Configure now shows preset picker for multi-preset mods (like Trust Me) and auto-applies after selection.",

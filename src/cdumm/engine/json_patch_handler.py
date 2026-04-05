@@ -649,7 +649,8 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             shutil.rmtree(sources_dir)
         sources_dir.mkdir(parents=True, exist_ok=True)
         # Copy the original JSON file and any sibling JSONs (for multi-preset mods)
-        json_path = patch_data.get("_json_path")
+        # Prefer _original_source (set by toggle picker) over _json_path (may be temp file)
+        json_path = patch_data.get("_original_source") or patch_data.get("_json_path")
         if json_path and Path(json_path).exists():
             src = Path(json_path)
             if src.is_file():

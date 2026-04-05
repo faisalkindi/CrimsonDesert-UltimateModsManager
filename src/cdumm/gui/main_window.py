@@ -289,12 +289,176 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Silent startup health check — fix dirty game state automatically
+        self._startup_health_check()
+
         # Check for missing PAMT full backups (upgrade from older versions)
         self._check_pamt_backups()
 
         # Trigger background status check for mod list
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
+
+    def _startup_health_check(self) -> None:
+        """Fast silent check for dirty game state on startup.
+
+        If no mods are enabled but game files don't match vanilla,
+        automatically fix the state so users don't have to.
+        """
+        try:
+            if not self._db or not self._game_dir or not self._snapshot:
+                return
+            if not self._snapshot.has_snapshot():
+                return
+
+            # Only check if no mods are enabled
+            enabled = self._db.connection.execute(
+                "SELECT COUNT(*) FROM mods WHERE enabled = 1").fetchone()[0]
+            if enabled > 0:
+                return
+
+            # Fast check: PAPGT size vs snapshot
+            papgt_path = self._game_dir / "meta" / "0.papgt"
+            if not papgt_path.exists():
+                return
+            snap = self._db.connection.execute(
+                "SELECT file_size FROM snapshots WHERE file_path = 'meta/0.papgt'"
+            ).fetchone()
+            if not snap:
+                return
+            actual_size = papgt_path.stat().st_size
+            if actual_size == snap[0]:
+                # PAPGT matches — also check for orphan directories
+                has_orphans = False
+                for d in self._game_dir.iterdir():
+                    if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                            and int(d.name) >= 36):
+                        orphan_check = self._db.connection.execute(
+                            "SELECT COUNT(*) FROM snapshots WHERE file_path LIKE ?",
+                            (d.name + "/%",)).fetchone()[0]
+                        if orphan_check == 0:
+                            has_orphans = True
+                            break
+                if not has_orphans:
+                    return  # everything looks clean
+
+            # Game files are dirty with no mods enabled — auto fix
+            logger.info("Startup health check: game files dirty, auto-fixing")
+            import shutil
+
+            # Clean orphan directories
+            for d in sorted(self._game_dir.iterdir()):
+                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                    continue
+                if int(d.name) < 36:
+                    continue
+                orphan_check = self._db.connection.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE file_path LIKE ?",
+                    (d.name + "/%",)).fetchone()[0]
+                if orphan_check == 0:
+                    shutil.rmtree(d, ignore_errors=True)
+                    logger.info("Health check: removed orphan directory %s", d.name)
+
+            # Restore vanilla PAPGT if backup exists and size matches snapshot
+            vanilla_papgt = self._vanilla_dir / "meta" / "0.papgt"
+            if vanilla_papgt.exists() and snap:
+                if vanilla_papgt.stat().st_size == snap[0]:
+                    shutil.copy2(vanilla_papgt, papgt_path)
+                    logger.info("Health check: restored vanilla PAPGT")
+
+            self._log_activity("health", "Auto-fixed dirty game state on startup")
+        except Exception as e:
+            logger.debug("Startup health check failed: %s", e)
+
+    def _on_fix_everything(self) -> None:
+        """One-click fix: revert, clear backups, clean orphans, rescan if clean.
+
+        For users with corrupted state who just want it to work.
+        """
+        reply = QMessageBox.question(
+            self, "Fix Game State",
+            "Before continuing, it is strongly recommended that you\n"
+            "verify your game files through Steam first:\n\n"
+            "  Steam > Right click Crimson Desert > Properties\n"
+            "  > Installed Files > Verify integrity of game files\n\n"
+            "After verifying, this will:\n"
+            "1. Revert all game files to vanilla\n"
+            "2. Clear old backups\n"
+            "3. Remove orphan mod directories\n"
+            "4. Take a fresh snapshot\n"
+            "5. Reimport all mods from stored sources\n\n"
+            "Your mod list is preserved.\n"
+            "Have you verified through Steam?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        import shutil
+
+        # Step 1: Revert
+        self.statusBar().showMessage("Fix: reverting to vanilla...", 0)
+        try:
+            from cdumm.engine.apply_engine import RevertWorker
+            from cdumm.storage.database import Database
+            revert_db = Database(self._db.db_path)
+            revert_db.initialize()
+            rw = RevertWorker.__new__(RevertWorker)
+            rw._game_dir = self._game_dir
+            rw._vanilla_dir = self._vanilla_dir
+            rw._db = revert_db
+            rw._revert()
+            revert_db.close()
+        except Exception as e:
+            logger.warning("Fix: revert failed: %s", e)
+
+        # Step 2: Clear backups
+        if self._vanilla_dir and self._vanilla_dir.exists():
+            shutil.rmtree(self._vanilla_dir, ignore_errors=True)
+            self._vanilla_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 3: Clean orphan directories
+        for d in sorted(self._game_dir.iterdir()):
+            if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                    and int(d.name) >= 36):
+                snap_check = self._db.connection.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE file_path LIKE ?",
+                    (d.name + "/%",)).fetchone()[0]
+                if snap_check == 0:
+                    shutil.rmtree(d, ignore_errors=True)
+
+        # Step 4: Check if files are actually clean before taking snapshot
+        # Quick check: PAPGT size should match snapshot
+        files_clean = True
+        try:
+            papgt = self._game_dir / "meta" / "0.papgt"
+            snap = self._db.connection.execute(
+                "SELECT file_size FROM snapshots WHERE file_path = 'meta/0.papgt'"
+            ).fetchone()
+            if snap and papgt.exists() and papgt.stat().st_size != snap[0]:
+                files_clean = False
+        except Exception:
+            pass
+
+        if files_clean:
+            self._on_refresh_snapshot(skip_verify_prompt=True)
+            self._log_activity("fix",
+                               "Fix Everything: reverted, cleared backups, rescanning")
+            self.statusBar().showMessage("Fix in progress: rescanning game files...", 0)
+        else:
+            self._log_activity("fix",
+                               "Fix Everything: reverted and cleaned up, but files still "
+                               "modded. Steam Verify needed.")
+            QMessageBox.warning(
+                self, "Steam Verify Needed",
+                "Game files are still modified after revert.\n\n"
+                "This means some changes couldn't be undone automatically.\n"
+                "Please verify game files through Steam, then come back\n"
+                "and click Fix Everything again.\n\n"
+                "Steam: Right click Crimson Desert, Properties,\n"
+                "Installed Files, Verify integrity of game files.")
+            self.statusBar().showMessage(
+                "Fix incomplete: Steam Verify needed, then run Fix again.", 0)
 
     def _check_stale_appdata(self) -> None:
         """Detect stale data in %LocalAppData%/cdumm from old versions.
@@ -1216,6 +1380,7 @@ class MainWindow(QMainWindow):
             ("Check Mods For Issues", self._on_check_mods),
             ("Find Problem Mod", self._on_find_problem_mod),
             ("Rescan After Steam Verify", self._on_refresh_snapshot),
+            ("Fix Everything", self._on_fix_everything),
             ("Change Game Directory", self._on_change_game_dir),
             ("Profiles", self._on_profiles),
             ("Export Mod List", self._on_export_list),
@@ -1318,10 +1483,11 @@ class MainWindow(QMainWindow):
 
         ab_layout.addStretch()
 
-        revert_btn = QPushButton("Revert to Vanilla")
-        revert_btn.setObjectName("revertBtn")
-        revert_btn.clicked.connect(self._on_revert)
-        ab_layout.addWidget(revert_btn)
+        fix_btn = QPushButton("Fix Everything")
+        fix_btn.setObjectName("fixBtn")
+        fix_btn.setToolTip("Revert, clear backups, rescan, reimport. Fixes most issues.")
+        fix_btn.clicked.connect(self._on_fix_everything)
+        ab_layout.addWidget(fix_btn)
 
         content_v.addWidget(action_bar)
         main_h.addLayout(content_v)
@@ -1499,6 +1665,12 @@ class MainWindow(QMainWindow):
         self._active_progress = None
         self._active_worker = None
         self._worker_thread = None
+
+        # Clear configurable state so failed imports don't leak to next import
+        if hasattr(self, '_configurable_source'):
+            del self._configurable_source
+        if hasattr(self, '_configurable_labels'):
+            del self._configurable_labels
 
         # If imports are queued, collect error and continue instead of blocking
         if hasattr(self, '_import_queue') and self._import_queue:
@@ -1782,9 +1954,13 @@ class MainWindow(QMainWindow):
                 # Write filtered JSON to temp file and import that
                 import json as _json
                 tmp_json = Path(tempfile.mktemp(suffix=".json", prefix="cdumm_filtered_"))
-                # Remove non-serializable Path objects before writing
+                # Preserve original _json_path for source archiving, remove for serialization
+                original_json_path = dialog.selected_data.get("_json_path")
                 write_data = dialog.selected_data.copy()
                 write_data.pop("_json_path", None)
+                # Store original path so import_json_as_entr can archive the real source
+                if original_json_path:
+                    write_data["_original_source"] = str(original_json_path)
                 tmp_json.write_text(_json.dumps(write_data, indent=2, default=str), encoding="utf-8")
                 # Remember original source and selected labels for reconfiguration
                 self._configurable_source = str(path)
@@ -3341,14 +3517,28 @@ class MainWindow(QMainWindow):
         for mod_id, mod_name, source_path, priority in mods:
             # Check if source exists in CDMods/sources/<mod_id>/
             src = sources_dir / str(mod_id)
-            if not src.exists() or not any(src.iterdir()):
-                # Try the stored source_path as fallback
+            has_source = src.exists() and any(src.iterdir()) if src.exists() else False
+            if not has_source:
                 if source_path and Path(source_path).exists():
                     src = Path(source_path)
-                else:
-                    logger.warning("No source for %s (id=%d), skipping", mod_name, mod_id)
-                    failed += 1
-                    continue
+                    has_source = True
+
+            if not has_source:
+                # Clear old deltas so stale data doesn't crash the game
+                self._db.connection.execute(
+                    "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+                self._db.connection.execute(
+                    "UPDATE mods SET enabled = 0 WHERE id = ?", (mod_id,))
+                self._db.connection.commit()
+                logger.warning("No source for %s (id=%d), cleared old deltas",
+                               mod_name, mod_id)
+                failed += 1
+                continue
+
+            # Clear old deltas before reimport
+            self._db.connection.execute(
+                "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+            self._db.connection.commit()
 
             try:
                 self.statusBar().showMessage(

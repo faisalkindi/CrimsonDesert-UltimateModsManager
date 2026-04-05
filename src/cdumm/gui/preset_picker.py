@@ -156,9 +156,19 @@ def has_labeled_changes(data: dict) -> bool:
     # All same bracket prefix = one feature, not toggleable
     if has_any_bracket and len(prefixes) <= 1:
         return False
-    # Multiple distinct bracket groups = independent toggleable categories
+    # Multiple distinct bracket groups, but only if all patches target
+    # the SAME game file. Different game files = different components
+    # that need to be installed together (like LET ME SLEEP's sleep_left
+    # + sleep_right), not independent options.
     if has_any_bracket and len(prefixes) >= 2:
-        return True
+        game_files = set()
+        for patch in data.get("patches", []):
+            gf = patch.get("game_file")
+            if gf:
+                game_files.add(gf)
+        if len(game_files) <= 1:
+            return True
+        return False  # multiple game files = not configurable
     # Plain labels (no brackets): only show toggle for mods with many
     # changes (10+), suggesting a mod with lots of independent options.
     # Small numbers of plain labels are just descriptions, not toggles.
