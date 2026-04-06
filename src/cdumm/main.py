@@ -93,16 +93,19 @@ def main() -> int:
     old_appdata_db = APP_DATA_DIR / "cdumm.db"
     old_cdmm_db = Path.home() / "AppData" / "Local" / "cdmm" / "cdumm.db"
 
-    # Try to find game_dir: pointer file first, then old DBs
+    # Try to find game_dir: pointer file first, then old DBs, then auto-detect
+    from cdumm.storage.game_finder import find_game_directories, validate_game_directory
     game_dir = None
 
     # Method 1: Read from persistent pointer file
     if _game_dir_file.exists():
         try:
             saved = _game_dir_file.read_text(encoding="utf-8").strip()
-            if saved and Path(saved).exists():
+            if saved and validate_game_directory(Path(saved)):
                 game_dir = saved
                 logger.info("Game directory from pointer: %s", game_dir)
+            elif saved:
+                logger.info("Pointer path no longer valid: %s", saved)
         except Exception:
             pass
 
@@ -113,12 +116,21 @@ def main() -> int:
                 try:
                     tmp_db = Database(old_db)
                     tmp_db.initialize()
-                    game_dir = _TmpConfig(tmp_db).get("game_directory")
+                    candidate = _TmpConfig(tmp_db).get("game_directory")
                     tmp_db.close()
+                    if candidate and validate_game_directory(Path(candidate)):
+                        game_dir = candidate
                 except Exception:
                     pass
                 if game_dir:
                     break
+
+    # Method 3: Auto-detect if saved path is invalid (game was moved)
+    if game_dir is None:
+        detected = find_game_directories()
+        if len(detected) == 1:
+            game_dir = str(detected[0])
+            logger.info("Auto-detected moved game: %s", game_dir)
 
     if game_dir is None:
         # First-run: game directory setup

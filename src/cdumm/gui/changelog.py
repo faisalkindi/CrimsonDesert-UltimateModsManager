@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "2.1.1",
-        "date": "2026-04-05",
+        "version": "2.1.2",
+        "date": "2026-04-06",
         "notes": [
+            "Fixed game directory not updating when Steam library is moved. CDUMM now validates the saved path has the actual game exe, and auto-detects the new location if the game was moved.",
+            "Fixed loose file mods in zip archives not being detected (VAXIS LOD Fix and similar mods).",
             "Auto migration no longer triggers on every version update. Only triggers when the delta format actually changes. No more unnecessary reimports that wipe working mods.",
             "Migration never clears deltas. If a mod has no stored source, its existing deltas are kept as-is instead of being destroyed.",
             "Fix Everything button in the action bar. One click to revert, clear backups, rescan, and reimport. Recommends Steam verify first.",

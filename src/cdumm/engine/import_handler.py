@@ -695,6 +695,22 @@ def import_from_zip(
                     existing_mod_id=existing_mod_id, modinfo=modinfo)
                 return result
 
+        # Check for loose file mod (files/NNNN/ structure)
+        lfm = detect_loose_file_mod(tmp_path)
+        if lfm is not None:
+            lfm_work = Path(tmp) / "_lfm_converted"
+            converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
+            if converted is not None:
+                mi = lfm.get("_modinfo", {})
+                lfm_name = mi.get("title", mod_name)
+                lfm_modinfo = {
+                    "name": mi.get("title"), "version": mi.get("version"),
+                    "author": mi.get("author"), "description": mi.get("description"),
+                }
+                return _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, lfm_name,
+                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+
         # Check for JSON byte-patch format — use ENTR deltas for proper composition
         jp_data = detect_json_patch(tmp_path)
         if jp_data is not None:
