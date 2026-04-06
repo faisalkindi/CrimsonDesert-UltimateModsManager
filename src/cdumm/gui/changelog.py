@@ -8,6 +8,16 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.3",
+        "date": "2026-04-06",
+        "notes": [
+            "Fixed false byte_range conflicts showing for mods that use entry-level deltas. Conflict panel now compares at the game file level instead of raw byte offsets. Two mods modifying different files inside the same PAZ archive correctly show as compatible.",
+            "Fixed stale PAMT byte-range deltas left behind after entry-level PAZ import. PAMT files were processed before PAZ files alphabetically, creating unnecessary deltas that caused false conflict reports.",
+            "Multi-variant loose file mods now detected and show a picker dialog. Mods like VAXIS Partial LOD Fix with multiple quality options (x1/x2/x3/x4/x5 folders) are recognized even when nested several folders deep inside the archive.",
+            "Fixed null-byte padding crash for mods with smaller content than vanilla. XML and CSS files that are shorter than the original (common with line ending differences) no longer get padded with null bytes that crash the game's parser. PAMT orig_size is now updated to the actual content size.",
+        ],
+    },
+    {
         "version": "2.1.2",
         "date": "2026-04-06",
         "notes": [

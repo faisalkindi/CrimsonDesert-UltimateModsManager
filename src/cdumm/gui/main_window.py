@@ -1875,6 +1875,31 @@ class MainWindow(QMainWindow):
                     self.statusBar().showMessage("Import cancelled.", 5000)
                     return
 
+            # Also check for deeply nested loose-file variants (files/NNNN/ pattern)
+            if not variants:
+                from cdumm.engine.import_handler import find_loose_file_variants
+                lfm_dir_variants = find_loose_file_variants(path)
+                if len(lfm_dir_variants) > 1:
+                    from PySide6.QtWidgets import QInputDialog
+                    lfm_names = []
+                    for v in lfm_dir_variants:
+                        try:
+                            lfm_names.append(v["_base_dir"].relative_to(path).as_posix())
+                        except ValueError:
+                            lfm_names.append(v["_base_dir"].name)
+                    chosen, ok = QInputDialog.getItem(
+                        self, "Choose Variant",
+                        f"This mod has {len(lfm_dir_variants)} variants.\n"
+                        "Choose which one to install:",
+                        lfm_names, 0, False)
+                    if ok and chosen:
+                        idx = lfm_names.index(chosen)
+                        path = lfm_dir_variants[idx]["_base_dir"]
+                        logger.info("User selected loose-file variant: %s", chosen)
+                    else:
+                        self.statusBar().showMessage("Import cancelled.", 5000)
+                        return
+
         # Check for multiple JSON presets — let user pick one
         # For zips, extract to temp first to scan for presets
         from cdumm.gui.preset_picker import find_json_presets, PresetPickerDialog
@@ -1930,6 +1955,41 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Check for multi-variant loose-file mods (e.g. LOD fix with x1/x2/x3 folders)
+        _lfm_selected = False
+        if _label_tmp:
+            from cdumm.engine.import_handler import find_loose_file_variants
+            lfm_variants = find_loose_file_variants(Path(_label_tmp))
+            if len(lfm_variants) > 1:
+                from PySide6.QtWidgets import QInputDialog
+                # Build display names from the variant's ancestor path
+                variant_names = []
+                for v in lfm_variants:
+                    base = v["_base_dir"]
+                    try:
+                        rel = base.relative_to(_label_tmp)
+                        variant_names.append(rel.as_posix())
+                    except ValueError:
+                        variant_names.append(base.name)
+                chosen, ok = QInputDialog.getItem(
+                    self, "Choose Variant",
+                    f"This mod has {len(lfm_variants)} variants.\n"
+                    "Choose which one to install:",
+                    variant_names, 0, False)
+                if ok and chosen:
+                    idx = variant_names.index(chosen)
+                    selected = lfm_variants[idx]
+                    # Point import at the selected variant's base directory.
+                    # Don't clean _label_tmp — the folder import needs it alive.
+                    path = selected["_base_dir"]
+                    _lfm_selected = True
+                    logger.info("User selected loose-file variant: %s", chosen)
+                else:
+                    import shutil
+                    shutil.rmtree(_label_tmp, ignore_errors=True)
+                    self.statusBar().showMessage("Import cancelled.", 5000)
+                    return
+
         json_data = detect_json_patch(json_check_path)
 
         # Mark for configurable flag only if the mod has real configurable options
@@ -1981,9 +2041,12 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Import cancelled.", 5000)
                 return
 
-        if _label_tmp:
+        if _label_tmp and not _lfm_selected:
             import shutil
             shutil.rmtree(_label_tmp, ignore_errors=True)
+        elif _label_tmp and _lfm_selected:
+            # Variant folder lives inside _label_tmp — clean after import finishes
+            self._pending_tmp_cleanup = _label_tmp
 
         # Regular PAZ mod — run on background thread
         logger.info("Starting import worker for: %s", path)
@@ -2261,6 +2324,12 @@ class MainWindow(QMainWindow):
     def _on_import_finished(self, result) -> None:
         logger.info("Import callback received, syncing DB...")
         self._sync_db()
+
+        # Clean up temp dir from loose-file variant selection
+        if hasattr(self, '_pending_tmp_cleanup'):
+            import shutil
+            shutil.rmtree(self._pending_tmp_cleanup, ignore_errors=True)
+            del self._pending_tmp_cleanup
 
         if hasattr(result, 'error') and result.error:
             # Collect error — don't block if more imports are queued

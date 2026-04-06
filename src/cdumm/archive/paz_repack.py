@@ -284,12 +284,10 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                 payload = header + compressed_body
         elif allow_size_change:
             # Type 0x02: fully LZ4 compressed
-            if len(plaintext) > entry.orig_size:
-                padded = plaintext
-                actual_orig_size = len(plaintext)
-            else:
-                padded = _pad_to_orig_size(plaintext, entry.orig_size)
-            compressed = lz4.block.compress(padded, store_size=False)
+            # Always use the actual content size — padding with nulls causes
+            # crashes for XML/CSS files whose parsers choke on null bytes.
+            actual_orig_size = len(plaintext)
+            compressed = lz4.block.compress(plaintext, store_size=False)
             actual_comp_size = len(compressed)
             if actual_comp_size > entry.comp_size:
                 payload = compressed
@@ -312,16 +310,20 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                     f"Size mismatch after compression: {len(compressed)} != {entry.comp_size}")
             payload = compressed
     else:
-        if len(plaintext) > entry.comp_size:
-            if allow_size_change:
-                # Uncompressed file larger than slot — caller must append to PAZ
-                actual_comp_size = len(plaintext)
-                actual_orig_size = len(plaintext)
-                payload = plaintext
+        if allow_size_change:
+            # Use actual content size — no null padding that could corrupt text files
+            actual_comp_size = len(plaintext)
+            actual_orig_size = len(plaintext)
+            if len(plaintext) <= entry.comp_size:
+                # Fits in existing slot — pad to fill but set actual sizes correctly
+                payload = plaintext + b'\x00' * (entry.comp_size - len(plaintext))
             else:
-                raise ValueError(
-                    f"Modified file ({len(plaintext)} bytes) exceeds budget "
-                    f"({entry.comp_size} bytes)")
+                # Larger than slot — caller must append to PAZ
+                payload = plaintext
+        elif len(plaintext) > entry.comp_size:
+            raise ValueError(
+                f"Modified file ({len(plaintext)} bytes) exceeds budget "
+                f"({entry.comp_size} bytes)")
         else:
             payload = plaintext + b'\x00' * (entry.comp_size - len(plaintext))
 

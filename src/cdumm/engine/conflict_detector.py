@@ -86,13 +86,14 @@ class ConflictDetector:
     def _get_enabled_mods(self) -> dict[int, list[dict]]:
         """Get all enabled PAZ mods with their delta byte ranges and priority."""
         cursor = self._db.connection.execute(
-            "SELECT m.id, m.name, m.priority, md.file_path, md.byte_start, md.byte_end "
+            "SELECT m.id, m.name, m.priority, md.file_path, md.byte_start, md.byte_end, "
+            "md.entry_path "
             "FROM mods m JOIN mod_deltas md ON m.id = md.mod_id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
             "ORDER BY m.priority"
         )
         mods: dict[int, list[dict]] = {}
-        for mod_id, mod_name, priority, file_path, byte_start, byte_end in cursor.fetchall():
+        for mod_id, mod_name, priority, file_path, byte_start, byte_end, entry_path in cursor.fetchall():
             if mod_id not in mods:
                 mods[mod_id] = []
             mods[mod_id].append({
@@ -101,6 +102,7 @@ class ConflictDetector:
                 "file_path": file_path,
                 "byte_start": byte_start,
                 "byte_end": byte_end,
+                "entry_path": entry_path,
             })
         return mods
 
@@ -155,11 +157,51 @@ class ConflictDetector:
         if not common_files:
             return conflicts
 
-        # For each shared file, check byte-range overlap
+        # For each shared file, check for conflicts
         for file_path in common_files:
-            a_ranges = [(d["byte_start"], d["byte_end"]) for d in a_files[file_path]
+            a_deltas = a_files[file_path]
+            b_deltas = b_files[file_path]
+
+            # Check if both mods use ENTR deltas for this file — compare at entry level
+            a_entries = {d["entry_path"] for d in a_deltas if d.get("entry_path")}
+            b_entries = {d["entry_path"] for d in b_deltas if d.get("entry_path")}
+
+            if a_entries and b_entries:
+                # Both use ENTR deltas — compare at entry level
+                shared_entries = a_entries & b_entries
+                if shared_entries:
+                    for entry_path in sorted(shared_entries):
+                        conflicts.append(Conflict(
+                            mod_a_id=mod_a_id, mod_a_name=mod_a_name,
+                            mod_b_id=mod_b_id, mod_b_name=mod_b_name,
+                            file_path=file_path,
+                            level="byte_range",
+                            byte_start=None, byte_end=None,
+                            explanation=(
+                                f"{mod_a_name} and {mod_b_name} both modify "
+                                f"{entry_path} in {file_path}. "
+                                f"Winner: {winner_name} (higher load order)."
+                            ),
+                            winner_id=winner_id, winner_name=winner_name,
+                        ))
+                else:
+                    # Different entries in the same PAZ — compatible
+                    conflicts.append(Conflict(
+                        mod_a_id=mod_a_id, mod_a_name=mod_a_name,
+                        mod_b_id=mod_b_id, mod_b_name=mod_b_name,
+                        file_path=file_path,
+                        level="paz",
+                        byte_start=None, byte_end=None,
+                        explanation=(
+                            f"{mod_a_name} and {mod_b_name} both modify {file_path} "
+                            "but different game files inside it. Compatible."
+                        ),
+                    ))
+                continue
+
+            a_ranges = [(d["byte_start"], d["byte_end"]) for d in a_deltas
                         if d["byte_start"] is not None]
-            b_ranges = [(d["byte_start"], d["byte_end"]) for d in b_files[file_path]
+            b_ranges = [(d["byte_start"], d["byte_end"]) for d in b_deltas
                         if d["byte_start"] is not None]
 
             if not a_ranges or not b_ranges:
