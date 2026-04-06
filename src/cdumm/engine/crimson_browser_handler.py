@@ -116,14 +116,21 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     for dir_num, file_list in files_by_dir.items():
         dir_name = f"{int(dir_num):04d}"
         game_paz_dir = game_dir / dir_name
-        pamt_path = game_paz_dir / "0.pamt"
+
+        # Use vanilla PAMT for entry lookup — the current game PAMT may have
+        # modified comp_sizes from other mods, which would produce wrong offsets.
+        vanilla_pamt = game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt"
+        pamt_path = vanilla_pamt if vanilla_pamt.exists() else game_paz_dir / "0.pamt"
+        # paz_dir must match where the PAZ files are for entry.paz_file
+        vanilla_paz_dir = game_dir / "CDMods" / "vanilla" / dir_name
+        paz_dir_for_parse = str(vanilla_paz_dir) if vanilla_pamt.exists() else str(game_paz_dir)
 
         if not pamt_path.exists():
-            logger.error("CB mod: vanilla PAMT not found: %s", pamt_path)
+            logger.error("CB mod: PAMT not found: %s", pamt_path)
             return None
 
         # Parse PAMT to find all entries
-        entries = parse_pamt(str(pamt_path), paz_dir=str(game_paz_dir))
+        entries = parse_pamt(str(pamt_path), paz_dir=paz_dir_for_parse)
         entry_map: dict[str, PazEntry] = {}
         for e in entries:
             # Normalize: strip leading folder prefix for matching
@@ -167,14 +174,23 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                                inner_path, dir_name)
                 continue
 
-            # Ensure we have a copy of the PAZ file in work_dir
+            # Ensure we have a copy of the PAZ file in work_dir.
+            # Use vanilla backup as the base — copying from the current game PAZ
+            # would include other mods' changes, which _try_paz_entry_import would
+            # then attribute to THIS mod. On disable, those foreign entries would
+            # be incorrectly reverted, breaking other active mods.
             paz_src = Path(entry.paz_file)
             if str(paz_src) not in paz_copies:
+                # Prefer vanilla backup over current game PAZ
+                vanilla_paz = game_dir / "CDMods" / "vanilla" / dir_name / paz_src.name
+                copy_src = vanilla_paz if vanilla_paz.exists() else paz_src
                 paz_dst = work_dir / dir_name / paz_src.name
                 paz_dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(paz_src, paz_dst)
+                shutil.copy2(copy_src, paz_dst)
                 paz_copies[str(paz_src)] = paz_dst
-                logger.info("Copied PAZ: %s -> %s", paz_src.name, paz_dst)
+                logger.info("Copied PAZ: %s -> %s (from %s)",
+                            paz_src.name, paz_dst,
+                            "vanilla" if copy_src == vanilla_paz else "game")
 
             paz_dst = paz_copies[str(paz_src)]
 

@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.6",
+        "date": "2026-04-06",
+        "notes": [
+            "Fixed disabling a mod breaking other active mods. The import handler was copying the current (modded) game PAZ instead of the vanilla backup. This caused other mods' entry changes to be attributed to the new mod. Disabling that mod would then revert all of them. Now uses vanilla backup as the base for PAZ copies and PAMT parsing.",
+        ],
+    },
+    {
         "version": "2.1.5",
         "date": "2026-04-06",
         "notes": [
