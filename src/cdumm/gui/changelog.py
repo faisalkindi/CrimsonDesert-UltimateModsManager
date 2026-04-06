@@ -8,6 +8,14 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.4",
+        "date": "2026-04-06",
+        "notes": [
+            "Fixed removing a mod leaving game files partially modded. When a mod with entry-level deltas was removed, the PAZ was reverted but the PAMT index was not, causing corrupted game state (wrong texture sizes, missing icons, crashes). Both PAZ and PAMT are now reverted together.",
+            "Fixed vanilla backups not created for PAMT and PATHC files. These files get modified during Apply by entry-level deltas and texture mods but had no backup, making revert impossible without Steam verify. Backups are now created automatically before any modification.",
+        ],
+    },
+    {
         "version": "2.1.3",
         "date": "2026-04-06",
         "notes": [
