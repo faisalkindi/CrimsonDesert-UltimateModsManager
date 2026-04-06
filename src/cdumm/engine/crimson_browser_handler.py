@@ -82,8 +82,9 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     # Files without numbered directory prefix need PAMT lookup
     unresolved: list[tuple[str, Path]] = []
 
+    _SKIP_FILES = {"mod.json", "manifest.json", "modinfo.json"}
     for f in files_dir.rglob("*"):
-        if not f.is_file():
+        if not f.is_file() or f.name.lower() in _SKIP_FILES:
             continue
         rel = f.relative_to(files_dir)
         parts = rel.parts

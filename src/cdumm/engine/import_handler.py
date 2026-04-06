@@ -324,7 +324,38 @@ def _find_loose_file_candidates(path: Path, max_depth: int = 5) -> list[dict]:
                     }
             except Exception:
                 pass
-        # Pattern 2: bare files/NNNN/
+        # Pattern 2: mod.json + game files at root (no files/ directory)
+        # Game file paths like gamedata/, sequencer/, ui/ sit next to mod.json.
+        # These get resolved to PAZ directories via PAMT lookup.
+        if mod_json.exists() and not files_dir.exists():
+            try:
+                with open(mod_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "modinfo" in data:
+                    # Check if there are actual game files alongside mod.json
+                    has_game_files = any(
+                        f.is_file() and f.name != "mod.json"
+                        for f in candidate.iterdir()
+                    ) or any(
+                        d.is_dir() and d.name != "files"
+                        for d in candidate.iterdir()
+                    )
+                    if has_game_files:
+                        modinfo = data["modinfo"]
+                        seen_bases.add(base_key)
+                        # Use "." as files_dir so convert_to_paz_mod scans
+                        # the candidate root for game files
+                        return {
+                            "format": "loose_file_mod",
+                            "id": modinfo.get("title", candidate.name),
+                            "files_dir": ".",
+                            "_manifest_path": mod_json,
+                            "_base_dir": candidate,
+                            "_modinfo": modinfo,
+                        }
+            except Exception:
+                pass
+        # Pattern 3: bare files/NNNN/
         if files_dir.exists() and files_dir.is_dir():
             try:
                 has_numbered = any(
