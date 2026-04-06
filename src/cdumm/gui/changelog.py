@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.7",
+        "date": "2026-04-06",
+        "notes": [
+            "Fixed PAMT revert overwriting active mod changes. When a disabled mod shared a PAZ directory with enabled mods, the revert would restore the vanilla PAMT on top of the ENTR-updated PAMT, corrupting all active entries in that directory. PAMT revert now skips directories where enabled mods have active entry-level deltas.",
+            "Fix Everything no longer requires Steam verify. Asks if you verified, takes a snapshot only if yes, proceeds either way.",
+            "Contaminated ENTR deltas from pre-v2.1.6 imports are automatically cleaned on startup. Duplicate entry_paths across mods are detected and the foreign copies removed.",
+        ],
+    },
+    {
         "version": "2.1.6",
         "date": "2026-04-06",
         "notes": [

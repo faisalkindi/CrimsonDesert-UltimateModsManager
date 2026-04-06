@@ -370,28 +370,91 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug("Startup health check failed: %s", e)
 
+        # Clean up contaminated ENTR deltas — mods imported before v2.1.6
+        # could absorb other mods' entries because the CB handler copied the
+        # modded game PAZ instead of vanilla. Detect by finding entry_paths
+        # that appear in multiple mods and remove the foreign copies.
+        try:
+            self._clean_contaminated_deltas()
+        except Exception as e:
+            logger.debug("Contaminated delta cleanup failed: %s", e)
+
+    def _clean_contaminated_deltas(self) -> None:
+        """Remove ENTR deltas that were incorrectly attributed to a mod.
+
+        Before v2.1.6, importing a mod copied the modded game PAZ (not vanilla),
+        so all active mods' entry changes got baked into the new mod's deltas.
+        Detect these by finding entry_paths shared across multiple mods.
+        The mod that legitimately owns the entry is the one with fewer total
+        ENTR deltas for that PAZ file (the contaminated mod has many extras).
+        """
+        if not self._db:
+            return
+
+        # Find entry_paths that appear in more than one mod
+        dupes = self._db.connection.execute("""
+            SELECT md.entry_path, md.file_path
+            FROM mod_deltas md
+            WHERE md.entry_path IS NOT NULL
+            GROUP BY md.entry_path, md.file_path
+            HAVING COUNT(DISTINCT md.mod_id) > 1
+        """).fetchall()
+
+        if not dupes:
+            return
+
+        import shutil
+        cleaned = 0
+        for entry_path, file_path in dupes:
+            # Get all mods that claim this entry
+            rows = self._db.connection.execute("""
+                SELECT md.mod_id, m.name, md.delta_path,
+                    (SELECT COUNT(*) FROM mod_deltas md2
+                     WHERE md2.mod_id = md.mod_id AND md2.entry_path IS NOT NULL) as total
+                FROM mod_deltas md JOIN mods m ON m.id = md.mod_id
+                WHERE md.entry_path = ? AND md.file_path = ?
+                ORDER BY total ASC
+            """, (entry_path, file_path)).fetchall()
+
+            if len(rows) < 2:
+                continue
+
+            # The mod with the fewest total ENTR deltas likely owns it legitimately.
+            # Remove from all others.
+            owner_id = rows[0][0]
+            for mod_id, mod_name, delta_path, total in rows[1:]:
+                self._db.connection.execute(
+                    "DELETE FROM mod_deltas WHERE mod_id = ? AND entry_path = ? "
+                    "AND file_path = ?",
+                    (mod_id, entry_path, file_path))
+                # Delete the stale delta file
+                dp = Path(delta_path)
+                if dp.exists():
+                    dp.unlink()
+                logger.info("Cleaned contaminated delta: %s from %s (belongs to mod %d)",
+                            entry_path, mod_name, owner_id)
+                cleaned += 1
+
+        if cleaned > 0:
+            self._db.connection.commit()
+            logger.info("Cleaned %d contaminated ENTR deltas on startup", cleaned)
+
     def _on_fix_everything(self) -> None:
         """One-click fix: revert, clear backups, clean orphans, rescan if clean.
 
         For users with corrupted state who just want it to work.
         """
-        reply = QMessageBox.question(
+        verified = QMessageBox.question(
             self, "Fix Game State",
-            "Before continuing, it is strongly recommended that you\n"
-            "verify your game files through Steam first:\n\n"
-            "  Steam > Right click Crimson Desert > Properties\n"
-            "  > Installed Files > Verify integrity of game files\n\n"
-            "After verifying, this will:\n"
-            "1. Revert all game files to vanilla\n"
-            "2. Clear old backups\n"
-            "3. Remove orphan mod directories\n"
-            "4. Take a fresh snapshot\n"
-            "5. Reimport all mods from stored sources\n\n"
-            "Your mod list is preserved.\n"
-            "Have you verified through Steam?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            "This will revert all game files, clear old backups,\n"
+            "remove orphan directories, and reimport your mods.\n\n"
+            "If you verified game files through Steam first,\n"
+            "a fresh snapshot will also be taken.\n\n"
+            "Did you verify through Steam?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if verified == QMessageBox.StandardButton.Cancel:
             return
 
         import shutil
@@ -440,25 +503,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        if files_clean:
+        steam_verified = verified == QMessageBox.StandardButton.Yes
+
+        if steam_verified:
             self._on_refresh_snapshot(skip_verify_prompt=True)
             self._log_activity("fix",
                                "Fix Everything: reverted, cleared backups, rescanning")
             self.statusBar().showMessage("Fix in progress: rescanning game files...", 0)
         else:
             self._log_activity("fix",
-                               "Fix Everything: reverted and cleaned up, but files still "
-                               "modded. Steam Verify needed.")
-            QMessageBox.warning(
-                self, "Steam Verify Needed",
-                "Game files are still modified after revert.\n\n"
-                "This means some changes couldn't be undone automatically.\n"
-                "Please verify game files through Steam, then come back\n"
-                "and click Fix Everything again.\n\n"
-                "Steam: Right click Crimson Desert, Properties,\n"
-                "Installed Files, Verify integrity of game files.")
+                               "Fix Everything: reverted and cleaned up (no rescan)")
+            self._refresh_all()
             self.statusBar().showMessage(
-                "Fix incomplete: Steam Verify needed, then run Fix again.", 0)
+                "Fix done. Rescan skipped — verify through Steam and "
+                "Rescan Game Files when ready.", 0)
 
     def _check_stale_appdata(self) -> None:
         """Detect stale data in %LocalAppData%/cdumm from old versions.

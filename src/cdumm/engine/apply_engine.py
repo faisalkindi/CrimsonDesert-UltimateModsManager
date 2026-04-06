@@ -1470,13 +1470,23 @@ class ApplyWorker(QObject):
             "WHERE m.enabled = 0 AND m.mod_type = 'paz'"
         )
         disabled_files: set[str] = set()
+        disabled_pamt_dirs: set[str] = set()
         for file_path, entry_path in cursor.fetchall():
             disabled_files.add(file_path)
-            # ENTR deltas modify the PAMT during apply but have no PAMT delta.
-            # Include the PAMT so it gets reverted to vanilla too.
+            # Track directories where disabled ENTR deltas modified the PAMT
             if entry_path and "/" in file_path:
-                pamt_path = file_path.rsplit("/", 1)[0] + "/0.pamt"
-                disabled_files.add(pamt_path)
+                disabled_pamt_dirs.add(file_path.rsplit("/", 1)[0])
+
+        # Only add PAMTs for directories where NO enabled mod has ENTR deltas.
+        # If an enabled mod uses the same directory, the PAMT will be updated
+        # by the ENTR apply (Phase 2) and must NOT be overwritten by revert.
+        enabled_entr_dirs: set[str] = set()
+        for fp in enabled_files:
+            if "/" in fp:
+                enabled_entr_dirs.add(fp.rsplit("/", 1)[0])
+        for pamt_dir in disabled_pamt_dirs - enabled_entr_dirs:
+            disabled_files.add(pamt_dir + "/0.pamt")
+
         return sorted(disabled_files - enabled_files)
 
     def _get_new_files_to_delete(self, enabled_files: set[str]) -> set[str]:
