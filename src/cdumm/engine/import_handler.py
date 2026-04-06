@@ -292,6 +292,86 @@ def _try_paz_entry_import(
     return True
 
 
+def _find_loose_file_candidates(path: Path, max_depth: int = 5) -> list[dict]:
+    """Recursively search for all loose-file mod roots (files/NNNN/ pattern).
+
+    Returns a list of manifest dicts, one per found variant.
+    """
+    results: list[dict] = []
+    seen_bases: set[str] = set()
+
+    def _check_candidate(candidate: Path) -> dict | None:
+        base_key = str(candidate)
+        if base_key in seen_bases:
+            return None
+        # Pattern 1: mod.json + files/
+        mod_json = candidate / "mod.json"
+        files_dir = candidate / "files"
+        if mod_json.exists() and files_dir.exists():
+            try:
+                with open(mod_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "modinfo" in data:
+                    modinfo = data["modinfo"]
+                    seen_bases.add(base_key)
+                    return {
+                        "format": "loose_file_mod",
+                        "id": modinfo.get("title", candidate.name),
+                        "files_dir": "files",
+                        "_manifest_path": mod_json,
+                        "_base_dir": candidate,
+                        "_modinfo": modinfo,
+                    }
+            except Exception:
+                pass
+        # Pattern 2: bare files/NNNN/
+        if files_dir.exists() and files_dir.is_dir():
+            try:
+                has_numbered = any(
+                    d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                    for d in files_dir.iterdir()
+                )
+            except OSError:
+                has_numbered = False
+            if has_numbered:
+                seen_bases.add(base_key)
+                return {
+                    "format": "loose_file_mod",
+                    "id": candidate.name,
+                    "files_dir": "files",
+                    "_manifest_path": None,
+                    "_base_dir": candidate,
+                    "_modinfo": {"title": candidate.name},
+                }
+        return None
+
+    def _walk(directory: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        hit = _check_candidate(directory)
+        if hit:
+            results.append(hit)
+            return  # don't recurse into a found mod root
+        try:
+            children = [d for d in directory.iterdir() if d.is_dir()
+                        and not d.name.startswith((".", "_"))]
+        except OSError:
+            return
+        for child in children:
+            _walk(child, depth + 1)
+
+    _walk(path, 0)
+    return results
+
+
+def find_loose_file_variants(path: Path) -> list[dict]:
+    """Public API: find all loose-file mod variants in a directory tree.
+
+    Used by the GUI to detect multi-variant mods and show a picker.
+    """
+    return _find_loose_file_candidates(path, max_depth=5)
+
+
 def detect_loose_file_mod(path: Path) -> dict | None:
     """Detect mods that ship loose game files with a mod.json metadata file.
 
@@ -300,52 +380,15 @@ def detect_loose_file_mod(path: Path) -> dict | None:
 
     Returns a CB-compatible manifest dict for convert_to_paz_mod, or None.
     """
-    for candidate in [path, *[d for d in path.iterdir() if d.is_dir()]]:
-        mod_json = candidate / "mod.json"
-        files_dir = candidate / "files"
-        if not mod_json.exists() or not files_dir.exists():
-            continue
-        try:
-            with open(mod_json, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and "modinfo" in data:
-                # Translate to CB-compatible manifest
-                modinfo = data["modinfo"]
-                manifest = {
-                    "format": "loose_file_mod",
-                    "id": modinfo.get("title", candidate.name),
-                    "files_dir": "files",
-                    "_manifest_path": mod_json,
-                    "_base_dir": candidate,
-                    "_modinfo": modinfo,
-                }
-                logger.info("Detected loose file mod: %s", manifest["id"])
-                return manifest
-        except Exception:
-            continue
-
-    # Pattern 2: files/NNNN/ structure without mod.json (bare loose file mod)
-    for candidate in [path, *[d for d in path.iterdir() if d.is_dir()]]:
-        files_dir = candidate / "files"
-        if not files_dir.exists() or not files_dir.is_dir():
-            continue
-        # Check if files/ contains numbered game directories
-        has_numbered = any(
-            d.is_dir() and d.name.isdigit() and len(d.name) == 4
-            for d in files_dir.iterdir()
-        )
-        if has_numbered:
-            manifest = {
-                "format": "loose_file_mod",
-                "id": candidate.name,
-                "files_dir": "files",
-                "_manifest_path": None,
-                "_base_dir": candidate,
-                "_modinfo": {"title": candidate.name},
-            }
-            logger.info("Detected bare loose file mod (no mod.json): %s", candidate.name)
-            return manifest
-
+    candidates = _find_loose_file_candidates(path, max_depth=5)
+    if len(candidates) == 1:
+        logger.info("Detected loose file mod: %s", candidates[0]["id"])
+        return candidates[0]
+    if len(candidates) > 1:
+        # Multiple variants found — caller should use find_loose_file_variants()
+        # and show a picker. Return None so the import doesn't silently pick one.
+        logger.info("Found %d loose file variants, picker needed", len(candidates))
+        return None
     return None
 
 
@@ -1555,6 +1598,29 @@ def _process_extracted_files(
             logger.error("Failed to process %s: %s", rel_path, e, exc_info=True)
             result.error = f"Failed to process {rel_path}: {e}"
             return result
+
+    # Clean up PAMT byte-range deltas that were created before the corresponding
+    # PAZ was decomposed into ENTR deltas. PAMT files sort before PAZ files
+    # alphabetically (0.pamt before 4.paz), so the PAMT delta may already exist
+    # by the time ENTR decomposition adds it to _paz_entr_handled.
+    for handled_path in _paz_entr_handled:
+        if handled_path.endswith(".pamt"):
+            cursor = db.connection.execute(
+                "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = ? AND file_path = ? "
+                "AND entry_path IS NULL",
+                (mod_id, handled_path))
+            count = cursor.fetchone()[0]
+            if count > 0:
+                db.connection.execute(
+                    "DELETE FROM mod_deltas WHERE mod_id = ? AND file_path = ? "
+                    "AND entry_path IS NULL",
+                    (mod_id, handled_path))
+                logger.info("Cleaned up %d PAMT byte-range deltas for %s "
+                            "(handled by ENTR import)", count, handled_path)
+                # Remove from changed_files too
+                result.changed_files = [
+                    cf for cf in result.changed_files
+                    if cf.get("file_path") != handled_path or cf.get("entry_path")]
 
     db.connection.commit()
     logger.info("Imported mod '%s': %d files changed", mod_name, len(result.changed_files))
