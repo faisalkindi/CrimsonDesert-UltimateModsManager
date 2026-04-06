@@ -684,6 +684,27 @@ class ApplyWorker(QObject):
             pass
 
         all_files = set(file_deltas.keys()) | set(revert_files)
+
+        # ENTR deltas modify PAMTs during apply (Phase 2) without having
+        # delta records. Back up PAMTs for any directory with ENTR deltas.
+        # Also back up PATHC — texture mods modify it during apply.
+        implicit_backups: set[str] = set()
+        for file_path, deltas in file_deltas.items():
+            if any(d.get("entry_path") for d in deltas) and "/" in file_path:
+                pamt_path = file_path.rsplit("/", 1)[0] + "/0.pamt"
+                implicit_backups.add(pamt_path)
+        if "meta/0.pathc" in snap_hashes:
+            implicit_backups.add("meta/0.pathc")
+
+        for imp_path in implicit_backups:
+            backup_path = self._vanilla_dir / imp_path.replace("/", "\\")
+            if not backup_path.exists():
+                game_path = self._game_dir / imp_path.replace("/", "\\")
+                if game_path.exists() and self._verify_is_vanilla(
+                        game_path, imp_path, snap_hashes):
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    _backup_copy(game_path, backup_path)
+                    logger.info("Implicit vanilla backup: %s", imp_path)
         for file_path in all_files:
             delta_infos = file_deltas.get(file_path, [])
 
@@ -1436,14 +1457,26 @@ class ApplyWorker(QObject):
                                        "(backup exists, no active mod)", rel)
 
     def _get_files_to_revert(self, enabled_files: set[str]) -> list[str]:
-        """Find files modified by disabled mods that no enabled mod covers."""
+        """Find files modified by disabled mods that no enabled mod covers.
+
+        For ENTR deltas (entry-level PAZ modifications), the PAMT is also
+        modified during apply but has no delta record. Include the PAMT
+        for any PAZ directory being reverted so it's restored to vanilla too.
+        """
         cursor = self._db.connection.execute(
-            "SELECT DISTINCT md.file_path "
+            "SELECT DISTINCT md.file_path, md.entry_path "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 0 AND m.mod_type = 'paz'"
         )
-        disabled_files = {row[0] for row in cursor.fetchall()}
+        disabled_files: set[str] = set()
+        for file_path, entry_path in cursor.fetchall():
+            disabled_files.add(file_path)
+            # ENTR deltas modify the PAMT during apply but have no PAMT delta.
+            # Include the PAMT so it gets reverted to vanilla too.
+            if entry_path and "/" in file_path:
+                pamt_path = file_path.rsplit("/", 1)[0] + "/0.pamt"
+                disabled_files.add(pamt_path)
         return sorted(disabled_files - enabled_files)
 
     def _get_new_files_to_delete(self, enabled_files: set[str]) -> set[str]:
