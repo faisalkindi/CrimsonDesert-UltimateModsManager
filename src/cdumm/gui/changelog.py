@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.5",
+        "date": "2026-04-06",
+        "notes": [
+            "Loose file mods without a files/ directory now recognized. Mods that ship game file paths (gamedata/, sequencer/, ui/) directly next to mod.json are resolved via PAMT lookup. Supports mods like Skip All Loading Scene.",
+        ],
+    },
+    {
         "version": "2.1.4",
         "date": "2026-04-06",
         "notes": [
