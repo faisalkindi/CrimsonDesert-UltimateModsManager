@@ -152,6 +152,20 @@ class ModManager:
         # Check if any target file differs from vanilla snapshot
         import os
         from cdumm.engine.snapshot_manager import hash_file
+
+        # Check if mod has ENTR deltas — these go to overlay PAZ, not in-place.
+        # If an overlay directory exists, the mod is active via overlay.
+        has_entr = self._db.connection.execute(
+            "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = ? AND entry_path IS NOT NULL",
+            (mod_id,)).fetchone()[0]
+        if has_entr > 0:
+            # Check if any overlay directory exists (0037+)
+            for d in sorted(game_dir.iterdir()):
+                if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                        and int(d.name) >= 37
+                        and (d / "0.paz").exists() and (d / "0.pamt").exists()):
+                    return "active"
+
         for (file_path,) in files:
             is_new = self._db.connection.execute(
                 "SELECT is_new FROM mod_deltas WHERE mod_id = ? AND file_path = ? LIMIT 1",

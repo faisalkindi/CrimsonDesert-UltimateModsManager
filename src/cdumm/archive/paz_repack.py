@@ -16,12 +16,117 @@ Library usage:
 
 import ctypes
 import os
+import struct
 import sys
 
 import lz4.block
 
 from cdumm.archive.paz_parse import PazEntry
 from cdumm.archive.paz_crypto import encrypt, lz4_compress
+
+
+# ── DDS header constants ──────────────────────────────────────────────
+
+# Block compression sizes by FourCC
+_BC_BLOCK_BYTES = {
+    b"DXT1": 8, b"ATI1": 8, b"BC4U": 8, b"BC4S": 8,
+    b"DXT3": 16, b"DXT5": 16, b"ATI2": 16, b"BC5U": 16, b"BC5S": 16,
+    b"DXT2": 16, b"DXT4": 16,
+}
+
+# "Last4" format identifier at DDS header byte 124 (game-specific)
+_DDS_LAST4_BY_FOURCC = {
+    b"DXT1": 12, b"DXT2": 15, b"DXT3": 15, b"DXT4": 15, b"DXT5": 15,
+    b"ATI1": 4, b"ATI2": 4, b"BC4U": 4, b"BC4S": 4, b"BC5U": 4, b"BC5S": 4,
+}
+
+# DXGI format -> last4
+_DDS_LAST4_BY_DXGI = {
+    71: 12, 72: 12,  # BC1
+    74: 15, 75: 15,  # BC2
+    77: 15, 78: 15,  # BC3
+    80: 4, 81: 4,    # BC4
+    83: 4, 84: 4,    # BC5
+    95: 4, 96: 4,    # BC6H
+    98: 15, 99: 15,  # BC7
+}
+
+
+def fix_dds_header(header: bytearray, compressed_body_size: int = 0) -> bytearray:
+    """Fix a DDS header to match what the game engine expects.
+
+    Mod tools (GIMP, Paint.NET) export DDS with non-standard header values.
+    The game's PAZ DDS loader uses specific fields:
+    - Flags must include 0x20000
+    - Depth must be >= 1
+    - Reserved1 offsets 32-47: [compressed_body_size, decompressed_body_size,
+      mip1_size, mip2_size] for single-mip-chunk textures
+    - Byte 124-127: format-specific "last4" identifier
+
+    Args:
+        header: 128-byte DDS header to fix (modified in place)
+        compressed_body_size: LZ4 compressed size of mip0 body (set after compression)
+    """
+    if len(header) < 128 or header[:4] != b"DDS ":
+        return header
+
+    h = bytearray(header)
+
+    # Fix flags: ensure 0x20000 is set
+    flags = struct.unpack_from("<I", h, 8)[0]
+    flags |= 0x20000
+    struct.pack_into("<I", h, 8, flags)
+
+    # Fix depth: must be >= 1
+    depth = struct.unpack_from("<I", h, 24)[0]
+    if depth == 0:
+        struct.pack_into("<I", h, 24, 1)
+
+    # Compute mip chain sizes for reserved1 area
+    height = struct.unpack_from("<I", h, 12)[0]
+    width = struct.unpack_from("<I", h, 16)[0]
+    mips = max(1, struct.unpack_from("<I", h, 28)[0])
+    fourcc = bytes(h[84:88])
+
+    dxgi = None
+    if fourcc == b"DX10":
+        dxgi = struct.unpack_from("<I", h, 128)[0] if len(h) >= 132 else None
+
+    block_bytes = _BC_BLOCK_BYTES.get(fourcc)
+    if block_bytes is None and dxgi is not None:
+        if dxgi in (70, 71, 72, 79, 80, 81):
+            block_bytes = 8
+        elif dxgi in (73, 74, 75, 76, 77, 78, 82, 83, 84, 94, 95, 96, 97, 98, 99):
+            block_bytes = 16
+
+    if block_bytes:
+        # Compute decompressed mip sizes
+        mip_sizes = []
+        cw, ch = max(1, width), max(1, height)
+        for i in range(min(4, mips)):
+            size = max(1, (cw + 3) // 4) * max(1, (ch + 3) // 4) * block_bytes
+            mip_sizes.append(size)
+            cw, ch = max(1, cw // 2), max(1, ch // 2)
+        while len(mip_sizes) < 4:
+            mip_sizes.append(0)
+
+        # Reserved1 layout: [comp_body_size, decomp_body_size, mip1_size, mip2_size]
+        struct.pack_into("<I", h, 32, compressed_body_size)
+        struct.pack_into("<I", h, 36, mip_sizes[0])  # decompressed mip0
+        struct.pack_into("<I", h, 40, mip_sizes[1] if len(mip_sizes) > 1 else 0)
+        struct.pack_into("<I", h, 44, mip_sizes[2] if len(mip_sizes) > 2 else 0)
+        # Zero remaining reserved1 (offsets 48-75)
+        for off in range(48, 76, 4):
+            struct.pack_into("<I", h, off, 0)
+
+    # Fix "last4" format identifier at byte 124
+    last4 = _DDS_LAST4_BY_FOURCC.get(fourcc)
+    if last4 is None and dxgi is not None:
+        last4 = _DDS_LAST4_BY_DXGI.get(dxgi)
+    if last4 is not None:
+        struct.pack_into("<I", h, 124, last4)
+
+    return h
 
 
 # ── Timestamp preservation (Windows) ────────────────────────────────
@@ -239,8 +344,10 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
         entry.orig_size if content grew).
     """
     basename = os.path.basename(entry.path)
-    is_compressed = entry.compressed and entry.compression_type in (1, 2)
     is_dds_split = entry.compression_type == 1  # 128-byte header + LZ4 body
+    # DDS type 0x01 always uses inner LZ4 even when comp_size == orig_size
+    # (the padded payload matches orig_size, actual LZ4 size is in header[32])
+    is_compressed = is_dds_split or (entry.compressed and entry.compression_type == 2)
     DDS_HEADER_SIZE = 128
     actual_comp_size = entry.comp_size
     actual_orig_size = entry.orig_size
@@ -248,7 +355,7 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
     if is_compressed:
         if is_dds_split:
             # Type 0x01: 128-byte DDS header (raw) + LZ4 compressed body
-            header = plaintext[:DDS_HEADER_SIZE]
+            header = bytearray(plaintext[:DDS_HEADER_SIZE])
             body = plaintext[DDS_HEADER_SIZE:]
             body_orig = entry.orig_size - DDS_HEADER_SIZE
             body_comp_budget = entry.comp_size - DDS_HEADER_SIZE
@@ -260,20 +367,23 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                 else:
                     padded_body = _pad_to_orig_size(body, body_orig)
                 compressed_body = lz4.block.compress(padded_body, store_size=False)
-                actual_comp_size = DDS_HEADER_SIZE + len(compressed_body)
-                if actual_comp_size > entry.comp_size:
-                    payload = header + compressed_body
-                elif actual_comp_size < entry.comp_size:
-                    pad_size = entry.comp_size - actual_comp_size
-                    try:
-                        with open(entry.paz_file, 'rb') as f:
-                            f.seek(entry.offset + actual_comp_size)
-                            original_tail = f.read(pad_size)
-                        payload = header + compressed_body + original_tail
-                    except Exception:
-                        payload = header + compressed_body + b'\x00' * pad_size
+
+                # Fix DDS header with the now-known compressed body size
+                if header[:4] == b"DDS ":
+                    header = fix_dds_header(header, len(compressed_body))
+
+                # DDS type 0x01: game reads compressed body size from header[32:36],
+                # not from PAMT comp_size. Set comp_size = orig_size (padded to full
+                # DDS size with zeros) so the PAMT entry looks "uncompressed" to the
+                # game's outer reader. The inner LZ4 decompression uses header[32:36].
+                full_size = DDS_HEADER_SIZE + len(padded_body)
+                payload_core = header + compressed_body
+                if len(payload_core) < full_size:
+                    payload = payload_core + b'\x00' * (full_size - len(payload_core))
                 else:
-                    payload = header + compressed_body
+                    payload = payload_core
+                actual_comp_size = full_size
+                actual_orig_size = full_size
             else:
                 adjusted_body = _match_compressed_size(
                     body, body_comp_budget, body_orig)

@@ -101,20 +101,45 @@ def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
     """
     basename = os.path.basename(entry.path)
 
-    if entry.compressed and entry.compression_type == 1:
+    if entry.compression_type == 1:
         DDS_HEADER_SIZE = 128
         header = raw[:DDS_HEADER_SIZE]
         compressed_body = raw[DDS_HEADER_SIZE:]
         body_orig_size = entry.orig_size - DDS_HEADER_SIZE
+
+        # The DDS header may store the inner LZ4 compressed size at offset 32.
+        # When comp_size == orig_size (padded DDS), the full body includes
+        # LZ4 data + zero padding. Use the header field to read only the
+        # actual LZ4 bytes, falling back to the full body if not available.
+        inner_comp_size = 0
+        if len(header) >= 36:
+            inner_comp_size = struct.unpack_from("<I", header, 32)[0]
+        if inner_comp_size > 0 and inner_comp_size < len(compressed_body):
+            lz4_input = compressed_body[:inner_comp_size]
+        else:
+            lz4_input = compressed_body
+
         try:
-            body = lz4_decompress(compressed_body, body_orig_size)
+            body = lz4_decompress(lz4_input, body_orig_size)
         except Exception:
-            decrypted = decrypt(compressed_body, basename)
-            body = lz4_decompress(decrypted, body_orig_size)
-            if not entry._encrypted_override:
-                logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
-                            entry.path)
-                entry._encrypted_override = True
+            # Retry with full body (vanilla entries without header field)
+            if lz4_input is not compressed_body:
+                try:
+                    body = lz4_decompress(compressed_body, body_orig_size)
+                except Exception:
+                    decrypted = decrypt(compressed_body, basename)
+                    body = lz4_decompress(decrypted, body_orig_size)
+                    if not entry._encrypted_override:
+                        logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
+                                    entry.path)
+                        entry._encrypted_override = True
+            else:
+                decrypted = decrypt(compressed_body, basename)
+                body = lz4_decompress(decrypted, body_orig_size)
+                if not entry._encrypted_override:
+                    logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
+                                entry.path)
+                    entry._encrypted_override = True
         return header + body
 
     if entry.compressed and entry.compression_type == 2:

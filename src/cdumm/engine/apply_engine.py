@@ -334,6 +334,11 @@ class ApplyWorker(QObject):
         # after PAZ composition. Track updates here for Phase 2.
         self._pamt_entry_updates: dict[str, list[dict]] = {}
 
+        # Overlay PAZ: collect ENTR delta entries to write to an overlay
+        # directory instead of modifying original game PAZ files in-place.
+        self._overlay_entries: list[tuple[bytes, dict]] = []
+        self._overlay_dir_name: str | None = None
+
         # Also ensure PAMTs are backed up for directories with entry deltas
         entry_pamt_dirs = set()
         for file_path, deltas in file_deltas.items():
@@ -429,6 +434,45 @@ class ApplyWorker(QObject):
 
                 txn.stage_file(file_path, result_bytes)
 
+
+            # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
+            if self._overlay_entries:
+                # Restore vanilla PAZ/PAMT for directories moving to overlay.
+                # Users upgrading from v2.1.7 (in-place) have modified PAZ/PAMT
+                # files that must be reverted before overlay takes over.
+                overlay_dirs_used = set()
+                for _, meta in self._overlay_entries:
+                    paz_file = meta.get("pamt_dir", "")
+                    if paz_file:
+                        overlay_dirs_used.add(paz_file)
+                for od in overlay_dirs_used:
+                    for suffix in ["0.pamt"]:
+                        vanilla_path = self._vanilla_dir / od / suffix
+                        if vanilla_path.exists():
+                            game_path = self._game_dir / od / suffix
+                            if game_path.exists():
+                                snap = self._db.connection.execute(
+                                    "SELECT file_size FROM snapshots WHERE file_path = ?",
+                                    (f"{od}/{suffix}",)).fetchone()
+                                if snap and game_path.stat().st_size != snap[0]:
+                                    # PAMT was modified in-place, restore vanilla
+                                    txn.stage_file(f"{od}/{suffix}", vanilla_path.read_bytes())
+                                    modified_pamts[od] = vanilla_path.read_bytes()
+                                    logger.info("Restored vanilla %s/%s (overlay migration)",
+                                                od, suffix)
+
+                from cdumm.archive.overlay_builder import build_overlay
+                paz_bytes, pamt_bytes = build_overlay(self._overlay_entries)
+                overlay_dir = self._allocate_overlay_dir()
+                self._overlay_dir_name = overlay_dir
+                overlay_path = self._game_dir / overlay_dir
+                overlay_path.mkdir(parents=True, exist_ok=True)
+                (overlay_path / "0.paz").write_bytes(paz_bytes)
+                (overlay_path / "0.pamt").write_bytes(pamt_bytes)
+                modified_pamts[overlay_dir] = pamt_bytes
+                logger.info("Overlay PAZ: %s (%d entries, PAZ=%d bytes, PAMT=%d bytes)",
+                            overlay_dir, len(self._overlay_entries),
+                            len(paz_bytes), len(pamt_bytes))
 
             # ── Phase 2: Compose PAMT files (entry updates + byte deltas) ──
             # Collect all PAMTs that need processing
@@ -607,6 +651,9 @@ class ApplyWorker(QObject):
                         mod_dir = fp.split("/")[0]
                         if mod_dir.isdigit() and len(mod_dir) == 4:
                             enabled_dirs.add(mod_dir)
+            # Include the overlay directory (just created in Phase 1b)
+            if hasattr(self, '_overlay_dir_name') and self._overlay_dir_name:
+                enabled_dirs.add(self._overlay_dir_name)
 
             for d in sorted(self._game_dir.iterdir()):
                 if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
@@ -822,6 +869,34 @@ class ApplyWorker(QObject):
         # Include merged deltas as entry deltas
         entry_deltas.extend(merged_deltas)
         byte_deltas = [d for d in remaining_deltas if not d.get("entry_path")]
+
+        # ── Overlay routing: ENTR-only files go to overlay PAZ ──
+        # If a file has ONLY entry deltas (no byte-range), route all entries
+        # to the overlay builder. The original PAZ is left untouched.
+        if entry_deltas and not byte_deltas:
+            from cdumm.engine.delta_engine import load_entry_delta
+            by_entry: dict[str, dict] = {}
+            for d in entry_deltas:
+                ep = d.get("entry_path") or d.get("_merged_metadata", {}).get("entry_path")
+                if ep:
+                    by_entry[ep] = d
+            for entry_path, d in by_entry.items():
+                if d.get("_merged_content") is not None:
+                    content = d["_merged_content"]
+                    metadata = d["_merged_metadata"]
+                elif d.get("delta_path"):
+                    try:
+                        content, metadata = load_entry_delta(Path(d["delta_path"]))
+                    except Exception as e:
+                        logger.warning("Failed to load entry delta %s: %s",
+                                       d["delta_path"], e)
+                        continue
+                else:
+                    continue
+                self._overlay_entries.append((content, metadata))
+                logger.info("Routed to overlay: %s in %s from %s",
+                            entry_path, file_path, d.get("mod_name", "?"))
+            return None  # Don't modify the original PAZ
 
         # Get vanilla content
         full_vanilla = self._vanilla_dir / file_path.replace("/", "\\")
@@ -1455,6 +1530,17 @@ class ApplyWorker(QObject):
                             modified_pamts[rel.split("/")[0]] = vanilla_bytes
                         logger.warning("Restored orphaned file to vanilla: %s "
                                        "(backup exists, no active mod)", rel)
+
+    def _allocate_overlay_dir(self) -> str:
+        """Find the next available 4-digit directory >= 0037 for the overlay PAZ."""
+        max_num = 36  # start after 0036 (used by standalone mods)
+        for d in self._game_dir.iterdir():
+            if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
+                num = int(d.name)
+                if num > max_num:
+                    max_num = num
+        overlay_num = max_num + 1
+        return f"{overlay_num:04d}"
 
     def _get_files_to_revert(self, enabled_files: set[str]) -> list[str]:
         """Find files modified by disabled mods that no enabled mod covers.

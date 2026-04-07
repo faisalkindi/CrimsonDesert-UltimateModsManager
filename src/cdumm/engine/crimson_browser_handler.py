@@ -121,9 +121,9 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
         # modified comp_sizes from other mods, which would produce wrong offsets.
         vanilla_pamt = game_dir / "CDMods" / "vanilla" / dir_name / "0.pamt"
         pamt_path = vanilla_pamt if vanilla_pamt.exists() else game_paz_dir / "0.pamt"
-        # paz_dir must match where the PAZ files are for entry.paz_file
-        vanilla_paz_dir = game_dir / "CDMods" / "vanilla" / dir_name
-        paz_dir_for_parse = str(vanilla_paz_dir) if vanilla_pamt.exists() else str(game_paz_dir)
+        # Always use game directory for PAZ file paths — vanilla backup may
+        # not have all PAZ files (only those that were modified and backed up).
+        paz_dir_for_parse = str(game_paz_dir)
 
         if not pamt_path.exists():
             logger.error("CB mod: PAMT not found: %s", pamt_path)

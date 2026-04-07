@@ -187,8 +187,20 @@ class PapgtManager:
                 pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
                 rehashed += 1
             elif dir_name in existing_hashes and not is_mod_base:
-                # Vanilla base — reuse hash (trusted, no I/O needed)
-                pamt_hash = existing_hashes[dir_name]
+                # Verify hash against actual PAMT on disk — the base PAPGT
+                # may have stale hashes from previous in-place applies that
+                # the overlay approach no longer maintains.
+                pamt_path = self._game_dir / dir_name / "0.pamt"
+                if pamt_path.exists():
+                    pamt_data = pamt_path.read_bytes()
+                    actual_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
+                    if actual_hash != existing_hashes[dir_name]:
+                        pamt_hash = actual_hash
+                        rehashed += 1
+                    else:
+                        pamt_hash = existing_hashes[dir_name]
+                else:
+                    pamt_hash = existing_hashes[dir_name]
             elif dir_name in existing_hashes and is_mod_base:
                 # Mod-shipped base — verify hash against actual PAMT on disk
                 pamt_path = self._game_dir / dir_name / "0.pamt"

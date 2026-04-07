@@ -8,6 +8,22 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.8",
+        "date": "2026-04-07",
+        "notes": [
+            "Overlay PAZ system: ENTR delta mods now write to a fresh overlay directory instead of modifying original game files. Original PAZ and PAMT files stay vanilla. The game loads modded entries from the overlay. This matches JSON Mod Manager's approach and improves stability.",
+            "DDS texture mod support: fixed type 0x01 DDS split handling. The compression check no longer relies on comp_size vs orig_size (which is always equal for DDS split). DDS headers are automatically fixed with correct flags, depth, mip sizes, and format identifier. Mods like Modern Controller Icons now work correctly.",
+            "DDS decompression reads inner LZ4 size from the DDS header instead of using the full padded body. Fixes decompression failures for overlay DDS entries.",
+            "Removed PATHC update for DDS mods that was causing hash collisions with existing textures.",
+            "PAPGT rebuild always verifies PAMT hashes against actual files on disk instead of trusting cached values from the base. Fixes stale hash mismatches after switching from in-place to overlay.",
+            "CB handler uses game directory for PAZ file paths instead of vanilla backup which may be incomplete. Fixes import failures for mods in directories with partial backups.",
+            "Loose file mods without a files/ directory now recognized. Mods with game paths directly next to mod.json are resolved via PAMT lookup.",
+            "Automatic migration from in-place to overlay on first apply after update. PAMTs modified by previous versions are restored to vanilla before the overlay is created.",
+            "Stale overlay directories from previous applies are cleaned up automatically.",
+            "Mod status correctly shows active for ENTR delta mods when overlay directory exists.",
+        ],
+    },
+    {
         "version": "2.1.7",
         "date": "2026-04-06",
         "notes": [
