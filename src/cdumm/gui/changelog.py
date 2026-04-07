@@ -8,6 +8,17 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.1.9",
+        "date": "2026-04-07",
+        "notes": [
+            "Fixed overlay PAZ entries not being found by the game. The overlay PAMT was using flattened folder paths (e.g. sequencer/) instead of the full hierarchical paths the game uses for lookups (e.g. sequencer/baseseq/gamesystemfx/ui/). Full paths are now resolved from the vanilla PAMT's folder tree.",
+            "Fixed overlay PAMT format: corrected folder record structure and file record prefix to match vanilla format exactly.",
+            "Fixed overlay directory collision with standalone mods. Overlay now allocates a directory number that doesn't conflict with any staged mod directories.",
+            "Fixed standalone PAZ mods with mod.json being incorrectly detected as loose-file mods. Mods with numbered directories containing 0.paz are now correctly routed to the PAZ import path.",
+            "Fixed PAPGT crash during rebuild when reading all PAMTs from disk in the worker thread.",
+        ],
+    },
+    {
         "version": "2.1.8",
         "date": "2026-04-07",
         "notes": [

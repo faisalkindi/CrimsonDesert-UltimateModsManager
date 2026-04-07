@@ -327,20 +327,31 @@ def _find_loose_file_candidates(path: Path, max_depth: int = 5) -> list[dict]:
         # Pattern 2: mod.json + game files at root (no files/ directory)
         # Game file paths like gamedata/, sequencer/, ui/ sit next to mod.json.
         # These get resolved to PAZ directories via PAMT lookup.
+        # Skip if the directory contains numbered game dirs with PAZ/PAMT files
+        # (that's a standalone PAZ mod, not a loose-file mod).
         if mod_json.exists() and not files_dir.exists():
             try:
                 with open(mod_json, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict) and "modinfo" in data:
-                    # Check if there are actual game files alongside mod.json
-                    has_game_files = any(
-                        f.is_file() and f.name != "mod.json"
-                        for f in candidate.iterdir()
-                    ) or any(
-                        d.is_dir() and d.name != "files"
+                    # Check if this is a standalone PAZ mod (has NNNN/0.paz)
+                    is_standalone_paz = any(
+                        d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                        and (d / "0.paz").exists()
                         for d in candidate.iterdir()
                     )
-                    if has_game_files:
+                    if is_standalone_paz:
+                        pass  # Let _match_game_files handle it as a PAZ mod
+                    else:
+                        # Check if there are actual game files alongside mod.json
+                        has_game_files = any(
+                            f.is_file() and f.name != "mod.json"
+                            for f in candidate.iterdir()
+                        ) or any(
+                            d.is_dir() and d.name != "files"
+                            for d in candidate.iterdir()
+                        )
+                    if not is_standalone_paz and has_game_files:
                         modinfo = data["modinfo"]
                         seen_bases.add(base_key)
                         # Use "." as files_dir so convert_to_paz_mod scans

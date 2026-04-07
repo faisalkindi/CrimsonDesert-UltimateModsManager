@@ -437,6 +437,14 @@ class ApplyWorker(QObject):
 
             # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
             if self._overlay_entries:
+                # Collect directories claimed by standalone mods so overlay
+                # doesn't collide with them
+                _staged_mod_dirs = set()
+                for fp in file_deltas:
+                    d = fp.split("/")[0]
+                    if d.isdigit() and len(d) == 4 and int(d) >= 36:
+                        _staged_mod_dirs.add(d)
+
                 # Restore vanilla PAZ/PAMT for directories moving to overlay.
                 # Users upgrading from v2.1.7 (in-place) have modified PAZ/PAMT
                 # files that must be reverted before overlay takes over.
@@ -462,13 +470,16 @@ class ApplyWorker(QObject):
                                                 od, suffix)
 
                 from cdumm.archive.overlay_builder import build_overlay
-                paz_bytes, pamt_bytes = build_overlay(self._overlay_entries)
-                overlay_dir = self._allocate_overlay_dir()
+                paz_bytes, pamt_bytes = build_overlay(self._overlay_entries,
+                                                       game_dir=self._game_dir)
+                overlay_dir = self._allocate_overlay_dir(_staged_mod_dirs)
                 self._overlay_dir_name = overlay_dir
                 overlay_path = self._game_dir / overlay_dir
                 overlay_path.mkdir(parents=True, exist_ok=True)
-                (overlay_path / "0.paz").write_bytes(paz_bytes)
-                (overlay_path / "0.pamt").write_bytes(pamt_bytes)
+                # Stage through transactional IO so overlay files are committed
+                # atomically with everything else (and not overwritten by other staged files)
+                txn.stage_file(f"{overlay_dir}/0.paz", paz_bytes)
+                txn.stage_file(f"{overlay_dir}/0.pamt", pamt_bytes)
                 modified_pamts[overlay_dir] = pamt_bytes
                 logger.info("Overlay PAZ: %s (%d entries, PAZ=%d bytes, PAMT=%d bytes)",
                             overlay_dir, len(self._overlay_entries),
@@ -1531,12 +1542,24 @@ class ApplyWorker(QObject):
                         logger.warning("Restored orphaned file to vanilla: %s "
                                        "(backup exists, no active mod)", rel)
 
-    def _allocate_overlay_dir(self) -> str:
-        """Find the next available 4-digit directory >= 0037 for the overlay PAZ."""
+    def _allocate_overlay_dir(self, staged_dirs: set[str] | None = None) -> str:
+        """Find the next available 4-digit directory >= 0037 for the overlay PAZ.
+
+        Args:
+            staged_dirs: directories already claimed by standalone mods in this
+                         apply session (from file_deltas). Overlay must not
+                         collide with these.
+        """
+        taken = staged_dirs or set()
         max_num = 36  # start after 0036 (used by standalone mods)
         for d in self._game_dir.iterdir():
             if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
                 num = int(d.name)
+                if num > max_num:
+                    max_num = num
+        for d in taken:
+            if d.isdigit() and len(d) == 4:
+                num = int(d)
                 if num > max_num:
                     max_num = num
         overlay_num = max_num + 1

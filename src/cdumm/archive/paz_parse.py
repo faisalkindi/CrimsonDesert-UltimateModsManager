@@ -119,12 +119,12 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
             cur = p
         return ''.join(reversed(parts))
 
-    # Record section
+    # Folder record section
     folder_count = struct.unpack_from('<I', data, off)[0]; off += 4
-    off += 4  # hash
-    off += folder_count * 16
+    off += folder_count * 16  # skip folder records (16 bytes each)
 
-    # File records (20 bytes each)
+    # File record section
+    file_count = struct.unpack_from('<I', data, off)[0]; off += 4
     entries = []
     while off + 20 <= len(data):
         node_ref, paz_offset, comp_size, orig_size, flags = \
