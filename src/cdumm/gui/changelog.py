@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.0",
+        "date": "2026-04-07",
+        "notes": [
+            "Removed auto-update download for NexusMods TOS compliance. CDUMM no longer downloads executables from the internet. Update checks still work: when a new version is found, you are prompted to open the GitHub releases page in your browser to download manually.",
+        ],
+    },
+    {
         "version": "2.1.9",
         "date": "2026-04-07",
         "notes": [

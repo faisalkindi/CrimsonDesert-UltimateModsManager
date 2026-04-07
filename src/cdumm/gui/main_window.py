@@ -4044,17 +4044,17 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_about_update_label'):
             self._about_update_label.setText(
                 f"\u26A0  Update available: {tag}\n"
-                "Click the red banner at the bottom to update.")
+                "Click the red banner at the bottom to open GitHub.")
             self._about_update_label.setStyleSheet(
                 "font-size: 15px; font-weight: bold; color: #F44336; "
                 "padding: 12px; border: 1px solid #F44336; border-radius: 8px; "
                 "background: #2E1A1A;")
         self._set_about_nav_indicator("red")
 
-        # Show persistent banner — always visible until they update
+        # Show persistent banner
         if hasattr(self, '_update_banner'):
             self._update_banner.setText(
-                f"\u26A0  Update available: {tag} — click here to update now")
+                f"\u26A0  Update available: {tag} — click here to open GitHub")
             self._update_banner.setVisible(True)
 
         # Check if this version is critically outdated
@@ -4063,51 +4063,38 @@ class MainWindow(QMainWindow):
         is_critical = _version_newer(self._MINIMUM_SAFE_VERSION, __version__)
 
         if is_critical:
-            # Force update — this version has known game-breaking bugs
-            download_url = info.get("download_url", "")
-            if download_url:
-                QMessageBox.critical(
-                    self, "Critical Update Required",
-                    f"You are running v{__version__} which has known issues "
-                    f"that can break your game.\n\n"
-                    f"Version {tag} fixes these problems.\n\n"
-                    "The update will download and install now.")
-                self._download_and_apply_update(download_url)
-            else:
+            import webbrowser
+            QMessageBox.critical(
+                self, "Critical Update Required",
+                f"You are running v{__version__} which has known issues "
+                f"that can break your game.\n\n"
+                f"Version {tag} fixes these problems.\n\n"
+                "Click OK to open the GitHub releases page and download "
+                "the latest version.")
+            if info.get("url"):
+                webbrowser.open(info["url"])
+        else:
+            if getattr(self, '_update_dialog_shown', False):
+                return
+            self._update_dialog_shown = True
+            reply = QMessageBox.question(
+                self, "Update Available",
+                f"A new version is available: {tag}\n\n"
+                f"{info.get('body', '')[:300]}\n\n"
+                "Open GitHub to download?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
                 import webbrowser
-                QMessageBox.critical(
-                    self, "Critical Update Required",
-                    f"You are running v{__version__} which has known issues "
-                    f"that can break your game.\n\n"
-                    f"Please download {tag} from GitHub.")
                 if info.get("url"):
                     webbrowser.open(info["url"])
-        else:
-            # Normal update — ask once, then rely on banner for reminders
-            if getattr(self, '_update_dialog_shown', False):
-                return  # already asked this session, don't nag
-            self._update_dialog_shown = True
-            download_url = info.get("download_url", "")
-            if download_url:
-                reply = QMessageBox.question(
-                    self, "Update Available",
-                    f"A new version is available: {tag}\n\n"
-                    f"{info.get('body', '')[:300]}\n\n"
-                    "Download and install now?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._download_and_apply_update(download_url)
 
     def _on_banner_clicked(self) -> None:
-        """User clicked the persistent update banner."""
+        """User clicked the persistent update banner — open GitHub."""
         info = getattr(self, '_pending_update_info', None)
         if not info:
             return
-        download_url = info.get("download_url", "")
-        if download_url:
-            self._download_and_apply_update(download_url)
-        elif info.get("url"):
+        if info.get("url"):
             import webbrowser
             webbrowser.open(info["url"])
 
@@ -4117,30 +4104,6 @@ class MainWindow(QMainWindow):
             if label == "About":
                 dot = "\U0001F7E2" if color == "green" else "\U0001F534"
                 btn.setText(f"About {dot}")
-
-    def _download_and_apply_update(self, download_url: str) -> None:
-        from cdumm.engine.update_checker import UpdateDownloadWorker
-        progress = ProgressDialog("Downloading Update", self)
-        worker = UpdateDownloadWorker(download_url)
-        thread = QThread()
-        self._run_worker(worker, thread, progress,
-                         on_finished=self._on_update_downloaded)
-
-    def _on_update_downloaded(self, new_exe_path) -> None:
-        if not new_exe_path:
-            # Download failed — fall back to opening browser
-            import webbrowser
-            QMessageBox.warning(
-                self, "Download Failed",
-                "Automatic download failed. Opening the download page instead.")
-            info = getattr(self, '_pending_update_info', {})
-            if info.get("url"):
-                webbrowser.open(info["url"])
-            return
-        from pathlib import Path
-        from cdumm.engine.update_checker import apply_update
-        # Apply immediately — no second confirmation needed
-        apply_update(Path(str(new_exe_path)))
 
     # --- View Mod Contents ---
     def _show_mod_contents(self, mod_id: int) -> None:
