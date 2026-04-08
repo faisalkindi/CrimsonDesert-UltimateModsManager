@@ -197,6 +197,28 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             # Read the modified file
             plaintext = source_file.read_bytes()
 
+            # Fix XML files that mod tools export with wrong formatting.
+            # The game's XML parser requires: UTF-8 BOM, no XML declaration,
+            # CRLF line endings. Mod tools (Python xml.etree, etc.) often
+            # export with LF, no BOM, and an XML declaration that crashes
+            # the game's parser.
+            if entry.path.lower().endswith('.xml') and plaintext[:1] != b'\xef':
+                fixed = plaintext
+                # Remove XML declaration if present
+                if fixed.startswith(b'<?xml'):
+                    nl = fixed.find(b'\n')
+                    if nl >= 0:
+                        fixed = fixed[nl + 1:]
+                # Add UTF-8 BOM
+                if not fixed.startswith(b'\xef\xbb\xbf'):
+                    fixed = b'\xef\xbb\xbf' + fixed
+                # Normalize line endings to CRLF
+                fixed = fixed.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+                if fixed != plaintext:
+                    plaintext = fixed
+                    logger.info("Fixed XML formatting for %s (BOM/line endings/declaration)",
+                                inner_path)
+
             # Detect if the original PAZ entry is actually encrypted
             # even when entry.encrypted says False (heuristic misses non-XML files)
             if not entry.encrypted and entry.compressed and entry.compression_type == 2:

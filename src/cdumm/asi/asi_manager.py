@@ -182,7 +182,7 @@ class AsiManager:
 
     @staticmethod
     def contains_asi(path: Path) -> bool:
-        """Check if a path contains ASI plugin files (searches subdirectories and zips)."""
+        """Check if a path contains ASI plugin files (searches subdirectories and archives)."""
         if path.is_file():
             if path.suffix.lower() == ASI_SUFFIX:
                 return True
@@ -193,6 +193,14 @@ class AsiManager:
                     with zipfile.ZipFile(path) as zf:
                         return any(n.lower().endswith(ASI_SUFFIX) for n in zf.namelist())
                 except (zipfile.BadZipFile, Exception):
+                    return False
+            # Check inside 7z files
+            if path.suffix.lower() == ".7z":
+                try:
+                    import py7zr
+                    with py7zr.SevenZipFile(path, 'r') as zf:
+                        return any(n.lower().endswith(ASI_SUFFIX) for n in zf.getnames())
+                except Exception:
                     return False
         if path.is_dir():
             return any(path.rglob(f"*{ASI_SUFFIX}"))

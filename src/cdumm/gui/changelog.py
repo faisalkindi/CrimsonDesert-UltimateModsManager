@@ -8,6 +8,14 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.5",
+        "date": "2026-04-09",
+        "notes": [
+            "Auto-fix XML formatting on import. Mods with broken XML (missing UTF-8 BOM, added XML declaration, LF line endings) are automatically corrected to match what the game expects. Fixes VAXIS Dynamic Ragdolls and similar mods that crashed the game.",
+            "ASI mods in 7z archives now detected and installed correctly.",
+        ],
+    },
+    {
         "version": "2.2.4",
         "date": "2026-04-09",
         "notes": [

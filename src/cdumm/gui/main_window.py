@@ -2560,7 +2560,7 @@ class MainWindow(QMainWindow):
             )
             logger.warning("ASI Loader not found, installing ASI mod anyway")
 
-        # Extract zip first if needed
+        # Extract archive first if needed
         if path.is_file() and path.suffix.lower() == ".zip":
             tmp = tempfile.mkdtemp(prefix="cdumm_asi_")
             try:
@@ -2569,6 +2569,15 @@ class MainWindow(QMainWindow):
                 path = Path(tmp)
             except Exception as e:
                 logger.error("Failed to extract ASI zip: %s", e)
+        elif path.is_file() and path.suffix.lower() == ".7z":
+            tmp = tempfile.mkdtemp(prefix="cdumm_asi_")
+            try:
+                import py7zr
+                with py7zr.SevenZipFile(path, 'r') as zf:
+                    zf.extractall(tmp)
+                path = Path(tmp)
+            except Exception as e:
+                logger.error("Failed to extract ASI 7z: %s", e)
 
         installed = asi_mgr.install(path)
         if installed:
