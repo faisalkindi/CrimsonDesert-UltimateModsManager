@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.2",
+        "date": "2026-04-08",
+        "notes": [
+            "Localization system: language selector in Tools page. English and Arabic included. Translators can contribute by copying en.json to their language code. RTL layout support for Arabic.",
+            "CDUMM minimizes to taskbar when Launch Game is clicked.",
+            "Fixed text clipping on Tools page header and combo boxes (descenders cut off).",
+        ],
+    },
+    {
         "version": "2.2.1",
         "date": "2026-04-08",
         "notes": [

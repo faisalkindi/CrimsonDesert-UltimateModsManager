@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -94,7 +95,8 @@ class MainWindow(QMainWindow):
                  startup_context: dict | None = None) -> None:
         super().__init__()
         from cdumm import __version__
-        self.setWindowTitle(f"Crimson Desert Ultimate Mods Manager v{__version__}")
+        from cdumm.i18n import tr as _tr
+        self.setWindowTitle(_tr("app.title", version=__version__))
         self.setMinimumSize(1000, 700)
 
         # Set window icon
@@ -438,6 +440,17 @@ class MainWindow(QMainWindow):
         if cleaned > 0:
             self._db.connection.commit()
             logger.info("Cleaned %d contaminated ENTR deltas on startup", cleaned)
+
+    def _on_language_changed(self, index: int) -> None:
+        code = self._lang_combo.itemData(index)
+        if self._db:
+            from cdumm.storage.config import Config
+            config = Config(self._db)
+            config.set("language", code)
+        from cdumm.i18n import tr
+        QMessageBox.information(
+            self, tr("tools.language_restart_title"),
+            tr("tools.language_restart_body"))
 
     def _on_fix_everything(self) -> None:
         """One-click fix: revert, clear backups, clean orphans, rescan if clean.
@@ -1274,7 +1287,7 @@ class MainWindow(QMainWindow):
         # ── Sidebar ──
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(80)
+        sidebar.setMaximumWidth(160)
         sb_layout = QVBoxLayout(sidebar)
         sb_layout.setContentsMargins(4, 8, 4, 8)
         sb_layout.setSpacing(4)
@@ -1286,14 +1299,21 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(title)
         sb_layout.addSpacing(12)
 
+        from cdumm.i18n import tr
         self._nav_buttons = []
-        for label, tooltip in [("PAZ Mods", "PAZ Archive Mods"), ("ASI Mods", "ASI Plugin Mods"), ("Log", "Activity Log"), ("Tools", "Tools & Settings"), ("About", "About CDUMM")]:
-            btn = QPushButton(label)
-            btn.setToolTip(tooltip)
+        for key, tr_key, tr_tip in [
+            ("PAZ Mods", "nav.paz_mods", "nav.paz_mods_tooltip"),
+            ("ASI Mods", "nav.asi_mods", "nav.asi_mods_tooltip"),
+            ("Log", "nav.log", "nav.log_tooltip"),
+            ("Tools", "nav.tools", "nav.tools_tooltip"),
+            ("About", "nav.about", "nav.about_tooltip"),
+        ]:
+            btn = QPushButton(tr(tr_key))
+            btn.setToolTip(tr(tr_tip))
             btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, l=label: self._on_nav(l))
+            btn.clicked.connect(lambda checked, l=key: self._on_nav(l))
             sb_layout.addWidget(btn)
-            self._nav_buttons.append((label, btn))
+            self._nav_buttons.append((key, btn))
 
         sb_layout.addStretch()
         main_h.addWidget(sidebar)
@@ -1429,25 +1449,41 @@ class MainWindow(QMainWindow):
         tools_v.setContentsMargins(20, 20, 20, 20)
         tools_v.setSpacing(12)
 
-        tools_header = QLabel("Tools & Settings")
+        tools_header = QLabel(tr("tools.header"))
         tools_header.setObjectName("toolsHeader")
         tools_v.addWidget(tools_header)
 
-        for label, slot in [
-            ("Verify Game State", self._on_verify_game_state),
-            ("Check Mods For Issues", self._on_check_mods),
-            ("Find Problem Mod", self._on_find_problem_mod),
-            ("Rescan After Steam Verify", self._on_refresh_snapshot),
-            ("Fix Everything", self._on_fix_everything),
-            ("Change Game Directory", self._on_change_game_dir),
-            ("Profiles", self._on_profiles),
-            ("Export Mod List", self._on_export_list),
-            ("Import Mod List", self._on_import_list),
-            ("Test Mod Compatibility", self._on_test_mod),
-            ("Patch Notes", self._on_show_patch_notes),
-            ("Report Bug", self._on_report_bug),
+        # Language selector
+        from cdumm.i18n import available_languages, current_language
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel(tr("tools.language")))
+        self._lang_combo = QComboBox()
+        for code, name in available_languages():
+            self._lang_combo.addItem(name, code)
+        for i in range(self._lang_combo.count()):
+            if self._lang_combo.itemData(i) == current_language():
+                self._lang_combo.setCurrentIndex(i)
+                break
+        self._lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_row.addWidget(self._lang_combo)
+        lang_row.addStretch()
+        tools_v.addLayout(lang_row)
+
+        for tr_key, slot in [
+            ("tools.verify_state", self._on_verify_game_state),
+            ("tools.check_mods", self._on_check_mods),
+            ("tools.find_problem", self._on_find_problem_mod),
+            ("tools.rescan", self._on_refresh_snapshot),
+            ("tools.fix_everything", self._on_fix_everything),
+            ("tools.change_dir", self._on_change_game_dir),
+            ("tools.profiles", self._on_profiles),
+            ("tools.export_list", self._on_export_list),
+            ("tools.import_list", self._on_import_list),
+            ("tools.test_mod", self._on_test_mod),
+            ("tools.patch_notes", self._on_show_patch_notes),
+            ("tools.report_bug", self._on_report_bug),
         ]:
-            btn = QPushButton(label)
+            btn = QPushButton(tr(tr_key))
             btn.setFixedHeight(36)
             btn.clicked.connect(slot)
             tools_v.addWidget(btn)
@@ -1529,21 +1565,21 @@ class MainWindow(QMainWindow):
         ab_layout = QHBoxLayout(action_bar)
         ab_layout.setContentsMargins(16, 8, 16, 8)
 
-        apply_btn = QPushButton("  Apply  ")
+        apply_btn = QPushButton(tr("action_bar.apply"))
         apply_btn.setObjectName("applyBtn")
         apply_btn.clicked.connect(self._on_apply)
         ab_layout.addWidget(apply_btn)
 
-        launch_btn = QPushButton("  Launch Game  ")
+        launch_btn = QPushButton(tr("action_bar.launch_game"))
         launch_btn.setObjectName("launchBtn")
         launch_btn.clicked.connect(self._on_launch_game)
         ab_layout.addWidget(launch_btn)
 
         ab_layout.addStretch()
 
-        fix_btn = QPushButton("Fix Everything")
+        fix_btn = QPushButton(tr("action_bar.fix_everything"))
         fix_btn.setObjectName("fixBtn")
-        fix_btn.setToolTip("Revert, clear backups, rescan, reimport. Fixes most issues.")
+        fix_btn.setToolTip(tr("action_bar.fix_everything_tooltip"))
         fix_btn.clicked.connect(self._on_fix_everything)
         ab_layout.addWidget(fix_btn)
 
@@ -1580,6 +1616,7 @@ class MainWindow(QMainWindow):
         try:
             subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
             self.statusBar().showMessage("Game launched!", 5000)
+            self.showMinimized()
         except Exception as e:
             self.statusBar().showMessage(f"Failed to launch: {e}", 10000)
 

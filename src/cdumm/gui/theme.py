@@ -359,6 +359,7 @@ QComboBox {{
     border-radius: 8px;
     color: {TEXT_BRIGHT};
     padding: 6px 10px;
+    min-height: 20px;
 }}
 QComboBox QAbstractItemView {{
     background: {BG_MID};
@@ -387,6 +388,7 @@ QLabel#toolsHeader {{
     color: {TEXT_BRIGHT};
     font-size: 18px;
     font-weight: 700;
-    padding-bottom: 8px;
+    padding: 4px 0px 12px 0px;
+    min-height: 28px;
 }}
 """

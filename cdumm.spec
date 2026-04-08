@@ -9,7 +9,8 @@ a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
     binaries=_xxhash_binaries,
-    datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader')],
+    datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
+           ('src/cdumm/translations', 'cdumm/translations')],
     hiddenimports=[
         'cdumm.gui.main_window',
         'cdumm.gui.setup_dialog',

@@ -62,6 +62,10 @@ def main() -> int:
     logger = logging.getLogger(__name__)
     logger.info("Starting Crimson Desert Ultimate Mods Manager")
 
+    # Initialize i18n (English default, reloads with user preference after DB is ready)
+    from cdumm.i18n import load as load_i18n
+    load_i18n("en")
+
     # Minimal import for QApplication — everything else is lazy
     from PySide6.QtWidgets import QApplication
     app = QApplication(sys.argv)
@@ -170,6 +174,17 @@ def main() -> int:
     logger.info("Database initialized at %s", db.db_path)
 
     config = Config(db)
+
+    # Reload i18n with user's language preference
+    user_lang = config.get("language") or "en"
+    if user_lang != "en":
+        load_i18n(user_lang)
+
+    # Set RTL layout direction for Arabic/Hebrew/etc.
+    from cdumm.i18n import is_rtl
+    if is_rtl():
+        from PySide6.QtCore import Qt
+        app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
     # Ensure game_dir is saved in the new DB and pointer file
     if config.get("game_directory") != game_dir:
