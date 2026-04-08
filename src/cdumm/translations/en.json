@@ -473,5 +473,7 @@
   "tools.verify_state": "Verify Game State",
   "tools.find_problem": "Find Problem Mod",
   "tools.rescan": "Rescan After Steam Verify",
-  "tools.change_dir": "Change Game Directory"
+  "tools.change_dir": "Change Game Directory",
+  "action_bar.revert_vanilla": "Revert to Vanilla",
+  "action_bar.revert_vanilla_tooltip": "Restore all game files to their original unmodded state"
 }

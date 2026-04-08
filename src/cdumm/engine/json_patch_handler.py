@@ -127,19 +127,29 @@ def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
                 try:
                     body = lz4_decompress(compressed_body, body_orig_size)
                 except Exception:
+                    try:
+                        decrypted = decrypt(compressed_body, basename)
+                        body = lz4_decompress(decrypted, body_orig_size)
+                        if not entry._encrypted_override:
+                            logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
+                                        entry.path)
+                            entry._encrypted_override = True
+                    except Exception:
+                        # All decompression failed — DX10 multi-mip raw passthrough
+                        logger.info("DDS %s: returning raw (DX10 multi-mip)", entry.path)
+                        return raw
+            else:
+                try:
                     decrypted = decrypt(compressed_body, basename)
                     body = lz4_decompress(decrypted, body_orig_size)
                     if not entry._encrypted_override:
                         logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
                                     entry.path)
                         entry._encrypted_override = True
-            else:
-                decrypted = decrypt(compressed_body, basename)
-                body = lz4_decompress(decrypted, body_orig_size)
-                if not entry._encrypted_override:
-                    logger.info("Corrected encrypted flag for %s (DDS split, actually encrypted)",
-                                entry.path)
-                    entry._encrypted_override = True
+                except Exception:
+                    # All decompression failed — DX10 multi-mip raw passthrough
+                    logger.info("DDS %s: returning raw (DX10 multi-mip)", entry.path)
+                    return raw
         return header + body
 
     if entry.compressed and entry.compression_type == 2:

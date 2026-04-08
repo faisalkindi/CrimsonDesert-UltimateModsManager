@@ -354,13 +354,22 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
 
     if is_compressed:
         if is_dds_split:
-            # Type 0x01: 128-byte DDS header (raw) + LZ4 compressed body
-            header = bytearray(plaintext[:DDS_HEADER_SIZE])
-            body = plaintext[DDS_HEADER_SIZE:]
-            body_orig = entry.orig_size - DDS_HEADER_SIZE
-            body_comp_budget = entry.comp_size - DDS_HEADER_SIZE
+            # Check if DX10 multi-mip (raw passthrough) or standard (inner LZ4)
+            fourcc = plaintext[84:88] if len(plaintext) >= 88 else b""
+            is_dx10 = fourcc == b"DX10" and len(plaintext) >= 148
+            mip_count = max(1, struct.unpack_from("<I", plaintext, 28)[0]) if len(plaintext) >= 32 else 1
 
-            if allow_size_change:
+            if allow_size_change and is_dx10 and mip_count > 1:
+                # DX10 multi-mip: raw passthrough, no compression
+                payload = plaintext
+                actual_comp_size = len(payload)
+                actual_orig_size = len(payload)
+            elif allow_size_change:
+                # Standard DDS: 128-byte header (raw) + LZ4 compressed body
+                header = bytearray(plaintext[:DDS_HEADER_SIZE])
+                body = plaintext[DDS_HEADER_SIZE:]
+                body_orig = entry.orig_size - DDS_HEADER_SIZE
+
                 if len(body) > body_orig:
                     padded_body = body
                     actual_orig_size = DDS_HEADER_SIZE + len(body)
@@ -368,14 +377,9 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                     padded_body = _pad_to_orig_size(body, body_orig)
                 compressed_body = lz4.block.compress(padded_body, store_size=False)
 
-                # Fix DDS header with the now-known compressed body size
                 if header[:4] == b"DDS ":
                     header = fix_dds_header(header, len(compressed_body))
 
-                # DDS type 0x01: game reads compressed body size from header[32:36],
-                # not from PAMT comp_size. Set comp_size = orig_size (padded to full
-                # DDS size with zeros) so the PAMT entry looks "uncompressed" to the
-                # game's outer reader. The inner LZ4 decompression uses header[32:36].
                 full_size = DDS_HEADER_SIZE + len(padded_body)
                 payload_core = header + compressed_body
                 if len(payload_core) < full_size:

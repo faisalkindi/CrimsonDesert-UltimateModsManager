@@ -199,25 +199,39 @@ def build_overlay(
         paz_offset = len(paz_buf)
 
         if comp_type == 1:
-            # DDS split: 128-byte header + LZ4 body
-            DDS_HEADER_SIZE = 128
-            header = bytearray(content[:DDS_HEADER_SIZE])
-            body = content[DDS_HEADER_SIZE:]
+            # DDS type 0x01: check if DX10 multi-mip (raw passthrough)
+            # or standard DDS (inner LZ4 compression).
+            # DX10 multi-mip textures must be written raw — inner LZ4
+            # breaks them (confirmed broken in JSON MM 9.8.3 too).
+            fourcc = content[84:88] if len(content) >= 88 else b""
+            is_dx10 = fourcc == b"DX10" and len(content) >= 148
+            mip_count = max(1, struct.unpack_from("<I", content, 28)[0]) if len(content) >= 32 else 1
 
-            compressed_body = lz4.block.compress(body, store_size=False)
-
-            if header[:4] == b"DDS ":
-                header = fix_dds_header(header, len(compressed_body))
-
-            full_size = len(content)
-            payload_core = bytes(header) + compressed_body
-            if len(payload_core) < full_size:
-                payload = payload_core + b'\x00' * (full_size - len(payload_core))
+            if is_dx10 and mip_count > 1:
+                # DX10 multi-mip: raw passthrough, no compression
+                payload = content
+                comp_size = len(payload)
+                decomp_size = len(payload)
             else:
-                payload = payload_core
+                # Standard DDS: inner LZ4 compression
+                DDS_HEADER_SIZE = 128
+                header = bytearray(content[:DDS_HEADER_SIZE])
+                body = content[DDS_HEADER_SIZE:]
 
-            comp_size = full_size
-            decomp_size = full_size
+                compressed_body = lz4.block.compress(body, store_size=False)
+
+                if header[:4] == b"DDS ":
+                    header = fix_dds_header(header, len(compressed_body))
+
+                full_size = len(content)
+                payload_core = bytes(header) + compressed_body
+                if len(payload_core) < full_size:
+                    payload = payload_core + b'\x00' * (full_size - len(payload_core))
+                else:
+                    payload = payload_core
+
+                comp_size = full_size
+                decomp_size = full_size
             flags = 1
 
         elif comp_type == 2:

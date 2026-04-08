@@ -8,6 +8,17 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.3",
+        "date": "2026-04-08",
+        "notes": [
+            "DX10 multi-mip DDS textures (BC7 with mipmaps) now handled correctly. Written raw to overlay without inner LZ4 compression. Fixes Enhanced Map Icons and similar mods using DX10/BC7 format.",
+            "Standard DDS textures (DXT1/DXT5 single mip) continue using inner LZ4 compression. Both formats work together in the same overlay.",
+            "Vanilla backup gap closed. All game files are now backed up before modification, even if they don't match the snapshot. A potentially dirty backup is better than no backup.",
+            "Revert to Vanilla button restored in the action bar.",
+            "DDS decompression fallback: if all LZ4 decompression attempts fail, raw DDS data is returned instead of crashing. Handles DX10 raw passthrough entries during import.",
+        ],
+    },
+    {
         "version": "2.2.2",
         "date": "2026-04-08",
         "notes": [

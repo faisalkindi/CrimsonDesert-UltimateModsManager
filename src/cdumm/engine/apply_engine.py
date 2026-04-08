@@ -781,16 +781,21 @@ class ApplyWorker(QObject):
                 if not full_path.exists():
                     game_path = self._game_dir / file_path.replace("/", "\\")
                     if game_path.exists():
-                        # Validate: game file must match snapshot before backing up
-                        if not self._verify_is_vanilla(game_path, file_path, snap_hashes):
+                        # Validate: game file should match snapshot.
+                        # But ALWAYS back up if no backup exists — a potentially
+                        # dirty backup is better than no backup at all. Without
+                        # a backup, revert requires Steam verify which is a
+                        # much worse user experience.
+                        is_vanilla = self._verify_is_vanilla(game_path, file_path, snap_hashes)
+                        if not is_vanilla:
                             logger.warning(
-                                "Skipping backup of %s — file doesn't match snapshot "
-                                "(may be modded). Revert will use range backup or "
-                                "require Steam verify.", file_path)
-                            continue
+                                "Backing up %s — file may not match snapshot "
+                                "(size differs). Backup may be dirty but is "
+                                "better than no backup.", file_path)
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         _backup_copy(game_path, full_path)
-                        logger.info("Full vanilla backup: %s", file_path)
+                        logger.info("Full vanilla backup: %s%s", file_path,
+                                    "" if is_vanilla else " (may be dirty)")
             else:
                 # Byte-range backup — only the positions mods touch
                 ranges = self._get_all_byte_ranges(file_path)

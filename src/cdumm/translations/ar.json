@@ -473,5 +473,7 @@
   "tools.verify_state": "التحقق من حالة اللعبة",
   "tools.find_problem": "البحث عن التعديل المسبب للمشكلة",
   "tools.rescan": "إعادة فحص بعد التحقق عبر Steam",
-  "tools.change_dir": "تغيير مجلد اللعبة"
+  "tools.change_dir": "تغيير مجلد اللعبة",
+  "action_bar.revert_vanilla": "استعادة الأصلي",
+  "action_bar.revert_vanilla_tooltip": "استعادة جميع ملفات اللعبة إلى حالتها الأصلية"
 }

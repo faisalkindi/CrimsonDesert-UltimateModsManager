@@ -1583,6 +1583,12 @@ class MainWindow(QMainWindow):
         fix_btn.clicked.connect(self._on_fix_everything)
         ab_layout.addWidget(fix_btn)
 
+        revert_btn = QPushButton(tr("action_bar.revert_vanilla"))
+        revert_btn.setObjectName("revertBtn")
+        revert_btn.setToolTip(tr("action_bar.revert_vanilla_tooltip"))
+        revert_btn.clicked.connect(self._on_revert)
+        ab_layout.addWidget(revert_btn)
+
         content_v.addWidget(action_bar)
         main_h.addLayout(content_v)
 
