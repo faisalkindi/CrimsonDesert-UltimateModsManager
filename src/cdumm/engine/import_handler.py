@@ -386,10 +386,13 @@ def _find_loose_file_candidates(path: Path, max_depth: int = 5) -> list[dict]:
                     "_modinfo": {"title": candidate.name},
                 }
         # Pattern 4: bare NNNN/ directly in the candidate (no files/ wrapper)
-        # Mods that ship e.g. 0010/actionchart/xml/file.xml at the root
+        # Mods that ship e.g. 0010/actionchart/xml/file.xml at the root.
+        # Skip if the numbered directory contains 0.paz (that's a standalone
+        # PAZ mod, handled by _match_game_files).
         try:
             has_direct_numbered = any(
                 d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                and not (d / "0.paz").exists()
                 and any(f.is_file() for f in d.rglob("*"))
                 for d in candidate.iterdir()
             )

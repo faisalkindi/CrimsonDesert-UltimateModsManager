@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.4",
+        "date": "2026-04-09",
+        "notes": [
+            "Fixed standalone PAZ mods (like Proper 3rd Person Camera) being incorrectly detected as loose-file mods. Numbered directories containing 0.paz are now correctly routed to the PAZ import path.",
+        ],
+    },
+    {
         "version": "2.2.3",
         "date": "2026-04-08",
         "notes": [
