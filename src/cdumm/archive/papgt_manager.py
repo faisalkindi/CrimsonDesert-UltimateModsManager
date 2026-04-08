@@ -187,11 +187,29 @@ class PapgtManager:
                 pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
                 rehashed += 1
             elif dir_name in existing_hashes and not is_mod_base:
-                # Reuse existing hash for vanilla directories. For directories
-                # that were modified by overlay migration, the migration code
-                # in Phase 1b already staged the vanilla PAMT and added it to
-                # modified_pamts, so it's handled above.
-                pamt_hash = existing_hashes[dir_name]
+                # Verify hash against actual PAMT on disk. The PAPGT base
+                # may have stale hashes from previous in-place applies or
+                # other mod managers. Only read small PAMTs (<2MB) to avoid
+                # memory issues in the worker thread.
+                pamt_path = self._game_dir / dir_name / "0.pamt"
+                if pamt_path.exists():
+                    try:
+                        pamt_size = pamt_path.stat().st_size
+                        if pamt_size < 2_000_000:
+                            pamt_data = pamt_path.read_bytes()
+                            actual_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
+                            if actual_hash != existing_hashes[dir_name]:
+                                pamt_hash = actual_hash
+                                rehashed += 1
+                            else:
+                                pamt_hash = existing_hashes[dir_name]
+                        else:
+                            # Large PAMT — trust existing hash to avoid memory pressure
+                            pamt_hash = existing_hashes[dir_name]
+                    except OSError:
+                        pamt_hash = existing_hashes[dir_name]
+                else:
+                    pamt_hash = existing_hashes[dir_name]
             elif dir_name in existing_hashes and is_mod_base:
                 # Mod-shipped base — verify hash against actual PAMT on disk
                 pamt_path = self._game_dir / dir_name / "0.pamt"

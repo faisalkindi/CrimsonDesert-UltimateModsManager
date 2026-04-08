@@ -8,6 +8,14 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.1",
+        "date": "2026-04-08",
+        "notes": [
+            "Bare numbered directory mods now recognized. Mods that ship game files directly in NNNN/ directories without a files/ wrapper or mod.json (e.g. VAXIS Blood Mod with 0010/actionchart/...) are now detected and imported correctly.",
+            "Fixed PAPGT stale hash causing game crash. The PAPGT rebuild now verifies PAMT hashes against disk for small PAMTs (<2MB), catching stale hashes from previous in-place applies or other mod managers without memory issues.",
+        ],
+    },
+    {
         "version": "2.2.0",
         "date": "2026-04-07",
         "notes": [

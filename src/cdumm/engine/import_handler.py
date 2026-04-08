@@ -385,6 +385,26 @@ def _find_loose_file_candidates(path: Path, max_depth: int = 5) -> list[dict]:
                     "_base_dir": candidate,
                     "_modinfo": {"title": candidate.name},
                 }
+        # Pattern 4: bare NNNN/ directly in the candidate (no files/ wrapper)
+        # Mods that ship e.g. 0010/actionchart/xml/file.xml at the root
+        try:
+            has_direct_numbered = any(
+                d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                and any(f.is_file() for f in d.rglob("*"))
+                for d in candidate.iterdir()
+            )
+        except OSError:
+            has_direct_numbered = False
+        if has_direct_numbered:
+            seen_bases.add(base_key)
+            return {
+                "format": "loose_file_mod",
+                "id": candidate.name,
+                "files_dir": ".",
+                "_manifest_path": None,
+                "_base_dir": candidate,
+                "_modinfo": {"title": candidate.name},
+            }
         return None
 
     def _walk(directory: Path, depth: int) -> None:
