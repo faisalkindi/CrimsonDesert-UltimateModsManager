@@ -54,10 +54,12 @@ class AsiPanel(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self._table.setSortingEnabled(True)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
+        from PySide6.QtGui import QShortcut, QKeySequence
+        QShortcut(QKeySequence.StandardKey.SelectAll, self._table, self._table.selectAll)
         layout.addWidget(self._table)
 
         # Hint
@@ -157,31 +159,46 @@ class AsiPanel(QWidget):
 
         menu = QMenu(self)
 
-        # Enable/Disable
-        if plugin.enabled:
-            toggle = QAction("Disable", self)
+        # Enable/Disable — supports multi-select
+        selected_rows = set(item.row() for item in self._table.selectedItems())
+        if len(selected_rows) > 1:
+            plugins = [self._get_plugin_at_row(r) for r in selected_rows]
+            plugins = [p for p in plugins if p]
+            enabled_count = sum(1 for p in plugins if p.enabled)
+            disabled_count = len(plugins) - enabled_count
+            if disabled_count > 0:
+                enable_action = QAction(f"Enable {disabled_count} plugins", self)
+                enable_action.triggered.connect(lambda: self._toggle_selected_plugins(True))
+                menu.addAction(enable_action)
+            if enabled_count > 0:
+                disable_action = QAction(f"Disable {enabled_count} plugins", self)
+                disable_action.triggered.connect(lambda: self._toggle_selected_plugins(False))
+                menu.addAction(disable_action)
         else:
-            toggle = QAction("Enable", self)
-        toggle.triggered.connect(lambda: self._toggle_plugin(plugin))
-        menu.addAction(toggle)
+            if plugin.enabled:
+                toggle = QAction("Disable", self)
+            else:
+                toggle = QAction("Enable", self)
+            toggle.triggered.connect(lambda: self._toggle_plugin(plugin))
+            menu.addAction(toggle)
 
-        # Config (if .ini exists)
-        if plugin.ini_path:
-            config = QAction("Edit Config", self)
-            config.triggered.connect(lambda: self._asi_mgr.open_config(plugin))
-            menu.addAction(config)
+            # Config (if .ini exists) — single plugin only
+            if plugin.ini_path:
+                config = QAction("Edit Config", self)
+                config.triggered.connect(lambda: self._asi_mgr.open_config(plugin))
+                menu.addAction(config)
 
-        menu.addSeparator()
+            menu.addSeparator()
 
-        # Update
-        update = QAction("Update", self)
-        update.triggered.connect(lambda: self._update_plugin(plugin))
-        menu.addAction(update)
+            # Update — single plugin only
+            update = QAction("Update", self)
+            update.triggered.connect(lambda: self._update_plugin(plugin))
+            menu.addAction(update)
 
-        # Uninstall
-        uninstall = QAction("Uninstall", self)
-        uninstall.triggered.connect(lambda: self._uninstall_plugin(plugin))
-        menu.addAction(uninstall)
+            # Uninstall — single plugin only
+            uninstall = QAction("Uninstall", self)
+            uninstall.triggered.connect(lambda: self._uninstall_plugin(plugin))
+            menu.addAction(uninstall)
 
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
@@ -190,6 +207,16 @@ class AsiPanel(QWidget):
             self._asi_mgr.disable(plugin)
         else:
             self._asi_mgr.enable(plugin)
+
+    def _toggle_selected_plugins(self, enabled: bool) -> None:
+        rows = set(item.row() for item in self._table.selectedItems())
+        for row in rows:
+            plugin = self._get_plugin_at_row(row)
+            if plugin:
+                if enabled:
+                    self._asi_mgr.enable(plugin)
+                else:
+                    self._asi_mgr.disable(plugin)
         self.refresh()
 
     def _update_plugin(self, plugin) -> None:
