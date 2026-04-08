@@ -1386,6 +1386,8 @@ class MainWindow(QMainWindow):
             self._mod_table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
             self._mod_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self._mod_table.customContextMenuRequested.connect(self._show_mod_context_menu)
+            from PySide6.QtGui import QShortcut, QKeySequence
+            QShortcut(QKeySequence.StandardKey.SelectAll, self._mod_table, self._mod_table.selectAll)
             self._mod_table.setDragEnabled(True)
             self._mod_table.setAcceptDrops(True)
             self._mod_table.setDropIndicatorShown(True)
@@ -3141,13 +3143,28 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QAction
         menu = QMenu(self)
 
-        # Enable/Disable
-        if mod["enabled"]:
-            toggle_action = QAction("Disable", self)
+        # Enable/Disable — supports multi-select
+        selected = self._mod_table.selectionModel().selectedRows()
+        if len(selected) > 1:
+            mods_sel = [self._get_mod_at_proxy_row(idx.row()) for idx in selected]
+            mods_sel = [m for m in mods_sel if m]
+            enabled_count = sum(1 for m in mods_sel if m["enabled"])
+            disabled_count = len(mods_sel) - enabled_count
+            if disabled_count > 0:
+                enable_action = QAction(f"Enable {disabled_count} mods", self)
+                enable_action.triggered.connect(lambda: self._on_toggle_selected_mods(True))
+                menu.addAction(enable_action)
+            if enabled_count > 0:
+                disable_action = QAction(f"Disable {enabled_count} mods", self)
+                disable_action.triggered.connect(lambda: self._on_toggle_selected_mods(False))
+                menu.addAction(disable_action)
         else:
-            toggle_action = QAction("Enable", self)
-        toggle_action.triggered.connect(lambda: self._on_toggle_mod(mod))
-        menu.addAction(toggle_action)
+            if mod["enabled"]:
+                toggle_action = QAction("Disable", self)
+            else:
+                toggle_action = QAction("Enable", self)
+            toggle_action.triggered.connect(lambda: self._on_toggle_mod(mod))
+            menu.addAction(toggle_action)
 
         menu.addSeparator()
 
@@ -3171,7 +3188,6 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         # Uninstall — handles single or multiple selected mods
-        selected = self._mod_table.selectionModel().selectedRows()
         if len(selected) > 1:
             remove_action = QAction(f"Uninstall {len(selected)} selected mods", self)
             remove_action.triggered.connect(lambda: self._on_remove_mod())
@@ -3333,6 +3349,17 @@ class MainWindow(QMainWindow):
             return
         new_state = not mod["enabled"]
         self._mod_manager.set_enabled(mod["id"], new_state)
+        self._refresh_all()
+        self._update_apply_reminder()
+
+    def _on_toggle_selected_mods(self, enabled: bool) -> None:
+        if not self._mod_manager:
+            return
+        indexes = self._mod_table.selectionModel().selectedRows()
+        for idx in indexes:
+            mod = self._get_mod_at_proxy_row(idx.row())
+            if mod:
+                self._mod_manager.set_enabled(mod["id"], enabled)
         self._refresh_all()
         self._update_apply_reminder()
 

@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.6",
+        "date": "2026-04-09",
+        "notes": [
+            "Multi-select enable/disable for PAZ mods. Select multiple mods with Ctrl+click or Shift+click, right-click to enable or disable them all at once.",
+            "Multi-select enable/disable for ASI plugins. Same bulk toggle support in the ASI Plugins tab.",
+            "Ctrl+A to select all mods in both PAZ and ASI tabs.",
+        ],
+    },
+    {
         "version": "2.2.5",
         "date": "2026-04-09",
         "notes": [
