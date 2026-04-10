@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.9",
+        "date": "2026-04-10",
+        "notes": [
+            "Fixed 'not applied' status for mods that modify game files without a vanilla snapshot. The status check now detects applied mods by the presence of vanilla backups. Fixes Barber Unlocked and similar mods showing 'not applied' even though they were correctly applied.",
+        ],
+    },
+    {
         "version": "2.2.8",
         "date": "2026-04-10",
         "notes": [
