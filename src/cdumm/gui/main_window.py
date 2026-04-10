@@ -488,12 +488,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning("Fix: revert failed: %s", e)
 
-        # Step 2: Clear backups
-        if self._vanilla_dir and self._vanilla_dir.exists():
-            shutil.rmtree(self._vanilla_dir, ignore_errors=True)
-            self._vanilla_dir.mkdir(parents=True, exist_ok=True)
-
-        # Step 3: Clean orphan directories
+        # Step 2: Clean orphan directories
         for d in sorted(self._game_dir.iterdir()):
             if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
                     and int(d.name) >= 36):
@@ -503,27 +498,23 @@ class MainWindow(QMainWindow):
                 if snap_check == 0:
                     shutil.rmtree(d, ignore_errors=True)
 
-        # Step 4: Check if files are actually clean before taking snapshot
-        # Quick check: PAPGT size should match snapshot
-        files_clean = True
-        try:
-            papgt = self._game_dir / "meta" / "0.papgt"
-            snap = self._db.connection.execute(
-                "SELECT file_size FROM snapshots WHERE file_path = 'meta/0.papgt'"
-            ).fetchone()
-            if snap and papgt.exists() and papgt.stat().st_size != snap[0]:
-                files_clean = False
-        except Exception:
-            pass
-
         steam_verified = verified == QMessageBox.StandardButton.Yes
 
         if steam_verified:
+            # Only delete backups when we know game files are clean (Steam verified).
+            # The fresh snapshot will validate the clean state, and new backups
+            # will be created from verified vanilla files on the next Apply.
+            if self._vanilla_dir and self._vanilla_dir.exists():
+                shutil.rmtree(self._vanilla_dir, ignore_errors=True)
+                self._vanilla_dir.mkdir(parents=True, exist_ok=True)
             self._on_refresh_snapshot(skip_verify_prompt=True)
             self._log_activity("fix",
                                "Fix Everything: reverted, cleared backups, rescanning")
             self.statusBar().showMessage("Fix in progress: rescanning game files...", 0)
         else:
+            # Keep backups intact — they're needed for future reverts.
+            # Without Steam verify, we can't guarantee game files are clean,
+            # so we don't delete the only way to restore them.
             self._log_activity("fix",
                                "Fix Everything: reverted and cleaned up (no rescan)")
             self._refresh_all()
@@ -3826,11 +3817,30 @@ class MainWindow(QMainWindow):
             if not game_file.exists():
                 continue
 
-            # Size difference = stale backup, replace with clean game file
+            # Size difference = stale backup. Only replace if game file
+            # matches the snapshot hash (is actually vanilla).
             if backup.stat().st_size != game_file.stat().st_size:
-                shutil.copy2(game_file, backup)
-                refreshed += 1
-                logger.info("Refreshed stale vanilla backup: %s", rel)
+                snap_row = self._db.connection.execute(
+                    "SELECT file_hash, file_size FROM snapshots WHERE file_path = ?",
+                    (rel,)).fetchone()
+                if snap_row and game_file.stat().st_size == snap_row[1]:
+                    from cdumm.engine.snapshot_manager import hash_file
+                    try:
+                        current_hash, _ = hash_file(game_file)
+                        if current_hash == snap_row[0]:
+                            shutil.copy2(game_file, backup)
+                            refreshed += 1
+                            logger.info("Refreshed stale vanilla backup: %s", rel)
+                        else:
+                            logger.warning(
+                                "Skipping backup refresh for %s — game file "
+                                "hash doesn't match snapshot", rel)
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(
+                        "Skipping backup refresh for %s — game file size "
+                        "doesn't match snapshot", rel)
 
         if orphans_removed:
             logger.info("Removed %d orphan vanilla backup(s)", orphans_removed)

@@ -364,7 +364,18 @@ class ApplyWorker(QObject):
 
         if needs_backup:
             self.progress_updated.emit(2, "Backing up vanilla files...")
-            self._ensure_backups(file_deltas, revert_files)
+            unbacked = self._ensure_backups(file_deltas, revert_files)
+            if unbacked:
+                files_str = ", ".join(unbacked[:5])
+                if len(unbacked) > 5:
+                    files_str += f" (+{len(unbacked) - 5} more)"
+                self.error_occurred.emit(
+                    f"Cannot apply — these game files don't match vanilla "
+                    f"and can't be safely backed up:\n\n{files_str}\n\n"
+                    f"To fix: Verify game files through Steam, then click "
+                    f"Fix Everything (say Yes to Steam verify)."
+                )
+                return
         # Ensure PAMT backups for directories with entry-level deltas
         for pamt_dir in entry_pamt_dirs:
             pamt_path = f"{pamt_dir}/0.pamt"
@@ -702,13 +713,17 @@ class ApplyWorker(QObject):
         finally:
             txn.cleanup_staging()
 
-    def _ensure_backups(self, file_deltas: dict, revert_files: list[str]) -> None:
+    def _ensure_backups(self, file_deltas: dict, revert_files: list[str]) -> list[str]:
         """Create vanilla backups for all files about to be modified.
 
         Validates each backup against the snapshot hash to ensure we're
         backing up actual vanilla files, not modded ones. A dirty backup
         poisons the entire restore chain.
+
+        Returns list of file paths that couldn't be backed up (game file
+        doesn't match vanilla snapshot). Caller should abort if non-empty.
         """
+        unbacked_files: list[str] = []
         self._vanilla_dir.mkdir(parents=True, exist_ok=True)
 
         # Always back up PAPGT — it's rebuilt on every Apply and the rebuild
@@ -778,30 +793,42 @@ class ApplyWorker(QObject):
 
             if needs_full:
                 full_path = self._vanilla_dir / file_path.replace("/", "\\")
-                if not full_path.exists():
+                if full_path.exists():
+                    # Validate existing backup against snapshot
+                    snap = snap_hashes.get(file_path)
+                    if snap:
+                        snap_hash, snap_size = snap
+                        try:
+                            if full_path.stat().st_size != snap_size:
+                                unbacked_files.append(file_path)
+                                logger.warning(
+                                    "Existing backup for %s is contaminated "
+                                    "(size %d != vanilla %d). Apply blocked.",
+                                    file_path, full_path.stat().st_size, snap_size)
+                        except OSError:
+                            pass
+                else:
                     game_path = self._game_dir / file_path.replace("/", "\\")
                     if game_path.exists():
-                        # Validate: game file should match snapshot.
-                        # But ALWAYS back up if no backup exists — a potentially
-                        # dirty backup is better than no backup at all. Without
-                        # a backup, revert requires Steam verify which is a
-                        # much worse user experience.
                         is_vanilla = self._verify_is_vanilla(game_path, file_path, snap_hashes)
                         if not is_vanilla:
+                            unbacked_files.append(file_path)
                             logger.warning(
-                                "Backing up %s — file may not match snapshot "
-                                "(size differs). Backup may be dirty but is "
-                                "better than no backup.", file_path)
+                                "Cannot back up %s — file doesn't match vanilla "
+                                "snapshot (modded or corrupted). Apply blocked.",
+                                file_path)
+                            continue
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         _backup_copy(game_path, full_path)
-                        logger.info("Full vanilla backup: %s%s", file_path,
-                                    "" if is_vanilla else " (may be dirty)")
+                        logger.info("Full vanilla backup: %s", file_path)
             else:
                 # Byte-range backup — only the positions mods touch
                 ranges = self._get_all_byte_ranges(file_path)
                 if ranges:
                     _save_range_backup(
                         self._game_dir, self._vanilla_dir, file_path, ranges)
+
+        return unbacked_files
 
     def _verify_is_vanilla(self, game_path: Path, file_path: str,
                            snap_hashes: dict[str, tuple[str, int]]) -> bool:

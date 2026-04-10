@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.3.0",
+        "date": "2026-04-10",
+        "notes": [
+            "Apply now blocked when game files don't match vanilla snapshot. Prevents contaminated backups that poison the restore chain. Shows a clear error with instructions to verify through Steam and Fix Everything.",
+            "Fix Everything no longer deletes vanilla backups when you say No to Steam verify. Backups are only cleared after a confirmed Steam verification.",
+            "Backup refresh now hash-verifies game files against the snapshot before overwriting existing backups. Prevents modded files from replacing clean backups.",
+        ],
+    },
+    {
         "version": "2.2.9",
         "date": "2026-04-10",
         "notes": [
