@@ -186,6 +186,13 @@ class ModManager:
             snap = self._db.connection.execute(
                 "SELECT file_hash FROM snapshots WHERE file_path = ?", (file_path,)).fetchone()
             if snap is None:
+                # No snapshot — check if a vanilla backup exists.
+                # If the apply engine created a backup, the file was modified.
+                vanilla_dir = game_dir / "CDMods" / "vanilla"
+                full_backup = vanilla_dir / file_path.replace("/", os.sep)
+                range_backup = vanilla_dir / (file_path.replace("/", "_") + ".vranges")
+                if full_backup.exists() or range_backup.exists():
+                    return "active"
                 continue
             from cdumm.engine.snapshot_manager import hash_matches
             if not hash_matches(game_file, snap[0]):
