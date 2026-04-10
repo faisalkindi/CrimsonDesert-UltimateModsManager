@@ -70,18 +70,15 @@ class AsiPanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        # Always check for updates (even if loader exists)
+        self._install_bundled_loader()
+
         if self._asi_mgr.has_loader():
             self._loader_label.setText("ASI Loader: Installed")
             self._loader_label.setStyleSheet("color: #48A858; font-weight: 600;")
         else:
-            # Try to auto-install bundled ASI loader
-            self._install_bundled_loader()
-            if self._asi_mgr.has_loader():
-                self._loader_label.setText("ASI Loader: Installed (auto)")
-                self._loader_label.setStyleSheet("color: #48A858; font-weight: 600;")
-            else:
-                self._loader_label.setText("ASI Loader: Missing")
-                self._loader_label.setStyleSheet("color: #D04848; font-weight: 600;")
+            self._loader_label.setText("ASI Loader: Missing")
+            self._loader_label.setStyleSheet("color: #D04848; font-weight: 600;")
 
         self._plugins = self._asi_mgr.scan()
         conflicts = self._asi_mgr.detect_conflicts(self._plugins)
@@ -122,7 +119,7 @@ class AsiPanel(QWidget):
         self._table.resizeColumnsToContents()
 
     def _install_bundled_loader(self) -> None:
-        """Install the bundled ASI loader (winmm.dll) to bin64."""
+        """Install or update the bundled ASI loader (winmm.dll) to bin64."""
         import sys, shutil
         if getattr(sys, 'frozen', False):
             bundled = Path(sys._MEIPASS) / "asi_loader" / "winmm.dll"
@@ -131,12 +128,31 @@ class AsiPanel(QWidget):
         if not bundled.exists():
             return
         dst = self._asi_mgr._bin64 / "winmm.dll"
+        # SHA-512 of the current bundled ASI loader
+        _BUNDLED_HASH = (
+            "d257f4639a831e31e10e2d912032604ae088cdefd2c2da5fe6f06ba49616f16a"
+            "bc5795b010687e62b88bcb38508f561e5d61ffa4bb79211fe35bda1e1c4c4efa"
+        )
         if dst.exists():
-            return
+            import hashlib
+            dst_hash = hashlib.sha512(dst.read_bytes()).hexdigest()
+            if dst_hash == _BUNDLED_HASH:
+                return  # already up to date
+            logger.info("Updating ASI loader: %s (hash mismatch)", dst)
+            updating = True
+        else:
+            updating = False
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bundled, dst)
-            logger.info("Auto-installed bundled ASI loader: %s", dst)
+            if updating:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self, "ASI Loader Updated",
+                    "The ASI Loader (winmm.dll) has been updated to a newer version.")
+                logger.info("Updated ASI loader: %s", dst)
+            else:
+                logger.info("Installed bundled ASI loader: %s", dst)
         except Exception as e:
             logger.warning("Failed to install ASI loader: %s", e)
 
