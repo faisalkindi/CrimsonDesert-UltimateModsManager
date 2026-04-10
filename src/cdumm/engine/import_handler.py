@@ -667,7 +667,7 @@ def import_from_7z(
                                       mod_name, existing_mod_id)
 
 
-_LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".lua", ".cfg", ".ini", ".txt", ".csv"}
+_LOOSE_GAME_EXTENSIONS = {".json", ".xml"}
 _SKIP_LOOSE_FILES = {"mod.json", "manifest.json", "modinfo.json"}
 
 
@@ -849,11 +849,17 @@ def _import_from_extracted(
         tmp_path, game_dir, db, snapshot, deltas_dir, mod_name,
         existing_mod_id=existing_mod_id, modinfo=modinfo)
 
-    # Second pass: import loose game files not matched by _match_game_files
-    # (e.g., standalone PAZ mod that also ships loose .json/.xml files)
+    # Second pass: import loose game files not matched by _match_game_files.
+    # Only runs for mixed-format mods (standalone PAZ dirs + loose files).
     if result.changed_files and not result.error and result.mod_id is not None:
-        _import_remaining_loose_files(
-            tmp_path, game_dir, db, snapshot, deltas_dir, result)
+        has_standalone_paz = any(
+            d.is_dir() and d.name.isdigit() and len(d.name) == 4
+            and (d / "0.paz").exists()
+            for d in tmp_path.iterdir() if d.is_dir()
+        )
+        if has_standalone_paz:
+            _import_remaining_loose_files(
+                tmp_path, game_dir, db, snapshot, deltas_dir, result)
 
     return result
 
@@ -1087,10 +1093,17 @@ def import_from_folder(
         folder_path, game_dir, db, snapshot, deltas_dir, mod_name,
         existing_mod_id=existing_mod_id, modinfo=modinfo)
 
-    # Second pass: import loose game files not matched by _match_game_files
+    # Second pass: import loose game files not matched by _match_game_files.
+    # Only runs for mixed-format mods (standalone PAZ dirs + loose files).
     if result.changed_files and not result.error and result.mod_id is not None:
-        _import_remaining_loose_files(
-            folder_path, game_dir, db, snapshot, deltas_dir, result)
+        has_standalone_paz = any(
+            d.is_dir() and d.name.isdigit() and len(d.name) == 4
+            and (d / "0.paz").exists()
+            for d in folder_path.iterdir() if d.is_dir()
+        )
+        if has_standalone_paz:
+            _import_remaining_loose_files(
+                folder_path, game_dir, db, snapshot, deltas_dir, result)
 
     return result
 
@@ -1520,17 +1533,20 @@ def _process_extracted_files(
     # Archive mod source files for auto-reimport after game updates.
     # Copy the extracted files to CDMods/sources/<mod_id>/ so the mod
     # can be re-imported without the user providing the original files.
-    sources_dir = deltas_dir.parent / "sources" / str(mod_id)
-    try:
-        if sources_dir.exists():
-            shutil.rmtree(sources_dir)
-        shutil.copytree(extracted_dir, sources_dir, dirs_exist_ok=True)
-        db.connection.execute(
-            "UPDATE mods SET source_path = ? WHERE id = ?",
-            (str(sources_dir), mod_id))
-        logger.info("Archived mod source: %s -> %s", mod_name, sources_dir)
-    except Exception as e:
-        logger.warning("Failed to archive mod source: %s", e)
+    # Skip when reusing an existing mod (e.g., second pass of mixed-format
+    # import) — sources were already archived from the first pass.
+    if existing_mod_id is None:
+        sources_dir = deltas_dir.parent / "sources" / str(mod_id)
+        try:
+            if sources_dir.exists():
+                shutil.rmtree(sources_dir)
+            shutil.copytree(extracted_dir, sources_dir, dirs_exist_ok=True)
+            db.connection.execute(
+                "UPDATE mods SET source_path = ? WHERE id = ?",
+                (str(sources_dir), mod_id))
+            logger.info("Archived mod source: %s -> %s", mod_name, sources_dir)
+        except Exception as e:
+            logger.warning("Failed to archive mod source: %s", e)
 
     total_matches = len(matches)
     _paz_entr_handled: set[str] = set()  # PAZ/PAMT files handled by entry-level import
