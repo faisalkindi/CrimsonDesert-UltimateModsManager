@@ -185,6 +185,13 @@ class Database:
             )
             logger.info("Migrated: added json_patches column to mod_deltas")
 
+        # Add force_inplace column to mods for per-mod overlay bypass
+        if "force_inplace" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN force_inplace INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migrated: added force_inplace column to mods")
+
     @property
     def connection(self) -> sqlite3.Connection:
         if self._connection is None:

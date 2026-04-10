@@ -8,6 +8,14 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.2.7",
+        "date": "2026-04-10",
+        "notes": [
+            "Force in-place mode: mod authors can set \"force_inplace\": true in modinfo.json to bypass the overlay system. Fixes mods like HAWT that need to replace vanilla entries in game directories that use merge behavior (e.g., conditionalpartprefab).",
+            "Mixed-format mod import: mods that ship both standalone PAZ directories and loose game files (JSON, XML) are now fully imported. Previously the loose files were silently dropped. Fixes Character Creator Female and similar mods.",
+        ],
+    },
+    {
         "version": "2.2.6",
         "date": "2026-04-09",
         "notes": [

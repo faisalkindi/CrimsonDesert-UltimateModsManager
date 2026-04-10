@@ -19,7 +19,8 @@ class ModManager:
         """List all mods ordered by priority (load order), optionally filtered by type."""
         query = (
             "SELECT id, name, mod_type, enabled, priority, import_date, "
-            "game_version_hash, source_path, author, version, description, configurable "
+            "game_version_hash, source_path, author, version, description, configurable, "
+            "force_inplace "
             "FROM mods"
         )
         if mod_type:
@@ -34,6 +35,7 @@ class ModManager:
                 "game_version_hash": row[6], "source_path": row[7],
                 "author": row[8], "version": row[9], "description": row[10],
                 "configurable": bool(row[11]) if len(row) > 11 else False,
+                "force_inplace": bool(row[12]) if len(row) > 12 else False,
             }
             for row in cursor.fetchall()
         ]

@@ -42,6 +42,7 @@ class ModImportResult:
         self.changed_files: list[dict] = []  # [{file_path, delta_path, byte_start, byte_end}]
         self.error: str | None = None
         self.health_issues: list = []  # list[HealthIssue] from mod_health_check
+        self.mod_id: int | None = None
 
 
 def detect_format(path: Path) -> str:
@@ -666,6 +667,87 @@ def import_from_7z(
                                       mod_name, existing_mod_id)
 
 
+_LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".lua", ".cfg", ".ini", ".txt", ".csv"}
+_SKIP_LOOSE_FILES = {"mod.json", "manifest.json", "modinfo.json"}
+
+
+def _import_remaining_loose_files(
+    extracted_dir: Path, game_dir: Path, db: Database,
+    snapshot: SnapshotManager, deltas_dir: Path,
+    result: ModImportResult,
+) -> None:
+    """Import loose game files that weren't matched by _match_game_files.
+
+    For mixed-format mods (standalone PAZ + loose .json/.xml files), the
+    main import handles the PAZ but drops the loose files. This function
+    collects those files and routes them through the CB handler which can
+    resolve filenames to PAZ directories via PAMT lookup, then imports the
+    converted output into the same mod entry.
+    """
+    from cdumm.engine.crimson_browser_handler import convert_to_paz_mod
+
+    # Collect loose files not inside numbered directories
+    loose_files: list[Path] = []
+    for f in extracted_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(extracted_dir)
+        parts = rel.parts
+        # Skip files inside numbered directories (already handled as PAZ)
+        if parts and parts[0].isdigit() and len(parts[0]) == 4:
+            continue
+        # Skip meta/ directory (PAPGT handled by CDUMM)
+        if parts and parts[0].lower() == "meta":
+            continue
+        # Skip known non-game files
+        if f.name.lower() in _SKIP_LOOSE_FILES:
+            continue
+        # Only include known game data extensions
+        if f.suffix.lower() in _LOOSE_GAME_EXTENSIONS:
+            loose_files.append(f)
+
+    if not loose_files:
+        return
+
+    logger.info("Mixed-format mod: found %d loose files after PAZ import: %s",
+                len(loose_files), [f.name for f in loose_files])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work_dir = Path(tmp)
+        files_dir = work_dir / "_loose_files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        for f in loose_files:
+            rel = f.relative_to(extracted_dir)
+            dst = files_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+
+        # Create synthetic CB manifest for the loose files
+        manifest = {
+            "id": result.name,
+            "files_dir": ".",
+            "_base_dir": files_dir,
+        }
+
+        cb_output = work_dir / "_cb_output"
+        converted = convert_to_paz_mod(manifest, game_dir, cb_output)
+        if converted is None:
+            logger.warning("CB handler could not resolve loose files for %s", result.name)
+            return
+
+        # Import the converted files into the same mod entry
+        loose_result = _process_extracted_files(
+            converted, game_dir, db, snapshot, deltas_dir, result.name,
+            existing_mod_id=result.mod_id)
+
+        if loose_result.changed_files:
+            result.changed_files.extend(loose_result.changed_files)
+            logger.info("Mixed-format mod: imported %d additional files from loose pass",
+                        len(loose_result.changed_files))
+        else:
+            logger.warning("Mixed-format mod: loose pass matched no files for %s", result.name)
+
+
 def _import_from_extracted(
     tmp_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     mod_name: str, existing_mod_id: int | None = None,
@@ -698,6 +780,7 @@ def _import_from_extracted(
             lfm_modinfo = {
                 "name": mi.get("title"), "version": mi.get("version"),
                 "author": mi.get("author"), "description": mi.get("description"),
+                "force_inplace": mi.get("force_inplace"),
             }
             return _process_extracted_files(
                 converted, game_dir, db, snapshot, deltas_dir, lfm_name,
@@ -762,9 +845,17 @@ def _import_from_extracted(
     if modinfo and modinfo.get("name"):
         mod_name = modinfo["name"]
 
-    return _process_extracted_files(
+    result = _process_extracted_files(
         tmp_path, game_dir, db, snapshot, deltas_dir, mod_name,
         existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    # Second pass: import loose game files not matched by _match_game_files
+    # (e.g., standalone PAZ mod that also ships loose .json/.xml files)
+    if result.changed_files and not result.error and result.mod_id is not None:
+        _import_remaining_loose_files(
+            tmp_path, game_dir, db, snapshot, deltas_dir, result)
+
+    return result
 
 
 def import_from_zip(
@@ -814,6 +905,7 @@ def import_from_zip(
                 lfm_modinfo = {
                     "name": mi.get("title"), "version": mi.get("version"),
                     "author": mi.get("author"), "description": mi.get("description"),
+                    "force_inplace": mi.get("force_inplace"),
                 }
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
@@ -922,6 +1014,7 @@ def import_from_folder(
                 lfm_modinfo = {
                     "name": mi.get("title"), "version": mi.get("version"),
                     "author": mi.get("author"), "description": mi.get("description"),
+                    "force_inplace": mi.get("force_inplace"),
                 }
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
@@ -990,9 +1083,16 @@ def import_from_folder(
     if modinfo and modinfo.get("name"):
         mod_name = modinfo["name"]
 
-    return _process_extracted_files(
+    result = _process_extracted_files(
         folder_path, game_dir, db, snapshot, deltas_dir, mod_name,
         existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+    # Second pass: import loose game files not matched by _match_game_files
+    if result.changed_files and not result.error and result.mod_id is not None:
+        _import_remaining_loose_files(
+            folder_path, game_dir, db, snapshot, deltas_dir, result)
+
+    return result
 
 
 def _find_best_variant(folder_path: Path) -> Path | None:
@@ -1391,13 +1491,16 @@ def _process_extracted_files(
     except Exception as e:
         logger.warning("Health check failed (non-fatal): %s", e)
 
+    force_inplace = 1 if (modinfo and modinfo.get("force_inplace")) else 0
+
     if existing_mod_id is not None:
         mod_id = existing_mod_id
         # Update metadata if modinfo provided
         if modinfo:
             db.connection.execute(
-                "UPDATE mods SET author=?, version=?, description=? WHERE id=?",
-                (modinfo.get("author"), modinfo.get("version"), modinfo.get("description"), mod_id),
+                "UPDATE mods SET author=?, version=?, description=?, force_inplace=? WHERE id=?",
+                (modinfo.get("author"), modinfo.get("version"), modinfo.get("description"),
+                 force_inplace, mod_id),
             )
     else:
         # Store mod in database
@@ -1406,11 +1509,13 @@ def _process_extracted_files(
         version = modinfo.get("version") if modinfo else None
         description = modinfo.get("description") if modinfo else None
         cursor = db.connection.execute(
-            "INSERT INTO mods (name, mod_type, priority, author, version, description) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (mod_name, "paz", priority, author, version, description),
+            "INSERT INTO mods (name, mod_type, priority, author, version, description, force_inplace) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mod_name, "paz", priority, author, version, description, force_inplace),
         )
         mod_id = cursor.lastrowid
+
+    result.mod_id = mod_id
 
     # Archive mod source files for auto-reimport after game updates.
     # Copy the extracted files to CDMods/sources/<mod_id>/ so the mod

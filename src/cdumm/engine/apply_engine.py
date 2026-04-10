@@ -889,7 +889,10 @@ class ApplyWorker(QObject):
         # ── Overlay routing: ENTR-only files go to overlay PAZ ──
         # If a file has ONLY entry deltas (no byte-range), route all entries
         # to the overlay builder. The original PAZ is left untouched.
-        if entry_deltas and not byte_deltas:
+        # Exception: force_inplace mods bypass overlay (for game dirs that
+        # merge base+overlay entries instead of overlay-wins).
+        any_force_inplace = any(d.get("force_inplace") for d in remaining_deltas)
+        if entry_deltas and not byte_deltas and not any_force_inplace:
             from cdumm.engine.delta_engine import load_entry_delta
             by_entry: dict[str, dict] = {}
             for d in entry_deltas:
@@ -1619,7 +1622,7 @@ class ApplyWorker(QObject):
         """Get all deltas for enabled mods, grouped by file path."""
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name, "
-            "md.is_new, md.entry_path, md.json_patches "
+            "md.is_new, md.entry_path, md.json_patches, m.force_inplace "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
@@ -1629,7 +1632,7 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        for file_path, delta_path, mod_name, is_new, entry_path, json_patches in cursor.fetchall():
+        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace in cursor.fetchall():
             if delta_path in seen_deltas:
                 continue
             # Skip deltas whose files are missing (zombie entries from old resets)
@@ -1646,6 +1649,8 @@ class ApplyWorker(QObject):
                 d["entry_path"] = entry_path
             if json_patches:
                 d["json_patches"] = json_patches
+            if force_inplace:
+                d["force_inplace"] = True
             file_deltas.setdefault(file_path, []).append(d)
 
         return file_deltas
