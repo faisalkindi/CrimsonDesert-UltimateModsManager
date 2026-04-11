@@ -191,15 +191,16 @@ def _extract_from_paz(entry: PazEntry, paz_path: str | None = None) -> bytes:
 
 
 def _apply_byte_patches(data: bytearray, changes: list[dict],
-                        signature: str | None = None) -> int:
+                        signature: str | None = None) -> tuple[int, int]:
     """Apply byte patches to decompressed file data.
 
     If signature is provided, find it in data and treat change offsets
     as relative to the end of the signature match. Otherwise offsets
     are absolute.
 
-    Returns number of patches applied.
+    Returns (applied_count, mismatched_count).
     """
+    mismatched = 0
     base_offset = 0
     if signature:
         sig_bytes = bytes.fromhex(signature)
@@ -241,12 +242,13 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     continue
                 logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
                                offset, change["original"], actual.hex())
+                mismatched += 1
                 continue
 
         data[offset:offset + len(patched_bytes)] = patched_bytes
         applied += 1
 
-    return applied
+    return applied, mismatched
 
 
 def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) -> Path | None:
@@ -334,8 +336,8 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
         # Apply byte patches
         modified = bytearray(plaintext)
         signature = patch.get("signature")
-        applied = _apply_byte_patches(modified, changes, signature=signature)
-        logger.info("Applied %d/%d patches to %s", applied, len(changes), game_file)
+        applied, mismatched = _apply_byte_patches(modified, changes, signature=signature)
+        logger.info("Applied %d/%d patches to %s (mismatched=%d)", applied, len(changes), game_file, mismatched)
 
         if bytes(modified) == plaintext:
             logger.info("No actual changes after patching %s, skipping", game_file)
@@ -537,19 +539,31 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
     version = modinfo.get("version") if modinfo else patch_data.get("version")
     description = modinfo.get("description") if modinfo else patch_data.get("description")
 
+    # Stamp with current game version
+    game_ver_hash = None
+    try:
+        from cdumm.engine.version_detector import detect_game_version
+        game_ver_hash = detect_game_version(game_dir)
+    except Exception:
+        pass
+
     if existing_mod_id:
         mod_id = existing_mod_id
         # Clear existing deltas for re-import
         db.connection.execute("DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+        if game_ver_hash:
+            db.connection.execute(
+                "UPDATE mods SET game_version_hash = ? WHERE id = ?",
+                (game_ver_hash, mod_id))
         import shutil
         old_delta_dir = deltas_dir / str(mod_id)
         if old_delta_dir.exists():
             shutil.rmtree(old_delta_dir)
     else:
         cursor = db.connection.execute(
-            "INSERT INTO mods (name, mod_type, priority, author, version, description) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (mod_name, "paz", priority, author, version, description))
+            "INSERT INTO mods (name, mod_type, priority, author, version, description, game_version_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mod_name, "paz", priority, author, version, description, game_ver_hash))
         mod_id = cursor.lastrowid
 
     changed_files = []
@@ -610,8 +624,20 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         # Apply byte patches
         modified = bytearray(plaintext)
         signature = patch.get("signature")
-        applied = _apply_byte_patches(modified, changes, signature=signature)
-        logger.info("Applied %d/%d patches to %s", applied, len(changes), game_file)
+        applied, mismatched = _apply_byte_patches(modified, changes, signature=signature)
+        logger.info("Applied %d/%d patches to %s (mismatched=%d)",
+                     applied, len(changes), game_file, mismatched)
+
+        # All patches failed due to byte mismatch → game version incompatibility
+        if mismatched > 0 and applied == 0 and bytes(modified) == plaintext:
+            game_ver = patch_data.get("game_version", "unknown")
+            logger.error("All %d patches mismatched for %s — mod targets game version %s",
+                         mismatched, game_file, game_ver)
+            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+            db.connection.commit()
+            return {"changed_files": [], "version_mismatch": True,
+                    "game_file": game_file, "game_version": game_ver,
+                    "mismatched": mismatched}
 
         if bytes(modified) == plaintext:
             # Content unchanged. Could mean: (a) patches had no effect, or
@@ -628,11 +654,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                     pass
             if vanilla_content is not None and bytes(modified) != vanilla_content:
                 logger.info("Mod already applied to %s, using current content as delta", game_file)
-                # Content is correct (already patched), proceed to save delta
             elif vanilla_content is None and applied > 0:
-                # No vanilla backup to compare against, but patches were
-                # detected as already applied. Trust the "already applied"
-                # detection and create the delta anyway.
                 logger.info("Mod likely already applied to %s (no vanilla to verify), creating delta", game_file)
             else:
                 logger.info("No changes after patching %s, skipping", game_file)
@@ -705,6 +727,13 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         logger.info("Archived JSON source: %s -> %s", mod_name, sources_dir)
     except Exception as e:
         logger.warning("Failed to archive JSON source: %s", e)
+
+    if not changed_files:
+        # No changes produced — clean up the mod entry instead of leaving a zombie
+        db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+        db.connection.commit()
+        logger.info("Removed empty mod entry %d (no changes)", mod_id)
+        return {"mod_id": None, "changed_files": [], "name": mod_name}
 
     db.connection.commit()
     return {"mod_id": mod_id, "changed_files": changed_files, "name": mod_name}

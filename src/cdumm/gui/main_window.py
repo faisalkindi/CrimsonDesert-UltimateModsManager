@@ -1029,15 +1029,28 @@ class MainWindow(QMainWindow):
     def _reset_for_game_update(self, new_fingerprint: str) -> None:
         """Reset for a new game version while KEEPING mod data.
 
-        Mod deltas and DB entries are preserved — users just need to
-        re-enable and Apply after the rescan. Only vanilla backups and
-        snapshot are cleared (they're version-specific).
+        Validates mods against new game files BEFORE clearing deltas.
+        Broken mods get notes explaining why. All mods are disabled
+        and reimported from sources.
         """
         import shutil
         from cdumm.storage.config import Config
 
-        # Step 1: Clean up orphan mod directories (0036+) from game dir
-        # These were created by mods — the new game version won't have them
+        # Step 1: Validate mods BEFORE clearing deltas
+        # This checks PAMT entries and file sizes against the new game version
+        broken_mods = {}
+        try:
+            broken_mods = self._mod_manager.validate_mods_post_update(self._game_dir)
+            for mod_id, reason in broken_mods.items():
+                self._db.connection.execute(
+                    "UPDATE mods SET notes = ? WHERE id = ?",
+                    (f"Broken by game update: {reason}", mod_id))
+            if broken_mods:
+                logger.info("Game update: %d mod(s) detected as broken", len(broken_mods))
+        except Exception as e:
+            logger.warning("Post-update validation failed: %s", e)
+
+        # Step 2: Clean up orphan mod directories (0036+) from game dir
         for d in self._game_dir.iterdir():
             if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
                 continue
@@ -1045,25 +1058,25 @@ class MainWindow(QMainWindow):
                 shutil.rmtree(d, ignore_errors=True)
                 logger.info("Removed orphan mod directory: %s", d.name)
 
-        # Step 2: Clear vanilla backups (they're for the old game version)
+        # Step 3: Clear vanilla backups (they're for the old game version)
         if self._vanilla_dir.exists():
             shutil.rmtree(self._vanilla_dir, ignore_errors=True)
             logger.info("Cleared vanilla backups (old game version)")
 
-        # Step 3: Clear snapshot (needs fresh rescan against new game files)
+        # Step 4: Clear snapshot (needs fresh rescan against new game files)
         self._db.connection.execute("DELETE FROM snapshots")
         try:
             self._db.connection.execute("DELETE FROM conflicts")
         except Exception:
             pass
 
-        # Step 4: Clear old deltas (they're against the old vanilla)
+        # Step 5: Clear old deltas (they're against the old vanilla)
         if self._deltas_dir.exists():
             shutil.rmtree(self._deltas_dir, ignore_errors=True)
             self._deltas_dir.mkdir(parents=True, exist_ok=True)
         self._db.connection.execute("DELETE FROM mod_deltas")
 
-        # Step 5: Disable all mods
+        # Step 6: Disable all mods
         self._db.connection.execute("UPDATE mods SET enabled = 0")
         self._db.connection.commit()
         logger.info("Game update: cleared backups/deltas/snapshot, disabled mods")
@@ -1132,52 +1145,10 @@ class MainWindow(QMainWindow):
             )
 
     def _check_bad_standalone_imports(self) -> None:
-        """Detect mods imported by v1.0.0 as broken standalone PAZ copies.
-
-        v1.0.0 stored JSON patch mods as full 954MB PAZ copies in new directories
-        instead of small byte-level deltas. These cause game crashes.
-        Telltale: is_new=1 delta for a .paz file >100MB.
-        """
-        if not self._db:
-            return
-        try:
-            cursor = self._db.connection.execute("""
-                SELECT DISTINCT m.id, m.name, md.file_path
-                FROM mod_deltas md JOIN mods m ON md.mod_id = m.id
-                WHERE md.is_new = 1 AND md.file_path LIKE '%%.paz'
-                  AND md.byte_end > 100000000
-            """)
-            bad_mods = {}
-            for mid, name, fpath in cursor.fetchall():
-                bad_mods[mid] = name
-
-            if not bad_mods:
-                return
-
-            names = "\n".join(f"  - {name}" for name in bad_mods.values())
-            reply = QMessageBox.warning(
-                self, "Mods Need Re-import",
-                f"The following mods were imported by an older version and may crash the game:\n\n"
-                f"{names}\n\n"
-                "They need to be uninstalled and re-imported to work correctly.\n\n"
-                "Uninstall them now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                # Store bad mod IDs for removal after revert
-                self._bad_import_ids = list(bad_mods.keys())
-                self.statusBar().showMessage("Reverting to vanilla to clean up...", 15000)
-                # Revert to vanilla first, then remove bad mods and re-apply good ones
-                progress = ProgressDialog("Cleaning up broken mods...", self)
-                from cdumm.engine.apply_engine import RevertWorker
-                worker = RevertWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
-                thread = QThread()
-                worker.warning.connect(
-                    lambda msg: self._dispatcher.call(self._show_revert_warning, msg))
-                self._run_worker(worker, thread, progress,
-                                 on_finished=self._on_bad_import_cleanup)
-        except Exception as e:
-            logger.debug("Bad standalone check failed: %s", e)
+        """No longer auto-disables mods. Outdated detection in get_mod_game_status
+        and Apply skip logic handle this — the user sees 'outdated' status and
+        Apply skips them unless force-applied. No need to override user choices."""
+        pass
 
     def _on_bad_import_cleanup(self) -> None:
         """After revert completes, remove bad mods and disable all."""
@@ -1266,7 +1237,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QSortFilterProxyModel
         from cdumm.gui.mod_list_model import (
             COL_ENABLED, COL_ORDER, COL_NAME, COL_AUTHOR, COL_VERSION,
-            COL_STATUS, COL_FILES, COL_DATE,
+            COL_STATUS, COL_FILES, COL_NOTES, COL_DATE,
         )
 
         central = QWidget()
@@ -1393,13 +1364,7 @@ class MainWindow(QMainWindow):
             # Fixed-size columns auto-fit to header, rest are draggable
             self._check_header.setSectionResizeMode(COL_ENABLED, QHeaderView.ResizeMode.Fixed)
             self._mod_table.setColumnWidth(COL_ENABLED, 30)
-            self._mod_table.setColumnWidth(COL_ORDER, 45)
-            # Fit content columns to header text width at minimum
-            self._mod_table.setColumnWidth(COL_NAME, 180)
-            self._mod_table.setColumnWidth(COL_AUTHOR, 110)
-            self._mod_table.setColumnWidth(COL_VERSION, 65)
-            self._mod_table.setColumnWidth(COL_STATUS, 130)
-            self._mod_table.setColumnWidth(COL_FILES, 45)
+            # All other columns auto-sized in _resize_columns_to_content
             # Import Date stretches via setStretchLastSection
             self._mod_table.doubleClicked.connect(self._on_mod_double_clicked)
             splitter.addWidget(self._mod_table)
@@ -1681,7 +1646,73 @@ class MainWindow(QMainWindow):
         logger.debug("_refresh_all: updating snapshot status")
         self._update_snapshot_status()
         self._update_header_checkbox()
+        self._resize_columns_to_content()
         logger.debug("_refresh_all: done")
+
+    def _resize_columns_to_content(self) -> None:
+        """Compute and set column widths from actual text content."""
+        if not hasattr(self, "_mod_table") or not hasattr(self, "_mod_list_model"):
+            return
+        from cdumm.gui.mod_list_model import (
+            COLUMNS, COL_ENABLED, COL_ORDER, COL_NAME, COL_AUTHOR,
+            COL_VERSION, COL_STATUS, COL_FILES, COL_NOTES, COL_DATE,
+        )
+
+        fm = self._mod_table.fontMetrics()
+        padding = 20
+
+        # Minimum widths per column
+        min_widths = {
+            COL_ORDER: 45,
+            COL_NAME: 150,
+            COL_STATUS: fm.horizontalAdvance("not applied (resolved)") + padding,
+            COL_FILES: 45,
+        }
+
+        # Get cell text for each column per mod
+        model = self._mod_list_model
+        status_cache = model._status_cache
+        file_count_cache = model._file_count_cache
+        conflict_cache = model._conflict_status_cache
+
+        # Skip COL_ENABLED (fixed) and COL_DATE (stretch last section)
+        for col in [COL_ORDER, COL_NAME, COL_AUTHOR, COL_VERSION,
+                    COL_STATUS, COL_FILES, COL_NOTES]:
+            header_text = COLUMNS[col]
+            max_w = fm.horizontalAdvance(header_text) + padding
+
+            for i, mod in enumerate(model._mods):
+                if col == COL_ORDER:
+                    text = str(i + 1)
+                elif col == COL_NAME:
+                    text = mod["name"]
+                    if mod.get("configurable"):
+                        text = f"⚙ {text}"
+                elif col == COL_AUTHOR:
+                    text = mod.get("author") or ""
+                elif col == COL_VERSION:
+                    text = mod.get("version") or ""
+                elif col == COL_STATUS:
+                    status = status_cache.get(mod["id"], "")
+                    conflict = conflict_cache.get(mod["id"], "clean")
+                    if conflict in ("conflict", "resolved"):
+                        text = f"{status} ({conflict})"
+                    else:
+                        text = status
+                elif col == COL_FILES:
+                    text = str(file_count_cache.get(mod["id"], 0))
+                elif col == COL_NOTES:
+                    text = mod.get("notes") or ""
+                else:
+                    text = ""
+
+                if text:
+                    w = fm.horizontalAdvance(text) + padding
+                    max_w = max(max_w, w)
+
+            # Apply minimum widths
+            max_w = max(max_w, min_widths.get(col, 0))
+            self._mod_table.setColumnWidth(col, max_w)
 
     def _on_mod_double_clicked(self, index) -> None:
         """Double-click on a configurable mod opens the configure dialog."""
@@ -2638,12 +2669,45 @@ class MainWindow(QMainWindow):
         if not self._check_game_running():
             return
 
-        # Conflicts are shown in the conflict view at the bottom of the window.
-        # No need to block Apply with a warning dialog — overlaps are resolved
-        # by load order and the winner is shown in the UI.
+        # Check for outdated mods among enabled mods
+        outdated_names = []
+        if self._mod_manager:
+            for mod in self._mod_manager.list_mods("paz"):
+                if mod["enabled"]:
+                    status = self._mod_manager.get_mod_game_status(mod["id"], self._game_dir)
+                    if "outdated" in status:
+                        outdated_names.append(mod["name"])
+
+        if outdated_names:
+            if len(outdated_names) == 1:
+                # Single outdated mod — ask user if they want to force apply to test
+                reply = QMessageBox.question(
+                    self, "Outdated Mod",
+                    f'"{outdated_names[0]}" is outdated and may not work with '
+                    f"the current game version.\n\n"
+                    f"Do you want to force apply it to test if it still works?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+                # User chose Yes — proceed, worker will include this mod
+                self._force_outdated = True
+            else:
+                # Multiple outdated mods — skip them, apply the rest
+                names = "\n".join(f"  - {n}" for n in outdated_names)
+                QMessageBox.information(
+                    self, "Outdated Mods Skipped",
+                    f"These outdated mods will be skipped:\n\n{names}\n\n"
+                    f"To test if an outdated mod still works, enable only that "
+                    f"mod and click Apply — you'll get the option to force it.",
+                )
+                self._force_outdated = False
+        else:
+            self._force_outdated = False
 
         progress = ProgressDialog("Applying Mods", self)
-        worker = ApplyWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
+        worker = ApplyWorker(self._game_dir, self._vanilla_dir, self._db.db_path,
+                             force_outdated=self._force_outdated)
         thread = QThread()
 
         self._run_worker(worker, thread, progress,
@@ -3172,9 +3236,21 @@ class MainWindow(QMainWindow):
         rename_action.triggered.connect(lambda: self._on_rename_mod(mod))
         menu.addAction(rename_action)
 
+        notes_label = "Edit Notes" if mod.get("notes") else "Add Notes"
+        notes_action = QAction(notes_label, self)
+        notes_action.triggered.connect(lambda: self._on_edit_notes(mod))
+        menu.addAction(notes_action)
+
         update_action = QAction("Update (replace with new version)", self)
         update_action.triggered.connect(lambda: self._on_update_mod(mod))
         menu.addAction(update_action)
+
+        # Reimport from stored source
+        source_dir = self._cdmods_dir / "sources" / str(mod["id"])
+        if source_dir.exists() and any(source_dir.iterdir()):
+            reimport_action = QAction("Reimport from source", self)
+            reimport_action.triggered.connect(lambda: self._on_reimport_from_source(mod))
+            menu.addAction(reimport_action)
 
         menu.addSeparator()
 
@@ -3384,7 +3460,73 @@ class MainWindow(QMainWindow):
             self._refresh_all()
             self.statusBar().showMessage(f"Renamed to: {name.strip()}", 5000)
 
+    def _on_edit_notes(self, mod: dict) -> None:
+        """Open a dialog to edit user notes for a mod."""
+        if not self._mod_manager:
+            return
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QPlainTextEdit, QDialogButtonBox, QLabel
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Notes — {mod['name']}")
+        dlg.setMinimumSize(400, 250)
+        layout = QVBoxLayout(dlg)
+        label = QLabel("Personal notes for this mod:")
+        layout.addWidget(label)
+        text_edit = QPlainTextEdit()
+        text_edit.setPlainText(mod.get("notes") or "")
+        text_edit.setPlaceholderText("e.g., compatibility issues, version info, reminders...")
+        layout.addWidget(text_edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            notes = text_edit.toPlainText().strip()
+            self._mod_manager.set_notes(mod["id"], notes)
+            self._refresh_all()
+            self.statusBar().showMessage(
+                f"Notes {'saved' if notes else 'cleared'} for {mod['name']}", 5000)
+
     # --- Update mod ---
+    def _on_reimport_from_source(self, mod: dict) -> None:
+        """Reimport a mod from its stored source files."""
+        if not self._db or not self._game_dir or not self._mod_manager:
+            return
+        source_dir = self._cdmods_dir / "sources" / str(mod["id"])
+        if not source_dir.exists():
+            QMessageBox.warning(self, "No Source",
+                                "No stored source files found for this mod.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Reimport from Source",
+            f"Reimport \"{mod['name']}\" from stored source files?\n\n"
+            f"This will clear old deltas and reimport against the current "
+            f"game version.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from cdumm.engine.import_handler import import_from_folder
+            # Clear old deltas
+            self._mod_manager.clear_deltas(mod["id"])
+            # Reimport
+            result = import_from_folder(
+                source_dir, self._game_dir, self._db, self._snapshot,
+                self._deltas_dir, existing_mod_id=mod["id"])
+            if result.error:
+                QMessageBox.warning(self, "Reimport Failed", result.error)
+            else:
+                count = len(result.changed_files)
+                QMessageBox.information(
+                    self, "Reimported",
+                    f"Reimported \"{mod['name']}\" with {count} file(s).")
+            self._refresh_all()
+        except Exception as e:
+            QMessageBox.critical(self, "Reimport Error", str(e))
+
     def _on_update_mod(self, mod: dict) -> None:
         """Show overlay for drag-drop mod update."""
         if not self._db or not self._game_dir or not self._mod_manager:

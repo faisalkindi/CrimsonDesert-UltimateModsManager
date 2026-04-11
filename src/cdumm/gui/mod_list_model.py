@@ -10,7 +10,7 @@ from cdumm.engine.mod_manager import ModManager
 
 logger = logging.getLogger(__name__)
 
-COLUMNS = ["☐", "#", "Name", "Author", "Version", "Status", "Files", "Import Date"]
+COLUMNS = ["☐", "#", "Name", "Author", "Version", "Status", "Files", "Notes", "Import Date"]
 COL_ENABLED = 0
 COL_ORDER = 1
 COL_NAME = 2
@@ -18,13 +18,18 @@ COL_AUTHOR = 3
 COL_VERSION = 4
 COL_STATUS = 5
 COL_FILES = 6
-COL_DATE = 7
+COL_NOTES = 7
+COL_DATE = 8
 
 STATUS_COLORS = {
     "active": QColor(76, 175, 80),       # green
     "not applied": QColor(255, 152, 0),   # orange
     "no data": QColor(244, 67, 54),       # red
+    "outdated": QColor(255, 193, 7),      # amber
+    "active (outdated)": QColor(255, 193, 7),    # amber
+    "not applied (outdated)": QColor(255, 193, 7), # amber
     "disabled": QColor(158, 158, 158),    # gray
+    "disabled (outdated)": QColor(255, 193, 7),  # amber
     "checking...": QColor(158, 158, 158), # gray
 }
 
@@ -171,15 +176,30 @@ class ModListModel(QAbstractTableModel):
                 return status
             if col == COL_FILES:
                 return str(self._file_count_cache.get(mod["id"], 0))
+            if col == COL_NOTES:
+                return mod.get("notes") or ""
             if col == COL_DATE:
                 return mod["import_date"][:16] if mod["import_date"] else ""
 
-        if role == Qt.ItemDataRole.ForegroundRole and col == COL_STATUS:
-            status = self._status_cache.get(mod["id"], "")
-            return STATUS_COLORS.get(status)
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if col == COL_STATUS:
+                status = self._status_cache.get(mod["id"], "")
+                return STATUS_COLORS.get(status)
+            if col == COL_NOTES and mod.get("notes"):
+                return QColor("#FFFFFF")
 
         if role == Qt.ItemDataRole.CheckStateRole and col == COL_ENABLED:
             return Qt.CheckState.Checked if mod["enabled"] else Qt.CheckState.Unchecked
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if col == COL_NAME and mod.get("notes"):
+                return f"Notes: {mod['notes']}"
+            if col == COL_STATUS:
+                status = self._status_cache.get(mod["id"], "")
+                if "outdated" in status and mod.get("notes") and "Broken by game update" in mod["notes"]:
+                    return mod["notes"]
+                if "outdated" in status:
+                    return "This mod was made for an older game version. The mod author needs to update it."
 
         return None
 

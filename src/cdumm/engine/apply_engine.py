@@ -306,11 +306,13 @@ class ApplyWorker(QObject):
     finished = Signal()
     error_occurred = Signal(str)
 
-    def __init__(self, game_dir: Path, vanilla_dir: Path, db_path: Path) -> None:
+    def __init__(self, game_dir: Path, vanilla_dir: Path, db_path: Path,
+                 force_outdated: bool = False) -> None:
         super().__init__()
         self._game_dir = game_dir
         self._vanilla_dir = vanilla_dir
         self._db_path = db_path
+        self._force_outdated = force_outdated
 
     def run(self) -> None:
         try:
@@ -781,8 +783,18 @@ class ApplyWorker(QObject):
         for file_path in all_files:
             delta_infos = file_deltas.get(file_path, [])
 
+            # Skip revert-only files — they don't need new backups,
+            # they need existing backups to restore FROM
+            if not delta_infos:
+                continue
+
             # Skip new files — no vanilla version to back up
             if all(d.get("is_new") for d in delta_infos) and delta_infos:
+                continue
+
+            # Skip mod directories (0036+) — these aren't vanilla files
+            dir_num = file_path.split("/")[0]
+            if dir_num.isdigit() and len(dir_num) == 4 and int(dir_num) >= 36:
                 continue
 
             # PAMT files always get full backups — they're small (<14MB)
@@ -1646,10 +1658,23 @@ class ApplyWorker(QObject):
         return disabled_new - enabled_files
 
     def _get_file_deltas(self) -> dict[str, list[dict]]:
-        """Get all deltas for enabled mods, grouped by file path."""
+        """Get all deltas for enabled mods, grouped by file path.
+
+        Skips mods with a game_version_hash that doesn't match the current
+        game version (outdated mods that need reimport).
+        """
+        # Get current game version to filter outdated mods
+        current_ver = None
+        try:
+            from cdumm.engine.version_detector import detect_game_version
+            current_ver = detect_game_version(self._game_dir)
+        except Exception:
+            pass
+
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name, "
-            "md.is_new, md.entry_path, md.json_patches, m.force_inplace "
+            "md.is_new, md.entry_path, md.json_patches, m.force_inplace, "
+            "m.game_version_hash, md.byte_end "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
@@ -1659,7 +1684,23 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace in cursor.fetchall():
+        skipped_outdated: set[str] = set()
+        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end in cursor.fetchall():
+            # Skip outdated mods unless force_outdated is set (user testing)
+            if not self._force_outdated:
+                if current_ver and game_ver_hash and game_ver_hash != current_ver:
+                    if mod_name not in skipped_outdated:
+                        logger.info("Skipping outdated mod: %s (version %s != %s)",
+                                    mod_name, game_ver_hash, current_ver)
+                        skipped_outdated.add(mod_name)
+                    continue
+                # Skip old full-PAZ-copy format (is_new=1, PAZ > 100MB)
+                if is_new and file_path.endswith(".paz") and byte_end and byte_end > 100_000_000:
+                    if mod_name not in skipped_outdated:
+                        logger.info("Skipping outdated mod (full PAZ copy): %s (%s, %d bytes)",
+                                    mod_name, file_path, byte_end)
+                        skipped_outdated.add(mod_name)
+                    continue
             if delta_path in seen_deltas:
                 continue
             # Skip deltas whose files are missing (zombie entries from old resets)
@@ -1711,10 +1752,19 @@ class RevertWorker(QObject):
         """Revert all mod-affected files to vanilla using range or full backups."""
         # Get all files any mod has ever touched
         cursor = self._db.connection.execute(
-            "SELECT DISTINCT file_path, is_new FROM mod_deltas")
+            "SELECT DISTINCT file_path, is_new, entry_path FROM mod_deltas")
         rows = cursor.fetchall()
         mod_files = [row[0] for row in rows]
         new_files = {row[0] for row in rows if row[1]}
+        # Files with ONLY entry deltas (overlay) — game files are untouched
+        entr_files: set[str] = set()
+        byte_files: set[str] = set()
+        for fp, is_new, entry_path in rows:
+            if entry_path:
+                entr_files.add(fp)
+            else:
+                byte_files.add(fp)
+        overlay_only_files = entr_files - byte_files  # files that ONLY have ENTR deltas
 
         if not mod_files:
             self.error_occurred.emit("No mod data found. Nothing to revert.")
@@ -1741,6 +1791,12 @@ class RevertWorker(QObject):
                         game_path.unlink()
                         logger.info("Deleted mod-added file: %s", file_path)
                         reverted += 1
+                    continue
+
+                if file_path in overlay_only_files:
+                    # ENTR-only file — game file was never modified (overlay handles it)
+                    # No backup needed, just skip. Overlay cleanup happens below.
+                    reverted += 1
                     continue
 
                 vanilla_bytes = self._get_vanilla_bytes(file_path)

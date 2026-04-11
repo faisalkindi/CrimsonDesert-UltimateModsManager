@@ -192,6 +192,13 @@ class Database:
             )
             logger.info("Migrated: added force_inplace column to mods")
 
+        # Add notes column to mods for user notes per mod
+        if "notes" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN notes TEXT"
+            )
+            logger.info("Migrated: added notes column to mods")
+
     @property
     def connection(self) -> sqlite3.Connection:
         if self._connection is None:
