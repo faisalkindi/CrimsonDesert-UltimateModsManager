@@ -26,6 +26,12 @@ class ModContentsDialog(QDialog):
         if mod.get("description"):
             layout.addWidget(QLabel(mod["description"]))
 
+        if mod.get("notes"):
+            notes_label = QLabel(f"Notes: {mod['notes']}")
+            notes_label.setWordWrap(True)
+            notes_label.setStyleSheet("color: #B0B8C8; font-style: italic; padding: 4px 0;")
+            layout.addWidget(notes_label)
+
         # File tree
         details = mod_manager.get_mod_details(mod["id"])
         self._tree = QTreeWidget()

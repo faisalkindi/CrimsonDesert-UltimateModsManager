@@ -284,7 +284,9 @@ def _try_paz_entry_import(
             continue
 
     if changed == 0:
-        logger.debug("No changed entries in %s, falling back to byte-level", rel_path)
+        logger.warning("No changed entries in %s (%d mod entries vs %d vanilla entries). "
+                        "Mod content may match current game version or decomposition failed.",
+                        rel_path, len(mod_by_path), len(van_by_path))
         return False
 
     db.connection.commit()
@@ -602,6 +604,15 @@ def _detect_standalone_mod(
             is_standalone = False
             logger.info("Modified vanilla: %s (same PAMT size, treating as patch, "
                          "PAZ %d vs %d)", dir_name, mod_paz_size, vanilla_paz_size)
+        elif int(dir_name) < 36:
+            # Vanilla directories (0000-0035): always treat as patch, even if
+            # PAMT sizes differ (game update may have added/removed entries).
+            # ENTR decomposition handles different PAMTs by matching entries
+            # by path, so it works regardless of PAMT size differences.
+            is_standalone = False
+            logger.info("Modified vanilla: %s (PAMT size differs %d vs %d, but "
+                         "vanilla dir — treating as patch for ENTR decomposition)",
+                         dir_name, mod_pamt_size, vanilla_pamt_size)
         else:
             is_standalone = True
             logger.info("Standalone: %s has different PAMT (mod=%d vs vanilla=%d, "
@@ -801,6 +812,16 @@ def _import_from_extracted(
             jp_data, game_dir, db, deltas_dir, jp_name,
             existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
         if entr_result is not None:
+            if entr_result.get("version_mismatch"):
+                result = ModImportResult(jp_name)
+                game_ver = entr_result.get("game_version", "unknown")
+                mismatched = entr_result.get("mismatched", 0)
+                result.error = (
+                    f"This mod is incompatible with the current game version. "
+                    f"{mismatched} byte patches don't match — the game data has "
+                    f"changed since this mod was created (mod targets version "
+                    f"{game_ver}). The mod author needs to update it.")
+                return result
             if not entr_result["changed_files"]:
                 result = ModImportResult(jp_name)
                 result.error = (
@@ -932,6 +953,16 @@ def import_from_zip(
                 jp_data, game_dir, db, deltas_dir, jp_name,
                 existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
             if entr_result is not None:
+                if entr_result.get("version_mismatch"):
+                    result = ModImportResult(jp_name)
+                    game_ver = entr_result.get("game_version", "unknown")
+                    mismatched = entr_result.get("mismatched", 0)
+                    result.error = (
+                        f"This mod is incompatible with the current game version. "
+                        f"{mismatched} byte patches don't match — the game data has "
+                        f"changed since this mod was created (mod targets version "
+                        f"{game_ver}). The mod author needs to update it.")
+                    return result
                 if not entr_result["changed_files"]:
                     result.error = (
                         "This mod's changes are already present in your game files. "
@@ -1041,6 +1072,16 @@ def import_from_folder(
             jp_data, game_dir, db, deltas_dir, jp_name,
             existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
         if entr_result is not None:
+            if entr_result.get("version_mismatch"):
+                result = ModImportResult(jp_name)
+                game_ver = entr_result.get("game_version", "unknown")
+                mismatched = entr_result.get("mismatched", 0)
+                result.error = (
+                    f"This mod is incompatible with the current game version. "
+                    f"{mismatched} byte patches don't match — the game data has "
+                    f"changed since this mod was created (mod targets version "
+                    f"{game_ver}). The mod author needs to update it.")
+                return result
             if not entr_result["changed_files"]:
                 result = ModImportResult(jp_name)
                 result.error = (
@@ -1369,12 +1410,22 @@ def import_from_json_patch(
         result.error = "Failed to apply JSON patches to game files."
         return result
 
+    if entr_result.get("version_mismatch"):
+        result = ModImportResult(mod_name)
+        game_ver = entr_result.get("game_version", "unknown")
+        mismatched = entr_result.get("mismatched", 0)
+        result.error = (
+            f"This mod is incompatible with the current game version. "
+            f"{mismatched} byte patches don't match — the game data has "
+            f"changed since this mod was created (mod targets version "
+            f"{game_ver}). The mod author needs to update it.")
+        return result
+
     if not entr_result["changed_files"]:
         result = ModImportResult(mod_name)
         result.error = (
             "This mod's changes are already present in your game files. "
-            "Nothing to apply — the game may have been updated to include these changes."
-        )
+            "Nothing to apply.")
         return result
 
     result = ModImportResult(mod_name)
@@ -1506,15 +1557,28 @@ def _process_extracted_files(
 
     force_inplace = 1 if (modinfo and modinfo.get("force_inplace")) else 0
 
+    # Stamp with current game version so we can detect outdated mods later
+    game_ver_hash = None
+    try:
+        from cdumm.engine.version_detector import detect_game_version
+        game_ver_hash = detect_game_version(game_dir)
+    except Exception:
+        pass
+
     if existing_mod_id is not None:
         mod_id = existing_mod_id
         # Update metadata if modinfo provided
         if modinfo:
             db.connection.execute(
-                "UPDATE mods SET author=?, version=?, description=?, force_inplace=? WHERE id=?",
+                "UPDATE mods SET author=?, version=?, description=?, force_inplace=?, "
+                "game_version_hash=? WHERE id=?",
                 (modinfo.get("author"), modinfo.get("version"), modinfo.get("description"),
-                 force_inplace, mod_id),
+                 force_inplace, game_ver_hash, mod_id),
             )
+        elif game_ver_hash:
+            db.connection.execute(
+                "UPDATE mods SET game_version_hash=? WHERE id=?",
+                (game_ver_hash, mod_id))
     else:
         # Store mod in database
         priority = _next_priority(db)
@@ -1522,9 +1586,10 @@ def _process_extracted_files(
         version = modinfo.get("version") if modinfo else None
         description = modinfo.get("description") if modinfo else None
         cursor = db.connection.execute(
-            "INSERT INTO mods (name, mod_type, priority, author, version, description, force_inplace) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (mod_name, "paz", priority, author, version, description, force_inplace),
+            "INSERT INTO mods (name, mod_type, priority, author, version, description, "
+            "force_inplace, game_version_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (mod_name, "paz", priority, author, version, description, force_inplace, game_ver_hash),
         )
         mod_id = cursor.lastrowid
 
@@ -1618,6 +1683,16 @@ def _process_extracted_files(
                     _paz_entr_handled.add(rel_path)
                     pamt_rel = rel_path.rsplit("/", 1)[0] + "/0.pamt"
                     _paz_entr_handled.add(pamt_rel)
+                    continue
+                # For large PAZ files (>100MB), don't fall back to FULL_COPY.
+                # A 900MB full copy is the old broken format. Skip the file —
+                # the mod will show "outdated" and need reimporting from a
+                # fresh download, or the mod author needs to update it.
+                if mod_size > 100 * 1024 * 1024:
+                    logger.warning(
+                        "Skipping %s (%.0f MB) — ENTR decomposition failed, "
+                        "refusing to store full PAZ copy. Mod may be outdated.",
+                        rel_path, mod_size / 1048576)
                     continue
 
             # ── Fast-track for different-size large files ─────────────

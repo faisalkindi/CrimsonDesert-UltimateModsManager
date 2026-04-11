@@ -8,6 +8,23 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.3.1",
+        "date": "2026-04-11",
+        "notes": [
+            "Outdated mod detection: mods imported for an older game version show amber 'outdated' status. Combined statuses: 'active (outdated)', 'disabled (outdated)'.",
+            "Apply skips outdated mods automatically. When only 1 outdated mod is enabled, you get the option to force apply it to test.",
+            "Post-update validation: after a game update, CDUMM checks each mod's entry metadata against the new game data and notes what broke.",
+            "Version mismatch error: importing incompatible JSON byte-patch mods now shows a clear 'mod is incompatible' message instead of 'changes already present'.",
+            "Vanilla directories (0000-0035) always use ENTR decomposition even when PAMT sizes differ after a game update. Prevents 900MB full PAZ copies.",
+            "Reimport from source: right-click a mod to reimport from stored source files against the current game version.",
+            "User notes: new Notes column, right-click to add/edit notes per mod. Notes shown in details dialog and as tooltips.",
+            "Fixed Qt crash on startup caused by 237+ conflicts in the conflict tree view (signal storm during batch model rebuild).",
+            "Revert no longer fails with 'No vanilla backups found' for overlay mods (ENTR-only mods don't need backup restoration).",
+            "Auto-sized columns: all columns auto-fit to their widest content.",
+            "Updated bundled ASI Loader with SHA-512 hash-based auto-update.",
+        ],
+    },
+    {
         "version": "2.3.0",
         "date": "2026-04-10",
         "notes": [
