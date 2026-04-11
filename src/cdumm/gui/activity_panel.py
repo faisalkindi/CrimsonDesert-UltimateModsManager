@@ -28,7 +28,7 @@ class ActivityPanel(QWidget):
 
         # Header
         header = QLabel("Activity Log")
-        header.setStyleSheet("font-size: 15px; font-weight: bold; color: #ECEFF4;")
+        header.setObjectName("activityHeader")
         layout.addWidget(header)
 
         # Toolbar row: session filter + search
@@ -72,7 +72,7 @@ class ActivityPanel(QWidget):
         legend.setSpacing(12)
         for cat, color in CATEGORY_COLORS.items():
             dot = QLabel(f'<span style="color:{color};">\u25CF</span> {cat}')
-            dot.setStyleSheet("font-size: 11px; color: #788090;")
+            dot.setObjectName("filterDot")
             legend.addWidget(dot)
         legend.addStretch()
         layout.addLayout(legend)
@@ -80,11 +80,7 @@ class ActivityPanel(QWidget):
         # Log browser
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(False)
-        self._browser.setStyleSheet(
-            "QTextBrowser { background: #0D0F12; border: 1px solid #2E3440; "
-            "border-radius: 6px; padding: 8px; font-family: 'Consolas', 'Cascadia Mono', monospace; "
-            "font-size: 12px; color: #D8DEE9; }"
-        )
+        self._browser.setObjectName("activityLog")
         layout.addWidget(self._browser)
 
     def refresh(self):

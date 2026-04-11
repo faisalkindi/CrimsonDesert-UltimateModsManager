@@ -497,16 +497,13 @@ def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
                 # game_file is suffix of PAMT path
                 if ep.endswith("/" + game_file_lower):
                     return e
-                # Basename match (last resort — only if unique)
+                # Basename match — keep the last one (highest offset = newest)
                 if ep.rsplit("/", 1)[-1] == game_basename:
-                    if basename_match is None:
-                        basename_match = e
-                    else:
-                        basename_match = False  # ambiguous
+                    basename_match = e
         except Exception:
             continue
 
-    if basename_match and basename_match is not False:
+    if basename_match:
         logger.info("Matched '%s' to '%s' by basename", game_file, basename_match.path)
         return basename_match
     return None

@@ -452,6 +452,17 @@ class MainWindow(QMainWindow):
             self, tr("tools.language_restart_title"),
             tr("tools.language_restart_body"))
 
+    def _on_theme_changed(self, index: int) -> None:
+        theme = self._theme_combo.itemData(index)
+        if self._db:
+            from cdumm.storage.config import Config
+            Config(self._db).set("theme", theme)
+        from cdumm.gui.theme import set_theme, build_stylesheet, DARK_PALETTE, LIGHT_PALETTE
+        set_theme(theme)
+        palette = LIGHT_PALETTE if theme == "light" else DARK_PALETTE
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().setStyleSheet(build_stylesheet(palette))
+
     def _on_fix_everything(self) -> None:
         """One-click fix: revert, clear backups, clean orphans, rescan if clean.
 
@@ -1426,6 +1437,20 @@ class MainWindow(QMainWindow):
         lang_row.addWidget(self._lang_combo)
         lang_row.addStretch()
         tools_v.addLayout(lang_row)
+
+        # Theme selector
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("Theme:"))
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItem("Dark", "dark")
+        self._theme_combo.addItem("Light", "light")
+        from cdumm.storage.config import Config
+        saved_theme = Config(self._db).get("theme") or "dark"
+        self._theme_combo.setCurrentIndex(0 if saved_theme == "dark" else 1)
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        theme_row.addWidget(self._theme_combo)
+        theme_row.addStretch()
+        tools_v.addLayout(theme_row)
 
         for tr_key, slot in [
             ("tools.verify_state", self._on_verify_game_state),

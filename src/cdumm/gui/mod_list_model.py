@@ -186,7 +186,8 @@ class ModListModel(QAbstractTableModel):
                 status = self._status_cache.get(mod["id"], "")
                 return STATUS_COLORS.get(status)
             if col == COL_NOTES and mod.get("notes"):
-                return QColor("#FFFFFF")
+                from cdumm.gui.theme import get_color
+                return QColor(get_color("text_bright"))
 
         if role == Qt.ItemDataRole.CheckStateRole and col == COL_ENABLED:
             return Qt.CheckState.Checked if mod["enabled"] else Qt.CheckState.Unchecked

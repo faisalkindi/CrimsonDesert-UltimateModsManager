@@ -76,7 +76,7 @@ def main() -> int:
     splash = show_splash()
     app.processEvents()
 
-    # Apply theme
+    # Apply default dark theme (may be overridden after DB loads)
     from cdumm.gui.theme import STYLESHEET
     app.setStyleSheet(STYLESHEET)
 
@@ -179,6 +179,13 @@ def main() -> int:
     user_lang = config.get("language") or "en"
     if user_lang != "en":
         load_i18n(user_lang)
+
+    # Apply saved theme preference
+    saved_theme = config.get("theme") or "dark"
+    if saved_theme == "light":
+        from cdumm.gui.theme import set_theme, build_stylesheet, LIGHT_PALETTE
+        set_theme("light")
+        app.setStyleSheet(build_stylesheet(LIGHT_PALETTE))
 
     # Set RTL layout direction for Arabic/Hebrew/etc.
     from cdumm.i18n import is_rtl
