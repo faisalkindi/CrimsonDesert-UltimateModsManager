@@ -43,10 +43,13 @@ def detect_crimson_browser(path: Path) -> dict | None:
         try:
             with open(candidate, "r", encoding="utf-8") as f:
                 manifest = json.load(f)
-            if isinstance(manifest, dict) and manifest.get("format", "").startswith("crimson_browser_mod"):
-                manifest["_manifest_path"] = candidate
-                manifest["_base_dir"] = candidate.parent
-                return manifest
+            if isinstance(manifest, dict):
+                fmt = manifest.get("format", "")
+                # Accept crimson_browser_mod_v1 and crimson_sharp_mod_v1
+                if fmt.startswith("crimson_browser_mod") or fmt.startswith("crimson_sharp_mod"):
+                    manifest["_manifest_path"] = candidate
+                    manifest["_base_dir"] = candidate.parent
+                    return manifest
         except Exception:
             continue
     return None
@@ -71,8 +74,40 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     files_dir_name = manifest.get("files_dir", "files")
     files_dir = base_dir / files_dir_name
 
-    if not files_dir.exists():
-        logger.error("CB mod files_dir not found: %s", files_dir)
+    # crimson_sharp_mod_v1 may have patches_dir with JSON byte patches
+    patches_dir_name = manifest.get("patches_dir")
+    patches_dir = base_dir / patches_dir_name if patches_dir_name else None
+
+    has_files = files_dir.exists() and any(files_dir.rglob("*"))
+    has_patches = patches_dir and patches_dir.exists() and any(patches_dir.rglob("*.json"))
+
+    if not has_files and not has_patches:
+        logger.error("CB mod: no files_dir or patches_dir found in %s", base_dir)
+        return None
+
+    # Handle patches_dir: read JSON patches and process via json_patch_handler
+    if has_patches:
+        from cdumm.engine.json_patch_handler import convert_json_patch_to_paz
+        for patch_file in patches_dir.rglob("*.json"):
+            try:
+                with open(patch_file, "r", encoding="utf-8") as f:
+                    patch_data = json.load(f)
+                # Ensure it has the expected structure
+                if "patches" not in patch_data and "game_file" in patch_data:
+                    # Single-file patch — wrap it
+                    patch_data = {"patches": [patch_data]}
+                if "patches" in patch_data:
+                    result = convert_json_patch_to_paz(patch_data, game_dir, work_dir)
+                    if result:
+                        logger.info("Sharp mod: applied patches from %s", patch_file.name)
+            except Exception as e:
+                logger.warning("Sharp mod: failed to apply patch %s: %s",
+                               patch_file.name, e)
+
+    if not has_files:
+        # Patches-only mod — return work_dir if patches produced output
+        if any(work_dir.iterdir()):
+            return work_dir
         return None
 
     # Collect all loose files, grouped by PAZ directory number

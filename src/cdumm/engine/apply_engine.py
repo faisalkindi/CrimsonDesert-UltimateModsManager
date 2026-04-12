@@ -1290,7 +1290,7 @@ class ApplyWorker(QObject):
             mod_names = []
             for d, patch_info in reversed(mod_patches):
                 for change in patch_info.get("changes", []):
-                    offset = change.get("offset", 0)
+                    offset = int(change.get("offset", 0))
                     try:
                         patched = bytes.fromhex(change.get("patched", ""))
                         if offset + len(patched) <= len(merged):

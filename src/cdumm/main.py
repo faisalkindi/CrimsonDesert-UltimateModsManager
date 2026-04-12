@@ -247,4 +247,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # CLI mode: if first arg is a known subcommand, skip GUI entirely
+    _cli_commands = {"list-mods", "set-enabled", "apply"}
+    if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:
+        from cdumm.cli import main as cli_main
+        cli_main()
+    else:
+        sys.exit(main())

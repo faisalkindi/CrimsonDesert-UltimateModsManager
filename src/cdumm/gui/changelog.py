@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.4.2",
+        "date": "2026-04-12",
+        "notes": [
+            "Fixed import crash on JSON mods with string offsets (e.g. Taller Damiane). Mod authors writing \"offset\": \"107\" instead of \"offset\": 107 now works.",
+            "Added crimson_sharp_mod_v1 manifest format support (e.g. Silver Fang Boss Size). Both files_dir and patches_dir are handled.",
+            "CLI interface for external tools: CDUMM.exe list-mods, set-enabled, and apply commands for headless mod management.",
+        ],
+    },
+    {
         "version": "2.4.1",
         "date": "2026-04-12",
         "notes": [

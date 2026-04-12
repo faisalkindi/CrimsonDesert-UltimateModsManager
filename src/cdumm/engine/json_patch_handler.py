@@ -216,7 +216,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
 
     applied = 0
     for change in changes:
-        offset = base_offset + change["offset"]
+        offset = base_offset + int(change["offset"])
         patched_hex = change["patched"]
         patched_bytes = bytes.fromhex(patched_hex)
 

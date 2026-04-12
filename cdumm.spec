@@ -13,6 +13,7 @@ a = Analysis(
            ('src/cdumm/translations', 'cdumm/translations'),
            ('schemas/pabgb_complete_schema.json', 'schemas')],
     hiddenimports=[
+        'cdumm.cli',
         'cdumm.gui.main_window',
         'cdumm.gui.setup_dialog',
         'cdumm.gui.import_widget',
