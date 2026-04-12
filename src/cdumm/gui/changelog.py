@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.4.3",
+        "date": "2026-04-12",
+        "notes": [
+            "Fixed KeyError on JSON mods with incomplete change entries (missing 'patched' or 'offset' fields). Changes are now skipped gracefully instead of crashing the import.",
+        ],
+    },
+    {
         "version": "2.4.2",
         "date": "2026-04-12",
         "notes": [

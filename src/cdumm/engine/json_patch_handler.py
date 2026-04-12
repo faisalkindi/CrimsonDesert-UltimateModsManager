@@ -216,8 +216,11 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
 
     applied = 0
     for change in changes:
-        offset = base_offset + int(change["offset"])
-        patched_hex = change["patched"]
+        offset = base_offset + int(change.get("offset", 0))
+        patched_hex = change.get("patched")
+        if not patched_hex:
+            logger.warning("Change at offset %d has no 'patched' field, skipping", offset)
+            continue
         patched_bytes = bytes.fromhex(patched_hex)
 
         if offset + len(patched_bytes) > len(data):
