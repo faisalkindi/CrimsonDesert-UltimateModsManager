@@ -188,6 +188,30 @@ class MainWindow(QMainWindow):
         self._update_timer.timeout.connect(self._check_for_updates)
         self._update_timer.start(15 * 60 * 1000)  # 15 minutes in ms
 
+        # Watch database for external changes (CLI, CDCrashMonitor)
+        # Starts paused — unpaused after _deferred_startup completes to avoid
+        # false triggers from health check and startup DB writes.
+        #
+        # SQLite WAL mode: writes go to .db-wal, not .db, so we watch both.
+        # Also poll every 2s as fallback since WAL checkpoint timing varies.
+        self._db_watcher_paused = True
+        self._db_last_mtime = 0.0
+        if self._db and self._db.db_path.exists():
+            from PySide6.QtCore import QFileSystemWatcher
+            watch_paths = [str(self._db.db_path)]
+            wal_path = str(self._db.db_path) + "-wal"
+            self._db_wal_path = wal_path
+            self._db_watcher = QFileSystemWatcher(watch_paths, self)
+            self._db_watcher.fileChanged.connect(self._on_db_changed_externally)
+            self._db_change_timer = QTimer(self)
+            self._db_change_timer.setSingleShot(True)
+            self._db_change_timer.timeout.connect(self._on_db_debounced_refresh)
+
+            # Poll timer: check DB + WAL mtime every 2 seconds
+            self._db_poll_timer = QTimer(self)
+            self._db_poll_timer.timeout.connect(self._poll_db_for_changes)
+            self._db_poll_timer.start(2000)
+
         # Auto-snapshot is handled by _deferred_startup
 
         # If previous session didn't close cleanly, offer bug report
@@ -300,6 +324,9 @@ class MainWindow(QMainWindow):
         # Trigger background status check for mod list
         if hasattr(self, "_mod_list_model"):
             self._mod_list_model.refresh_statuses()
+
+        # Now safe to watch for external DB changes
+        self._db_watcher_paused = False
 
     def _startup_health_check(self) -> None:
         """Fast silent check for dirty game state on startup.
@@ -1645,6 +1672,72 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _get_db_mtime(self) -> float:
+        """Get the latest mtime of the DB file and its WAL."""
+        import os
+        mtime = 0.0
+        db_path = str(self._db.db_path)
+        if os.path.exists(db_path):
+            mtime = max(mtime, os.path.getmtime(db_path))
+        wal_path = getattr(self, "_db_wal_path", "")
+        if wal_path and os.path.exists(wal_path):
+            mtime = max(mtime, os.path.getmtime(wal_path))
+        return mtime
+
+    def _stamp_db_mtime(self) -> None:
+        """Record current DB mtime so the poll ignores CDUMM's own writes."""
+        try:
+            self._db_last_mtime = self._get_db_mtime()
+        except Exception:
+            pass
+
+    def _poll_db_for_changes(self) -> None:
+        """Poll DB + WAL file mtimes to detect external writes."""
+        if self._db_watcher_paused or not self._db:
+            return
+        try:
+            mtime = self._get_db_mtime()
+            if mtime > self._db_last_mtime and self._db_last_mtime > 0:
+                self._db_last_mtime = mtime
+                self._db_change_timer.start(500)
+            elif self._db_last_mtime == 0:
+                self._db_last_mtime = mtime
+        except Exception:
+            pass
+
+    @Slot(str)
+    def _on_db_changed_externally(self, path: str) -> None:
+        """Called when the database file is modified by an external process."""
+        if self._db_watcher_paused:
+            return
+        # Debounce: wait 500ms for writes to settle before refreshing
+        self._db_change_timer.start(500)
+        # QFileSystemWatcher may stop watching after a change — re-add
+        if hasattr(self, "_db_watcher") and path not in self._db_watcher.files():
+            self._db_watcher.addPath(path)
+
+    def _on_db_debounced_refresh(self) -> None:
+        """Refresh UI after external DB change (debounced).
+
+        Only reloads the mod list data (enabled state, names, etc).
+        Does NOT recheck file statuses — that would trigger background
+        workers that write to the DB, causing an infinite refresh loop.
+        """
+        if self._db_watcher_paused:
+            return
+        logger.info("Database changed externally — refreshing UI")
+        self._sync_db()
+        # Pause poll while we refresh + recheck statuses
+        self._db_watcher_paused = True
+        self._refresh_all(update_statuses=True)
+        # Stamp after a delay to let the status worker finish writing
+        QTimer.singleShot(3000, self._unpause_db_watcher)
+
+    def _unpause_db_watcher(self) -> None:
+        """Re-enable DB polling after an external refresh settles."""
+        self._stamp_db_mtime()
+        self._db_watcher_paused = False
+
     def _sync_db(self) -> None:
         """Sync main DB after a worker writes via WAL checkpoint."""
         if not self._db:
@@ -1658,7 +1751,7 @@ class MainWindow(QMainWindow):
         logger.debug("_refresh_all: start")
         if hasattr(self, "_mod_list_model"):
             logger.debug("_refresh_all: refreshing mod list model")
-            self._mod_list_model.refresh()
+            self._mod_list_model.refresh(preserve_statuses=not update_statuses)
             if update_statuses:
                 self._mod_list_model.refresh_statuses()
         if self._conflict_detector:
@@ -1672,6 +1765,7 @@ class MainWindow(QMainWindow):
         self._update_snapshot_status()
         self._update_header_checkbox()
         self._resize_columns_to_content()
+        self._stamp_db_mtime()  # mark our own writes so poll doesn't re-trigger
         logger.debug("_refresh_all: done")
 
     def _resize_columns_to_content(self) -> None:
@@ -1774,6 +1868,10 @@ class MainWindow(QMainWindow):
                 self._worker_error, thread, progress, err, on_error)
         )
 
+        # Pause DB file watcher during internal operations
+        if hasattr(self, "_db_watcher_paused"):
+            self._db_watcher_paused = True
+
         logger.info("Starting worker: %s", type(worker).__name__)
         progress.show()
         thread.start()
@@ -1794,6 +1892,10 @@ class MainWindow(QMainWindow):
         self._active_progress = None
         self._active_worker = None
         self._worker_thread = None
+
+        # Resume DB file watcher
+        if hasattr(self, "_db_watcher_paused"):
+            self._db_watcher_paused = False
 
         logger.info("Calling completion callback")
         try:

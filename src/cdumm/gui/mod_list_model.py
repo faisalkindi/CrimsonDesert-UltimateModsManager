@@ -88,11 +88,24 @@ class ModListModel(QAbstractTableModel):
         self._status_thread: QThread | None = None
         self.refresh()
 
-    def refresh(self) -> None:
+    def refresh(self, preserve_statuses: bool = False) -> None:
         self.beginResetModel()
+        old_statuses = self._status_cache if preserve_statuses else {}
         self._mods = self._mod_manager.list_mods()
-        # Set placeholder — real status computed after window is shown
-        self._status_cache = {mod["id"]: "checking..." for mod in self._mods}
+        if preserve_statuses and old_statuses:
+            # Keep existing statuses but reflect enable/disable changes
+            self._status_cache = {}
+            for mod in self._mods:
+                old = old_statuses.get(mod["id"], "checking...")
+                if not mod["enabled"]:
+                    self._status_cache[mod["id"]] = "disabled"
+                elif old == "disabled":
+                    # Was disabled, now re-enabled — needs recheck
+                    self._status_cache[mod["id"]] = "checking..."
+                else:
+                    self._status_cache[mod["id"]] = old
+        else:
+            self._status_cache = {mod["id"]: "checking..." for mod in self._mods}
         self._file_count_cache = self._mod_manager.get_file_counts()
         self._conflict_status_cache = self._conflict_detector.get_all_mod_statuses()
         self.endResetModel()

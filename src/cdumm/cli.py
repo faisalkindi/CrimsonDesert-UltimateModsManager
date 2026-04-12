@@ -73,18 +73,25 @@ def cmd_list_mods(args):
     if args.json:
         out = []
         for m in mods:
-            out.append({
+            entry = {
                 "id": m["id"],
                 "name": m["name"],
                 "mod_type": m["mod_type"],
                 "enabled": m["enabled"],
                 "priority": m["priority"],
-            })
+            }
+            if args.status:
+                entry["status"] = mgr.get_mod_game_status(m["id"], game_dir)
+            out.append(entry)
         print(json.dumps(out, indent=2))
     else:
         for m in mods:
-            status = "ON " if m["enabled"] else "OFF"
-            print(f"[{status}] #{m['id']:>3d}  {m['name']}  ({m['mod_type']})")
+            if args.status:
+                game_status = mgr.get_mod_game_status(m["id"], game_dir)
+                print(f"[{game_status:>12s}] #{m['id']:>3d}  {m['name']}  ({m['mod_type']})")
+            else:
+                status = "ON " if m["enabled"] else "OFF"
+                print(f"[{status}] #{m['id']:>3d}  {m['name']}  ({m['mod_type']})")
 
     db.close()
 
@@ -131,7 +138,7 @@ def cmd_apply(args):
     # ApplyWorker needs PySide6 for QObject/Signal — import it
     from cdumm.engine.apply_engine import ApplyWorker
 
-    worker = ApplyWorker(game_dir, vanilla_dir, db_path, force_outdated=True)
+    worker = ApplyWorker(game_dir, vanilla_dir, db_path, force_outdated=False)
 
     errors = []
 
@@ -167,6 +174,7 @@ def main():
     # list-mods
     p_list = sub.add_parser("list-mods", help="List mods")
     p_list.add_argument("--json", action="store_true", help="Output as JSON")
+    p_list.add_argument("--status", action="store_true", help="Include game file status (active/not applied)")
     p_list.add_argument("--type", default=None, help="Filter by mod_type (paz, asi)")
     p_list.add_argument("--game-dir", default=None, help="Game directory override")
 
