@@ -925,6 +925,11 @@ class ApplyWorker(QObject):
         entry_deltas.extend(merged_deltas)
         byte_deltas = [d for d in remaining_deltas if not d.get("entry_path")]
 
+        # ── Semantic merge: when multiple mods touch the same PABGB entry ──
+        # Try field-level merge instead of last-wins. Falls back silently.
+        if len(entry_deltas) > 1:
+            entry_deltas = self._try_semantic_merge(file_path, entry_deltas)
+
         # ── Overlay routing: ENTR-only files go to overlay PAZ ──
         # If a file has ONLY entry deltas (no byte-range), route all entries
         # to the overlay builder. The original PAZ is left untouched.
@@ -1039,6 +1044,165 @@ class ApplyWorker(QObject):
         for d in size_preserving:
             current = apply_delta_from_file(current, Path(d["delta_path"]))
         return current
+
+    def _try_semantic_merge(self, file_path: str,
+                           entry_deltas: list[dict]) -> list[dict]:
+        """Attempt semantic field-level merge for overlapping ENTR deltas.
+
+        When multiple mods modify the same PABGB entry, semantic merge
+        combines their changes at the field level instead of last-wins.
+        Falls back to the original deltas if semantic merge is unavailable.
+        """
+        from cdumm.engine.delta_engine import load_entry_delta
+
+        # Group deltas by entry_path
+        by_entry: dict[str, list[dict]] = {}
+        for d in entry_deltas:
+            ep = d.get("entry_path", "")
+            if ep:
+                by_entry.setdefault(ep, []).append(d)
+
+        # Only attempt merge on entries with 2+ mods
+        entries_to_merge = {ep: ds for ep, ds in by_entry.items() if len(ds) > 1}
+        if not entries_to_merge:
+            return entry_deltas
+
+        try:
+            from cdumm.semantic.parser import identify_table_from_path
+        except ImportError:
+            return entry_deltas
+
+        merged_deltas = list(entry_deltas)  # start with original list
+
+        for entry_path, conflicting in entries_to_merge.items():
+            table_name = identify_table_from_path(entry_path)
+            if not table_name:
+                continue  # not a supported format
+
+            try:
+                from cdumm.semantic.engine import SemanticEngine
+                engine = SemanticEngine(self._db)
+
+                # Load each mod's decompressed content
+                mod_bodies: dict[str, bytes] = {}
+                for d in conflicting:
+                    dp = d.get("delta_path")
+                    if not dp:
+                        continue
+                    content, meta = load_entry_delta(Path(dp))
+                    mod_bodies[d.get("mod_name", "unknown")] = content
+
+                if len(mod_bodies) < 2:
+                    continue
+
+                # Semantic merge requires the PABGH header to parse records.
+                # Extract it from the same PAZ directory as a sibling entry.
+                pamt_dir = file_path.split("/")[0]
+                header_entry_path = entry_path.replace(".pabgb", ".pabgh")
+                header_bytes = self._extract_sibling_entry(
+                    pamt_dir, header_entry_path)
+                if not header_bytes:
+                    logger.debug("No PABGH header for %s, skipping semantic merge",
+                                 entry_path)
+                    continue
+
+                # Get vanilla body from backup or game
+                vanilla_content = self._get_vanilla_entry_content(
+                    file_path, entry_path)
+                if not vanilla_content:
+                    continue
+
+                # Run semantic merge
+                result = engine.analyze_bytes(
+                    table_name, vanilla_content, header_bytes, mod_bodies)
+                if result and not result.has_conflicts:
+                    merged_body = engine.build_merged_body(
+                        table_name, vanilla_content, header_bytes,
+                        result.table_changeset)
+                    if merged_body and merged_body != vanilla_content:
+                        # Replace all conflicting deltas with a single merged one
+                        from cdumm.engine.delta_engine import save_entry_delta
+                        merged_meta = {
+                            "pamt_dir": pamt_dir,
+                            "entry_path": entry_path,
+                            "_semantic_merged": True,
+                        }
+                        # Use first delta's metadata as template
+                        first_d = conflicting[0]
+                        _, first_meta = load_entry_delta(Path(first_d["delta_path"]))
+                        merged_meta.update({
+                            k: first_meta[k] for k in (
+                                "paz_index", "compression_type", "flags",
+                                "vanilla_offset", "vanilla_comp_size",
+                                "vanilla_orig_size", "encrypted")
+                            if k in first_meta
+                        })
+
+                        # Create merged delta dict
+                        merged_d = dict(first_d)
+                        merged_d["_merged_content"] = merged_body
+                        merged_d["_merged_metadata"] = merged_meta
+                        merged_d["mod_name"] = "semantic_merge"
+
+                        # Replace conflicting deltas in the output list
+                        ep_set = {entry_path}
+                        merged_deltas = [
+                            d for d in merged_deltas
+                            if d.get("entry_path") not in ep_set
+                        ]
+                        merged_deltas.append(merged_d)
+
+                        logger.info("Semantic merge SUCCESS: %s — %s",
+                                    entry_path, result.summary)
+                        continue
+
+                if result and result.has_conflicts:
+                    logger.info("Semantic merge: %d conflict(s) in %s, "
+                                "using last-wins fallback",
+                                len(result.conflicts), entry_path)
+
+            except Exception as e:
+                logger.debug("Semantic merge failed for %s: %s", entry_path, e)
+
+        return merged_deltas
+
+    def _extract_sibling_entry(self, pamt_dir: str, entry_path: str) -> bytes | None:
+        """Extract a sibling entry (e.g., .pabgh) from the same PAZ directory."""
+        try:
+            from cdumm.archive.paz_parse import parse_pamt
+            from cdumm.engine.json_patch_handler import _extract_from_paz
+
+            # Try vanilla backup first, then game dir
+            for base in [self._vanilla_dir, self._game_dir]:
+                pamt_path = base / pamt_dir / "0.pamt"
+                if not pamt_path.exists():
+                    continue
+                entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                for e in entries:
+                    if e.path == entry_path:
+                        return _extract_from_paz(e)
+        except Exception:
+            pass
+        return None
+
+    def _get_vanilla_entry_content(self, file_path: str, entry_path: str) -> bytes | None:
+        """Get vanilla decompressed content for a specific PAMT entry."""
+        try:
+            from cdumm.archive.paz_parse import parse_pamt
+            from cdumm.engine.json_patch_handler import _extract_from_paz
+
+            pamt_dir = file_path.split("/")[0]
+            for base in [self._vanilla_dir, self._game_dir]:
+                pamt_path = base / pamt_dir / "0.pamt"
+                if not pamt_path.exists():
+                    continue
+                entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                for e in entries:
+                    if e.path == entry_path:
+                        return _extract_from_paz(e)
+        except Exception:
+            pass
+        return None
 
     def _merge_json_patch_deltas(
         self, file_path: str, deltas: list[dict],

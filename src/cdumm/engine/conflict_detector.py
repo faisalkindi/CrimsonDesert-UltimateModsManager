@@ -33,6 +33,70 @@ class ConflictDetector:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    def _semantic_conflict_info(
+        self, entry_path: str,
+        mod_a_name: str, mod_b_name: str,
+        a_deltas: list[dict], b_deltas: list[dict],
+    ) -> str | None:
+        """Try to get field-level conflict info using the semantic system.
+
+        Returns a human-readable explanation string, or None if semantic
+        analysis is unavailable for this entry.
+        """
+        try:
+            from cdumm.semantic.parser import identify_table_from_path
+            table_name = identify_table_from_path(entry_path)
+            if not table_name:
+                return None
+
+            # Check if delta metadata has semantic_fields_changed
+            a_fields = set()
+            b_fields = set()
+            for d in a_deltas:
+                if d.get("entry_path") == entry_path:
+                    # Try to read from stored metadata
+                    try:
+                        from cdumm.engine.delta_engine import load_entry_delta
+                        from pathlib import Path
+                        _, meta = load_entry_delta(Path(d["delta_path"]))
+                        fields = meta.get("semantic_fields_changed", [])
+                        a_fields.update(fields)
+                    except Exception:
+                        pass
+            for d in b_deltas:
+                if d.get("entry_path") == entry_path:
+                    try:
+                        from cdumm.engine.delta_engine import load_entry_delta
+                        from pathlib import Path
+                        _, meta = load_entry_delta(Path(d["delta_path"]))
+                        fields = meta.get("semantic_fields_changed", [])
+                        b_fields.update(fields)
+                    except Exception:
+                        pass
+
+            if not a_fields and not b_fields:
+                return None
+
+            shared = a_fields & b_fields
+            only_a = a_fields - b_fields
+            only_b = b_fields - a_fields
+
+            parts = []
+            if shared:
+                parts.append(f"Both modify: {', '.join(sorted(shared))}")
+            if only_a:
+                parts.append(f"{mod_a_name} only: {', '.join(sorted(only_a))}")
+            if only_b:
+                parts.append(f"{mod_b_name} only: {', '.join(sorted(only_b))}")
+
+            if shared:
+                return f"{entry_path} — CONFLICT on {', '.join(sorted(shared))}. " + ". ".join(parts)
+            else:
+                return f"{entry_path} — Compatible (different fields). " + ". ".join(parts)
+
+        except Exception:
+            return None
+
     def detect_all(self) -> list[Conflict]:
         """Run full conflict detection across all enabled mods.
 
@@ -87,13 +151,13 @@ class ConflictDetector:
         """Get all enabled PAZ mods with their delta byte ranges and priority."""
         cursor = self._db.connection.execute(
             "SELECT m.id, m.name, m.priority, md.file_path, md.byte_start, md.byte_end, "
-            "md.entry_path "
+            "md.entry_path, md.delta_path "
             "FROM mods m JOIN mod_deltas md ON m.id = md.mod_id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
             "ORDER BY m.priority"
         )
         mods: dict[int, list[dict]] = {}
-        for mod_id, mod_name, priority, file_path, byte_start, byte_end, entry_path in cursor.fetchall():
+        for mod_id, mod_name, priority, file_path, byte_start, byte_end, entry_path, delta_path in cursor.fetchall():
             if mod_id not in mods:
                 mods[mod_id] = []
             mods[mod_id].append({
@@ -103,6 +167,7 @@ class ConflictDetector:
                 "byte_start": byte_start,
                 "byte_end": byte_end,
                 "entry_path": entry_path,
+                "delta_path": delta_path,
             })
         return mods
 
@@ -171,17 +236,26 @@ class ConflictDetector:
                 shared_entries = a_entries & b_entries
                 if shared_entries:
                     for entry_path in sorted(shared_entries):
+                        # Try semantic analysis for richer conflict info
+                        sem_explanation = self._semantic_conflict_info(
+                            entry_path, mod_a_name, mod_b_name,
+                            a_deltas, b_deltas)
+                        if sem_explanation:
+                            level = "semantic"
+                            explanation = sem_explanation
+                        else:
+                            level = "byte_range"
+                            explanation = (
+                                f"{mod_a_name} and {mod_b_name} both modify "
+                                f"{entry_path} in {file_path}. "
+                                f"Winner: {winner_name} (higher load order).")
                         conflicts.append(Conflict(
                             mod_a_id=mod_a_id, mod_a_name=mod_a_name,
                             mod_b_id=mod_b_id, mod_b_name=mod_b_name,
                             file_path=file_path,
-                            level="byte_range",
+                            level=level,
                             byte_start=None, byte_end=None,
-                            explanation=(
-                                f"{mod_a_name} and {mod_b_name} both modify "
-                                f"{entry_path} in {file_path}. "
-                                f"Winner: {winner_name} (higher load order)."
-                            ),
+                            explanation=explanation,
                             winner_id=winner_id, winner_name=winner_name,
                         ))
                 else:

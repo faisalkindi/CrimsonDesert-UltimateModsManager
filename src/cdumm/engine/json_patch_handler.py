@@ -209,7 +209,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             logger.error("Signature %s not found in data (%d bytes)",
                          signature[:40] + "..." if len(signature) > 40 else signature,
                          len(data))
-            return 0
+            return 0, 0
         base_offset = idx + len(sig_bytes)
         logger.info("Signature found at offset %d, patches relative to %d",
                      idx, base_offset)
@@ -673,6 +673,20 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             "vanilla_orig_size": entry.orig_size,
             "encrypted": entry.encrypted,
         }
+
+        # Semantic annotation: mark entry path as semantically parseable
+        # Full field-level diff requires both .pabgb body + .pabgh header,
+        # which are only available at the PAZ level (not individual entries).
+        # The semantic engine handles this during Apply/conflict detection.
+        try:
+            from cdumm.semantic.parser import identify_table_from_path
+            sem_table = identify_table_from_path(entry.path)
+            if sem_table:
+                metadata["semantic_table"] = sem_table
+                logger.info("Semantic: %s is parseable table '%s'",
+                            entry.path, sem_table)
+        except Exception:
+            pass
 
         safe_name = entry.path.replace("/", "_") + ".entr"
         delta_path = deltas_dir / str(mod_id) / safe_name

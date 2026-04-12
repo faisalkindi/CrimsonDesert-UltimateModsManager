@@ -221,8 +221,10 @@ class AsiPanel(QWidget):
     def _toggle_plugin(self, plugin) -> None:
         if plugin.enabled:
             self._asi_mgr.disable(plugin)
+            self.refresh()
         else:
             self._asi_mgr.enable(plugin)
+            self.refresh()
 
     def _toggle_selected_plugins(self, enabled: bool) -> None:
         rows = set(item.row() for item in self._table.selectedItems())

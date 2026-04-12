@@ -59,7 +59,7 @@ def identify_pabgb_records(data: bytes, byte_start: int, byte_end: int) -> str |
 
         if len(overlapping) == 1:
             return f"pabgb record {overlapping[0]}"
-        return f"pabgb records {overlapping[0]}-{overlapping[-1]}"
+        return f"pabgb records {', '.join(str(r) for r in overlapping)}"
 
     except (struct.error, ValueError):
         return None

@@ -8,6 +8,20 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.4.0",
+        "date": "2026-04-12",
+        "notes": [
+            "Semantic diffing and merging: PABGB binary records are now parsed at the field level using community schemas (322 tables, 3700+ fields). Mods that change different fields in the same record are automatically merged instead of conflicting.",
+            "Field-level conflict detection: conflicts now show exactly which fields each mod changes (e.g. 'Mod A changes maxSlot, Mod B changes defaultSlot — compatible') instead of generic byte-range overlaps.",
+            "Offset collision detection for JSON byte-patch mods: overlapping byte ranges across mods are detected and reported before Apply.",
+            "Semantic merge during Apply: when multiple mods modify the same PABGB entry, CDUMM attempts a three-way merge at the field level. Falls back to byte-level for unknown formats.",
+            "Conflict resolutions persisted in database: user decisions on field-level conflicts survive across sessions.",
+            "Light and dark theme: toggle between warm-neutral light mode and refined dark mode in Tools. Theme preference saved.",
+            "ASI panel: enable/disable now refreshes the table immediately. ASI Loader auto-updated via SHA-512 hash comparison on every refresh.",
+            "Fixed startup crash (NameError on COL_NOTES) in column auto-sizing when Notes column was added.",
+        ],
+    },
+    {
         "version": "2.3.1",
         "date": "2026-04-11",
         "notes": [

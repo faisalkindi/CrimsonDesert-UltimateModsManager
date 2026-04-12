@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS conflicts (
     mod_a_id INTEGER NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
     mod_b_id INTEGER NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
     file_path TEXT NOT NULL,
-    level TEXT NOT NULL CHECK(level IN ('papgt', 'paz', 'byte_range')),
+    level TEXT NOT NULL CHECK(level IN ('papgt', 'paz', 'byte_range', 'semantic')),
     byte_start INTEGER,
     byte_end INTEGER,
     explanation TEXT,
@@ -198,6 +198,20 @@ class Database:
                 "ALTER TABLE mods ADD COLUMN notes TEXT"
             )
             logger.info("Migrated: added notes column to mods")
+
+        # Create semantic_resolutions table for conflict resolution persistence
+        if not self.table_exists("semantic_resolutions"):
+            self._connection.execute("""
+                CREATE TABLE semantic_resolutions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    record_key INTEGER NOT NULL,
+                    field_name TEXT NOT NULL,
+                    winning_mod TEXT NOT NULL,
+                    UNIQUE(table_name, record_key, field_name)
+                )
+            """)
+            logger.info("Created semantic_resolutions table")
 
     @property
     def connection(self) -> sqlite3.Connection:

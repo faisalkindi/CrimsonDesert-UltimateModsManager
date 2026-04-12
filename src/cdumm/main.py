@@ -202,6 +202,17 @@ def main() -> int:
     except Exception:
         pass
 
+    splash.showMessage("  Loading game schemas...", 0x0081)
+    app.processEvents()
+
+    # Load semantic schemas eagerly so they're available for all operations
+    try:
+        from cdumm.semantic.parser import init_schemas
+        schema_count = init_schemas()
+        logger.info("Semantic schemas: %d tables loaded", schema_count)
+    except Exception as e:
+        logger.debug("Semantic schemas unavailable: %s", e)
+
     splash.showMessage("  Checking game state...", 0x0081)
     app.processEvents()
 
