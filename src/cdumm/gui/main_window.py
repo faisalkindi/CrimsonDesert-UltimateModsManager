@@ -2694,45 +2694,9 @@ class MainWindow(QMainWindow):
         if not self._check_game_running():
             return
 
-        # Check for outdated mods among enabled mods
-        outdated_names = []
-        if self._mod_manager:
-            for mod in self._mod_manager.list_mods("paz"):
-                if mod["enabled"]:
-                    status = self._mod_manager.get_mod_game_status(mod["id"], self._game_dir)
-                    if "outdated" in status:
-                        outdated_names.append(mod["name"])
-
-        if outdated_names:
-            if len(outdated_names) == 1:
-                # Single outdated mod — ask user if they want to force apply to test
-                reply = QMessageBox.question(
-                    self, "Outdated Mod",
-                    f'"{outdated_names[0]}" is outdated and may not work with '
-                    f"the current game version.\n\n"
-                    f"Do you want to force apply it to test if it still works?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.No:
-                    return
-                # User chose Yes — proceed, worker will include this mod
-                self._force_outdated = True
-            else:
-                # Multiple outdated mods — skip them, apply the rest
-                names = "\n".join(f"  - {n}" for n in outdated_names)
-                QMessageBox.information(
-                    self, "Outdated Mods Skipped",
-                    f"These outdated mods will be skipped:\n\n{names}\n\n"
-                    f"To test if an outdated mod still works, enable only that "
-                    f"mod and click Apply — you'll get the option to force it.",
-                )
-                self._force_outdated = False
-        else:
-            self._force_outdated = False
-
         progress = ProgressDialog("Applying Mods", self)
         worker = ApplyWorker(self._game_dir, self._vanilla_dir, self._db.db_path,
-                             force_outdated=self._force_outdated)
+                             force_outdated=True)
         thread = QThread()
 
         self._run_worker(worker, thread, progress,

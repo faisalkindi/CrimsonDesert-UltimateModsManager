@@ -1822,19 +1822,7 @@ class ApplyWorker(QObject):
         return disabled_new - enabled_files
 
     def _get_file_deltas(self) -> dict[str, list[dict]]:
-        """Get all deltas for enabled mods, grouped by file path.
-
-        Skips mods with a game_version_hash that doesn't match the current
-        game version (outdated mods that need reimport).
-        """
-        # Get current game version to filter outdated mods
-        current_ver = None
-        try:
-            from cdumm.engine.version_detector import detect_game_version
-            current_ver = detect_game_version(self._game_dir)
-        except Exception:
-            pass
-
+        """Get all deltas for enabled mods, grouped by file path."""
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name, "
             "md.is_new, md.entry_path, md.json_patches, m.force_inplace, "
@@ -1848,23 +1836,7 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        skipped_outdated: set[str] = set()
         for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end in cursor.fetchall():
-            # Skip outdated mods unless force_outdated is set (user testing)
-            if not self._force_outdated:
-                if current_ver and game_ver_hash and game_ver_hash != current_ver:
-                    if mod_name not in skipped_outdated:
-                        logger.info("Skipping outdated mod: %s (version %s != %s)",
-                                    mod_name, game_ver_hash, current_ver)
-                        skipped_outdated.add(mod_name)
-                    continue
-                # Skip old full-PAZ-copy format (is_new=1, PAZ > 100MB)
-                if is_new and file_path.endswith(".paz") and byte_end and byte_end > 100_000_000:
-                    if mod_name not in skipped_outdated:
-                        logger.info("Skipping outdated mod (full PAZ copy): %s (%s, %d bytes)",
-                                    mod_name, file_path, byte_end)
-                        skipped_outdated.add(mod_name)
-                    continue
             if delta_path in seen_deltas:
                 continue
             # Skip deltas whose files are missing (zombie entries from old resets)

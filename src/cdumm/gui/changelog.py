@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.4.1",
+        "date": "2026-04-12",
+        "notes": [
+            "Fixed Apply silently skipping outdated mods. All enabled mods now apply regardless of game version. The 'outdated' status label remains as an informational warning only.",
+        ],
+    },
+    {
         "version": "2.4.0",
         "date": "2026-04-12",
         "notes": [
