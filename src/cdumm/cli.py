@@ -283,6 +283,8 @@ def _save_bisect_session(db, session):
         "original_state": {int(k): v for k, v in session.original_state.items()},
     })
     db.connection.execute(
+        "CREATE TABLE IF NOT EXISTS ddmin_progress (id INTEGER PRIMARY KEY, data TEXT)")
+    db.connection.execute(
         "INSERT OR REPLACE INTO ddmin_progress (id, data) VALUES (1, ?)", (data,))
     db.connection.commit()
 

@@ -2880,8 +2880,7 @@ class MainWindow(QMainWindow):
         import struct, os
         from cdumm.archive.hashlittle import compute_pamt_hash, compute_papgt_hash
         from cdumm.archive.paz_parse import parse_pamt
-        from cdumm.archive.paz_crypto import decrypt
-        import lz4.block
+        from cdumm.archive.paz_crypto import decrypt, lz4_decompress
 
         issues = []
 
@@ -2979,10 +2978,10 @@ class MainWindow(QMainWindow):
                         if is_lz4:
                             # Try decompress, then decrypt+decompress
                             try:
-                                lz4.block.decompress(raw, uncompressed_size=e.orig_size)
+                                lz4_decompress(raw, e.orig_size)
                             except Exception:
                                 dec = decrypt(raw, os.path.basename(e.path))
-                                lz4.block.decompress(dec, uncompressed_size=e.orig_size)
+                                lz4_decompress(dec, e.orig_size)
 
                         tested += 1
                     except Exception as ex:
@@ -3109,6 +3108,12 @@ class MainWindow(QMainWindow):
                     pass
             self.statusBar().showMessage(
                 f"Deleted {deleted} leftover backup file(s).", 5000)
+
+    def _on_clear_crash_flag(self, mod_id: int) -> None:
+        if self._mod_manager:
+            self._mod_manager.clear_crash_flag(mod_id)
+            self._refresh_all()
+            self.statusBar().showMessage("Crash flag cleared", 3000)
 
     # --- Remove mod ---
     def _on_remove_mod(self, mod_id: int | None = None) -> None:
@@ -3244,17 +3249,26 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_toggle_all(self) -> None:
-        """Toggle all mods on/off."""
+        """Toggle all mods on/off. Batches DB writes to avoid signal storm."""
         if not self._mod_manager:
             return
         mods = self._mod_manager.list_mods()
         if not mods:
             return
+        # Pause watcher during batch toggle
+        self._db_watcher_paused = True
         any_enabled = any(m["enabled"] for m in mods)
+        new_state = not any_enabled
+        # Batch all writes in one transaction
         for m in mods:
-            self._mod_manager.set_enabled(m["id"], not any_enabled)
+            self._db.connection.execute(
+                "UPDATE mods SET enabled = ? WHERE id = ?",
+                (1 if new_state else 0, m["id"]))
+        self._db.connection.commit()
         self._refresh_all()
         self._update_apply_reminder()
+        self._stamp_db_mtime()
+        self._db_watcher_paused = False
 
     # --- View details ---
     def _get_mod_at_proxy_row(self, proxy_row: int) -> dict | None:
@@ -3323,6 +3337,16 @@ class MainWindow(QMainWindow):
             configure_action.triggered.connect(lambda: self._on_configure_mod(mod))
             menu.addAction(configure_action)
 
+        # Toggle individual patches (mount-time JSON mods only)
+        has_json_source = self._db.connection.execute(
+            "SELECT json_source FROM mods WHERE id = ? AND json_source IS NOT NULL AND json_source != ''",
+            (mod["id"],)
+        ).fetchone()
+        if has_json_source:
+            toggle_patches_action = QAction("Toggle Patches...", self)
+            toggle_patches_action.triggered.connect(lambda: self._on_toggle_patches(mod))
+            menu.addAction(toggle_patches_action)
+
         rename_action = QAction("Rename", self)
         rename_action.triggered.connect(lambda: self._on_rename_mod(mod))
         menu.addAction(rename_action)
@@ -3353,6 +3377,12 @@ class MainWindow(QMainWindow):
             remove_action = QAction("Uninstall", self)
             remove_action.triggered.connect(lambda: self._on_remove_mod(mod_id=mod["id"]))
         menu.addAction(remove_action)
+
+        # Clear crash flag (if flagged)
+        if self._mod_manager and self._mod_manager.is_flagged_crash(mod["id"]):
+            clear_flag = QAction("Clear crash flag", self)
+            clear_flag.triggered.connect(lambda: self._on_clear_crash_flag(mod["id"]))
+            menu.addAction(clear_flag)
 
         menu.exec(self._mod_table.viewport().mapToGlobal(pos))
 
@@ -4328,6 +4358,9 @@ class MainWindow(QMainWindow):
     _MINIMUM_SAFE_VERSION = "1.7.0"
 
     def _check_for_updates(self) -> None:
+        # Guard against overlapping update checks (timer can re-trigger)
+        if hasattr(self, "_update_thread") and self._update_thread and self._update_thread.isRunning():
+            return
         from cdumm import __version__
         from cdumm.engine.update_checker import UpdateCheckWorker
         logger.info("Checking for updates (current: v%s)", __version__)
@@ -4427,6 +4460,12 @@ class MainWindow(QMainWindow):
                 dot = "\U0001F7E2" if color == "green" else "\U0001F534"
                 btn.setText(f"About {dot}")
 
+    # --- Toggle Patches ---
+    def _on_toggle_patches(self, mod: dict) -> None:
+        from cdumm.gui.patch_toggle_dialog import PatchToggleDialog
+        dialog = PatchToggleDialog(mod, self._mod_manager, self)
+        dialog.exec()
+
     # --- View Mod Contents ---
     def _show_mod_contents(self, mod_id: int) -> None:
         mod = None
@@ -4440,7 +4479,25 @@ class MainWindow(QMainWindow):
             dialog.exec()
 
     def closeEvent(self, event) -> None:
-        """Clean shutdown — remove lock file so next startup knows we exited cleanly."""
+        """Clean shutdown — stop threads, close DB, remove lock file."""
+        # Stop timers
+        for timer_name in ("_update_timer", "_db_poll_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer:
+                timer.stop()
+        # Stop worker threads
+        for thread_name in ("_worker_thread", "_update_thread"):
+            thread = getattr(self, thread_name, None)
+            if thread and thread.isRunning():
+                thread.quit()
+                thread.wait(2000)
+        # Close DB
+        if self._db:
+            try:
+                self._db.close()
+            except Exception:
+                pass
+        # Remove lock file
         if hasattr(self, "_lock_file") and self._lock_file.exists():
             self._lock_file.unlink()
         super().closeEvent(event)

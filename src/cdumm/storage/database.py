@@ -213,6 +213,39 @@ class Database:
             """)
             logger.info("Created semantic_resolutions table")
 
+        # Add disabled_patches column to mods for per-patch toggle
+        if "disabled_patches" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN disabled_patches TEXT"
+            )
+            logger.info("Migrated: added disabled_patches column to mods")
+
+        # Add json_source column to mods for mount-time patching
+        if "json_source" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN json_source TEXT"
+            )
+            logger.info("Migrated: added json_source column to mods")
+
+        # Create crash_registry table for mod health tracking
+        if not self.table_exists("crash_registry"):
+            self._connection.execute("""
+                CREATE TABLE crash_registry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mod_id INTEGER NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+                    mod_name TEXT NOT NULL,
+                    delta_hash TEXT NOT NULL,
+                    flagged_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                    flagged_by TEXT NOT NULL DEFAULT 'auto_bisect',
+                    crashes_alone INTEGER NOT NULL DEFAULT 0,
+                    context_mods TEXT,
+                    game_version TEXT,
+                    rounds_to_find INTEGER,
+                    UNIQUE(mod_id, delta_hash)
+                )
+            """)
+            logger.info("Created crash_registry table")
+
     @property
     def connection(self) -> sqlite3.Connection:
         if self._connection is None:

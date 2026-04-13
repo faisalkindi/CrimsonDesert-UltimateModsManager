@@ -5,6 +5,9 @@ and LZ4 block compression/decompression for Crimson Desert PAZ archives.
 
 Keys are derived from the filename alone — no key database needed.
 
+Uses Rust cdumm_native for performance-critical operations when available,
+with Python fallback for development/testing.
+
 Usage:
     from cdumm.archive.paz_crypto import derive_key_iv, encrypt, decrypt, lz4_compress
 """
@@ -12,8 +15,15 @@ Usage:
 import os
 import struct
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
-import lz4.block
+try:
+    import cdumm_native as _native
+    _HAS_NATIVE = True
+except ImportError:
+    _native = None
+    _HAS_NATIVE = False
+
+# Use the canonical hashlittle implementation (single source of truth)
+from cdumm.archive.hashlittle import hashlittle
 
 # ── Key derivation constants ─────────────────────────────────────────
 
@@ -25,73 +35,12 @@ XOR_DELTAS = [
 ]
 
 
-# ── Bob Jenkins' lookup3 hashlittle ──────────────────────────────────
-
-def _rot(v, k):
-    return ((v << k) | (v >> (32 - k))) & 0xFFFFFFFF
-
-def _add(a, b):
-    return (a + b) & 0xFFFFFFFF
-
-def _sub(a, b):
-    return (a - b) & 0xFFFFFFFF
-
-
-def hashlittle(data: bytes, initval: int = 0) -> int:
-    """Bob Jenkins' lookup3 hashlittle — returns the primary hash (c)."""
-    length = len(data)
-    a = b = c = _add(0xDEADBEEF + length, initval)
-    off = 0
-
-    while length > 12:
-        a = _add(a, struct.unpack_from('<I', data, off)[0])
-        b = _add(b, struct.unpack_from('<I', data, off + 4)[0])
-        c = _add(c, struct.unpack_from('<I', data, off + 8)[0])
-        # mix
-        a = _sub(a, c); a ^= _rot(c, 4);  c = _add(c, b)
-        b = _sub(b, a); b ^= _rot(a, 6);  a = _add(a, c)
-        c = _sub(c, b); c ^= _rot(b, 8);  b = _add(b, a)
-        a = _sub(a, c); a ^= _rot(c, 16); c = _add(c, b)
-        b = _sub(b, a); b ^= _rot(a, 19); a = _add(a, c)
-        c = _sub(c, b); c ^= _rot(b, 4);  b = _add(b, a)
-        off += 12
-        length -= 12
-
-    # Handle remaining bytes (zero-padded to 12)
-    tail = data[off:] + b'\x00' * 12
-    if length >= 12:
-        c = _add(c, struct.unpack_from('<I', tail, 8)[0])
-    elif length >= 9:
-        v = struct.unpack_from('<I', tail, 8)[0]
-        c = _add(c, v & (0xFFFFFFFF >> (8 * (12 - length))))
-    if length >= 8:
-        b = _add(b, struct.unpack_from('<I', tail, 4)[0])
-    elif length >= 5:
-        v = struct.unpack_from('<I', tail, 4)[0]
-        b = _add(b, v & (0xFFFFFFFF >> (8 * (8 - length))))
-    if length >= 4:
-        a = _add(a, struct.unpack_from('<I', tail, 0)[0])
-    elif length >= 1:
-        v = struct.unpack_from('<I', tail, 0)[0]
-        a = _add(a, v & (0xFFFFFFFF >> (8 * (4 - length))))
-    elif length == 0:
-        return c
-
-    # final
-    c ^= b; c = _sub(c, _rot(b, 14))
-    a ^= c; a = _sub(a, _rot(c, 11))
-    b ^= a; b = _sub(b, _rot(a, 25))
-    c ^= b; c = _sub(c, _rot(b, 16))
-    a ^= c; a = _sub(a, _rot(c, 4))
-    b ^= a; b = _sub(b, _rot(a, 14))
-    c ^= b; c = _sub(c, _rot(b, 24))
-    return c
-
-
 # ── Key derivation ───────────────────────────────────────────────────
 
 def derive_key_iv(filename: str) -> tuple[bytes, bytes]:
     """Derive 32-byte ChaCha20 key and 16-byte IV from a filename."""
+    if _HAS_NATIVE:
+        return _native.derive_key_iv(filename)
     basename = os.path.basename(filename).lower()
     seed = hashlittle(basename.encode('utf-8'), HASH_INITVAL)
 
@@ -103,16 +52,14 @@ def derive_key_iv(filename: str) -> tuple[bytes, bytes]:
 
 # ── ChaCha20 encrypt/decrypt ────────────────────────────────────────
 
-def chacha20(data: bytes, key: bytes, iv: bytes) -> bytes:
-    """ChaCha20 encrypt or decrypt (symmetric)."""
-    cipher = Cipher(algorithms.ChaCha20(key, iv), mode=None)
-    return cipher.encryptor().update(data)
-
-
 def decrypt(data: bytes, filename: str) -> bytes:
     """Decrypt data using a key derived from the filename."""
+    if _HAS_NATIVE:
+        return _native.chacha20_decrypt(data, filename)
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
     key, iv = derive_key_iv(filename)
-    return chacha20(data, key, iv)
+    cipher = Cipher(algorithms.ChaCha20(key, iv), mode=None)
+    return cipher.encryptor().update(data)
 
 
 def encrypt(data: bytes, filename: str) -> bytes:
@@ -124,9 +71,15 @@ def encrypt(data: bytes, filename: str) -> bytes:
 
 def lz4_decompress(data: bytes, original_size: int) -> bytes:
     """LZ4 block decompression (no frame header)."""
+    if _HAS_NATIVE:
+        return _native.lz4_decompress(data, original_size)
+    import lz4.block
     return lz4.block.decompress(data, uncompressed_size=original_size)
 
 
 def lz4_compress(data: bytes) -> bytes:
     """LZ4 block compression (no frame header, matching game format)."""
+    if _HAS_NATIVE:
+        return _native.lz4_compress(data)
+    import lz4.block
     return lz4.block.compress(data, store_size=False)

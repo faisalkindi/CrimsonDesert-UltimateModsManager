@@ -11,10 +11,9 @@ import struct
 import logging
 from dataclasses import dataclass
 
-import lz4.block
-
 from cdumm.archive.hashlittle import hashlittle
 from cdumm.archive.paz_repack import fix_dds_header
+from cdumm.archive.paz_crypto import lz4_compress
 
 logger = logging.getLogger(__name__)
 
@@ -155,23 +154,141 @@ def _build_full_path_map(pamt_dir: str, game_dir) -> dict[str, str]:
     return result
 
 
+def _load_overlay_cache(game_dir) -> dict:
+    """Load the overlay cache manifest from the previous Apply.
+
+    Returns {entry_path: {offset, comp_size, decomp_size, flags, delta_hash, overlay_dir}}
+    and the cached overlay PAZ bytes (or None).
+    """
+    import json
+    from pathlib import Path
+    cache_path = Path(game_dir) / "CDMods" / ".overlay_cache.json"
+    if not cache_path.exists():
+        return {}, None, None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        overlay_dir = manifest.get("_overlay_dir")
+        if not overlay_dir:
+            return {}, None, None
+        paz_path = Path(game_dir) / overlay_dir / "0.paz"
+        if not paz_path.exists():
+            return {}, None, None
+        paz_data = paz_path.read_bytes()
+        entries = {k: v for k, v in manifest.items() if not k.startswith("_")}
+        return entries, paz_data, overlay_dir
+    except Exception as e:
+        logger.debug("Overlay cache load failed: %s", e)
+        return {}, None, None
+
+
+def _save_overlay_cache(game_dir, overlay_dir, cache_entries: dict):
+    """Save overlay cache manifest for incremental rebuild."""
+    import json
+    from pathlib import Path
+    cache_path = Path(game_dir) / "CDMods" / ".overlay_cache.json"
+    manifest = dict(cache_entries)
+    manifest["_overlay_dir"] = overlay_dir
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+    except Exception as e:
+        logger.debug("Overlay cache save failed: %s", e)
+
+
+def _get_vanilla_pabgh(pamt_dir: str, pabgb_entry_path: str, game_dir) -> bytes | None:
+    """Extract the vanilla PABGH file that corresponds to a PABGB entry.
+
+    Looks up the sibling .pabgh in the same PAMT directory and extracts it
+    from the vanilla PAZ file.
+
+    Returns raw (decompressed) PABGH bytes, or None if not found.
+    """
+    from pathlib import Path
+    from cdumm.archive.paz_parse import parse_pamt, PazEntry
+
+    if not pamt_dir or not game_dir:
+        return None
+
+    # Derive PABGH path from PABGB path
+    pabgh_path = pabgb_entry_path.replace(".pabgb", ".pabgh")
+    pabgh_filename = pabgh_path.rsplit("/", 1)[-1] if "/" in pabgh_path else pabgh_path
+
+    game_dir = Path(game_dir)
+
+    # Search in vanilla backup first, then game dir
+    for base in [game_dir / "CDMods" / "vanilla", game_dir]:
+        pamt_path = base / pamt_dir / "0.pamt"
+        if not pamt_path.exists():
+            continue
+
+        try:
+            entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+            for e in entries:
+                if e.path.lower().endswith(pabgh_filename.lower()):
+                    # Found the PABGH entry — extract from PAZ
+                    paz_path = Path(e.paz_file)
+                    if not paz_path.exists():
+                        continue
+                    with open(paz_path, "rb") as f:
+                        f.seek(e.offset)
+                        raw = f.read(e.comp_size)
+
+                    if e.comp_size != e.orig_size and e.orig_size > 0:
+                        # Compressed — decompress
+                        from cdumm.archive.paz_crypto import lz4_decompress
+                        return lz4_decompress(raw, e.orig_size)
+                    else:
+                        # Uncompressed
+                        return raw
+        except Exception as ex:
+            logger.debug("PABGH extraction failed for %s: %s", pabgh_filename, ex)
+            continue
+
+    return None
+
+
 def build_overlay(
     entries: list[tuple[bytes, dict]],
     game_dir=None,
+    progress_cb=None,
+    preloaded_cache=None,
 ) -> tuple[bytes, bytes]:
     """Build overlay PAZ + PAMT from ENTR delta entries.
+
+    Uses incremental rebuild: entries unchanged since last Apply are copied
+    from the cached overlay PAZ (no re-compression). Only new/changed entries
+    are compressed from scratch.
 
     Args:
         entries: list of (decompressed_content, entr_metadata) tuples.
         game_dir: game installation directory (for vanilla PAMT lookup).
+        progress_cb: optional (idx, total, entry_name) callback.
+        preloaded_cache: optional pre-loaded (manifest, paz_data, dir) tuple
+            from _load_overlay_cache. Used when the previous overlay dir
+            gets cleaned up before build runs.
 
     Returns:
         (paz_bytes, pamt_bytes) ready to write to overlay directory.
     """
+    if preloaded_cache:
+        cache_manifest, cached_paz, _cached_dir = preloaded_cache
+    elif game_dir:
+        cache_manifest, cached_paz, _cached_dir = _load_overlay_cache(game_dir)
+    else:
+        cache_manifest, cached_paz, _cached_dir = {}, None, None
+    cache_hits = 0
+    new_cache: dict[str, dict] = {}
+
     paz_buf = bytearray()
     overlay_entries: list[OverlayEntry] = []
+    _added_pabgh: set[str] = set()  # track which PABGH files we've added
+    total_entries = len(entries)
 
-    for content, metadata in entries:
+    for entry_idx, (content, metadata) in enumerate(entries):
+        if progress_cb and total_entries > 0:
+            ename = metadata.get("entry_path", "").rsplit("/", 1)[-1] if metadata.get("entry_path") else ""
+            progress_cb(entry_idx, total_entries, ename)
         entry_path = metadata["entry_path"]
         comp_type = metadata.get("compression_type", 2)
         pamt_dir = metadata.get("pamt_dir", "")
@@ -198,6 +315,45 @@ def build_overlay(
 
         paz_offset = len(paz_buf)
 
+        # Check overlay cache: if this entry is unchanged, copy compressed
+        # bytes directly from the previous overlay PAZ (skip decompression/recompression)
+        delta_hash = metadata.get("delta_hash", "")
+        if not delta_hash and metadata.get("delta_path"):
+            # Use delta file mtime as a cheap change indicator
+            import os
+            try:
+                delta_hash = str(os.path.getmtime(metadata["delta_path"]))
+            except OSError:
+                delta_hash = ""
+
+        cached = cache_manifest.get(entry_path)
+        if (cached and cached_paz and delta_hash
+                and cached.get("delta_hash") == delta_hash):
+            # Cache hit — copy pre-compressed bytes from previous overlay
+            c_off = cached["offset"]
+            c_size = cached["comp_size"]
+            c_end = c_off + c_size
+            # Include padding to alignment
+            pad = (PAZ_ALIGNMENT - (c_end % PAZ_ALIGNMENT)) % PAZ_ALIGNMENT
+            c_padded = c_end + pad
+            # Safety: verify alignment and bounds
+            if (c_padded <= len(cached_paz)
+                    and paz_offset % PAZ_ALIGNMENT == 0  # current position aligned
+                    and c_size > 0):
+                paz_buf.extend(cached_paz[c_off:c_padded])
+                overlay_entries.append(OverlayEntry(
+                    dir_path=dir_path, filename=filename,
+                    paz_offset=paz_offset, comp_size=cached["comp_size"],
+                    decomp_size=cached["decomp_size"], flags=cached["flags"],
+                ))
+                new_cache[entry_path] = {
+                    "offset": paz_offset, "comp_size": cached["comp_size"],
+                    "decomp_size": cached["decomp_size"], "flags": cached["flags"],
+                    "delta_hash": delta_hash,
+                }
+                cache_hits += 1
+                continue
+
         if comp_type == 1:
             # DDS type 0x01: check if DX10 multi-mip (raw passthrough)
             # or standard DDS (inner LZ4 compression).
@@ -218,7 +374,7 @@ def build_overlay(
                 header = bytearray(content[:DDS_HEADER_SIZE])
                 body = content[DDS_HEADER_SIZE:]
 
-                compressed_body = lz4.block.compress(body, store_size=False)
+                compressed_body = lz4_compress(body)
 
                 if header[:4] == b"DDS ":
                     header = fix_dds_header(header, len(compressed_body))
@@ -235,7 +391,7 @@ def build_overlay(
             flags = 1
 
         elif comp_type == 2:
-            compressed = lz4.block.compress(content, store_size=False)
+            compressed = lz4_compress(content)
             payload = compressed
             comp_size = len(compressed)
             decomp_size = len(content)
@@ -260,8 +416,47 @@ def build_overlay(
             decomp_size=decomp_size, flags=flags,
         ))
 
+        # Cache this entry for future incremental rebuilds
+        new_cache[entry_path] = {
+            "offset": paz_offset, "comp_size": comp_size,
+            "decomp_size": decomp_size, "flags": flags,
+            "delta_hash": delta_hash,
+        }
+
         logger.info("Overlay entry: %s/%s (comp=%d, decomp=%d, type=%d)",
                      dir_path, filename, comp_size, decomp_size, comp_type)
+
+        # Auto-include matching PABGH alongside PABGB entries.
+        # The game needs the index file to read the data file. Without it,
+        # the game uses the vanilla PABGH which has stale offsets if the
+        # PABGB structure changed.
+        if filename.endswith(".pabgb") and game_dir:
+            pabgh_name = filename.replace(".pabgb", ".pabgh")
+            pabgh_key = f"{dir_path}/{pabgh_name}" if dir_path else pabgh_name
+            # Only add if we haven't already added this PABGH
+            if pabgh_key not in _added_pabgh:
+                pabgh_data = _get_vanilla_pabgh(pamt_dir, entry_path, game_dir)
+                if pabgh_data:
+                    _added_pabgh.add(pabgh_key)
+                    pabgh_offset = len(paz_buf)
+                    paz_buf.extend(pabgh_data)
+                    # Align
+                    pad = PAZ_ALIGNMENT - (len(paz_buf) % PAZ_ALIGNMENT)
+                    if pad < PAZ_ALIGNMENT:
+                        paz_buf.extend(b'\x00' * pad)
+                    overlay_entries.append(OverlayEntry(
+                        dir_path=dir_path, filename=pabgh_name,
+                        paz_offset=pabgh_offset,
+                        comp_size=len(pabgh_data),
+                        decomp_size=len(pabgh_data),
+                        flags=0,  # uncompressed, matching DMM
+                    ))
+                    logger.info("Overlay entry (auto PABGH): %s/%s (%d bytes, uncompressed)",
+                                 dir_path, pabgh_name, len(pabgh_data))
+
+    if cache_hits > 0:
+        logger.info("Overlay cache: %d/%d entries reused (skipped recompression)",
+                     cache_hits, len(entries))
 
     paz_bytes = bytes(paz_buf)
     pamt_bytes = _build_multi_pamt(overlay_entries, len(paz_bytes))
@@ -276,6 +471,9 @@ def build_overlay(
 
     logger.info("Overlay built: %d entries, PAZ=%d bytes, PAMT=%d bytes",
                 len(overlay_entries), len(paz_bytes), len(pamt_bytes))
+
+    # Store cache for caller to save after overlay dir is allocated
+    build_overlay._last_cache = new_cache
 
     return paz_bytes, pamt_bytes
 

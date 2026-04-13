@@ -108,7 +108,8 @@ class TransactionalIO:
         pre_apply_files = TransactionalIO.detect_interrupted_apply(game_dir)
         count = 0
         for backup in pre_apply_files:
-            original = backup.with_suffix("")  # strip .pre-apply
+            # Strip the .pre-apply suffix (handles multi-dotted names like 0.pamt.pre-apply)
+            original = backup.with_name(backup.name.removesuffix(".pre-apply"))
             if original.exists():
                 original.unlink()
             backup.rename(original)

@@ -41,6 +41,37 @@ class ModManager:
             for row in cursor.fetchall()
         ]
 
+    def get_disabled_patches(self, mod_id: int) -> list[int]:
+        """Get the list of disabled patch indices for a mod."""
+        row = self._db.connection.execute(
+            "SELECT disabled_patches FROM mods WHERE id = ?", (mod_id,)
+        ).fetchone()
+        if row and row[0]:
+            import json
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return []
+
+    def set_disabled_patches(self, mod_id: int, indices: list[int]) -> None:
+        """Set the list of disabled patch indices for a mod."""
+        import json
+        value = json.dumps(sorted(set(indices))) if indices else None
+        self._db.connection.execute(
+            "UPDATE mods SET disabled_patches = ? WHERE id = ?",
+            (value, mod_id),
+        )
+        self._db.connection.commit()
+        logger.info("Mod %d disabled patches: %s", mod_id, indices)
+
+    def get_json_source(self, mod_id: int) -> str | None:
+        """Get the json_source path for a mount-time JSON mod, or None."""
+        row = self._db.connection.execute(
+            "SELECT json_source FROM mods WHERE id = ?", (mod_id,)
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
     def set_notes(self, mod_id: int, notes: str) -> None:
         """Set user notes for a mod."""
         self._db.connection.execute(
@@ -291,10 +322,27 @@ class ModManager:
             if delta_count == 0:
                 return "outdated"
 
-        # Check if mod has any deltas
+        # Check if mod has any deltas (or is a mount-time JSON mod)
         delta_count = self._db.connection.execute(
             "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = ?", (mod_id,)).fetchone()[0]
         if delta_count == 0:
+            # Mount-time JSON mods have no deltas — they patch at Apply time.
+            # Check json_source to distinguish from broken imports.
+            json_src = self.get_json_source(mod_id)
+            if json_src:
+                if not Path(json_src).exists():
+                    return "no data"  # source file missing
+                # Mount-time mod with valid JSON — check overlay like ENTR mods
+                try:
+                    if game_dir and game_dir.exists():
+                        for d in game_dir.iterdir():
+                            if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                                    and int(d.name) >= 37
+                                    and (d / "0.paz").exists() and (d / "0.pamt").exists()):
+                                return "active"
+                except OSError:
+                    pass
+                return "not applied"
             return "no data"
 
         # Get the mod's target files (excluding meta/0.papgt which is always rebuilt)
@@ -314,11 +362,14 @@ class ModManager:
             "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = ? AND entry_path IS NOT NULL",
             (mod_id,)).fetchone()[0]
         if has_entr > 0:
-            for d in sorted(game_dir.iterdir()):
-                if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
-                        and int(d.name) >= 37
-                        and (d / "0.paz").exists() and (d / "0.pamt").exists()):
-                    return _status("active")
+            try:
+                for d in game_dir.iterdir():
+                    if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                            and int(d.name) >= 37
+                            and (d / "0.paz").exists() and (d / "0.pamt").exists()):
+                        return _status("active")
+            except OSError:
+                pass
 
         for (file_path,) in files:
             is_new = self._db.connection.execute(
@@ -489,3 +540,129 @@ class ModManager:
             "UPDATE mods SET priority = ? WHERE id = ?", (min_priority, mod_id))
         self._db.connection.commit()
         logger.info("Set mod %d as winner (priority=%d)", mod_id, min_priority)
+
+    # ── Crash Registry ────────────────────────────────────────────
+
+    def flag_crash(self, mod_id: int, crashes_alone: bool = True,
+                   context_mods: list[str] | None = None,
+                   rounds: int | None = None) -> None:
+        """Flag a mod as crash-causing. Keyed on mod_id + delta_hash."""
+        mod = next((m for m in self.list_mods() if m["id"] == mod_id), None)
+        if not mod:
+            return
+        delta_hash = self._compute_delta_hash(mod_id)
+        game_ver = mod.get("game_version_hash", "")
+        context = ",".join(context_mods) if context_mods else None
+        self._db.connection.execute(
+            "INSERT OR REPLACE INTO crash_registry "
+            "(mod_id, mod_name, delta_hash, flagged_by, crashes_alone, "
+            " context_mods, game_version, rounds_to_find) "
+            "VALUES (?, ?, ?, 'auto_bisect', ?, ?, ?, ?)",
+            (mod_id, mod["name"], delta_hash, 1 if crashes_alone else 0,
+             context, game_ver, rounds))
+        self._db.connection.commit()
+        logger.info("Flagged crash: %s (id=%d, hash=%s)", mod["name"], mod_id, delta_hash)
+
+    def clear_crash_flag(self, mod_id: int) -> None:
+        """Clear crash flag for a mod (e.g. after update/reimport)."""
+        self._db.connection.execute(
+            "DELETE FROM crash_registry WHERE mod_id = ?", (mod_id,))
+        self._db.connection.commit()
+
+    def get_crash_flags(self) -> dict[int, dict]:
+        """Get all flagged mods. Returns {mod_id: {name, flagged_at, ...}}."""
+        try:
+            rows = self._db.connection.execute(
+                "SELECT mod_id, mod_name, delta_hash, flagged_at, flagged_by, "
+                "crashes_alone, context_mods, game_version, rounds_to_find "
+                "FROM crash_registry"
+            ).fetchall()
+        except Exception:
+            return {}
+        result = {}
+        for r in rows:
+            # Check if delta hash still matches (mod was reimported = hash changed)
+            current_hash = self._compute_delta_hash(r[0])
+            if current_hash != r[2]:
+                # Mod changed since flagging — auto-clear
+                self._db.connection.execute(
+                    "DELETE FROM crash_registry WHERE mod_id = ? AND delta_hash = ?",
+                    (r[0], r[2]))
+                self._db.connection.commit()
+                continue
+            result[r[0]] = {
+                "name": r[1], "delta_hash": r[2], "flagged_at": r[3],
+                "flagged_by": r[4], "crashes_alone": bool(r[5]),
+                "context_mods": r[6].split(",") if r[6] else [],
+                "game_version": r[7], "rounds_to_find": r[8],
+            }
+        return result
+
+    def is_flagged_crash(self, mod_id: int) -> bool:
+        """Check if a mod is currently flagged as crash-causing."""
+        flags = self.get_crash_flags()
+        return mod_id in flags
+
+    def get_crash_report(self) -> str:
+        """Generate a copyable crash report of all flagged mods."""
+        flags = self.get_crash_flags()
+        if not flags:
+            return "No problem mods detected."
+        lines = [
+            "═══ CDUMM Crash Report ═══",
+            f"Generated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"Problem mods: {len(flags)}",
+            "",
+        ]
+        for mod_id, info in flags.items():
+            lines.append(f"  ✗ {info['name']}")
+            lines.append(f"    Flagged: {info['flagged_at']} by {info['flagged_by']}")
+            if info['crashes_alone']:
+                lines.append(f"    Crashes by itself")
+            if info['context_mods']:
+                lines.append(f"    Context: tested with {', '.join(info['context_mods'])}")
+            if info['game_version']:
+                lines.append(f"    Game version: {info['game_version']}")
+            if info['rounds_to_find']:
+                lines.append(f"    Found in {info['rounds_to_find']} bisection rounds")
+            lines.append("")
+        lines.append("Mods not listed here passed automated testing.")
+        return "\n".join(lines)
+
+    def _compute_delta_hash(self, mod_id: int) -> str:
+        """Compute a fingerprint of a mod's deltas for change detection.
+
+        For mount-time JSON mods (delta_path=""), uses the json_source
+        file's mtime instead.
+        """
+        # Check if this is a mount-time JSON mod
+        row = self._db.connection.execute(
+            "SELECT json_source, disabled_patches FROM mods WHERE id = ?", (mod_id,)
+        ).fetchone()
+        if row and row[0]:
+            import hashlib, os
+            h = hashlib.md5()
+            try:
+                h.update(str(os.path.getmtime(row[0])).encode())
+            except OSError:
+                h.update(row[0].encode())
+            # Include disabled_patches in hash so toggling invalidates crash flags
+            if row[1]:
+                h.update(row[1].encode())
+            return h.hexdigest()[:16]
+
+        rows = self._db.connection.execute(
+            "SELECT delta_path FROM mod_deltas WHERE mod_id = ? ORDER BY delta_path",
+            (mod_id,)).fetchall()
+        if not rows:
+            return ""
+        import hashlib, os
+        h = hashlib.md5()
+        for (dp,) in rows:
+            if not dp:
+                continue
+            try:
+                h.update(str(os.path.getmtime(dp)).encode())
+            except OSError:
+                h.update(dp.encode())
+        return h.hexdigest()[:16]

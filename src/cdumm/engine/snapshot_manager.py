@@ -266,64 +266,6 @@ class SnapshotWorker(QObject):
 
         return problems
 
-        total = len(files_to_hash)
-        if total == 0:
-            self.error_occurred.emit(
-                "No PAZ/PAMT/PAPGT files found in game directory.\n\n"
-                f"Searched: {self._game_dir}\n"
-                "Expected directories: 0000-0032 with .paz and .pamt files."
-            )
-            return
-
-        # Calculate total bytes for accurate progress
-        total_bytes = sum(f.stat().st_size for f, _ in files_to_hash)
-        total_gb = total_bytes / (1024 ** 3)
-        logger.info("Snapshot: %d files, %.1f GB to hash", total, total_gb)
-        self.progress_updated.emit(0, f"Found {total} files ({total_gb:.1f} GB). Hashing...")
-
-        # Clear existing snapshot
-        self._thread_db.connection.execute("DELETE FROM snapshots")
-
-        bytes_hashed = 0
-        last_pct = -1  # throttle: only emit when percentage changes
-
-        # Hash each file and store
-        for i, (abs_path, rel_path) in enumerate(files_to_hash):
-            file_size_bytes = abs_path.stat().st_size
-            file_size_mb = file_size_bytes / (1024 * 1024)
-            logger.debug("Hashing [%d/%d]: %s (%.0f MB)", i + 1, total, rel_path, file_size_mb)
-
-            # Progress callback — throttled to only emit when overall % changes
-            def on_chunk(chunk_bytes_read, chunk_total, _rel=rel_path, _i=i,
-                         _base=bytes_hashed, _fmb=file_size_mb):
-                nonlocal last_pct
-                overall = _base + chunk_bytes_read
-                pct = int(overall / total_bytes * 100) if total_bytes > 0 else 0
-                if pct != last_pct:
-                    last_pct = pct
-                    chunk_pct = int(chunk_bytes_read / chunk_total * 100) if chunk_total > 0 else 100
-                    self.progress_updated.emit(
-                        pct,
-                        f"[{_i + 1}/{total}] {_rel} ({_fmb:.0f} MB) — {chunk_pct}%"
-                    )
-
-            file_hash, file_size = hash_file(abs_path, progress_callback=on_chunk)
-            bytes_hashed += file_size
-
-            self._thread_db.connection.execute(
-                "INSERT OR REPLACE INTO snapshots (file_path, file_hash, file_size) "
-                "VALUES (?, ?, ?)",
-                (rel_path, file_hash, file_size),
-            )
-
-            pct = int(bytes_hashed / total_bytes * 100) if total_bytes > 0 else 0
-            self.progress_updated.emit(pct, f"[{i + 1}/{total}] {rel_path} — done")
-            logger.debug("Hashed: %s -> %s", rel_path, file_hash[:16])
-
-        self._thread_db.connection.commit()
-        logger.info("Snapshot complete: %d files hashed", total)
-        self.finished.emit(total)
-
 
 class SnapshotManager:
     """High-level snapshot operations."""
@@ -355,7 +297,6 @@ class SnapshotManager:
             if not abs_path.exists():
                 changes.append((rel_path, "deleted"))
             else:
-                current_hash, _ = hash_file(abs_path)
-                if current_hash != stored_hash:
+                if not hash_matches(abs_path, stored_hash):
                     changes.append((rel_path, "modified"))
         return changes

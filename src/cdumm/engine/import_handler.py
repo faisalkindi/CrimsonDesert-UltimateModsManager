@@ -78,7 +78,7 @@ import json
 import re
 
 from cdumm.engine.crimson_browser_handler import detect_crimson_browser, convert_to_paz_mod
-from cdumm.engine.json_patch_handler import detect_json_patch, convert_json_patch_to_paz
+from cdumm.engine.json_patch_handler import detect_json_patch, convert_json_patch_to_paz, import_json_fast
 from cdumm.engine.texture_mod_handler import detect_texture_mod, convert_texture_mod
 
 # Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt, meta/0.pathc
@@ -678,7 +678,8 @@ def import_from_7z(
                                       mod_name, existing_mod_id)
 
 
-_LOOSE_GAME_EXTENSIONS = {".json", ".xml"}
+_LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".css", ".html", ".thtml",
+                          ".dds", ".ttf", ".otf", ".wem", ".mp4"}
 _SKIP_LOOSE_FILES = {"mod.json", "manifest.json", "modinfo.json"}
 
 
@@ -1380,11 +1381,11 @@ def import_from_json_patch(
 ) -> ModImportResult:
     """Import a mod from a JSON byte-patch file.
 
-    Uses ENTR (entry-level) deltas so multiple JSON mods modifying
-    different entries in the same PAZ compose correctly.
-    """
-    from cdumm.engine.json_patch_handler import import_json_as_entr
+    Uses mount-time patching: stores the JSON file and applies patches
+    from vanilla at Apply time. No PAZ extraction at import = instant import.
 
+    Falls back to ENTR delta import if mount-time setup fails.
+    """
     patch_data = detect_json_patch(json_path if json_path.is_file() else json_path)
     if patch_data is None:
         result = ModImportResult(json_path.stem)
@@ -1401,40 +1402,62 @@ def import_from_json_patch(
     if modinfo.get("name"):
         mod_name = modinfo["name"]
 
-    entr_result = import_json_as_entr(
-        patch_data, game_dir, db, deltas_dir, mod_name,
+    # Mount-time fast import: just store JSON, patches applied at Apply time
+    mods_dir = game_dir / "CDMods" / "mods"
+    fast_result = import_json_fast(
+        patch_data, game_dir, db, mods_dir, mod_name,
         existing_mod_id=existing_mod_id, modinfo=modinfo)
 
-    if entr_result is None:
+    if fast_result is not None and fast_result.get("changed_files"):
         result = ModImportResult(mod_name)
-        result.error = "Failed to apply JSON patches to game files."
+        result.changed_files = fast_result["changed_files"]
+        result.mod_id = fast_result.get("mod_id")
+        if patch_data.get("patches"):
+            _store_json_patches(db, result, patch_data, game_dir)
         return result
 
-    if entr_result.get("version_mismatch"):
+    # Fallback: ENTR delta import (if fast import failed, e.g. game file not found)
+    if fast_result is None:
+        logger.info("Fast import failed for '%s', falling back to ENTR import", mod_name)
+        from cdumm.engine.json_patch_handler import import_json_as_entr
+        entr_result = import_json_as_entr(
+            patch_data, game_dir, db, deltas_dir, mod_name,
+            existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+        if entr_result is None:
+            result = ModImportResult(mod_name)
+            result.error = "Failed to apply JSON patches to game files."
+            return result
+
+        if entr_result.get("version_mismatch"):
+            result = ModImportResult(mod_name)
+            game_ver = entr_result.get("game_version", "unknown")
+            mismatched = entr_result.get("mismatched", 0)
+            result.error = (
+                f"This mod is incompatible with the current game version. "
+                f"{mismatched} byte patches don't match — the game data has "
+                f"changed since this mod was created (mod targets version "
+                f"{game_ver}). The mod author needs to update it.")
+            return result
+
+        if not entr_result["changed_files"]:
+            result = ModImportResult(mod_name)
+            result.error = (
+                "This mod's changes are already present in your game files. "
+                "Nothing to apply.")
+            return result
+
         result = ModImportResult(mod_name)
-        game_ver = entr_result.get("game_version", "unknown")
-        mismatched = entr_result.get("mismatched", 0)
-        result.error = (
-            f"This mod is incompatible with the current game version. "
-            f"{mismatched} byte patches don't match — the game data has "
-            f"changed since this mod was created (mod targets version "
-            f"{game_ver}). The mod author needs to update it.")
+        result.changed_files = entr_result["changed_files"]
+        if patch_data.get("patches"):
+            _store_json_patches(db, result, patch_data, game_dir)
         return result
 
-    if not entr_result["changed_files"]:
-        result = ModImportResult(mod_name)
-        result.error = (
-            "This mod's changes are already present in your game files. "
-            "Nothing to apply.")
-        return result
-
+    # fast_result returned but empty changed_files
     result = ModImportResult(mod_name)
-    result.changed_files = entr_result["changed_files"]
-
-    # Store original JSON patch data for three-way merge support
-    if patch_data.get("patches"):
-        _store_json_patches(db, result, patch_data, game_dir)
-
+    result.error = (
+        "This mod's changes are already present in your game files. "
+        "Nothing to apply.")
     return result
 
 

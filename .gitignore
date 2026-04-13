@@ -12,3 +12,7 @@ build/
 venv/
 .pytest_cache/
 .ruff_cache/
+# Rust native module build artifacts
+native/target/
+*.pyd
+*.pdb

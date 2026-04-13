@@ -31,6 +31,9 @@ STATUS_COLORS = {
     "disabled": QColor(158, 158, 158),    # gray
     "disabled (outdated)": QColor(255, 193, 7),  # amber
     "checking...": QColor(158, 158, 158), # gray
+    "disabled (crash)": QColor(244, 67, 54),    # red
+    "active (crash)": QColor(244, 67, 54),      # red
+    "not applied (crash)": QColor(244, 67, 54), # red
 }
 
 
@@ -146,6 +149,16 @@ class ModListModel(QAbstractTableModel):
 
     def _on_statuses_ready(self, results: dict) -> None:
         self._status_cache.update(results)
+        # Overlay crash flags from crash registry
+        try:
+            crash_flags = self._mod_manager.get_crash_flags()
+            for mod_id, info in crash_flags.items():
+                if mod_id in self._status_cache:
+                    base = self._status_cache[mod_id]
+                    if "crash" not in base:
+                        self._status_cache[mod_id] = f"{base} (crash)"
+        except Exception:
+            pass
         # Emit dataChanged for the status column
         if self._mods:
             top = self.index(0, COL_STATUS)
@@ -197,7 +210,10 @@ class ModListModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             if col == COL_STATUS:
                 status = self._status_cache.get(mod["id"], "")
-                return STATUS_COLORS.get(status)
+                color = STATUS_COLORS.get(status)
+                if color is None and "(crash)" in status:
+                    color = QColor(244, 67, 54)  # red for any crash-flagged status
+                return color
             if col == COL_NOTES and mod.get("notes"):
                 from cdumm.gui.theme import get_color
                 return QColor(get_color("text_bright"))

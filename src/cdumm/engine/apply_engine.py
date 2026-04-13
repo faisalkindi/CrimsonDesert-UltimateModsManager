@@ -339,6 +339,10 @@ class ApplyWorker(QObject):
         # Overlay PAZ: collect ENTR delta entries to write to an overlay
         # directory instead of modifying original game PAZ files in-place.
         self._overlay_entries: list[tuple[bytes, dict]] = []
+
+        # Pre-load overlay cache before orphan cleanup deletes the previous overlay
+        from cdumm.archive.overlay_builder import _load_overlay_cache
+        self._cached_overlay = _load_overlay_cache(self._game_dir)
         self._overlay_dir_name: str | None = None
 
         # Also ensure PAMTs are backed up for directories with entry deltas
@@ -399,7 +403,7 @@ class ApplyWorker(QObject):
 
             # ── Phase 1: Compose PAZ and other non-PAMT files ──────────
             for file_path, deltas in file_deltas.items():
-                pct = int((file_idx / total_files) * 60)
+                pct = int((file_idx / total_files) * 55)
                 self.progress_updated.emit(pct, f"Processing {file_path}...")
                 file_idx += 1
 
@@ -448,6 +452,32 @@ class ApplyWorker(QObject):
                 txn.stage_file(file_path, result_bytes)
 
 
+            # ── Phase 1a: Mount-time patching for JSON mods ──────────
+            # JSON mods with json_source are patched fresh from vanilla
+            # at Apply time (no stored ENTR deltas needed).
+            json_mods = self._db.connection.execute(
+                "SELECT id, name, json_source, disabled_patches FROM mods "
+                "WHERE enabled = 1 AND json_source IS NOT NULL AND json_source != ''"
+            ).fetchall()
+            if json_mods:
+                from cdumm.engine.json_patch_handler import process_json_patches_for_overlay
+                import json as _json
+                for jm_idx, (mod_id, mod_name, json_source, disabled_raw) in enumerate(json_mods):
+                    pct = 55 + int((jm_idx / len(json_mods)) * 5)
+                    self.progress_updated.emit(
+                        pct, f"Patching {mod_name} from vanilla...")
+                    try:
+                        disabled = _json.loads(disabled_raw) if disabled_raw else None
+                    except (ValueError, TypeError):
+                        disabled = None
+                    entries = process_json_patches_for_overlay(
+                        mod_id, json_source, self._game_dir,
+                        disabled_indices=disabled)
+                    self._overlay_entries.extend(entries)
+                    if entries:
+                        logger.info("Mount-time: %s produced %d overlay entries",
+                                    mod_name, len(entries))
+
             # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
             if self._overlay_entries:
                 # Collect directories claimed by standalone mods so overlay
@@ -483,8 +513,18 @@ class ApplyWorker(QObject):
                                                 od, suffix)
 
                 from cdumm.archive.overlay_builder import build_overlay
+
+                _last_pct = [0]
+                def _overlay_progress(idx, total, entry_name=""):
+                    pct = 60 + int((idx / total) * 25)
+                    if pct != _last_pct[0]:
+                        _last_pct[0] = pct
+                        self.progress_updated.emit(pct, f"Building overlay ({idx}/{total} entries)...")
+
                 paz_bytes, pamt_bytes = build_overlay(self._overlay_entries,
-                                                       game_dir=self._game_dir)
+                                                       game_dir=self._game_dir,
+                                                       progress_cb=_overlay_progress,
+                                                       preloaded_cache=self._cached_overlay)
                 overlay_dir = self._allocate_overlay_dir(_staged_mod_dirs)
                 self._overlay_dir_name = overlay_dir
                 overlay_path = self._game_dir / overlay_dir
@@ -497,6 +537,16 @@ class ApplyWorker(QObject):
                 logger.info("Overlay PAZ: %s (%d entries, PAZ=%d bytes, PAMT=%d bytes)",
                             overlay_dir, len(self._overlay_entries),
                             len(paz_bytes), len(pamt_bytes))
+
+                # Save overlay cache for incremental rebuild on next Apply
+                if hasattr(build_overlay, '_last_cache') and build_overlay._last_cache:
+                    from cdumm.archive.overlay_builder import _save_overlay_cache
+                    _save_overlay_cache(self._game_dir, overlay_dir, build_overlay._last_cache)
+
+                # Register DDS entries in PATHC (meta/0.pathc) so the game
+                # can find textures via its texture path index.
+                # DMM does this for all DDS overlay entries.
+                self._update_pathc_for_overlay(txn)
 
             # ── Phase 2: Compose PAMT files (entry updates + byte deltas) ──
             # Collect all PAMTs that need processing
@@ -950,6 +1000,7 @@ class ApplyWorker(QObject):
                 elif d.get("delta_path"):
                     try:
                         content, metadata = load_entry_delta(Path(d["delta_path"]))
+                        metadata["delta_path"] = d["delta_path"]
                     except Exception as e:
                         logger.warning("Failed to load entry delta %s: %s",
                                        d["delta_path"], e)
@@ -1753,6 +1804,92 @@ class ApplyWorker(QObject):
                             modified_pamts[rel.split("/")[0]] = vanilla_bytes
                         logger.warning("Restored orphaned file to vanilla: %s "
                                        "(backup exists, no active mod)", rel)
+
+    def _update_pathc_for_overlay(self, txn) -> None:
+        """Register DDS overlay entries in meta/0.pathc.
+
+        The game uses PATHC as a texture path index to find DDS files.
+        Without registration, DDS textures in the overlay PAZ are invisible
+        to the game's texture loader.
+        """
+        # Collect DDS entries from the overlay
+        dds_entries = []
+        for content, metadata in self._overlay_entries:
+            entry_path = metadata.get("entry_path", "")
+            if entry_path.lower().endswith(".dds"):
+                dds_entries.append((content, metadata))
+
+        if not dds_entries:
+            return
+
+        try:
+            from cdumm.archive.pathc_handler import (
+                read_pathc, serialize_pathc, get_dds_metadata,
+                update_entry,
+            )
+        except ImportError:
+            logger.debug("PATHC handler not available, skipping DDS registration")
+            return
+
+        # Backup vanilla PATHC if not already backed up
+        pathc_path = self._game_dir / "meta" / "0.pathc"
+        if not pathc_path.exists():
+            logger.debug("No meta/0.pathc found, skipping DDS registration")
+            return
+
+        vanilla_pathc = self._vanilla_dir / "meta" / "0.pathc"
+        if not vanilla_pathc.exists():
+            vanilla_pathc.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(pathc_path, vanilla_pathc)
+            logger.info("Backed up vanilla PATHC: %s", vanilla_pathc)
+
+        try:
+            # Read from vanilla backup (clean state)
+            pathc = read_pathc(vanilla_pathc)
+
+            for content, metadata in dds_entries:
+                entry_path = metadata.get("entry_path", "")
+                pamt_dir = metadata.get("pamt_dir", "")
+
+                # Build virtual path: /{dir_path}/{filename}
+                # where dir_path comes from the PAMT folder prefix
+                if "/" in entry_path:
+                    vpath = "/" + entry_path
+                else:
+                    vpath = "/" + entry_path
+
+                # Create DDS record from content bytes
+                record_size = pathc.header.dds_record_size
+                dds_rec = bytearray(record_size)
+                to_copy = min(len(content), record_size)
+                dds_rec[:to_copy] = content[:to_copy]
+                dds_rec = bytes(dds_rec)
+
+                # Deduplicate against existing records
+                try:
+                    dds_idx = pathc.dds_records.index(dds_rec)
+                except ValueError:
+                    pathc.dds_records.append(dds_rec)
+                    dds_idx = len(pathc.dds_records) - 1
+
+                # Compute mip metadata
+                m = get_dds_metadata(content)
+
+                # Update hash table entry
+                update_entry(pathc, vpath, dds_idx, m)
+
+            # Update header counts
+            pathc.header.dds_record_count = len(pathc.dds_records)
+            pathc.header.hash_count = len(pathc.key_hashes)
+
+            # Serialize and stage
+            pathc_bytes = serialize_pathc(pathc)
+            txn.stage_file("meta/0.pathc", pathc_bytes)
+            logger.info("Updated PATHC: registered %d DDS overlay entries", len(dds_entries))
+
+        except Exception as e:
+            logger.error("Failed to update PATHC for DDS overlay: %s", e, exc_info=True)
 
     def _allocate_overlay_dir(self, staged_dirs: set[str] | None = None) -> str:
         """Find the next available 4-digit directory >= 0037 for the overlay PAZ.

@@ -19,8 +19,6 @@ import os
 import struct
 import sys
 
-import lz4.block
-
 from cdumm.archive.paz_parse import PazEntry
 from cdumm.archive.paz_crypto import encrypt, lz4_compress
 
@@ -181,7 +179,7 @@ def _match_compressed_size(plaintext: bytes, target_comp_size: int,
     """
     padded = _pad_to_orig_size(plaintext, target_orig_size)
 
-    comp = lz4.block.compress(padded, store_size=False)
+    comp = lz4_compress(padded)
     if len(comp) == target_comp_size:
         return padded
 
@@ -197,7 +195,7 @@ def _match_compressed_size(plaintext: bytes, target_comp_size: int,
             fill = (filler * (mid // len(filler) + 1))[:mid]
             trial = plaintext + fill
             trial = _pad_to_orig_size(trial, target_orig_size)
-            c = lz4.block.compress(trial, store_size=False)
+            c = lz4_compress(trial)
             if len(c) == target_comp_size:
                 return trial
             elif len(c) < target_comp_size:
@@ -210,7 +208,7 @@ def _match_compressed_size(plaintext: bytes, target_comp_size: int,
             fill = (filler * (n // len(filler) + 1))[:n] if n > 0 else b''
             trial = plaintext + fill
             trial = _pad_to_orig_size(trial, target_orig_size)
-            c = lz4.block.compress(trial, store_size=False)
+            c = lz4_compress(trial)
             if len(c) == target_comp_size:
                 return trial
 
@@ -221,7 +219,7 @@ def _match_compressed_size(plaintext: bytes, target_comp_size: int,
 
     raise ValueError(
         f"Cannot match target comp_size {target_comp_size} "
-        f"(best: {len(lz4.block.compress(padded, store_size=False))})")
+        f"(best: {len(lz4_compress(padded))})")
 
 
 def _strip_whitespace_to_fit(plaintext: bytes, target_comp: int, target_orig: int) -> bytes | None:
@@ -239,7 +237,7 @@ def _strip_whitespace_to_fit(plaintext: bytes, target_comp: int, target_orig: in
     stripped = '\r\n'.join(line.rstrip() for line in text.splitlines())
     candidate = stripped.encode('utf-8')
     padded = _pad_to_orig_size(candidate, target_orig)
-    comp = lz4.block.compress(padded, store_size=False)
+    comp = lz4_compress(padded)
     if len(comp) <= target_comp:
         return padded
 
@@ -249,7 +247,7 @@ def _strip_whitespace_to_fit(plaintext: bytes, target_comp: int, target_orig: in
     stripped = re.sub(r'\n{3,}', '\n\n', stripped)
     candidate = stripped.encode('utf-8')
     padded = _pad_to_orig_size(candidate, target_orig)
-    comp = lz4.block.compress(padded, store_size=False)
+    comp = lz4_compress(padded)
     if len(comp) <= target_comp:
         return padded
 
@@ -279,7 +277,7 @@ def repack_entry(modified_path: str, entry: PazEntry,
 
     if is_compressed:
         adjusted = _match_compressed_size(plaintext, entry.comp_size, entry.orig_size)
-        compressed = lz4.block.compress(adjusted, store_size=False)
+        compressed = lz4_compress(adjusted)
         assert len(compressed) == entry.comp_size, \
             f"Size mismatch: {len(compressed)} != {entry.comp_size}"
         payload = compressed
@@ -375,7 +373,7 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                     actual_orig_size = DDS_HEADER_SIZE + len(body)
                 else:
                     padded_body = _pad_to_orig_size(body, body_orig)
-                compressed_body = lz4.block.compress(padded_body, store_size=False)
+                compressed_body = lz4_compress(padded_body)
 
                 if header[:4] == b"DDS ":
                     header = fix_dds_header(header, len(compressed_body))
@@ -389,19 +387,24 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                 actual_comp_size = full_size
                 actual_orig_size = full_size
             else:
+                # DDS split without size change: recompress to exact original comp_size
+                header = bytearray(plaintext[:DDS_HEADER_SIZE])
+                body = plaintext[DDS_HEADER_SIZE:]
+                body_orig = entry.orig_size - DDS_HEADER_SIZE
+                body_comp_budget = entry.comp_size - DDS_HEADER_SIZE
                 adjusted_body = _match_compressed_size(
                     body, body_comp_budget, body_orig)
-                compressed_body = lz4.block.compress(adjusted_body, store_size=False)
+                compressed_body = lz4_compress(adjusted_body)
                 if len(compressed_body) != body_comp_budget:
                     raise ValueError(
                         f"DDS body size mismatch: {len(compressed_body)} != {body_comp_budget}")
-                payload = header + compressed_body
+                payload = bytes(header) + compressed_body
         elif allow_size_change:
             # Type 0x02: fully LZ4 compressed
             # Always use the actual content size — padding with nulls causes
             # crashes for XML/CSS files whose parsers choke on null bytes.
             actual_orig_size = len(plaintext)
-            compressed = lz4.block.compress(plaintext, store_size=False)
+            compressed = lz4_compress(plaintext)
             actual_comp_size = len(compressed)
             if actual_comp_size > entry.comp_size:
                 payload = compressed
@@ -418,7 +421,7 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
                 payload = compressed
         else:
             adjusted = _match_compressed_size(plaintext, entry.comp_size, entry.orig_size)
-            compressed = lz4.block.compress(adjusted, store_size=False)
+            compressed = lz4_compress(adjusted)
             if len(compressed) != entry.comp_size:
                 raise ValueError(
                     f"Size mismatch after compression: {len(compressed)} != {entry.comp_size}")

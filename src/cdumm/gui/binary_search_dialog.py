@@ -1,13 +1,21 @@
-"""Binary search wizard dialog for finding problem mods."""
+"""Binary search wizard dialog for finding problem mods.
+
+Supports two modes:
+  Manual: User launches game and reports crash/ok each round.
+  Auto: CDUMM launches game through Steam, monitors for crash, and
+        feeds results to the ddmin algorithm automatically.
+"""
 
 import logging
-import subprocess
+import math
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Slot
+from PySide6.QtCore import Qt, QObject, QThread, QRunnable, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QStackedWidget, QTextBrowser, QWidget, QMessageBox,
+    QProgressBar,
 )
 
 from cdumm.engine.apply_engine import ApplyWorker
@@ -28,18 +36,45 @@ class BinarySearchDialog(QDialog):
 
         self._mm = mod_manager
         self._game_dir = game_dir
+        self._auto_running = False
         self._vanilla_dir = vanilla_dir
         self._db = db
-        self._session = DeltaDebugSession(mod_manager)
+
+        # Scan ASI plugins and inject them as fake mods with negative IDs
+        self._asi_mods: dict[int, dict] = {}  # fake_id -> {name, plugin}
+        try:
+            from cdumm.asi.asi_manager import AsiManager
+            bin64 = game_dir / "bin64"
+            if bin64.exists():
+                asi_mgr = AsiManager(bin64)
+                plugins = asi_mgr.scan()
+                for i, p in enumerate(plugins):
+                    if p.enabled:
+                        fake_id = -(i + 1)  # negative IDs for ASI mods
+                        self._asi_mods[fake_id] = {
+                            "id": fake_id,
+                            "name": f"[ASI] {p.name}",
+                            "enabled": True,
+                            "mod_type": "asi",
+                            "_plugin": p,
+                        }
+        except Exception as e:
+            logger.debug("ASI scan for bisect failed: %s", e)
+
+        self._session = DeltaDebugSession(mod_manager, extra_mods=list(self._asi_mods.values()))
 
         self._pages = QStackedWidget()
         layout = QVBoxLayout(self)
         layout.addWidget(self._pages)
 
         self._build_intro_page()
-        self._build_test_page()
-        self._build_result_page()
         self._pages.setCurrentIndex(0)
+
+    def closeEvent(self, event):
+        if self._auto_running:
+            event.ignore()  # can't close during auto bisect — use Stop button
+            return
+        super().closeEvent(event)
 
     def _has_saved_progress(self) -> bool:
         """Check if there's a saved ddmin session that matches current mods."""
@@ -120,15 +155,15 @@ class BinarySearchDialog(QDialog):
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #D4A43C;")
         page.addWidget(title)
 
-        import math
         n = len(self._session.enabled_mods)
-        best = max(1, 2 * math.ceil(math.log2(n))) if n > 1 else 1
+        best = max(1, 2 * math.ceil(math.log2(max(n, 2)))) if n > 1 else 1
         page.addWidget(QLabel(
-            f"This will test your {n} enabled mods using the Delta Debugging\n"
-            f"algorithm to find the minimal set causing the crash.\n\n"
-            f"It finds single bad mods, conflict pairs, and multi-mod issues.\n\n"
-            f"Estimated: {best}-{best * 3} rounds (each round you launch the\n"
-            f"game and report if it crashed).\n\n"
+            f"CDUMM will automatically test your {n} enabled mods to find\n"
+            f"which one(s) are causing crashes.\n\n"
+            f"It launches the game through Steam, monitors for crashes,\n"
+            f"and repeats until all problem mods are identified.\n\n"
+            f"Estimated: {best}-{best * 3} rounds per problem mod (~90s each).\n\n"
+            f"Do not interact with the game during testing.\n"
             f"Your mod configuration will be restored when finished."
         ))
 
@@ -138,32 +173,21 @@ class BinarySearchDialog(QDialog):
         mod_list.setMaximumHeight(150)
         page.addWidget(mod_list)
 
-        has_saved = self._has_saved_progress()
-
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        if has_saved:
-            fresh_btn = QPushButton("Start Fresh")
-            fresh_btn.clicked.connect(self._start_fresh)
-            btn_row.addWidget(fresh_btn)
-
-            resume_btn = QPushButton("Resume")
-            resume_btn.setStyleSheet("font-weight: bold; padding: 6px 20px; background: #D4A43C;")
-            resume_btn.clicked.connect(self._resume_search)
-            btn_row.addWidget(resume_btn)
-        else:
-            start_btn = QPushButton("Start")
-            start_btn.setStyleSheet("font-weight: bold; padding: 6px 20px;")
-            start_btn.clicked.connect(self._start_search)
-            btn_row.addWidget(start_btn)
+        auto_btn = QPushButton("Find Problem Mods")
+        auto_btn.setStyleSheet("font-weight: bold; padding: 6px 20px; background: #D4A43C;")
+        auto_btn.setToolTip("CDUMM launches the game, detects crashes, and finds all problem mods automatically")
+        auto_btn.clicked.connect(self._start_auto_bisect)
+        btn_row.addWidget(auto_btn)
 
         page.addLayout(btn_row)
 
-        if has_saved:
+        if self._has_saved_progress():
             import json
             row = self._db.connection.execute(
                 "SELECT data FROM ddmin_progress WHERE id = 1").fetchone()
@@ -177,258 +201,440 @@ class BinarySearchDialog(QDialog):
 
         self._pages.addWidget(w)
 
-    def _build_test_page(self):
-        page = QVBoxLayout()
-        w = QWidget()
-        page.setContentsMargins(16, 16, 16, 16)
-        page.setSpacing(10)
-        w.setLayout(page)
+    # ── Auto Bisect Mode ──────────────────────────────────────────
 
-        self._phase_label = QLabel("Round 1")
-        self._phase_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #D4A43C;")
-        page.addWidget(self._phase_label)
+    def _start_auto_bisect(self):
+        """Launch fully automated bisection."""
+        from cdumm.engine.game_monitor import find_game_process
+        if find_game_process():
+            QMessageBox.warning(self, "Game Running",
+                                "Close Crimson Desert before starting auto bisection.")
+            return
 
-        self._status_label = QLabel("")
-        self._status_label.setWordWrap(True)
-        self._status_label.setStyleSheet("color: #D8DEE9; font-size: 12px;")
-        page.addWidget(self._status_label)
+        n = len(self._session.enabled_mods)
+        if n < 2:
+            QMessageBox.information(self, "Not Enough Mods",
+                                   "Need at least 2 enabled mods to bisect.")
+            return
 
-        self._test_list = QListWidget()
-        self._test_list.setMaximumHeight(150)
-        page.addWidget(self._test_list)
+        # Build auto page if not already built
+        if not hasattr(self, "_auto_page"):
+            self._build_auto_page()
 
-        self._info_label = QLabel("")
-        self._info_label.setStyleSheet("color: #788090; font-size: 11px;")
-        page.addWidget(self._info_label)
+        self._clear_progress()
+        self._session = DeltaDebugSession(self._mm, extra_mods=list(self._asi_mods.values()))
+        self._auto_log_browser.setHtml("")
+        self._auto_stop_btn.setEnabled(True)
 
-        launch_btn = QPushButton("Launch Game")
-        launch_btn.setStyleSheet("background: #48A858; color: white; font-weight: bold; padding: 8px;")
-        launch_btn.clicked.connect(self._launch_game)
-        page.addWidget(launch_btn)
+        estimated = max(1, 2 * math.ceil(math.log2(n)))
+        self._auto_progress.setRange(0, estimated * 3)
+        self._auto_progress.setValue(0)
+        self._auto_status.setText(f"Starting auto bisection ({n} mods, ~{estimated} rounds)...")
+        self._pages.setCurrentWidget(self._auto_page)
 
-        page.addWidget(QLabel("Did the game crash?"))
+        self._auto_running = True
 
-        btn_row = QHBoxLayout()
-        crash_btn = QPushButton("Yes — Crashed")
-        crash_btn.setStyleSheet(
-            "background: #D04848; color: white; font-weight: bold; padding: 10px; font-size: 13px;")
-        crash_btn.clicked.connect(lambda: self._report(True))
-        btn_row.addWidget(crash_btn)
+        # Launch worker on thread pool
+        worker = _AutoBisectWorker(
+            self._session, self._mm, self._game_dir,
+            self._vanilla_dir, self._db,
+            asi_mods=self._asi_mods)
+        worker.signals.log.connect(self._on_auto_log)
+        worker.signals.progress.connect(self._on_auto_progress)
+        worker.signals.finished.connect(self._on_auto_finished)
+        worker.signals.error.connect(self._on_auto_error)
+        self._auto_worker = worker
+        QThreadPool.globalInstance().start(worker)
 
-        ok_btn = QPushButton("No — Worked Fine")
-        ok_btn.setStyleSheet(
-            "background: #48A858; color: white; font-weight: bold; padding: 10px; font-size: 13px;")
-        ok_btn.clicked.connect(lambda: self._report(False))
-        btn_row.addWidget(ok_btn)
-        page.addLayout(btn_row)
+    def _build_auto_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
 
-        cancel_btn = QPushButton("Cancel Search")
-        cancel_btn.setStyleSheet("color: #788090;")
-        cancel_btn.clicked.connect(self._cancel)
-        page.addWidget(cancel_btn)
+        title = QLabel("Auto Find Problem Mod")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #D4A43C;")
+        layout.addWidget(title)
 
-        self._pages.addWidget(w)
+        self._auto_status = QLabel("Initializing...")
+        self._auto_status.setWordWrap(True)
+        layout.addWidget(self._auto_status)
 
-    def _build_result_page(self):
-        page = QVBoxLayout()
-        w = QWidget()
-        page.setContentsMargins(16, 16, 16, 16)
-        page.setSpacing(10)
-        w.setLayout(page)
+        self._auto_progress = QProgressBar()
+        layout.addWidget(self._auto_progress)
 
-        self._result_title = QLabel("")
-        self._result_title.setStyleSheet("font-size: 15px; font-weight: bold;")
-        self._result_title.setWordWrap(True)
-        page.addWidget(self._result_title)
+        hint = QLabel("Do not interact with the game — CDUMM will launch and close it automatically.")
+        hint.setStyleSheet("color: #FF9800; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
-        self._result_detail = QLabel("")
-        self._result_detail.setWordWrap(True)
-        self._result_detail.setStyleSheet("color: #D8DEE9; font-size: 12px;")
-        page.addWidget(self._result_detail)
-
-        self._history_browser = QTextBrowser()
-        self._history_browser.setMaximumHeight(200)
-        self._history_browser.setStyleSheet(
-            "QTextBrowser { background: #1A1D23; border: 1px solid #2E3440; "
-            "border-radius: 6px; padding: 6px; color: #D8DEE9; font-size: 11px; }")
-        page.addWidget(self._history_browser)
+        self._auto_log_browser = QTextBrowser()
+        self._auto_log_browser.setStyleSheet(
+            "QTextBrowser { background: #111111; border: 1px solid #2E3440; "
+            "border-radius: 6px; padding: 6px; font-size: 11px; }")
+        layout.addWidget(self._auto_log_browser)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self._disable_btn = QPushButton("Disable Problem Mod(s)")
-        self._disable_btn.setStyleSheet("background: #D04848; color: white; font-weight: bold;")
-        self._disable_btn.clicked.connect(self._disable_culprits)
-        btn_row.addWidget(self._disable_btn)
+        self._auto_stop_btn = QPushButton("Stop")
+        self._auto_stop_btn.setStyleSheet("padding: 6px 20px; background: #BF616A;")
+        self._auto_stop_btn.clicked.connect(self._stop_auto_bisect)
+        btn_row.addWidget(self._auto_stop_btn)
+        layout.addLayout(btn_row)
+
+        self._auto_page = page
+        self._pages.addWidget(page)
+
+    @Slot(str)
+    def _on_auto_log(self, msg):
+        self._auto_log_browser.append(msg)
+
+    @Slot(int, int)
+    def _on_auto_progress(self, current, total):
+        self._auto_progress.setRange(0, max(total, 1))
+        self._auto_progress.setValue(current)
+        self._auto_status.setText(f"Round {current} of ~{total}")
+
+    @Slot(dict)
+    def _on_auto_finished(self, result):
+        self._auto_running = False
+        self._auto_stop_btn.setEnabled(False)
+        self._clear_progress()
+
+        minimal = result.get("minimal_set", [])
+        if not minimal:
+            self._auto_status.setText("No problem mods found — all mods appear compatible.")
+            self._auto_log_browser.append("\n✓ All mods passed. No crash detected.")
+        elif len(minimal) == 1:
+            name = minimal[0]["name"]
+            self._auto_status.setText(f"Found it: {name}")
+            self._auto_log_browser.append(f"\n★ CULPRIT: {name}")
+            self._auto_log_browser.append(
+                f"Found in {result['rounds']} rounds. "
+                f"Culprit disabled. Other mods restored.")
+        else:
+            names = ", ".join(m["name"] for m in minimal)
+            self._auto_status.setText(f"Found {len(minimal)} problem mods: {names}")
+            self._auto_log_browser.append(f"\n★ PROBLEM MODS: {names}")
+            self._auto_log_browser.append(
+                f"All {len(minimal)} culprits disabled. Other mods restored.")
+
+        # Show action buttons — clean up any previous dynamic buttons first
+        self._auto_stop_btn.hide()
+        for old_btn in getattr(self, "_dynamic_buttons", []):
+            old_btn.deleteLater()
+        self._dynamic_buttons = []
+
+        btn_row = self._auto_stop_btn.parent().layout() if self._auto_stop_btn.parent() else None
+
+        copy_btn = QPushButton("Copy Report")
+        copy_btn.setStyleSheet("padding: 6px 20px;")
+        copy_btn.clicked.connect(self._copy_crash_report)
+        if btn_row:
+            btn_row.addWidget(copy_btn)
+        self._dynamic_buttons.append(copy_btn)
 
         close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self._restore_and_close)
-        btn_row.addWidget(close_btn)
-        page.addLayout(btn_row)
+        close_btn.setStyleSheet("padding: 6px 20px; background: #D4A43C;")
+        close_btn.clicked.connect(self.accept)
+        if btn_row:
+            btn_row.addWidget(close_btn)
+        self._dynamic_buttons.append(close_btn)
 
-        self._pages.addWidget(w)
+    def _copy_crash_report(self):
+        """Copy the crash registry report to clipboard."""
+        from PySide6.QtWidgets import QApplication
+        report = self._mm.get_crash_report()
+        QApplication.clipboard().setText(report)
+        self._auto_status.setText("Report copied to clipboard!")
 
-    def _log(self, msg, detail=None):
-        parent = self.parent()
-        if parent and hasattr(parent, '_log_activity'):
-            parent._log_activity("verify", msg, detail)
+    @Slot(str)
+    def _on_auto_error(self, msg):
+        self._auto_running = False
+        self._auto_stop_btn.setEnabled(False)
+        self._auto_status.setText(f"Error: {msg}")
+        self._auto_log_browser.append(f"\n✗ ERROR: {msg}")
 
-    # --- Flow ---
+    def _stop_auto_bisect(self):
+        if hasattr(self, "_auto_worker"):
+            self._auto_worker.cancel()
+            self._auto_status.setText("Stopping... killing game and restoring mods...")
+            self._auto_stop_btn.setText("Stopping...")
+            self._auto_stop_btn.setEnabled(False)
+            # Kill game immediately so the worker unblocks from wait_for_exit
+            import threading
+            def _kill_game():
+                try:
+                    from cdumm.engine.game_monitor import find_game_process, kill_process
+                    pid = find_game_process()
+                    if pid:
+                        kill_process(pid)
+                except Exception:
+                    pass
+            threading.Thread(target=_kill_game, daemon=True).start()
 
-    def _start_search(self):
-        self._clear_progress()
-        self._log(f"Delta debug started with {len(self._session.enabled_mods)} mods")
-        self._run_next_round()
 
-    def _start_fresh(self):
-        self._clear_progress()
-        self._session = DeltaDebugSession(self._mm)
-        self._log(f"Delta debug restarted fresh with {len(self._session.enabled_mods)} mods")
-        self._run_next_round()
+class _AutoBisectSignals(QObject):
+    """Thread-safe signals for the auto bisect worker."""
+    log = Signal(str)
+    progress = Signal(int, int)
+    finished = Signal(dict)
+    error = Signal(str)
 
-    def _resume_search(self):
-        self._load_progress()
-        self._log(f"Delta debug resumed at round {self._session.round_number}")
-        self._run_next_round()
 
-    def _run_next_round(self):
-        if self._session.is_done():
-            self._show_results()
-            return
+class _AutoBisectWorker(QRunnable):
+    """Runs the full automated bisection loop on a background thread."""
 
-        changes = self._session.start_round()
-        for mod_id, enabled in changes.items():
-            self._mm.set_enabled(mod_id, enabled)
+    def __init__(self, session: DeltaDebugSession, mm: ModManager,
+                 game_dir: Path, vanilla_dir: Path, db: Database,
+                 asi_mods: dict[int, dict] | None = None):
+        super().__init__()
+        self.signals = _AutoBisectSignals()
+        self._session = session
+        self._mm = mm
+        self._game_dir = game_dir
+        self._vanilla_dir = vanilla_dir
+        self._db = db
+        self._cancelled = False
+        self._asi_mods = asi_mods or {}  # fake_id -> {name, _plugin}
+        self._asi_manager = None
+        if self._asi_mods:
+            try:
+                from cdumm.asi.asi_manager import AsiManager
+                self._asi_manager = AsiManager(game_dir / "bin64")
+            except Exception:
+                pass
 
-        # Update UI
-        self._phase_label.setText(self._session.get_phase_description())
-        self._status_label.setText("These mods are enabled for this test:")
+    def cancel(self):
+        self._cancelled = True
 
-        self._test_list.clear()
-        for mid in self._session.current_group:
-            self._test_list.addItem(self._session.get_mod_name(mid))
-
-        self._info_label.setText(
-            f"Round {self._session.round_number} | "
-            f"Testing {len(self._session.current_group)} of "
-            f"{len(self._session._changes)} remaining mods")
-
-        # Apply
-        self._apply_and_show_test()
-
-    def _apply_and_show_test(self):
-        from cdumm.gui.progress_dialog import ProgressDialog
-        main_win = self.parent()
-        if not main_win._check_game_running():
-            return
-        self.hide()
-        progress = ProgressDialog(
-            f"Round {self._session.round_number} — {self._session.get_phase_description()}",
-            main_win)
-        worker = ApplyWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
-        thread = QThread()
-        main_win._run_worker(worker, thread, progress,
-                             on_finished=self._on_apply_complete)
-
-    def _on_apply_complete(self):
-        self.show()
-        self.raise_()
-        self._pages.setCurrentIndex(1)
-
-    def _launch_game(self):
-        exe = self._game_dir / "bin64" / "CrimsonDesert.exe"
-        if exe.exists():
-            subprocess.Popen([str(exe)], cwd=str(exe.parent))
-
-    def _report(self, crashed: bool):
-        names = ", ".join(self._session.get_mod_name(m) for m in self._session.current_group)
-        self._log(
-            f"Round {self._session.round_number} [{self._session.phase}]: "
-            f"{'CRASHED' if crashed else 'OK'} — {names}")
-
-        next_desc = self._session.report_crash(crashed)
-        logger.info("Next: %s", next_desc)
-
-        self._save_progress()
-
-        if self._session.is_done():
-            self._clear_progress()
-            self._show_results()
+    def _set_mod_enabled(self, mod_id: int, enabled: bool, thread_mm: ModManager) -> None:
+        """Toggle a mod — handles both PAZ mods (DB) and ASI mods (file rename)."""
+        if mod_id < 0 and mod_id in self._asi_mods and self._asi_manager:
+            plugin = self._asi_mods[mod_id].get("_plugin")
+            if plugin:
+                try:
+                    # Re-scan to get current file state (path may have changed)
+                    for p in self._asi_manager.scan():
+                        if p.name == plugin.name:
+                            plugin = p
+                            break
+                    if enabled:
+                        self._asi_manager.enable(plugin)
+                    else:
+                        self._asi_manager.disable(plugin)
+                except OSError as e:
+                    self.signals.log.emit(f"  Warning: failed to toggle ASI {plugin.name}: {e}")
         else:
-            self._run_next_round()
+            thread_mm.set_enabled(mod_id, enabled)
 
-    def _show_results(self):
-        result = self._session.get_result()
-        minimal = result["minimal_set"]
+    @Slot()
+    def run(self):
+        from cdumm.engine.game_monitor import launch_and_test
 
-        if not minimal:
-            self._result_title.setText("No Problems Found")
-            self._result_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #A3BE8C;")
-            self._result_detail.setText("All enabled mods appear to work together.")
-            self._disable_btn.setVisible(False)
-        elif result["is_single"]:
-            name = minimal[0]["name"]
-            self._result_title.setText(f"Problem Mod: {name}")
-            self._result_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #BF616A;")
-            self._result_detail.setText(
-                f"This mod causes the crash by itself.\n"
-                f"Found in {result['rounds']} rounds.")
-        else:
-            names = "\n  ".join(m["name"] for m in minimal)
-            self._result_title.setText(f"Minimal Crash Set ({len(minimal)} mods)")
-            self._result_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #BF616A;")
-            self._result_detail.setText(
-                f"These mods crash when used together:\n  {names}\n\n"
-                f"Each works alone, but the combination crashes.\n"
-                f"Found in {result['rounds']} rounds.")
+        # Open own DB connection — SQLite objects can't cross threads
+        db_path = self._game_dir / "CDMods" / "cdumm.db"
+        thread_db = Database(db_path)
+        thread_db.initialize()
+        thread_mm = ModManager(thread_db, self._game_dir / "CDMods" / "deltas")
 
-        # History
-        html = []
-        for h in result["history"]:
-            color = "#BF616A" if h["crashed"] else "#A3BE8C"
-            status = "CRASHED" if h["crashed"] else "OK"
-            mods = ", ".join(h["tested"][:4])
-            if len(h["tested"]) > 4:
-                mods += f" +{len(h['tested'])-4} more"
-            html.append(f'<span style="color:{color};">Round {h["round"]}: {status}</span>'
-                        f' ({h["count"]} mods) — {mods}')
-        self._history_browser.setHtml("<br>".join(html))
+        all_culprits = []  # accumulate (mod_id, mod_name) tuples
+        original_state = dict(self._session.original_state)
+        total_rounds = 0
 
-        names = ", ".join(m["name"] for m in minimal) if minimal else "none"
-        self._log(f"Delta debug complete: minimal set = [{names}] in {result['rounds']} rounds")
+        try:
+            # Outer loop: find culprit → disable → re-test → repeat until stable
+            while not self._cancelled:
+                enabled_mods = [m for m in thread_mm.list_mods() if m["enabled"]]
+                n = len(enabled_mods)
 
-        self._pages.setCurrentIndex(2)
+                if n < 2:
+                    self.signals.log.emit("Less than 2 mods remaining — done.")
+                    break
 
-    def _disable_culprits(self):
-        result = self._session.get_result()
-        to_disable = {m["id"] for m in result["minimal_set"]}
+                estimated = max(1, 2 * math.ceil(math.log2(n)))
+                self.signals.log.emit(
+                    f"\n{'═' * 40}")
+                if all_culprits:
+                    self.signals.log.emit(
+                        f"Re-testing {n} remaining mods (already found: "
+                        f"{', '.join(name for _, name in all_culprits)})...")
+                else:
+                    self.signals.log.emit(
+                        f"Testing {n} enabled mods...")
+                self.signals.log.emit(f"{'═' * 40}")
 
-        for mod_id, was_enabled in self._session.original_state.items():
-            if mod_id in to_disable:
-                self._mm.set_enabled(mod_id, False)
+                # First: verify crash still happens with current mod set
+                self.signals.log.emit("\nVerifying crash reproduces...")
+                # Enable all remaining, apply, test
+                for m in enabled_mods:
+                    self._set_mod_enabled(m["id"], True, thread_mm)
+                verify_errors = []
+                worker = ApplyWorker(self._game_dir, self._vanilla_dir,
+                                     db_path, force_outdated=True)
+                worker.error_occurred.connect(lambda e: verify_errors.append(e))
+                worker.run()
+
+                if verify_errors:
+                    self.signals.log.emit(f"  ✗ Apply failed during verification: {verify_errors[0]}")
+                    self.signals.log.emit("  Continuing anyway — this may be a transient error.")
+                    # Don't break — try launching anyway, the game might still work
+
+                if self._cancelled:
+                    break
+
+                crashed = launch_and_test(
+                    self._game_dir, stable_seconds=90, launch_timeout=60,
+                    log_cb=lambda msg: self.signals.log.emit(f"  {msg}"),
+                    cancel_check=lambda: self._cancelled)
+
+                if self._cancelled:
+                    break
+
+                if not crashed:
+                    self.signals.log.emit("✓ Game is stable — no more crashes!")
+                    break
+
+                self.signals.log.emit("✗ Crash confirmed. Starting bisection...\n")
+
+                # Create fresh session for this round (include ASI mods)
+                session = DeltaDebugSession(thread_mm, extra_mods=list(self._asi_mods.values()))
+                round_num = 0
+
+                while not session.is_done() and not self._cancelled:
+                    round_num += 1
+                    total_rounds += 1
+                    config = session.start_round()
+                    test_count = len(session.current_group)
+
+                    self.signals.log.emit(f"\n─── Round {round_num} ───")
+                    self.signals.log.emit(
+                        f"Testing {test_count} of {len(session._changes)} suspects")
+                    self.signals.progress.emit(total_rounds, total_rounds + estimated)
+
+                    self.signals.log.emit("Applying mod configuration...")
+                    for mod_id, enabled in config.items():
+                        self._set_mod_enabled(mod_id, enabled, thread_mm)
+
+                    apply_errors = []
+                    worker = ApplyWorker(self._game_dir, self._vanilla_dir,
+                                         db_path, force_outdated=True)
+                    worker.error_occurred.connect(lambda e: apply_errors.append(e))
+                    worker.run()
+
+                    if apply_errors:
+                        self.signals.log.emit(f"  ✗ Apply failed: {apply_errors[0]}")
+                        self.signals.log.emit("  Treating as crash for this round.")
+                        session.report_crash(True)
+                        self._save_progress(thread_db, session)
+                        continue
+
+                    if self._cancelled:
+                        break
+
+                    self.signals.log.emit("Launching game through Steam...")
+                    crashed = launch_and_test(
+                        self._game_dir, stable_seconds=90, launch_timeout=60,
+                        log_cb=lambda msg: self.signals.log.emit(f"  {msg}"),
+                        cancel_check=lambda: self._cancelled)
+
+                    if self._cancelled:
+                        break
+
+                    result_str = "CRASHED" if crashed else "OK"
+                    self.signals.log.emit(f"Result: {result_str}")
+                    session.report_crash(crashed)
+                    self._save_progress(thread_db, session)
+
+                if self._cancelled:
+                    break
+
+                # Got a result from this bisection pass
+                result = session.get_result()
+                minimal = result.get("minimal_set", [])
+                if minimal:
+                    # Get context: what other mods were enabled during this test
+                    context_names = [em["name"] for em in enabled_mods
+                                     if em["name"] not in [m["name"] for m in minimal]]
+                    for m in minimal:
+                        name = m["name"]
+                        all_culprits.append((m["id"], name))
+                        self._set_mod_enabled(m["id"], False, thread_mm)
+                        # Flag in crash registry (PAZ mods only — ASI mods use negative IDs)
+                        if m["id"] > 0:
+                            try:
+                                thread_mm.flag_crash(
+                                    m["id"], crashes_alone=len(minimal) == 1,
+                                    context_mods=context_names[:10],
+                                    rounds=round_num)
+                            except Exception:
+                                pass
+                        self.signals.log.emit(f"\n★ CULPRIT FOUND: {name}")
+                        self.signals.log.emit(f"  Flagged in crash registry. Checking for more...")
+                else:
+                    self.signals.log.emit("No single culprit found in this pass.")
+                    break
+
+            # Restore original state (except culprits stay disabled)
+            self.signals.log.emit("\nRestoring mod state...")
+            culprit_ids = {cid for cid, _ in all_culprits}
+            for mod_id, enabled in original_state.items():
+                if mod_id in culprit_ids:
+                    self._set_mod_enabled(mod_id, False, thread_mm)  # keep culprits disabled
+                else:
+                    self._set_mod_enabled(mod_id, enabled, thread_mm)
+
+            worker = ApplyWorker(self._game_dir, self._vanilla_dir,
+                                 db_path, force_outdated=True)
+            worker.run()
+            thread_db.close()
+
+            if self._cancelled:
+                self.signals.log.emit("Bisection cancelled. Mods restored.")
+                self.signals.error.emit("Cancelled by user")
             else:
-                self._mm.set_enabled(mod_id, was_enabled)
+                # Build combined result
+                final_result = {
+                    "minimal_set": [{"id": cid, "name": n} for cid, n in all_culprits],
+                    "rounds": total_rounds,
+                    "is_single": len(all_culprits) == 1,
+                    "is_combination": False,
+                }
+                self.signals.log.emit(
+                    f"\nDone! Found {len(all_culprits)} problem mod(s) in {total_rounds} rounds.")
+                self.signals.finished.emit(final_result)
 
-        names = ", ".join(m["name"] for m in result["minimal_set"])
-        self._log(f"Disabled problem mod(s): {names}")
-        self.accept()
+        except Exception as e:
+            logger.error("Auto bisect failed: %s", e, exc_info=True)
+            try:
+                for mod_id, enabled in original_state.items():
+                    self._set_mod_enabled(mod_id, enabled, thread_mm)
+                thread_db.close()
+            except Exception:
+                pass
+            self.signals.error.emit(str(e))
 
-    def _restore_and_close(self):
-        for mod_id, enabled in self._session.get_restore_changes().items():
-            self._mm.set_enabled(mod_id, enabled)
-        self._log("Restored original mod state after binary search")
-        self.accept()
+    def _save_progress(self, db, session=None):
+        try:
+            import json
+            s = session or self._session
+            data = json.dumps({
+                "all_ids": s.all_ids,
+                "changes": s._changes,
+                "n": s._n,
+                "partition_index": s._partition_index,
+                "testing_complement": s._testing_complement,
+                "round_number": s.round_number,
+                "history": s.history,
+                "phase": s.phase,
+            })
+            db.connection.execute(
+                "CREATE TABLE IF NOT EXISTS ddmin_progress "
+                "(id INTEGER PRIMARY KEY, data TEXT)")
+            db.connection.execute(
+                "INSERT OR REPLACE INTO ddmin_progress (id, data) VALUES (1, ?)",
+                (data,))
+            db.connection.commit()
+        except Exception:
+            pass
 
-    def _cancel(self):
-        self._restore_and_close()
-
-    def closeEvent(self, event):
-        if not self._session.is_done() and self._session.round_number > 0:
-            reply = QMessageBox.question(
-                self, "Cancel Search?",
-                "Cancel the search and restore your original mod configuration?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-        self._restore_and_close()
-        super().closeEvent(event)

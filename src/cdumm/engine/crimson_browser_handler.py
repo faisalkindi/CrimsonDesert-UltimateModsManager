@@ -36,8 +36,13 @@ def detect_crimson_browser(path: Path) -> dict | None:
     Returns:
         Parsed manifest dict if CB format, None otherwise.
     """
-    # Check root and one level deep
-    for candidate in [path / "manifest.json", *path.glob("*/manifest.json")]:
+    # Check root and one level deep for manifest.json or modinfo.json
+    candidates = []
+    for name in ("manifest.json", "modinfo.json"):
+        candidates.append(path / name)
+        candidates.extend(path.glob(f"*/{name}"))
+
+    for candidate in candidates:
         if not candidate.exists():
             continue
         try:
@@ -50,6 +55,14 @@ def detect_crimson_browser(path: Path) -> dict | None:
                     manifest["_manifest_path"] = candidate
                     manifest["_base_dir"] = candidate.parent
                     return manifest
+                # Accept modinfo.json with a files/ directory (CrimsonSaveEditor format)
+                if candidate.name == "modinfo.json":
+                    files_dir = candidate.parent / "files"
+                    if files_dir.exists() and any(files_dir.rglob("*")):
+                        manifest.setdefault("files_dir", "files")
+                        manifest["_manifest_path"] = candidate
+                        manifest["_base_dir"] = candidate.parent
+                        return manifest
         except Exception:
             continue
     return None

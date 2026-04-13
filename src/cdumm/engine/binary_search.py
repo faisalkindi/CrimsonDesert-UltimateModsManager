@@ -17,10 +17,16 @@ logger = logging.getLogger(__name__)
 class DeltaDebugSession:
     """Manages the ddmin algorithm state."""
 
-    def __init__(self, mod_manager):
+    def __init__(self, mod_manager, extra_mods: list[dict] | None = None):
         self._mm = mod_manager
         self.original_state = {m["id"]: m["enabled"] for m in mod_manager.list_mods()}
         self.enabled_mods = [m for m in mod_manager.list_mods() if m["enabled"]]
+        # Include extra mods (e.g. ASI plugins with fake negative IDs)
+        if extra_mods:
+            for em in extra_mods:
+                self.original_state[em["id"]] = em["enabled"]
+                if em["enabled"]:
+                    self.enabled_mods.append(em)
         self.all_ids = [m["id"] for m in self.enabled_mods]
 
         # ddmin state

@@ -294,8 +294,8 @@ class ConflictDetector:
                 continue
 
             # Too many ranges for O(n²) — report PAZ-level and skip
-            MAX_RANGES_FOR_BYTECMP = 10_000
-            if len(a_ranges) * len(b_ranges) > MAX_RANGES_FOR_BYTECMP * MAX_RANGES_FOR_BYTECMP:
+            MAX_RANGE_PRODUCT = 100_000  # limit O(n*m) comparisons
+            if len(a_ranges) * len(b_ranges) > MAX_RANGE_PRODUCT:
                 conflicts.append(Conflict(
                     mod_a_id=mod_a_id, mod_a_name=mod_a_name,
                     mod_b_id=mod_b_id, mod_b_name=mod_b_name,

@@ -8,6 +8,23 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.5.0",
+        "date": "2026-04-13",
+        "notes": [
+            "Performance: Apply is dramatically faster — core operations now run through native compiled code.",
+            "JSON mod import is now instant (mount-time patching).",
+            "Mods now survive game updates without needing to reimport.",
+            "Per-patch toggle: right-click a JSON mod to enable/disable individual changes.",
+            "Find Problem Mod now includes ASI plugins alongside PAZ mods.",
+            "DDS texture mods now register in PATHC for correct in-game rendering.",
+            "Added support for modinfo.json + files/ mod format (CrimsonSaveEditor exports).",
+            "PABGH auto-included alongside PABGB entries in overlay.",
+            "Font, audio, and video mod support.",
+            "Fixed DDS repack errors, conflict detector threshold, transactional I/O edge case.",
+            "6 new translations: German (by HaZt), Spanish, French, Korean, Portuguese (BR), Chinese (TW).",
+        ],
+    },
+    {
         "version": "2.4.4",
         "date": "2026-04-13",
         "notes": [

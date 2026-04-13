@@ -489,7 +489,7 @@ def _check_version_mismatch(
 
         # Only flag if the PAZ is NOT part of the mod (unmodified PAZ should match)
         paz_rel = f"{dir_name}/{i}.paz"
-        if paz_rel not in {} and mod_sz != game_sz:  # mod_files not available here
+        if mod_sz != game_sz:
             mismatches.append((i, mod_sz, game_sz))
 
     if mismatches:

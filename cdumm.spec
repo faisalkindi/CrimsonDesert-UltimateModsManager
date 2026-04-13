@@ -5,10 +5,23 @@ import importlib.util
 _xxhash_spec = importlib.util.find_spec('xxhash._xxhash')
 _xxhash_binaries = [(_xxhash_spec.origin, 'xxhash')] if _xxhash_spec else []
 
+# cdumm_native Rust extension (.pyd)
+_native_spec = importlib.util.find_spec('cdumm_native')
+_native_binaries = []
+if _native_spec and _native_spec.submodule_search_locations and len(_native_spec.submodule_search_locations) > 0:
+    import os
+    _native_dir = _native_spec.submodule_search_locations[0]
+    for f in os.listdir(_native_dir):
+        if f.endswith('.pyd') or f.endswith('.so'):
+            _native_binaries.append((os.path.join(_native_dir, f), 'cdumm_native'))
+elif _native_spec and _native_spec.origin:
+    _native_binaries.append((_native_spec.origin, '.'))
+
+
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=_xxhash_binaries,
+    binaries=_xxhash_binaries + _native_binaries,
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
            ('src/cdumm/translations', 'cdumm/translations'),
            ('schemas/pabgb_complete_schema.json', 'schemas')],
@@ -24,6 +37,7 @@ a = Analysis(
         'cdumm.gui.workers',
         'cdumm.gui.bug_report',
         'xxhash', 'xxhash._xxhash',
+        'cdumm_native',
         'cdumm.engine.snapshot_manager',
         'cdumm.engine.delta_engine',
         'cdumm.engine.import_handler',
@@ -72,7 +86,9 @@ a = Analysis(
         'cdumm.gui.activity_panel',
         'cdumm.engine.activity_log',
         'cdumm.engine.binary_search',
+        'cdumm.engine.game_monitor',
         'cdumm.gui.binary_search_dialog',
+        'cdumm.gui.patch_toggle_dialog',
         'py7zr',
     ],
     hookspath=[],
