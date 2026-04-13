@@ -8,6 +8,15 @@ from PySide6.QtWidgets import (
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "2.4.4",
+        "date": "2026-04-13",
+        "notes": [
+            "Added format 2 JSON mod support: hex offsets and insert operations. Mods like Kliff Wears Damiane that use hex offsets (e.g. '12079F') and insert operations now import correctly.",
+            "Fixed hex offset parsing in all code paths (import, apply, collision detection).",
+            "Single instance: only one CDUMM GUI window can run at a time. Opening a second brings the existing window to front.",
+        ],
+    },
+    {
         "version": "2.4.3",
         "date": "2026-04-12",
         "notes": [
@@ -20,7 +29,7 @@ CHANGELOG = [
         "notes": [
             "Fixed import crash on JSON mods with string offsets (e.g. Taller Damiane). Mod authors writing \"offset\": \"107\" instead of \"offset\": 107 now works.",
             "Added crimson_sharp_mod_v1 manifest format support (e.g. Silver Fang Boss Size). Both files_dir and patches_dir are handled.",
-            "CLI interface for external tools: CDUMM.exe list-mods, set-enabled, and apply commands for headless mod management.",
+            "Database watcher: CDUMM UI auto-refreshes when mods are toggled by external tools.",
         ],
     },
     {

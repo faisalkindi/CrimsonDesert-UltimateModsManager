@@ -161,6 +161,182 @@ def cmd_apply(args):
         sys.exit(0)
 
 
+def cmd_bisect(args):
+    """Interactive bisection via CLI. Two sub-modes:
+        bisect start [--mod-ids 1,2,3]  → starts session, applies first config, prints JSON state
+        bisect report --crashed true/false → reports result, applies next config, prints JSON state
+    """
+    game_dir = _resolve_game_dir(args.game_dir)
+    if not game_dir:
+        print("Error: cannot find game directory.", file=sys.stderr)
+        sys.exit(1)
+
+    db = _open_db(game_dir)
+    from cdumm.engine.mod_manager import ModManager
+    from cdumm.engine.binary_search import DeltaDebugSession
+    from cdumm.engine.apply_engine import ApplyWorker
+
+    mgr = ModManager(db, game_dir / "CDMods" / "deltas")
+
+    if args.action == "start":
+        # Optionally filter to specific mod IDs
+        if args.mod_ids:
+            filter_ids = set(int(x) for x in args.mod_ids.split(","))
+            # Disable mods NOT in the filter list
+            for m in mgr.list_mods():
+                if m["enabled"] and m["id"] not in filter_ids:
+                    mgr.set_enabled(m["id"], False)
+
+        session = DeltaDebugSession(mgr)
+        config = session.start_round()
+
+        # Apply the config
+        for mod_id, enabled in config.items():
+            mgr.set_enabled(mod_id, enabled)
+
+        vanilla_dir = game_dir / "CDMods" / "vanilla"
+        db_path = game_dir / "CDMods" / "cdumm.db"
+        worker = ApplyWorker(game_dir, vanilla_dir, db_path, force_outdated=False)
+        worker.progress_updated.connect(lambda pct, msg: print(f"[{pct:3d}%] {msg}", file=sys.stderr))
+        worker.run()
+
+        # Save session state
+        _save_bisect_session(db, session)
+
+        # Output state as JSON
+        testing = [session.get_mod_name(m) for m in session.current_group]
+        print(json.dumps({
+            "phase": session.phase,
+            "round": session.round_number,
+            "testing": testing,
+            "testing_count": len(testing),
+            "total_suspects": len(session.all_ids),
+            "status": session.get_phase_description(),
+        }))
+
+    elif args.action == "report":
+        # Load saved session
+        session = _load_bisect_session(db, mgr)
+        if not session:
+            print("Error: no active bisection session. Run 'bisect start' first.", file=sys.stderr)
+            sys.exit(1)
+
+        crashed = args.crashed.lower() in ("true", "1", "yes")
+        status_msg = session.report_crash(crashed)
+        print(f"Result: {status_msg}", file=sys.stderr)
+
+        if session.is_done():
+            culprit_ids = set(session._changes)
+            culprits = [session.get_mod_name(m) for m in culprit_ids]
+            # Restore original state BUT keep culprits disabled
+            for mod_id, enabled in session.original_state.items():
+                if mod_id in culprit_ids:
+                    mgr.set_enabled(mod_id, False)
+                else:
+                    mgr.set_enabled(mod_id, enabled)
+            vanilla_dir = game_dir / "CDMods" / "vanilla"
+            db_path = game_dir / "CDMods" / "cdumm.db"
+            worker = ApplyWorker(game_dir, vanilla_dir, db_path, force_outdated=False)
+            worker.progress_updated.connect(lambda pct, msg: print(f"[{pct:3d}%] {msg}", file=sys.stderr))
+            worker.run()
+            _clear_bisect_session(db)
+            print(json.dumps({
+                "phase": "done",
+                "culprits": culprits,
+                "rounds": session.round_number,
+            }))
+        else:
+            # Apply next config
+            config = session.start_round()
+            for mod_id, enabled in config.items():
+                mgr.set_enabled(mod_id, enabled)
+            vanilla_dir = game_dir / "CDMods" / "vanilla"
+            db_path = game_dir / "CDMods" / "cdumm.db"
+            worker = ApplyWorker(game_dir, vanilla_dir, db_path, force_outdated=False)
+            worker.progress_updated.connect(lambda pct, msg: print(f"[{pct:3d}%] {msg}", file=sys.stderr))
+            worker.run()
+            _save_bisect_session(db, session)
+            testing = [session.get_mod_name(m) for m in session.current_group]
+            print(json.dumps({
+                "phase": session.phase,
+                "round": session.round_number,
+                "testing": testing,
+                "testing_count": len(testing),
+                "status": status_msg,
+            }))
+
+    db.close()
+
+
+def _save_bisect_session(db, session):
+    data = json.dumps({
+        "changes": session._changes,
+        "n": session._n,
+        "partition_index": session._partition_index,
+        "testing_complement": session._testing_complement,
+        "test_set": session._test_set,
+        "current_group": session.current_group,
+        "round_number": session.round_number,
+        "history": session.history,
+        "phase": session.phase,
+        "all_ids": session.all_ids,
+        "original_state": {int(k): v for k, v in session.original_state.items()},
+    })
+    db.connection.execute(
+        "INSERT OR REPLACE INTO ddmin_progress (id, data) VALUES (1, ?)", (data,))
+    db.connection.commit()
+
+
+def _load_bisect_session(db, mgr):
+    from cdumm.engine.binary_search import DeltaDebugSession
+    try:
+        row = db.connection.execute(
+            "SELECT data FROM ddmin_progress WHERE id = 1").fetchone()
+        if not row:
+            return None
+        saved = json.loads(row[0])
+        session = DeltaDebugSession(mgr)
+        session._changes = saved["changes"]
+        session._n = saved["n"]
+        session._partition_index = saved["partition_index"]
+        session._testing_complement = saved["testing_complement"]
+        session.round_number = saved["round_number"]
+        session.history = saved["history"]
+        session.phase = saved["phase"]
+        session.all_ids = saved["all_ids"]
+        # JSON dict keys are always strings — convert back to int
+        session.original_state = {int(k): v for k, v in saved["original_state"].items()}
+        # Restore _test_set and current_group (critical for report_crash)
+        if "test_set" in saved:
+            session._test_set = saved["test_set"]
+            session.current_group = saved.get("current_group", list(session._test_set))
+        else:
+            # Recompute from algorithm state (backward compat)
+            partitions = session._split(session._changes, session._n)
+            if session._partition_index < len(partitions):
+                if not session._testing_complement:
+                    session._test_set = partitions[session._partition_index]
+                else:
+                    session._test_set = [
+                        mid for mid in session._changes
+                        if mid not in partitions[session._partition_index]
+                    ]
+            else:
+                session._test_set = list(session._changes)
+            session.current_group = list(session._test_set)
+        return session
+    except Exception:
+        return None
+
+
+def _clear_bisect_session(db):
+    try:
+        db.connection.execute("DELETE FROM ddmin_progress WHERE id = 1")
+        db.connection.commit()
+    except Exception:
+        pass
+
+
 def main():
     _attach_console()
     _setup_logging()
@@ -188,6 +364,13 @@ def main():
     p_apply = sub.add_parser("apply", help="Apply current mod state to game files")
     p_apply.add_argument("--game-dir", default=None, help="Game directory override")
 
+    # bisect
+    p_bisect = sub.add_parser("bisect", help="Binary search for problem mod")
+    p_bisect.add_argument("action", choices=["start", "report"], help="start or report")
+    p_bisect.add_argument("--mod-ids", default=None, help="Comma-separated mod IDs to test (optional)")
+    p_bisect.add_argument("--crashed", default=None, help="true/false — did the game crash?")
+    p_bisect.add_argument("--game-dir", default=None, help="Game directory override")
+
     args = parser.parse_args()
 
     if args.command == "list-mods":
@@ -196,6 +379,8 @@ def main():
         cmd_set_enabled(args)
     elif args.command == "apply":
         cmd_apply(args)
+    elif args.command == "bisect":
+        cmd_bisect(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -27,7 +27,8 @@ def _change_range(change: dict) -> tuple[int, int]:
     Uses 'original' length to determine size; falls back to 'patched'.
     Raises KeyError if 'offset' is missing (matches apply path behavior).
     """
-    offset = int(change["offset"])
+    raw = change["offset"]
+    offset = int(raw, 0) if isinstance(raw, str) else int(raw)
     hex_src = change.get("original") or change.get("patched")
     if not hex_src:
         return offset, offset  # zero-width range, no collision possible

@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 import threading
@@ -16,12 +17,24 @@ def setup_logging(app_data: Path) -> None:
 
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    file_handler = RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=1, encoding="utf-8"
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(fmt)
-    root_logger.addHandler(file_handler)
+    try:
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 * 1024, backupCount=1,
+            encoding="utf-8", delay=True,
+        )
+        # Override rotation to handle locked files on Windows
+        _orig_rotate = file_handler.doRollover
+        def _safe_rollover():
+            try:
+                _orig_rotate()
+            except OSError:
+                pass  # file locked by another process — skip rotation
+        file_handler.doRollover = _safe_rollover
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(fmt)
+        root_logger.addHandler(file_handler)
+    except OSError:
+        pass  # log file locked by another CDUMM instance — skip file logging
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
@@ -61,6 +74,26 @@ def main() -> int:
 
     logger = logging.getLogger(__name__)
     logger.info("Starting Crimson Desert Ultimate Mods Manager")
+
+    # Single instance check — prevent two GUI windows
+    _lock_file = APP_DATA_DIR / ".gui_lock"
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        # Try to acquire exclusive lock on the file
+        import msvcrt
+        _lock_fh = open(_lock_file, "w")
+        msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        _lock_fh.write(str(os.getpid()))
+        _lock_fh.flush()
+    except (OSError, IOError):
+        # Another GUI instance holds the lock — bring it to front and exit
+        logger.info("Another CDUMM instance is already running, exiting")
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, "Crimson Desert Ultimate Mods Manager")
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        return 0
 
     # Initialize i18n (English default, reloads with user preference after DB is ready)
     from cdumm.i18n import load as load_i18n
@@ -248,7 +281,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     # CLI mode: if first arg is a known subcommand, skip GUI entirely
-    _cli_commands = {"list-mods", "set-enabled", "apply"}
+    _cli_commands = {"list-mods", "set-enabled", "apply", "bisect"}
     if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:
         from cdumm.cli import main as cli_main
         cli_main()
