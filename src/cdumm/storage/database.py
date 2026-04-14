@@ -213,6 +213,24 @@ class Database:
             """)
             logger.info("Created semantic_resolutions table")
 
+        # Add group_id column to mods for folder groups
+        if "group_id" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN group_id INTEGER"
+            )
+            logger.info("Migrated: added group_id column to mods")
+
+        # Create mod_groups table for user folder groups
+        if not self.table_exists("mod_groups"):
+            self._connection.execute("""
+                CREATE TABLE mod_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER DEFAULT 0
+                )
+            """)
+            logger.info("Created mod_groups table")
+
         # Add disabled_patches column to mods for per-patch toggle
         if "disabled_patches" not in columns:
             self._connection.execute(

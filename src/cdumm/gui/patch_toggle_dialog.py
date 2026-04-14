@@ -5,8 +5,18 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget, QApplication, QFrame,
+    QCheckBox, QHBoxLayout,
+    QScrollArea, QVBoxLayout, QWidget, QFrame,
+)
+
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    MessageBox,
+    MessageBoxBase,
+    PushButton,
+    StrongBodyLabel,
+    SubtitleLabel,
 )
 
 from cdumm.engine.mod_manager import ModManager
@@ -14,7 +24,7 @@ from cdumm.engine.mod_manager import ModManager
 logger = logging.getLogger(__name__)
 
 
-class PatchToggleDialog(QDialog):
+class PatchToggleDialog(MessageBoxBase):
     """Shows each individual byte-change in a JSON mod with a toggle checkbox."""
 
     def __init__(self, mod: dict, mod_manager: ModManager, parent=None) -> None:
@@ -24,30 +34,28 @@ class PatchToggleDialog(QDialog):
         self._checkboxes: list[tuple[int, QCheckBox]] = []
         self._changed = False
 
-        self.setWindowTitle(f"Toggle Patches: {mod['name']}")
-        self.setMinimumSize(650, 500)
-
-        layout = QVBoxLayout(self)
+        self.titleLabel = SubtitleLabel(f"Toggle Patches: {mod['name']}")
+        self.viewLayout.addWidget(self.titleLabel)
 
         # Header
-        header = QLabel(
-            f"<b>{mod['name']}</b> — Toggle individual changes on/off. "
+        header = BodyLabel(
+            f"{mod['name']} -- Toggle individual changes on/off. "
             f"Disabled changes are skipped when you Apply."
         )
         header.setWordWrap(True)
-        layout.addWidget(header)
+        self.viewLayout.addWidget(header)
 
         # Load JSON source
         json_source = self._load_json_source(mod["id"])
         if json_source is None:
-            layout.addWidget(QLabel(
+            self.viewLayout.addWidget(BodyLabel(
                 "This mod does not use mount-time patching.\n"
                 "Per-patch toggle is only available for JSON mods imported with v2.5+.\n"
                 "Reimport the mod to enable this feature."
             ))
-            close_btn = QPushButton("Close")
-            close_btn.clicked.connect(self.accept)
-            layout.addWidget(close_btn)
+            self.yesButton.setText("Close")
+            self.cancelButton.hide()
+            self.widget.setMinimumWidth(650)
             return
 
         # Current disabled indices
@@ -56,6 +64,7 @@ class PatchToggleDialog(QDialog):
         # Scroll area for patches
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(300)
         container = QWidget()
         patch_layout = QVBoxLayout(container)
         patch_layout.setSpacing(2)
@@ -70,13 +79,11 @@ class PatchToggleDialog(QDialog):
                 continue
 
             # Game file header
-            file_label = QLabel(f"<b>{game_file}</b>")
-            file_label.setStyleSheet("padding: 6px 0 2px 0;")
+            file_label = StrongBodyLabel(game_file)
             patch_layout.addWidget(file_label)
 
             sep = QFrame()
             sep.setFrameShape(QFrame.Shape.HLine)
-            sep.setStyleSheet("color: #3A3F4B;")
             patch_layout.addWidget(sep)
 
             for change in changes:
@@ -110,36 +117,33 @@ class PatchToggleDialog(QDialog):
 
         patch_layout.addStretch()
         scroll.setWidget(container)
-        layout.addWidget(scroll)
+        self.viewLayout.addWidget(scroll)
 
         # Status
         total = flat_idx
         enabled = total - len(disabled)
-        self._status = QLabel(f"{enabled}/{total} patches enabled")
-        layout.addWidget(self._status)
+        self._status = CaptionLabel(f"{enabled}/{total} patches enabled")
+        self.viewLayout.addWidget(self._status)
 
-        # Buttons
-        btn_row = QHBoxLayout()
-
-        enable_all = QPushButton("Enable All")
+        # Bulk buttons
+        bulk_row = QHBoxLayout()
+        enable_all = PushButton("Enable All")
         enable_all.clicked.connect(self._enable_all)
-        btn_row.addWidget(enable_all)
+        bulk_row.addWidget(enable_all)
 
-        disable_all = QPushButton("Disable All")
+        disable_all = PushButton("Disable All")
         disable_all.clicked.connect(self._disable_all)
-        btn_row.addWidget(disable_all)
+        bulk_row.addWidget(disable_all)
+        bulk_row.addStretch()
+        self.viewLayout.addLayout(bulk_row)
 
-        btn_row.addStretch()
+        # Override default buttons
+        self.yesButton.setText("Save && Close")
+        self.yesButton.clicked.disconnect()
+        self.yesButton.clicked.connect(self._save_and_close)
+        self.cancelButton.setText("Cancel")
 
-        apply_btn = QPushButton("Save && Close")
-        apply_btn.clicked.connect(self._save_and_close)
-        btn_row.addWidget(apply_btn)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-
-        layout.addLayout(btn_row)
+        self.widget.setMinimumWidth(650)
 
     def _load_json_source(self, mod_id: int) -> dict | None:
         """Load the JSON source for a mount-time mod."""
@@ -173,26 +177,23 @@ class PatchToggleDialog(QDialog):
             cb.setChecked(False)
         self._changed = True
 
-    def closeEvent(self, event) -> None:
-        if self._changed:
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self, "Unsaved Changes",
-                "You have unsaved patch toggle changes. Save before closing?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-            )
-            if reply == QMessageBox.StandardButton.Save:
-                self._save_and_close()
-                return
-            elif reply == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-        super().closeEvent(event)
-
     def _save_and_close(self) -> None:
         disabled = [idx for idx, cb in self._checkboxes if not cb.isChecked()]
         self._mm.set_disabled_patches(self._mod["id"], disabled)
         self._changed = False
         self.accept()
+
+    def reject(self) -> None:
+        """Override reject to warn about unsaved changes."""
+        if self._changed:
+            w = MessageBox(
+                "Unsaved Changes",
+                "You have unsaved patch toggle changes. Save before closing?",
+                self,
+            )
+            w.yesButton.setText("Save")
+            w.cancelButton.setText("Discard")
+            if w.exec():
+                self._save_and_close()
+                return
+        super().reject()

@@ -1,8 +1,11 @@
 """Changelog data and patch notes dialog for CDUMM."""
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QTextBrowser, QPushButton, QLabel, QHBoxLayout,
+from PySide6.QtWidgets import QTextBrowser
+
+from qfluentwidgets import (
+    BodyLabel,
+    MessageBoxBase,
+    SubtitleLabel,
 )
 
 # Changelog entries — newest first. Add new versions at the top.
@@ -245,6 +248,13 @@ CHANGELOG = [
             "Fixed stale PAMT byte-range deltas left behind after entry-level PAZ import. PAMT files were processed before PAZ files alphabetically, creating unnecessary deltas that caused false conflict reports.",
             "Multi-variant loose file mods now detected and show a picker dialog. Mods like VAXIS Partial LOD Fix with multiple quality options (x1/x2/x3/x4/x5 folders) are recognized even when nested several folders deep inside the archive.",
             "Fixed null-byte padding crash for mods with smaller content than vanilla. XML and CSS files that are shorter than the original (common with line ending differences) no longer get padded with null bytes that crash the game's parser. PAMT orig_size is now updated to the actual content size.",
+        ],
+    },
+    {
+        "version": "2.2.0",
+        "date": "2026-04-07",
+        "notes": [
+            "Removed auto-update download for NexusMods TOS compliance. CDUMM no longer downloads executables from the internet. Update checks still work: when a new version is found, you are prompted to open the GitHub releases page in your browser to download manually.",
         ],
     },
     {
@@ -527,46 +537,38 @@ def get_latest_notes_html() -> str:
     return get_changelog_html([CHANGELOG[0]])
 
 
-class PatchNotesDialog(QDialog):
+class PatchNotesDialog(MessageBoxBase):
     """Dialog showing patch notes — either latest or full history."""
 
     def __init__(self, parent=None, latest_only: bool = False):
         super().__init__(parent)
         version = CHANGELOG[0]["version"] if CHANGELOG else "?"
+
         if latest_only:
-            self.setWindowTitle(f"What's New in v{version}")
+            self.titleLabel = SubtitleLabel(f"What's New in v{version}")
         else:
-            self.setWindowTitle("CDUMM Patch Notes")
-        self.setMinimumSize(520, 420)
-        self.resize(560, 500)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+            self.titleLabel = SubtitleLabel("CDUMM Patch Notes")
+        self.viewLayout.addWidget(self.titleLabel)
 
         if latest_only:
-            header = QLabel(f"CDUMM has been updated to v{version}")
-            header.setStyleSheet(
-                "font-size: 15px; font-weight: bold; color: #ECEFF4;"
-            )
-            layout.addWidget(header)
+            header = BodyLabel(f"CDUMM has been updated to v{version}")
+            font = header.font()
+            font.setPixelSize(15)
+            font.setBold(True)
+            header.setFont(font)
+            self.viewLayout.addWidget(header)
 
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.setStyleSheet(
-            "QTextBrowser { background: #1A1D23; border: 1px solid #2E3440; "
-            "border-radius: 6px; padding: 8px; }"
-        )
+        browser.setMinimumHeight(350)
         if latest_only:
             browser.setHtml(get_latest_notes_html())
         else:
             browser.setHtml(get_changelog_html())
-        layout.addWidget(browser)
+        self.viewLayout.addWidget(browser)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.setFixedWidth(100)
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+        # Override default buttons
+        self.yesButton.setText("Close")
+        self.cancelButton.hide()
+
+        self.widget.setMinimumWidth(560)

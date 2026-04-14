@@ -73,7 +73,15 @@ class ImportWorker(QObject):
                 result = import_from_bsdiff(
                     self._mod_path, self._game_dir, db, snapshot, self._deltas_dir)
             else:
-                self.error_occurred.emit(f"Unsupported format: {fmt}")
+                suffix = self._mod_path.suffix.lower()
+                if suffix == '.rar':
+                    self.error_occurred.emit(
+                        "RAR files are not supported. Please extract the .rar "
+                        "and drop the folder or re-compress as .zip")
+                else:
+                    self.error_occurred.emit(
+                        f"Unsupported file format: {suffix or 'unknown'}\n"
+                        "Supported: .zip, .7z, .json, folder, .bat, .py")
                 db.close()
                 return
 

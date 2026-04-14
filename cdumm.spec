@@ -2,6 +2,10 @@
 # PyInstaller spec for Crimson Desert Ultimate Mods Manager
 
 import importlib.util
+import os
+
+from PyInstaller.utils.hooks import collect_data_files, collect_all
+
 _xxhash_spec = importlib.util.find_spec('xxhash._xxhash')
 _xxhash_binaries = [(_xxhash_spec.origin, 'xxhash')] if _xxhash_spec else []
 
@@ -9,7 +13,6 @@ _xxhash_binaries = [(_xxhash_spec.origin, 'xxhash')] if _xxhash_spec else []
 _native_spec = importlib.util.find_spec('cdumm_native')
 _native_binaries = []
 if _native_spec and _native_spec.submodule_search_locations and len(_native_spec.submodule_search_locations) > 0:
-    import os
     _native_dir = _native_spec.submodule_search_locations[0]
     for f in os.listdir(_native_dir):
         if f.endswith('.pyd') or f.endswith('.so'):
@@ -17,14 +20,23 @@ if _native_spec and _native_spec.submodule_search_locations and len(_native_spec
 elif _native_spec and _native_spec.origin:
     _native_binaries.append((_native_spec.origin, '.'))
 
+# qfluentwidgets resources (icons, stylesheets, compiled Qt resources)
+_qfw_datas = collect_data_files('qfluentwidgets')
+
+# qframelesswindow — collect everything (binaries, datas, hidden imports)
+_qflw_datas, _qflw_binaries, _qflw_hiddenimports = collect_all('qframelesswindow')
+
 
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=_xxhash_binaries + _native_binaries,
+    binaries=_xxhash_binaries + _native_binaries + _qflw_binaries,
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
            ('src/cdumm/translations', 'cdumm/translations'),
-           ('schemas/pabgb_complete_schema.json', 'schemas')],
+           ('schemas/pabgb_complete_schema.json', 'schemas'),
+           ('assets/fonts/Oxanium-VariableFont_wght.ttf', 'assets/fonts'),
+           ('assets/cdumm-logo.png', 'assets'),
+           ] + _qfw_datas + _qflw_datas,
     hiddenimports=[
         'cdumm.cli',
         'cdumm.gui.main_window',
@@ -36,6 +48,33 @@ a = Analysis(
         'cdumm.gui.test_mod_dialog',
         'cdumm.gui.workers',
         'cdumm.gui.bug_report',
+        # v3 Fluent UI
+        'cdumm.gui.fluent_window',
+        'cdumm.gui.pages.mods_page',
+        'cdumm.gui.pages.asi_page',
+        'cdumm.gui.pages.activity_page',
+        'cdumm.gui.pages.about_page',
+        'cdumm.gui.pages.settings_page',
+        'cdumm.gui.pages.tools_page',
+        'cdumm.gui.pages.tool_page',
+        'cdumm.gui.components.mod_card',
+        'cdumm.gui.components.summary_bar',
+        'cdumm.gui.components.config_panel',
+        'cdumm.gui.components.conflict_card',
+        'cdumm.gui.components.drop_overlay',
+        # PySide6-Fluent-Widgets + dependencies
+        'qfluentwidgets',
+        'qfluentwidgets._rc',
+        'qfluentwidgets._rc.resource',
+        'qfluentwidgets.common',
+        'qfluentwidgets.components',
+        'qfluentwidgets.window',
+        'qframelesswindow',
+        'qframelesswindow._rc',
+        'qframelesswindow._rc.resource',
+        'darkdetect',
+        # colorthief (lightweight, no scipy/numpy)
+        'colorthief',
         'xxhash', 'xxhash._xxhash',
         'cdumm_native',
         'cdumm.engine.snapshot_manager',
@@ -90,20 +129,51 @@ a = Analysis(
         'cdumm.gui.binary_search_dialog',
         'cdumm.gui.patch_toggle_dialog',
         'py7zr',
-    ],
+    ] + _qflw_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        # PySide6 modules not used by CDUMM (only QtCore/QtGui/QtWidgets/QtSvg needed)
         'PySide6.QtWebEngine', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
-        'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DInput',
+        'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DInput', 'PySide6.Qt3DExtras',
         'PySide6.QtCharts', 'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',
         'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtBluetooth',
         'PySide6.QtPositioning', 'PySide6.QtSensors', 'PySide6.QtSerialPort',
         'PySide6.QtRemoteObjects', 'PySide6.QtNfc',
+        'PySide6.QtOpenGL', 'PySide6.QtOpenGLWidgets',
+        'PySide6.QtNetwork',
+        'PySide6.QtDataVisualization', 'PySide6.QtGraphs',
+        'PySide6.QtAxContainer', 'PySide6.QtDesigner',
+        'PySide6.QtHelp', 'PySide6.QtPdf', 'PySide6.QtPdfWidgets',
+        'PySide6.QtQuick3D', 'PySide6.QtShaderTools',
+        'PySide6.QtSpatialAudio', 'PySide6.QtHttpServer',
+        'PySide6.QtTest', 'PySide6.QtDBus', 'PySide6.QtConcurrent',
+        # scipy/numpy — only needed for acrylic blur (disabled)
+        'scipy', 'numpy', 'numpy.core', 'numpy.linalg',
+        # setuptools/pkg_resources not needed at runtime
+        'setuptools', 'pkg_resources',
     ],
     noarchive=False,
 )
+
+# Strip large unused DLLs from binaries
+_dll_excludes = {
+    'opengl32sw.dll',        # ~20 MB software OpenGL (not needed)
+    'Qt6Network.dll',        # ~3 MB
+    'Qt6Pdf.dll',            # ~4 MB
+    'Qt6Designer.dll',       # ~5 MB
+    'Qt6Quick.dll',          # ~6 MB
+    'Qt6Qml.dll',            # ~5 MB
+    'Qt6ShaderTools.dll',    # ~4 MB
+    'Qt6Quick3DRuntimeRender.dll',
+    'avcodec-61.dll',        # ~13 MB multimedia codec
+    'avformat-61.dll',
+    'avutil-59.dll',
+    'swresample-5.dll',
+    'swscale-8.dll',
+}
+a.binaries = [b for b in a.binaries if b[0].split('/')[-1].split('\\')[-1] not in _dll_excludes]
 
 pyz = PYZ(a.pure)
 

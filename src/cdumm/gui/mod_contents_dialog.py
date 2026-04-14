@@ -1,19 +1,28 @@
 """Dialog showing which game files a mod touches."""
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QApplication,
+    QApplication,
+    QHBoxLayout,
+    QTreeWidget,
+    QTreeWidgetItem,
+)
+
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    MessageBoxBase,
+    PushButton,
+    SubtitleLabel,
 )
 
 from cdumm.engine.mod_manager import ModManager
 
 
-class ModContentsDialog(QDialog):
+class ModContentsDialog(MessageBoxBase):
     def __init__(self, mod: dict, mod_manager: ModManager, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Mod Contents: {mod['name']}")
-        self.setMinimumSize(600, 400)
 
-        layout = QVBoxLayout(self)
+        self.titleLabel = SubtitleLabel(f"Mod Contents: {mod['name']}")
+        self.viewLayout.addWidget(self.titleLabel)
 
         # Mod info
         info = f"Name: {mod['name']}"
@@ -21,22 +30,22 @@ class ModContentsDialog(QDialog):
             info += f"  |  Author: {mod['author']}"
         if mod.get("version"):
             info += f"  |  Version: {mod['version']}"
-        layout.addWidget(QLabel(info))
+        self.viewLayout.addWidget(BodyLabel(info))
 
         if mod.get("description"):
-            layout.addWidget(QLabel(mod["description"]))
+            self.viewLayout.addWidget(BodyLabel(mod["description"]))
 
         if mod.get("notes"):
-            notes_label = QLabel(f"Notes: {mod['notes']}")
+            notes_label = CaptionLabel(f"Notes: {mod['notes']}")
             notes_label.setWordWrap(True)
-            notes_label.setStyleSheet("color: #B0B8C8; font-style: italic; padding: 4px 0;")
-            layout.addWidget(notes_label)
+            self.viewLayout.addWidget(notes_label)
 
         # File tree
         details = mod_manager.get_mod_details(mod["id"])
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["File", "Byte Range", "Type"])
         self._tree.setColumnCount(3)
+        self._tree.setMinimumHeight(250)
 
         if details:
             # Group by directory
@@ -61,21 +70,24 @@ class ModContentsDialog(QDialog):
             self._tree.resizeColumnToContents(0)
             self._tree.resizeColumnToContents(1)
 
-        layout.addWidget(self._tree)
+        self.viewLayout.addWidget(self._tree)
 
-        # Buttons
+        # Copy button
         btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn = PushButton("Copy to Clipboard")
         copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(copy_btn)
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
+        self.viewLayout.addLayout(btn_row)
+
+        # Override default buttons
+        self.yesButton.setText("Close")
+        self.cancelButton.hide()
+
+        self.widget.setMinimumWidth(600)
 
     def _copy(self) -> None:
-        lines = [self.windowTitle(), ""]
+        lines = [self.titleLabel.text(), ""]
         for i in range(self._tree.topLevelItemCount()):
             item = self._tree.topLevelItem(i)
             lines.append(f"{item.text(0)}/")

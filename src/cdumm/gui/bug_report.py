@@ -5,17 +5,26 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
-    QDialog,
     QFileDialog,
     QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
+)
+
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    ComboBox,
+    InfoBar,
+    InfoBarPosition,
+    MessageBoxBase,
+    PrimaryPushButton,
+    PushButton,
+    SubtitleLabel,
 )
 
 from cdumm.storage.database import Database
@@ -33,7 +42,7 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
 
     # Header
     lines.append("=" * 60)
-    lines.append("CRIMSON DESERT ULTIMATE MODS MANAGER — BUG REPORT")
+    lines.append("CRIMSON DESERT ULTIMATE MODS MANAGER -- BUG REPORT")
     lines.append("=" * 60)
     lines.append(f"Generated: {now}")
     lines.append(f"App Version: {APP_VERSION}")
@@ -134,79 +143,84 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
     return "\n".join(lines)
 
 
-class BugReportDialog(QDialog):
-    """Dialog that shows the bug report and lets user copy or save it."""
+class BugReportDialog(MessageBoxBase):
+    """Fluent-style bug report dialog."""
 
     def __init__(self, report_text: str, parent=None, is_crash: bool = False) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Bug Report")
-        self.setMinimumSize(700, 550)
         self._base_report = report_text
 
-        layout = QVBoxLayout(self)
+        self.titleLabel = SubtitleLabel("Bug Report")
+        self.viewLayout.addWidget(self.titleLabel)
 
         if is_crash:
-            layout.addWidget(QLabel(
+            desc = BodyLabel(
                 "The app didn't close normally last time. Please describe what "
                 "you were doing when it happened, then copy or save this report."
-            ))
+            )
         else:
-            layout.addWidget(QLabel(
+            desc = BodyLabel(
                 "Describe the problem below, then copy or save the report.\n"
                 "Attach it to your Nexus Mods bug report page."
-            ))
+            )
+        desc.setWordWrap(True)
+        self.viewLayout.addWidget(desc)
 
         # Severity
         sev_row = QHBoxLayout()
-        sev_row.addWidget(QLabel("Severity:"))
-        self._severity = QComboBox()
-        self._severity.addItems(["Crash (app closed/froze)", "Bug (wrong behavior)",
-                                  "Visual (UI issue)", "Other"])
+        sev_row.addWidget(CaptionLabel("Severity:"))
+        self._severity = ComboBox()
+        self._severity.addItems([
+            "Crash (app closed/froze)", "Bug (wrong behavior)",
+            "Visual (UI issue)", "Other",
+        ])
         if is_crash:
             self._severity.setCurrentIndex(0)
+        self._severity.setFixedWidth(220)
         sev_row.addWidget(self._severity)
         sev_row.addStretch()
-        layout.addLayout(sev_row)
+        self.viewLayout.addLayout(sev_row)
 
         # User description field
-        layout.addWidget(QLabel("What happened? (steps to reproduce):"))
+        self.viewLayout.addWidget(CaptionLabel("What happened? (steps to reproduce):"))
         self._desc_edit = QTextEdit()
         self._desc_edit.setMaximumHeight(80)
         self._desc_edit.setPlaceholderText(
             "Example: I dropped a zip file, the progress bar reached 68%, then the app froze...")
-        layout.addWidget(self._desc_edit)
-
-        # Update preview when user types or changes severity
-        self._severity.currentTextChanged.connect(lambda: self._update_preview())
+        self.viewLayout.addWidget(self._desc_edit)
 
         # Report preview
-        layout.addWidget(QLabel("Report preview:"))
+        self.viewLayout.addWidget(CaptionLabel("Report preview:"))
         self._text_edit = QTextEdit()
         self._text_edit.setReadOnly(True)
         self._text_edit.setPlainText(report_text)
         self._text_edit.setFontFamily("Consolas")
-        layout.addWidget(self._text_edit)
+        self._text_edit.setMinimumHeight(250)
+        self.viewLayout.addWidget(self._text_edit)
 
-        # Update preview when user types
+        # Update preview when user types or changes severity
+        self._severity.currentTextChanged.connect(lambda _: self._update_preview())
         self._desc_edit.textChanged.connect(self._update_preview)
 
+        # Action buttons
         btn_row = QHBoxLayout()
 
-        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn = PrimaryPushButton("Copy to Clipboard")
         copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(copy_btn)
 
-        save_btn = QPushButton("Save as File")
+        save_btn = PushButton("Save as File")
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
 
         btn_row.addStretch()
+        self.viewLayout.addLayout(btn_row)
 
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
+        # Override default buttons
+        self.yesButton.setText("Close")
+        self.cancelButton.hide()
 
-        layout.addLayout(btn_row)
+        self.widget.setMinimumWidth(700)
 
     def _update_preview(self) -> None:
         self._text_edit.setPlainText(self._get_full_report())
@@ -223,7 +237,11 @@ class BugReportDialog(QDialog):
     def _copy(self) -> None:
         clipboard = QApplication.clipboard()
         clipboard.setText(self._get_full_report())
-        QMessageBox.information(self, "Copied", "Bug report copied to clipboard.")
+        InfoBar.success(
+            title="Copied",
+            content="Bug report copied to clipboard.",
+            duration=3000, position=InfoBarPosition.TOP, parent=self,
+        )
 
     def _save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -233,4 +251,8 @@ class BugReportDialog(QDialog):
         )
         if path:
             Path(path).write_text(self._get_full_report(), encoding="utf-8")
-            QMessageBox.information(self, "Saved", f"Bug report saved to:\n{path}")
+            InfoBar.success(
+                title="Saved",
+                content=f"Bug report saved to:\n{path}",
+                duration=4000, position=InfoBarPosition.TOP, parent=self,
+            )

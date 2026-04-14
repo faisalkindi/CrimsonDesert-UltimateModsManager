@@ -1,3 +1,4 @@
+import atexit
 import os
 import sys
 import logging
@@ -6,6 +7,8 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
+
+_lock_fh = None
 
 
 def setup_logging(app_data: Path) -> None:
@@ -76,6 +79,7 @@ def main() -> int:
     logger.info("Starting Crimson Desert Ultimate Mods Manager")
 
     # Single instance check — prevent two GUI windows
+    global _lock_fh
     _lock_file = APP_DATA_DIR / ".gui_lock"
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -85,11 +89,13 @@ def main() -> int:
         msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
         _lock_fh.write(str(os.getpid()))
         _lock_fh.flush()
+        atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
     except (OSError, IOError):
         # Another GUI instance holds the lock — bring it to front and exit
         logger.info("Another CDUMM instance is already running, exiting")
         import ctypes
-        hwnd = ctypes.windll.user32.FindWindowW(None, "Crimson Desert Ultimate Mods Manager")
+        from cdumm import __version__
+        hwnd = ctypes.windll.user32.FindWindowW(None, f"CDUMM v{__version__}")
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             ctypes.windll.user32.SetForegroundWindow(hwnd)
@@ -99,19 +105,52 @@ def main() -> int:
     from cdumm.i18n import load as load_i18n
     load_i18n("en")
 
+    # Set AppUserModelID so Windows taskbar shows our icon, not Python's
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("kindiboy.cdumm.modmanager.3")
+    except Exception:
+        pass
+
     # Minimal import for QApplication — everything else is lazy
     from PySide6.QtWidgets import QApplication
     app = QApplication(sys.argv)
+    # Fix PySide6 6.7+ Win11 style causing double borders on menus/shadows
+    app.setStyle("fusion")
     app.setApplicationName("Crimson Desert Ultimate Mods Manager")
+
+    # Set application-level icon (shows in taskbar)
+    from PySide6.QtGui import QIcon
+    if getattr(sys, 'frozen', False):
+        _app_ico = Path(sys._MEIPASS) / "cdumm.ico"
+    else:
+        _app_ico = Path(__file__).resolve().parents[2] / "cdumm.ico"
+    if _app_ico.exists():
+        app.setWindowIcon(QIcon(str(_app_ico)))
+
+    # Load Oxanium font
+    from PySide6.QtGui import QFontDatabase
+    font_path = None
+    if getattr(sys, 'frozen', False):
+        font_path = Path(sys._MEIPASS) / "assets" / "fonts" / "Oxanium-VariableFont_wght.ttf"
+    else:
+        font_path = Path(__file__).resolve().parents[2] / "assets" / "fonts" / "Oxanium-VariableFont_wght.ttf"
+    if font_path and font_path.exists():
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        if font_id >= 0:
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            if families:
+                from qfluentwidgets import setFontFamilies
+                setFontFamilies([families[0], "Segoe UI"])
+
+    # Set Fluent theme
+    from qfluentwidgets import setTheme, Theme, setThemeColor
+    setTheme(Theme.LIGHT)
+    setThemeColor("#2878D0")
 
     # Show splash immediately before heavy imports
     from cdumm.gui.splash import show_splash
     splash = show_splash()
     app.processEvents()
-
-    # Apply default dark theme (may be overridden after DB loads)
-    from cdumm.gui.theme import STYLESHEET
-    app.setStyleSheet(STYLESHEET)
 
     # Now do heavy imports
     splash.showMessage("  Loading database...", 0x0081)  # AlignLeft | AlignBottom
@@ -172,10 +211,9 @@ def main() -> int:
     if game_dir is None:
         # First-run: game directory setup
         splash.close()
-        from PySide6.QtWidgets import QDialog
         from cdumm.gui.setup_dialog import SetupDialog
         dialog = SetupDialog()
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.game_directory:
+        if dialog.exec() and dialog.game_directory:
             game_dir = str(dialog.game_directory)
             logger.info("Game directory configured: %s", game_dir)
         else:
@@ -214,11 +252,13 @@ def main() -> int:
         load_i18n(user_lang)
 
     # Apply saved theme preference
-    saved_theme = config.get("theme") or "dark"
-    if saved_theme == "light":
-        from cdumm.gui.theme import set_theme, build_stylesheet, LIGHT_PALETTE
-        set_theme("light")
-        app.setStyleSheet(build_stylesheet(LIGHT_PALETTE))
+    saved_theme = config.get("theme") or "light"
+    if saved_theme == "auto":
+        from qfluentwidgets import setTheme, Theme
+        setTheme(Theme.AUTO)
+    elif saved_theme == "dark":
+        from qfluentwidgets import setTheme, Theme
+        setTheme(Theme.DARK)
 
     # Set RTL layout direction for Arabic/Hebrew/etc.
     from cdumm.i18n import is_rtl
@@ -270,9 +310,9 @@ def main() -> int:
     splash.showMessage("  Building UI...", 0x0081)
     app.processEvents()
 
-    from cdumm.gui.main_window import MainWindow
-    window = MainWindow(db=db, game_dir=game_path, app_data_dir=APP_DATA_DIR,
-                        startup_context=startup_context)
+    from cdumm.gui.fluent_window import CdummWindow
+    window = CdummWindow(db=db, game_dir=game_path, app_data_dir=APP_DATA_DIR,
+                         startup_context=startup_context)
     window.show()
     splash.finish(window)
 

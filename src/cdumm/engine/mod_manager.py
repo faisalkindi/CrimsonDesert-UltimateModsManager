@@ -20,7 +20,7 @@ class ModManager:
         query = (
             "SELECT id, name, mod_type, enabled, priority, import_date, "
             "game_version_hash, source_path, author, version, description, configurable, "
-            "force_inplace, notes "
+            "force_inplace, notes, group_id "
             "FROM mods"
         )
         if mod_type:
@@ -37,6 +37,7 @@ class ModManager:
                 "configurable": bool(row[11]) if len(row) > 11 else False,
                 "force_inplace": bool(row[12]) if len(row) > 12 else False,
                 "notes": row[13] if len(row) > 13 else None,
+                "group_id": row[14] if len(row) > 14 else None,
             }
             for row in cursor.fetchall()
         ]

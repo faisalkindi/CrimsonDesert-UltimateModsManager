@@ -855,34 +855,52 @@ class ApplyWorker(QObject):
 
             if needs_full:
                 full_path = self._vanilla_dir / file_path.replace("/", "\\")
+                game_path = self._game_dir / file_path.replace("/", "\\")
                 if full_path.exists():
                     # Validate existing backup against snapshot
                     snap = snap_hashes.get(file_path)
                     if snap:
                         snap_hash, snap_size = snap
                         try:
-                            if full_path.stat().st_size != snap_size:
-                                unbacked_files.append(file_path)
-                                logger.warning(
-                                    "Existing backup for %s is contaminated "
-                                    "(size %d != vanilla %d). Apply blocked.",
-                                    file_path, full_path.stat().st_size, snap_size)
+                            backup_size = full_path.stat().st_size
+                            is_contaminated = backup_size != snap_size
+                            # Also verify hash for files where size matches
+                            # (catches same-size but different-content contamination)
+                            if not is_contaminated and snap_hash:
+                                from cdumm.engine.snapshot_manager import hash_file
+                                actual_hash, _ = hash_file(full_path)
+                                if actual_hash != snap_hash:
+                                    is_contaminated = True
+                                    logger.debug("Backup hash mismatch for %s", file_path)
+
+                            if is_contaminated:
+                                # Backup is contaminated — try to refresh from game file
+                                if game_path.exists() and self._verify_is_vanilla(
+                                        game_path, file_path, snap_hashes):
+                                    _backup_copy(game_path, full_path)
+                                    logger.info(
+                                        "Refreshed contaminated backup: %s", file_path)
+                                else:
+                                    logger.warning(
+                                        "Backup for %s is contaminated and game file is modded. "
+                                        "Proceeding with existing backup (may cause issues on revert).",
+                                        file_path)
                         except OSError:
                             pass
                 else:
-                    game_path = self._game_dir / file_path.replace("/", "\\")
                     if game_path.exists():
                         is_vanilla = self._verify_is_vanilla(game_path, file_path, snap_hashes)
-                        if not is_vanilla:
-                            unbacked_files.append(file_path)
+                        if is_vanilla:
+                            full_path.parent.mkdir(parents=True, exist_ok=True)
+                            _backup_copy(game_path, full_path)
+                            logger.info("Full vanilla backup: %s", file_path)
+                        else:
+                            # Game file is modded, no backup exists — warn but proceed
+                            # (blocking here is what caused the v2.5 "mods not applying" reports)
                             logger.warning(
-                                "Cannot back up %s — file doesn't match vanilla "
-                                "snapshot (modded or corrupted). Apply blocked.",
+                                "No vanilla backup for %s and game file is modded. "
+                                "Proceeding without backup (revert may not fully restore).",
                                 file_path)
-                            continue
-                        full_path.parent.mkdir(parents=True, exist_ok=True)
-                        _backup_copy(game_path, full_path)
-                        logger.info("Full vanilla backup: %s", file_path)
             else:
                 # Byte-range backup — only the positions mods touch
                 ranges = self._get_all_byte_ranges(file_path)

@@ -1,0 +1,1022 @@
+"""ModsPage -- main PAZ Mods page for CDUMM v3.
+
+Card-based mod list with summary bar, conflict cards, config panel,
+drag-drop import overlay, and search/filter controls.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from PySide6.QtCore import QEasingCurve, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QVBoxLayout,
+    QWidget,
+)
+
+from qfluentwidgets import (
+    CheckBox,
+    FluentIcon,
+    PushButton,
+    SearchLineEdit,
+    SmoothScrollArea,
+)
+
+from cdumm.gui.components.config_panel import ConfigPanel
+from cdumm.gui.components.conflict_card import ConflictCard
+from cdumm.gui.components.mod_card import FolderGroup, ModCard
+from cdumm.gui.components.summary_bar import SummaryBar
+from cdumm.i18n import tr
+
+logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# ModsPage
+# ======================================================================
+
+
+class ModsPage(QWidget):
+    """Main PAZ Mods page -- card list, summary bar, config panel, drop overlay.
+
+    The page does NOT inherit ScrollArea; it contains one internally
+    so that the SummaryBar stays pinned at the top.
+
+    Signals
+    -------
+    file_dropped(Path)
+        Emitted when a file is drag-dropped onto the page.
+    """
+
+    file_dropped = Signal(Path)
+    uninstall_requested = Signal(int)  # mod_id — triggers disable+apply+remove in window
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ModsPage")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+
+        # Engine references (set later via set_managers)
+        self._mod_manager = None
+        self._conflict_detector = None
+        self._db = None
+        self._game_dir: Path | None = None
+
+        # Card tracking
+        self._mod_cards: list[ModCard] = []
+        self._conflict_cards: list[ConflictCard] = []
+        self._folder_groups: dict[int | None, FolderGroup] = {}  # group_id -> FolderGroup
+        self._last_clicked_index: int | None = None  # for Shift+Click range select
+        self._initial_load_done = False  # staggered animation only on first load
+
+        self._build_ui()
+
+        # Ctrl+A shortcut — select all visible cards (visual selection, not enable/disable)
+        QShortcut(QKeySequence.StandardKey.SelectAll, self, self._on_ctrl_a)
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        main = QVBoxLayout(self)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        # ---- SummaryBar (pinned top) ---------------------------------
+        self._summary_bar = SummaryBar(self)
+        main.addWidget(self._summary_bar)
+
+        # ---- Body (left content + right config panel) ----------------
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
+        # -- Left column (scrollable) --
+        left = QVBoxLayout()
+        left.setContentsMargins(16, 12, 16, 12)
+        left.setSpacing(10)
+
+        # Section header row: title + search
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+        from qfluentwidgets import SubtitleLabel
+        self._section_title = SubtitleLabel(tr("mod_list.section_title"))
+        header_row.addWidget(self._section_title)
+        header_row.addStretch()
+
+        self._search_edit = SearchLineEdit(self)
+        self._search_edit.setPlaceholderText(tr("mod_list.search_placeholder"))
+        self._search_edit.setFixedWidth(220)
+        self._search_edit.textChanged.connect(self._on_search)
+        header_row.addWidget(self._search_edit)
+        left.addLayout(header_row)
+
+        # Select-all row + New Folder button
+        select_row = QHBoxLayout()
+        select_row.setContentsMargins(14, 0, 0, 0)
+        self._select_all_cb = CheckBox(tr("mod_list.select_all"))
+        self._select_all_cb.setTristate(True)
+        self._select_all_cb.clicked.connect(self._on_select_all)
+        select_row.addWidget(self._select_all_cb)
+        select_row.addStretch()
+
+        from qfluentwidgets import setCustomStyleSheet
+        from PySide6.QtGui import QFont as _QFont
+        self._new_folder_btn = PushButton(FluentIcon.ADD, tr("mod_list.new_folder"))
+        self._new_folder_btn.setFixedHeight(32)
+        _nbf = self._new_folder_btn.font()
+        _nbf.setPixelSize(13)
+        _nbf.setWeight(_QFont.Weight.Bold)
+        self._new_folder_btn.setFont(_nbf)
+        self._new_folder_btn.clicked.connect(self._on_new_folder)
+        setCustomStyleSheet(self._new_folder_btn,
+            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #E0ECFF; }"
+            "PushButton:pressed { background: #D0E0F8; }",
+            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #223450; }"
+            "PushButton:pressed { background: #2A3C58; }")
+        select_row.addWidget(self._new_folder_btn)
+        left.addLayout(select_row)
+
+        # Scrollable mod list area with smooth scroll animation
+        self._scroll = SmoothScrollArea(self)
+        self._scroll.setScrollAnimation(Qt.Orientation.Vertical, 400, QEasingCurve.Type.OutQuint)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(SmoothScrollArea.Shape.NoFrame)
+
+        self._scroll_content = QWidget()
+        self._scroll_layout = QVBoxLayout(self._scroll_content)
+        self._scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self._scroll_layout.setSpacing(4)
+
+        self._scroll_layout.addStretch()
+
+        self._scroll.setWidget(self._scroll_content)
+        self._scroll.enableTransparentBackground()  # MUST be after setWidget
+        left.addWidget(self._scroll, 1)
+
+        # Wrap left column in a widget so it gets stretch factor
+        left_widget = QWidget()
+        left_widget.setLayout(left)
+        body.addWidget(left_widget, 1)
+
+        # -- Right column: ConfigPanel (hidden by default) --
+        self._config_panel = ConfigPanel(self)
+        self._config_panel.panel_closed.connect(self._on_config_closed)
+        self._config_panel.apply_clicked.connect(self._on_config_apply)
+        body.addWidget(self._config_panel, 0)
+
+        main.addLayout(body, 1)
+
+    # ------------------------------------------------------------------
+    # Engine wiring
+    # ------------------------------------------------------------------
+
+    def set_managers(self, mod_manager, conflict_detector, db, game_dir=None) -> None:
+        """Called by CdummWindow after init to provide engine access.
+
+        Parameters
+        ----------
+        mod_manager : ModManager
+        conflict_detector : ConflictDetector
+        db : Database
+        game_dir : Path | None
+        """
+        self._mod_manager = mod_manager
+        self._conflict_detector = conflict_detector
+        self._db = db
+        self._game_dir = game_dir
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # Refresh
+    # ------------------------------------------------------------------
+
+    def refresh(self) -> None:
+        """Reload mods, rebuild cards, refresh conflicts, update stats."""
+        self._build_mod_cards()
+        self._build_conflict_cards()
+        self._update_stats()
+        self._sync_select_all()
+
+    def retranslate_ui(self) -> None:
+        """Update text with current translations."""
+        self._section_title.setText(tr("mod_list.section_title"))
+        self._search_edit.setPlaceholderText(tr("mod_list.search_placeholder"))
+        self._select_all_cb.setText(tr("mod_list.select_all"))
+        self._new_folder_btn.setText(tr("mod_list.new_folder"))
+        self._summary_bar.retranslate_ui()
+
+    # ------------------------------------------------------------------
+    # Mod cards
+    # ------------------------------------------------------------------
+
+    def _build_mod_cards(self) -> None:
+        """Clear existing cards and rebuild from mod_manager.list_mods()."""
+        # Clear old cards
+        for card in self._mod_cards:
+            card.setParent(None)
+            card.deleteLater()
+        self._mod_cards.clear()
+
+        # Clear old folder groups
+        for group in self._folder_groups.values():
+            group.setParent(None)
+            group.deleteLater()
+        self._folder_groups.clear()
+
+        # Remove all widgets from scroll layout except the stretch
+        while self._scroll_layout.count() > 1:
+            item = self._scroll_layout.takeAt(0)
+            # stretch items have no widget
+            if item.widget():
+                pass  # already cleaned up above
+
+        if not self._mod_manager:
+            return
+
+        # Load folder groups from DB
+        groups_from_db = self._load_folder_groups()
+
+        # Create FolderGroup widgets: user groups first, then Ungrouped
+        for g in groups_from_db:
+            fg = FolderGroup(g["name"], group_id=g["id"], parent=self._scroll_content)
+            fg.order_changed.connect(self._on_order_changed)
+            fg.mod_moved_to_group.connect(self._on_mod_moved_to_group)
+            fg.header_context_menu.connect(self._on_group_header_menu)
+            fg.select_all_in_group.connect(self._on_select_all_in_group)
+            self._folder_groups[g["id"]] = fg
+            self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, fg)
+
+        # Always create "Ungrouped" group (group_id=None)
+        ungrouped = FolderGroup(tr("mod_list.ungrouped"), group_id=None, parent=self._scroll_content)
+        ungrouped.order_changed.connect(self._on_order_changed)
+        ungrouped.mod_moved_to_group.connect(self._on_mod_moved_to_group)
+        ungrouped.select_all_in_group.connect(self._on_select_all_in_group)
+        self._folder_groups[None] = ungrouped
+        self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, ungrouped)
+
+        mods = self._mod_manager.list_mods(mod_type="paz")
+        file_counts = self._mod_manager.get_file_counts()
+
+        # Track counts per group
+        group_counts: dict[int | None, int] = {gid: 0 for gid in self._folder_groups}
+
+        for order, mod in enumerate(mods, start=1):
+            mod_id = mod["id"]
+
+            # Fast status from DB (no filesystem checks)
+            # active = enabled + applied, loaded = enabled + not yet applied, unloaded = disabled
+            if not mod["enabled"]:
+                status = "unloaded"
+            else:
+                status = "loaded"  # will become "active" after Apply
+
+            # Check if configurable
+            has_config = bool(mod.get("configurable"))
+            if not has_config:
+                json_src = self._mod_manager.get_json_source(mod_id)
+                has_config = json_src is not None
+
+            card = ModCard(
+                mod_id=mod_id,
+                order=order,
+                name=mod["name"],
+                author=mod.get("author") or "Unknown",
+                version=mod.get("version") or "1.0",
+                status=status,
+                file_count=file_counts.get(mod_id, 0),
+                has_config=has_config,
+                has_notes=bool(mod.get("notes")),
+                parent=self._scroll_content,
+            )
+            card.set_note_text(mod.get("notes") or "")
+            card.toggled.connect(self._on_mod_toggled)
+            card.config_clicked.connect(self._on_config_clicked)
+            card.context_menu_requested.connect(self._show_mod_context_menu)
+            card.renamed.connect(self._on_mod_renamed)
+            card.card_clicked.connect(self._on_card_clicked)
+
+            self._mod_cards.append(card)
+
+            # Place card in the correct folder group
+            gid = mod.get("group_id")
+            if gid not in self._folder_groups:
+                gid = None  # fallback to Ungrouped
+            self._folder_groups[gid].add_mod_card(card)
+            group_counts[gid] = group_counts.get(gid, 0) + 1
+
+        # Update counts
+        for gid, fg in self._folder_groups.items():
+            fg.set_count(group_counts.get(gid, 0))
+
+        # Staggered entrance animation only on first load
+        if not self._initial_load_done:
+            from cdumm.gui.components.card_animations import staggered_fade_in
+            self._entrance_anim = staggered_fade_in(self._mod_cards)
+            self._initial_load_done = True
+
+    # ------------------------------------------------------------------
+    # Conflict cards
+    # ------------------------------------------------------------------
+
+    def _build_conflict_cards(self) -> None:
+        """No-op — conflicts are handled automatically and not shown to users."""
+        pass
+
+    # ------------------------------------------------------------------
+    # Stats
+    # ------------------------------------------------------------------
+
+    def _update_stats(self) -> None:
+        """Count totals and update the summary bar."""
+        total = len(self._mod_cards)
+        loaded = sum(1 for c in self._mod_cards if c._checkbox.isChecked())
+        unloaded = total - loaded
+        installed = 0  # TODO: count mods that are actually applied to game
+        self._summary_bar.update_stats(total, installed, loaded, unloaded)
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
+    def _on_search(self, text: str) -> None:
+        """Filter mod cards by name (case-insensitive)."""
+        needle = text.strip().lower()
+        for card in self._mod_cards:
+            if not needle:
+                card.setVisible(True)
+            else:
+                card.setVisible(needle in card._name_label.text().lower())
+        self._sync_select_all()
+
+    # ------------------------------------------------------------------
+    # Select all
+    # ------------------------------------------------------------------
+
+    def _on_select_all(self) -> None:
+        """Toggle all visible mod cards when select-all is clicked."""
+        checked = self._select_all_cb.isChecked()
+        for card in self._mod_cards:
+            if card.isVisible():
+                card.set_checked(checked)
+        if self._mod_manager:
+            for card in self._mod_cards:
+                if card.isVisible():
+                    self._mod_manager.set_enabled(card.mod_id, checked)
+        total = len(self._mod_cards)
+        active = sum(1 for c in self._mod_cards if c._checkbox.isChecked())
+        self._summary_bar.update_stats(total, 0, active, total - active)
+
+    def _sync_select_all(self) -> None:
+        """Update select-all checkbox to match current card states."""
+        visible = [c for c in self._mod_cards if c.isVisible()]
+        if not visible:
+            self._select_all_cb.blockSignals(True)
+            self._select_all_cb.setCheckState(Qt.CheckState.Unchecked)
+            self._select_all_cb.blockSignals(False)
+            return
+
+        checked_count = sum(1 for c in visible if c._checkbox.isChecked())
+        self._select_all_cb.blockSignals(True)
+        if checked_count == 0:
+            self._select_all_cb.setCheckState(Qt.CheckState.Unchecked)
+        elif checked_count == len(visible):
+            self._select_all_cb.setCheckState(Qt.CheckState.Checked)
+        else:
+            self._select_all_cb.setCheckState(Qt.CheckState.PartiallyChecked)
+        self._select_all_cb.blockSignals(False)
+
+    # ------------------------------------------------------------------
+    # Mod toggle
+    # ------------------------------------------------------------------
+
+    def _on_mod_toggled(self, mod_id: int, enabled: bool) -> None:
+        """Handle a mod being enabled/disabled via its card checkbox."""
+        if self._mod_manager:
+            self._mod_manager.set_enabled(mod_id, enabled)
+
+        # Update just the toggled card's badge (no full rebuild)
+        new_status = "loaded" if enabled else "unloaded"
+        for card in self._mod_cards:
+            if card.mod_id == mod_id:
+                card.set_status(new_status)
+                break
+
+        self._sync_select_all()
+        self._update_stats()
+
+    # ------------------------------------------------------------------
+    # Ctrl+Click / Shift+Click selection
+    # ------------------------------------------------------------------
+
+    def _on_card_clicked(self, mod_id: int, event) -> None:
+        """Handle click/Ctrl+Click/Shift+Click selection like Explorer."""
+        visible = [c for c in self._mod_cards if c.isVisible()]
+        if not visible:
+            return
+
+        clicked_idx = None
+        for i, card in enumerate(visible):
+            if card.mod_id == mod_id:
+                clicked_idx = i
+                break
+        if clicked_idx is None:
+            return
+
+        mods = event.modifiers()
+
+        if mods & Qt.KeyboardModifier.ShiftModifier and self._last_clicked_index is not None:
+            # Shift+Click: select range between last clicked and current
+            start = min(self._last_clicked_index, clicked_idx)
+            end = max(self._last_clicked_index, clicked_idx)
+            for i, c in enumerate(visible):
+                c.set_selected(start <= i <= end)
+        elif mods & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl+Click: toggle selection of single card
+            visible[clicked_idx].set_selected(not visible[clicked_idx].is_selected)
+        else:
+            # Plain click: deselect all, select this one
+            for c in visible:
+                c.set_selected(False)
+            visible[clicked_idx].set_selected(True)
+
+        self._last_clicked_index = clicked_idx
+
+    def _on_ctrl_a(self) -> None:
+        """Ctrl+A: select all visible cards."""
+        visible = [c for c in self._mod_cards if c.isVisible()]
+        all_selected = all(c.is_selected for c in visible)
+        for c in visible:
+            c.set_selected(not all_selected)
+
+    def _on_select_all_in_group(self, group_id) -> None:
+        """Toggle all checkboxes (enable/disable) for mods in a specific group."""
+        if group_id not in self._folder_groups:
+            return
+        fg = self._folder_groups[group_id]
+        group_ids = set(fg.get_mod_ids())
+        group_cards = [c for c in self._mod_cards if c.mod_id in group_ids]
+        if not group_cards:
+            return
+        all_checked = all(c._checkbox.isChecked() for c in group_cards)
+        new_state = not all_checked
+        for c in group_cards:
+            c.set_checked(new_state)
+            if self._mod_manager:
+                self._mod_manager.set_enabled(c.mod_id, new_state)
+                c.set_status("loaded" if new_state else "unloaded")
+        self._sync_select_all()
+        self._update_stats()
+
+    def _deselect_all_cards(self) -> None:
+        """Clear selection from all cards."""
+        for card in self._mod_cards:
+            card.set_selected(False)
+
+    def _get_selected_mod_ids(self) -> list[int]:
+        """Return mod_ids of all selected cards."""
+        return [c.mod_id for c in self._mod_cards if c.is_selected]
+
+    # ------------------------------------------------------------------
+    # Config panel
+    # ------------------------------------------------------------------
+
+    def _on_config_clicked(self, mod_id: int) -> None:
+        """Open or close the config panel for a configurable mod."""
+        if not self._mod_manager:
+            return
+
+        # If clicking the same mod that's already open, close the panel
+        if self._config_panel.isVisible() and self._config_panel._mod_id == mod_id:
+            self._config_panel.close_panel()
+            return
+
+        # Get mod info
+        mod = None
+        for m in self._mod_manager.list_mods(mod_type="paz"):
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if not mod:
+            return
+
+        # Fast status from DB
+        status = "active" if mod["enabled"] else "disabled"
+
+        file_counts = self._mod_manager.get_file_counts()
+
+        # Build patches list from json_source using FLAT change-level indices
+        # (matching how json_patch_handler.py consumes disabled_patches)
+        patches: list[dict] = []
+        json_source = self._mod_manager.get_json_source(mod_id)
+        if json_source:
+            try:
+                import json
+                with open(json_source, "r", encoding="utf-8") as f:
+                    source_data = json.load(f)
+                disabled_indices = set(self._mod_manager.get_disabled_patches(mod_id))
+                raw_patches = source_data.get("patches", [])
+                flat_idx = 0
+                for pi, patch in enumerate(raw_patches):
+                    changes = patch.get("changes", [])
+                    if not changes:
+                        # Patch with no changes — show as single toggle at patch level
+                        patches.append({
+                            "label": patch.get("label", f"Patch {pi + 1}"),
+                            "description": patch.get("description", ""),
+                            "enabled": flat_idx not in disabled_indices,
+                        })
+                        flat_idx += 1
+                    else:
+                        for ci, change in enumerate(changes):
+                            label = change.get("label", "")
+                            if not label:
+                                label = f"{patch.get('label', f'Patch {pi+1}')} - Change {ci+1}"
+                            patches.append({
+                                "label": label,
+                                "description": change.get("description", ""),
+                                "enabled": flat_idx not in disabled_indices,
+                            })
+                            flat_idx += 1
+            except Exception as e:
+                logger.warning("Failed to load patches for mod %d: %s", mod_id, e)
+
+        # Build conflicts list
+        conflicts: list[str] = []
+        if self._conflict_detector:
+            mod_conflicts = self._conflict_detector.get_conflicts_for_mod(mod_id)
+            for c in mod_conflicts:
+                conflicts.append(c.explanation)
+
+        self._config_panel.show_mod(
+            mod_id=mod_id,
+            name=mod["name"],
+            author=mod.get("author") or "Unknown",
+            version=mod.get("version") or "1.0",
+            status=status,
+            file_count=file_counts.get(mod_id, 0),
+            patches=patches,
+            conflicts=conflicts,
+        )
+
+    def _on_config_apply(self, mod_id: int, patches: list) -> None:
+        """Apply config panel changes -- save disabled patch indices."""
+        if not self._mod_manager:
+            return
+
+        disabled_indices = [
+            i for i, p in enumerate(patches) if not p["enabled"]
+        ]
+        self._mod_manager.set_disabled_patches(mod_id, disabled_indices)
+        self._config_panel.close_panel()
+        logger.info("Config applied for mod %d: disabled=%s", mod_id, disabled_indices)
+
+    def _on_config_closed(self) -> None:
+        """Stub for when the config panel closes."""
+        pass
+
+    # ------------------------------------------------------------------
+    # Mod context menu (right-click)
+    # ------------------------------------------------------------------
+
+    def _show_mod_context_menu(self, mod_id: int, global_pos) -> None:
+        """Show RoundMenu with mod actions. Supports multi-select like Explorer."""
+        if not self._mod_manager:
+            return
+
+        from qfluentwidgets import RoundMenu, Action, FluentIcon
+
+        # If right-clicked card is selected, operate on ALL selected cards
+        # If not selected, deselect others and select just this one (Explorer behavior)
+        selected_ids = self._get_selected_mod_ids()
+        if mod_id not in selected_ids:
+            self._deselect_all_cards()
+            for c in self._mod_cards:
+                if c.mod_id == mod_id:
+                    c.set_selected(True)
+                    break
+            selected_ids = [mod_id]
+
+        multi = len(selected_ids) > 1
+
+        mod = None
+        for m in self._mod_manager.list_mods(mod_type="paz"):
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if not mod:
+            return
+
+        menu = RoundMenu(parent=self)
+
+        if multi:
+            # Multi-select: batch enable/disable/uninstall
+            menu.addAction(Action(FluentIcon.ACCEPT, f"Enable {len(selected_ids)} mods",
+                                  triggered=lambda: self._ctx_batch_toggle(selected_ids, True)))
+            menu.addAction(Action(FluentIcon.REMOVE, f"Disable {len(selected_ids)} mods",
+                                  triggered=lambda: self._ctx_batch_toggle(selected_ids, False)))
+            menu.addSeparator()
+            menu.addAction(Action(FluentIcon.DELETE, f"Uninstall {len(selected_ids)} mods",
+                                  triggered=lambda: self._ctx_batch_uninstall(selected_ids)))
+        else:
+            # Single select: full menu
+            if mod["enabled"]:
+                menu.addAction(Action(FluentIcon.REMOVE, "Disable", triggered=lambda: self._ctx_toggle(mod_id, False)))
+            else:
+                menu.addAction(Action(FluentIcon.ACCEPT, "Enable", triggered=lambda: self._ctx_toggle(mod_id, True)))
+
+        if not multi:
+            menu.addSeparator()
+
+            # Configure (if configurable)
+            has_config = bool(mod.get("configurable"))
+            if not has_config:
+                has_config = self._mod_manager.get_json_source(mod_id) is not None
+            if has_config:
+                menu.addAction(Action(FluentIcon.SETTING, "Configure...", triggered=lambda: self._on_config_clicked(mod_id)))
+
+            # Rename
+            menu.addAction(Action(FluentIcon.EDIT, "Rename", triggered=lambda: self._ctx_rename(mod_id)))
+
+            # Notes
+            menu.addAction(Action(FluentIcon.PENCIL_INK, "Edit Notes" if mod.get("notes") else "Add Notes",
+                                  triggered=lambda: self._ctx_notes(mod_id)))
+
+            # Move to folder submenu
+            move_menu = RoundMenu("Move to Folder", parent=menu)
+            current_gid = mod.get("group_id")
+
+            if current_gid is not None:
+                move_menu.addAction(Action(
+                    FluentIcon.FOLDER, tr("mod_list.ungrouped"),
+                    triggered=lambda: self._move_mod_to_group(mod_id, None),
+                ))
+
+            groups = self._load_folder_groups()
+            for g in groups:
+                if g["id"] != current_gid:
+                    gid = g["id"]
+                    move_menu.addAction(Action(
+                        FluentIcon.FOLDER, g["name"],
+                        triggered=lambda _checked=False, _gid=gid: self._move_mod_to_group(mod_id, _gid),
+                    ))
+
+            if move_menu.actions():
+                menu.addMenu(move_menu)
+
+            # Update
+            menu.addAction(Action(FluentIcon.UPDATE, "Update (replace)", triggered=lambda: self._ctx_update(mod_id)))
+
+            menu.addSeparator()
+
+            # Uninstall
+            menu.addAction(Action(FluentIcon.DELETE, "Uninstall", triggered=lambda: self._ctx_uninstall(mod_id)))
+
+        menu.exec(global_pos)
+
+    def _ctx_toggle(self, mod_id: int, enabled: bool) -> None:
+        self._mod_manager.set_enabled(mod_id, enabled)
+        for card in self._mod_cards:
+            if card.mod_id == mod_id:
+                card.set_checked(enabled)
+                card.set_status("loaded" if enabled else "unloaded")
+                break
+        self._sync_select_all()
+        self._update_stats()
+
+    def _ctx_batch_toggle(self, mod_ids: list[int], enabled: bool) -> None:
+        """Enable or disable multiple selected mods."""
+        for mid in mod_ids:
+            self._mod_manager.set_enabled(mid, enabled)
+            for card in self._mod_cards:
+                if card.mod_id == mid:
+                    card.set_checked(enabled)
+                    card.set_status("loaded" if enabled else "unloaded")
+                    break
+        self._sync_select_all()
+        self._update_stats()
+
+    def _ctx_batch_uninstall(self, mod_ids: list[int]) -> None:
+        """Uninstall multiple selected mods — disables first, reverts via Apply, then removes."""
+        from qfluentwidgets import MessageBox
+        box = MessageBox("Uninstall Mods", f"Remove {len(mod_ids)} selected mods? This cannot be undone.", self.window())
+        if not box.exec():
+            return
+
+        # Check which mods are enabled (need apply to revert game files)
+        enabled_ids = []
+        disabled_ids = []
+        for mid in mod_ids:
+            for m in self._mod_manager.list_mods():
+                if m["id"] == mid:
+                    if m["enabled"]:
+                        enabled_ids.append(mid)
+                    else:
+                        disabled_ids.append(mid)
+                    break
+
+        # Remove already-disabled mods directly (no game files to revert)
+        for mid in disabled_ids:
+            self._mod_manager.remove_mod(mid)
+
+        if enabled_ids:
+            # Disable enabled mods and trigger apply to revert their game files
+            for mid in enabled_ids:
+                self._mod_manager.set_enabled(mid, False)
+            # Store IDs for removal after apply finishes
+            window = self.window()
+            if hasattr(window, '_pending_removals'):
+                window._pending_removals = enabled_ids
+            # Trigger apply which will revert files, then on_apply_done removes mods
+            if hasattr(window, '_on_apply'):
+                window._on_apply()
+        else:
+            self.refresh()
+
+    def _ctx_rename(self, mod_id: int) -> None:
+        """Start inline rename on the card."""
+        for card in self._mod_cards:
+            if card.mod_id == mod_id:
+                card.start_rename()
+                break
+
+    def _on_mod_renamed(self, mod_id: int, new_name: str) -> None:
+        """Persist the new mod name from inline rename."""
+        if self._db:
+            self._db.connection.execute("UPDATE mods SET name = ? WHERE id = ?", (new_name, mod_id))
+            self._db.connection.commit()
+
+    def _ctx_notes(self, mod_id: int) -> None:
+        """Edit notes via input dialog."""
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, TextEdit
+
+        mod = None
+        for m in self._mod_manager.list_mods(mod_type="paz"):
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if not mod:
+            return
+
+        class NotesBox(MessageBoxBase):
+            def __init__(self, notes, parent):
+                super().__init__(parent)
+                self.titleLabel = SubtitleLabel("Mod Notes")
+                self.input = TextEdit()
+                self.input.setPlainText(notes or "")
+                self.input.setMinimumHeight(120)
+                self.viewLayout.addWidget(self.titleLabel)
+                self.viewLayout.addWidget(self.input)
+
+        box = NotesBox(mod.get("notes", ""), self.window())
+        if box.exec():
+            notes = box.input.toPlainText().strip()
+            self._db.connection.execute("UPDATE mods SET notes = ? WHERE id = ?", (notes, mod_id))
+            self._db.connection.commit()
+            # Update the note icon and text on the card
+            for card in self._mod_cards:
+                if card.mod_id == mod_id:
+                    card.set_note_text(notes)
+                    break
+
+    def _ctx_update(self, mod_id: int) -> None:
+        """Update mod placeholder."""
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        InfoBar.info("Update", "Drag a new version onto the window to update this mod.",
+                     parent=self.window(), duration=3000, position=InfoBarPosition.TOP)
+
+    def _ctx_uninstall(self, mod_id: int) -> None:
+        """Uninstall a mod: disable it, trigger apply to revert game files, then remove."""
+        from qfluentwidgets import MessageBox
+
+        mod = None
+        for m in self._mod_manager.list_mods(mod_type="paz"):
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if not mod:
+            return
+
+        box = MessageBox(
+            "Uninstall Mod",
+            f'Remove "{mod["name"]}"?\n\n'
+            "This will revert its changes from game files and remove it from the database.",
+            self.window(),
+        )
+        if not box.exec():
+            return
+
+        # If the mod was enabled, disable it and signal the window to apply
+        # (which reverts the game files), then remove from DB after apply completes.
+        if mod["enabled"]:
+            self._mod_manager.set_enabled(mod_id, False)
+            self.refresh()
+            # Signal the window to handle the apply-then-remove flow
+            self.uninstall_requested.emit(mod_id)
+        else:
+            # Mod was already disabled — just remove from DB directly
+            self._mod_manager.remove_mod(mod_id)
+            self.refresh()
+
+    # ------------------------------------------------------------------
+    # Drag-reorder
+    # ------------------------------------------------------------------
+
+    def _on_order_changed(self, mod_ids: list[int]) -> None:
+        """Persist the new mod order after a drag-reorder within a folder.
+
+        Rebuilds the GLOBAL priority list from all folders (in display order)
+        so that cross-folder ordering is preserved.
+        """
+        if not self._mod_manager:
+            return
+        # Build global order: iterate all folder groups in layout order,
+        # collect mod_ids from each group's cards in their current order
+        global_order: list[int] = []
+        for i in range(self._scroll_layout.count()):
+            item = self._scroll_layout.itemAt(i)
+            widget = item.widget() if item else None
+            if isinstance(widget, FolderGroup):
+                for j in range(widget._content_layout.count()):
+                    card_item = widget._content_layout.itemAt(j)
+                    card = card_item.widget() if card_item else None
+                    if isinstance(card, ModCard):
+                        global_order.append(card.mod_id)
+
+        if global_order:
+            # Append any DB mods not present in the UI to preserve their priorities
+            all_db_ids = {m["id"] for m in self._mod_manager.list_mods(mod_type="paz")}
+            ui_ids = set(global_order)
+            for mid in sorted(all_db_ids - ui_ids):
+                global_order.append(mid)
+            self._mod_manager.reorder_mods(global_order)
+            # Update order labels on all cards
+            for i, mid in enumerate(global_order, start=1):
+                for card in self._mod_cards:
+                    if card.mod_id == mid:
+                        card._order_label.setText(f"#{i}")
+                        break
+
+    def _on_mod_moved_to_group(self, mod_id: int, group_id) -> None:
+        """Persist group change when a mod is dragged to a different group."""
+        if not self._db:
+            return
+        self._db.connection.execute(
+            "UPDATE mods SET group_id = ? WHERE id = ?", (group_id, mod_id)
+        )
+        self._db.connection.commit()
+
+    # ------------------------------------------------------------------
+    # Folder group management
+    # ------------------------------------------------------------------
+
+    def _load_folder_groups(self) -> list[dict]:
+        """Load folder groups from the database."""
+        if not self._db:
+            return []
+        try:
+            cursor = self._db.connection.execute(
+                "SELECT id, name, sort_order FROM mod_groups ORDER BY sort_order"
+            )
+            return [{"id": row[0], "name": row[1], "sort_order": row[2]} for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def _on_new_folder(self) -> None:
+        """Create a new folder group via dialog."""
+        if not self._db:
+            return
+
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, LineEdit
+
+        class NewFolderBox(MessageBoxBase):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.titleLabel = SubtitleLabel(tr("mod_list.new_folder"))
+                self.input = LineEdit()
+                self.input.setPlaceholderText(tr("mod_list.folder_name_placeholder"))
+                self.viewLayout.addWidget(self.titleLabel)
+                self.viewLayout.addWidget(self.input)
+
+        box = NewFolderBox(self.window())
+        if box.exec():
+            name = box.input.text().strip()
+            if not name:
+                return
+            # Get next sort_order
+            cursor = self._db.connection.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM mod_groups"
+            )
+            next_order = cursor.fetchone()[0]
+            self._db.connection.execute(
+                "INSERT INTO mod_groups (name, sort_order) VALUES (?, ?)",
+                (name, next_order),
+            )
+            self._db.connection.commit()
+            self.refresh()
+
+    def _on_group_header_menu(self, group_name: str, global_pos) -> None:
+        """Show context menu for a folder group header."""
+        if group_name == tr("mod_list.ungrouped"):
+            return  # No context menu for the default group
+
+        from qfluentwidgets import RoundMenu, Action, FluentIcon
+
+        # Find the group_id
+        group_id = None
+        for gid, fg in self._folder_groups.items():
+            if fg.group_name == group_name and gid is not None:
+                group_id = gid
+                break
+        if group_id is None:
+            return
+
+        menu = RoundMenu(parent=self)
+
+        menu.addAction(Action(FluentIcon.EDIT, "Rename Folder", triggered=lambda: self._rename_folder(group_id, group_name)))
+        menu.addSeparator()
+        menu.addAction(Action(FluentIcon.DELETE, "Delete Folder", triggered=lambda: self._delete_folder(group_id)))
+
+        menu.exec(global_pos)
+
+    def _rename_folder(self, group_id: int, current_name: str) -> None:
+        """Rename a folder group."""
+        if not self._db:
+            return
+
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, LineEdit
+
+        class RenameFolderBox(MessageBoxBase):
+            def __init__(self, name, parent):
+                super().__init__(parent)
+                self.titleLabel = SubtitleLabel("Rename Folder")
+                self.input = LineEdit()
+                self.input.setText(name)
+                self.input.selectAll()
+                self.viewLayout.addWidget(self.titleLabel)
+                self.viewLayout.addWidget(self.input)
+
+        box = RenameFolderBox(current_name, self.window())
+        if box.exec():
+            new_name = box.input.text().strip()
+            if new_name and new_name != current_name:
+                self._db.connection.execute(
+                    "UPDATE mod_groups SET name = ? WHERE id = ?",
+                    (new_name, group_id),
+                )
+                self._db.connection.commit()
+                self.refresh()
+
+    def _delete_folder(self, group_id: int) -> None:
+        """Delete a folder group and move its mods back to Ungrouped."""
+        if not self._db:
+            return
+
+        from qfluentwidgets import MessageBox
+
+        box = MessageBox(
+            "Delete Folder",
+            "Delete this folder? All mods in it will be moved to Ungrouped.",
+            self.window(),
+        )
+        if box.exec():
+            # Move mods to Ungrouped (group_id = NULL)
+            self._db.connection.execute(
+                "UPDATE mods SET group_id = NULL WHERE group_id = ?",
+                (group_id,),
+            )
+            # Delete the group
+            self._db.connection.execute(
+                "DELETE FROM mod_groups WHERE id = ?",
+                (group_id,),
+            )
+            self._db.connection.commit()
+            self.refresh()
+
+    def _move_mod_to_group(self, mod_id: int, group_id: int | None) -> None:
+        """Move a mod to a different folder group."""
+        if not self._db:
+            return
+        self._db.connection.execute(
+            "UPDATE mods SET group_id = ? WHERE id = ?",
+            (group_id, mod_id),
+        )
+        self._db.connection.commit()
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # Close config panel on outside click (Bug 13)
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._config_panel.isVisible():
+            panel_rect = self._config_panel.geometry()
+            if not panel_rect.contains(event.pos()):
+                self._config_panel.close_panel()
+        super().mousePressEvent(event)

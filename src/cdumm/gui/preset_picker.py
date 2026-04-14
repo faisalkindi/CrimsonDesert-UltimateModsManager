@@ -6,9 +6,18 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QHBoxLayout, QCheckBox, QScrollArea, QWidget,
+    QVBoxLayout, QListWidget, QListWidgetItem,
+    QHBoxLayout, QCheckBox, QScrollArea, QWidget,
     QFrame,
+)
+
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    MessageBoxBase,
+    PrimaryPushButton,
+    PushButton,
+    SubtitleLabel,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,33 +55,24 @@ def find_json_presets(path: Path) -> list[tuple[Path, dict]]:
     return presets
 
 
-class PresetPickerDialog(QDialog):
+class PresetPickerDialog(MessageBoxBase):
     """Dialog for choosing which JSON preset to import."""
 
     def __init__(self, presets: list[tuple[Path, dict]], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Choose Mod Preset")
-        self.setMinimumWidth(420)
-        self.resize(460, 340)
         self._presets = presets
         self.selected_path: Path | None = None
         self.selected_data: dict | None = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        self.titleLabel = SubtitleLabel("Choose Mod Preset")
+        self.viewLayout.addWidget(self.titleLabel)
 
-        header = QLabel("This mod has multiple presets.\nChoose which one to install:")
-        header.setStyleSheet("font-size: 13px; color: #ECEFF4;")
-        layout.addWidget(header)
+        header = BodyLabel("This mod has multiple presets.\nChoose which one to install:")
+        header.setWordWrap(True)
+        self.viewLayout.addWidget(header)
 
         self._list = QListWidget()
-        self._list.setStyleSheet(
-            "QListWidget { background: #1A1D23; border: 1px solid #2E3440; "
-            "border-radius: 6px; padding: 4px; }"
-            "QListWidget::item { padding: 6px 8px; }"
-            "QListWidget::item:selected { background: #2E3440; color: #D4A43C; }"
-        )
+        self._list.setMinimumHeight(200)
 
         for file_path, data in presets:
             name = data.get("name", file_path.stem)
@@ -81,7 +81,7 @@ class PresetPickerDialog(QDialog):
 
             label = name
             if desc:
-                label += f"  —  {desc[:60]}"
+                label += f"  --  {desc[:60]}"
             label += f"  ({patch_count} changes)"
 
             item = QListWidgetItem(label)
@@ -90,23 +90,15 @@ class PresetPickerDialog(QDialog):
 
         self._list.setCurrentRow(0)
         self._list.itemDoubleClicked.connect(self._on_double_click)
-        layout.addWidget(self._list)
+        self.viewLayout.addWidget(self._list)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        # Override default buttons
+        self.yesButton.setText("Install")
+        self.yesButton.clicked.disconnect()
+        self.yesButton.clicked.connect(self._on_accept)
+        self.cancelButton.setText("Cancel")
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedWidth(90)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-
-        ok_btn = QPushButton("Install")
-        ok_btn.setFixedWidth(90)
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self._on_accept)
-        btn_row.addWidget(ok_btn)
-
-        layout.addLayout(btn_row)
+        self.widget.setMinimumWidth(460)
 
     def _on_accept(self) -> None:
         item = self._list.currentItem()
@@ -223,7 +215,7 @@ def _detect_preset_groups(data: dict) -> dict[str, list[int]] | None:
     return None
 
 
-class TogglePickerDialog(QDialog):
+class TogglePickerDialog(MessageBoxBase):
     """Dialog for picking which labeled changes to apply from a JSON mod.
 
     Handles two patterns:
@@ -233,67 +225,57 @@ class TogglePickerDialog(QDialog):
 
     def __init__(self, data: dict, parent=None, previous_labels: list[str] | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Choose What to Apply")
-        self.setMinimumSize(450, 400)
-        self.resize(500, 500)
         self._data = data
         self._previous = set(previous_labels) if previous_labels else None
         self.selected_data: dict | None = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        self.titleLabel = SubtitleLabel("Choose What to Apply")
+        self.viewLayout.addWidget(self.titleLabel)
 
         name = data.get("name", "Mod")
         desc = data.get("description", "")
-        header = QLabel(f"<b>{name}</b>")
-        header.setStyleSheet("font-size: 14px; color: #ECEFF4;")
-        layout.addWidget(header)
+        name_label = BodyLabel(name)
+        font = name_label.font()
+        font.setPixelSize(14)
+        font.setBold(True)
+        name_label.setFont(font)
+        self.viewLayout.addWidget(name_label)
+
         if desc:
-            desc_label = QLabel(desc)
+            desc_label = CaptionLabel(desc)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: #788090; font-size: 11px;")
-            layout.addWidget(desc_label)
+            self.viewLayout.addWidget(desc_label)
 
         if self._previous:
-            prev_hint = QLabel(f"Previously selected: {len(self._previous)} items")
-            prev_hint.setStyleSheet("color: #D4A43C; font-size: 11px;")
-            layout.addWidget(prev_hint)
+            prev_hint = CaptionLabel(f"Previously selected: {len(self._previous)} items")
+            self.viewLayout.addWidget(prev_hint)
 
         # Detect which mode to use
         self._groups = _detect_preset_groups(data)
 
         if self._groups:
-            self._build_preset_mode(layout)
+            self._build_preset_mode()
         else:
-            self._build_toggle_mode(layout)
+            self._build_toggle_mode()
 
-        # Buttons
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedWidth(90)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        ok_btn = QPushButton("Apply Selected")
-        ok_btn.setFixedWidth(110)
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self._on_accept)
-        btn_row.addWidget(ok_btn)
-        layout.addLayout(btn_row)
+        # Override default buttons
+        self.yesButton.setText("Apply Selected")
+        self.yesButton.clicked.disconnect()
+        self.yesButton.clicked.connect(self._on_accept)
+        self.cancelButton.setText("Cancel")
 
-    def _build_preset_mode(self, layout):
+        self.widget.setMinimumWidth(500)
+
+    def _build_preset_mode(self):
         """Mutually exclusive presets — radio buttons."""
-        from PySide6.QtWidgets import QRadioButton, QGroupBox
+        from PySide6.QtWidgets import QRadioButton
 
-        hint = QLabel("Choose a preset:")
-        hint.setStyleSheet("color: #D8DEE9; font-size: 12px;")
-        layout.addWidget(hint)
+        hint = BodyLabel("Choose a preset:")
+        self.viewLayout.addWidget(hint)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            "QScrollArea { background: #1A1D23; border: 1px solid #2E3440; border-radius: 6px; }")
+        scroll.setMinimumHeight(250)
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setContentsMargins(12, 12, 12, 12)
@@ -316,7 +298,10 @@ class TogglePickerDialog(QDialog):
                         detail_parts.append(clean)
 
             radio = QRadioButton(f"{group_name}")
-            radio.setStyleSheet("color: #D4A43C; font-size: 13px; font-weight: bold; padding: 4px;")
+            radio_font = radio.font()
+            radio_font.setPixelSize(13)
+            radio_font.setBold(True)
+            radio.setFont(radio_font)
             # Pre-select based on previous choice
             if self._previous and any(l in self._previous for l in group_labels):
                 radio.setChecked(True)
@@ -332,8 +317,7 @@ class TogglePickerDialog(QDialog):
                     summary = ", ".join(detail_parts)
                 else:
                     summary = ", ".join(detail_parts[:MAX_SHOWN]) + f"  (+{len(detail_parts) - MAX_SHOWN} more)"
-                detail = QLabel("  " + summary)
-                detail.setStyleSheet("color: #788090; font-size: 11px; padding-left: 20px;")
+                detail = CaptionLabel("  " + summary)
                 detail.setWordWrap(True)
                 scroll_layout.addWidget(detail)
 
@@ -341,30 +325,28 @@ class TogglePickerDialog(QDialog):
 
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
-        layout.addWidget(scroll)
+        self.viewLayout.addWidget(scroll)
 
-    def _build_toggle_mode(self, layout):
+    def _build_toggle_mode(self):
         """Independent toggles — checkboxes."""
-        hint = QLabel("Check the items you want to apply:")
-        hint.setStyleSheet("color: #D8DEE9; font-size: 12px;")
-        layout.addWidget(hint)
+        hint = BodyLabel("Check the items you want to apply:")
+        self.viewLayout.addWidget(hint)
 
         sel_row = QHBoxLayout()
-        sel_all = QPushButton("Select All")
+        sel_all = PushButton("Select All")
         sel_all.setFixedWidth(90)
         sel_all.clicked.connect(self._select_all)
         sel_row.addWidget(sel_all)
-        desel_all = QPushButton("Deselect All")
-        desel_all.setFixedWidth(90)
+        desel_all = PushButton("Deselect All")
+        desel_all.setFixedWidth(100)
         desel_all.clicked.connect(self._deselect_all)
         sel_row.addWidget(desel_all)
         sel_row.addStretch()
-        layout.addLayout(sel_row)
+        self.viewLayout.addLayout(sel_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            "QScrollArea { background: #1A1D23; border: 1px solid #2E3440; border-radius: 6px; }")
+        scroll.setMinimumHeight(250)
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setContentsMargins(8, 8, 8, 8)
@@ -380,17 +362,15 @@ class TogglePickerDialog(QDialog):
                     cb.setChecked(label in self._previous)
                 else:
                     cb.setChecked(True)
-                cb.setStyleSheet("color: #D8DEE9; padding: 2px;")
                 scroll_layout.addWidget(cb)
                 self._checkboxes.append((cb, change))
 
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
-        layout.addWidget(scroll)
+        self.viewLayout.addWidget(scroll)
 
-        self._count_label = QLabel(f"{len(self._checkboxes)} items selected")
-        self._count_label.setStyleSheet("color: #788090; font-size: 11px;")
-        layout.addWidget(self._count_label)
+        self._count_label = CaptionLabel(f"{len(self._checkboxes)} items selected")
+        self.viewLayout.addWidget(self._count_label)
         for cb, _ in self._checkboxes:
             cb.toggled.connect(self._update_count)
 

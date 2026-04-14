@@ -1,56 +1,73 @@
 """Mod profile management dialog."""
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QVBoxLayout,
+    QHBoxLayout, QInputDialog, QListWidget, QListWidgetItem,
+    QVBoxLayout,
+)
+
+from qfluentwidgets import (
+    BodyLabel,
+    MessageBox,
+    MessageBoxBase,
+    PrimaryPushButton,
+    PushButton,
+    SubtitleLabel,
 )
 
 from cdumm.engine.profile_manager import ProfileManager
 from cdumm.storage.database import Database
 
 
-class ProfileDialog(QDialog):
+class ProfileDialog(MessageBoxBase):
     def __init__(self, db: Database, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Mod Profiles")
-        self.setMinimumSize(500, 400)
         self._db = db
         self._pm = ProfileManager(db)
         self._profile_loaded = False
 
-        layout = QHBoxLayout(self)
+        self.titleLabel = SubtitleLabel("Mod Profiles")
+        self.viewLayout.addWidget(self.titleLabel)
+
+        body = QHBoxLayout()
 
         # Left: profile list
         left = QVBoxLayout()
-        left.addWidget(QLabel("Saved Profiles:"))
+        left.addWidget(BodyLabel("Saved Profiles:"))
         self._list = QListWidget()
         self._list.currentRowChanged.connect(self._on_selection_changed)
         left.addWidget(self._list)
 
         btn_row = QHBoxLayout()
-        save_btn = QPushButton("Save Current")
+        save_btn = PushButton("Save Current")
         save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(save_btn)
-        delete_btn = QPushButton("Delete")
+        delete_btn = PushButton("Delete")
         delete_btn.clicked.connect(self._on_delete)
         btn_row.addWidget(delete_btn)
-        rename_btn = QPushButton("Rename")
+        rename_btn = PushButton("Rename")
         rename_btn.clicked.connect(self._on_rename)
         btn_row.addWidget(rename_btn)
         left.addLayout(btn_row)
 
-        load_btn = QPushButton("Load Selected Profile")
-        load_btn.setStyleSheet("font-weight: bold; color: #4CAF50;")
+        load_btn = PrimaryPushButton("Load Selected Profile")
         load_btn.clicked.connect(self._on_load)
         left.addWidget(load_btn)
 
-        layout.addLayout(left, 2)
+        body.addLayout(left, 2)
 
         # Right: preview
         right = QVBoxLayout()
-        right.addWidget(QLabel("Mods in profile:"))
+        right.addWidget(BodyLabel("Mods in profile:"))
         self._preview = QListWidget()
         right.addWidget(self._preview)
-        layout.addLayout(right, 3)
+        body.addLayout(right, 3)
+
+        self.viewLayout.addLayout(body)
+
+        # Override default buttons
+        self.yesButton.setText("Close")
+        self.cancelButton.hide()
+
+        self.widget.setMinimumWidth(550)
 
         self._refresh()
 
@@ -83,11 +100,12 @@ class ProfileDialog(QDialog):
             return
         pid = item.data(256)
         name = item.text()
-        reply = QMessageBox.question(
-            self, "Load Profile",
+        w = MessageBox(
+            "Load Profile",
             f"Load profile '{name}'?\n\nThis will change which mods are enabled/disabled.",
+            self,
         )
-        if reply == QMessageBox.StandardButton.Yes:
+        if w.exec():
             self._pm.load_profile(pid)
             self._profile_loaded = True
             self.accept()
@@ -96,9 +114,12 @@ class ProfileDialog(QDialog):
         item = self._list.currentItem()
         if not item:
             return
-        reply = QMessageBox.question(
-            self, "Delete Profile", f"Delete profile '{item.text()}'?")
-        if reply == QMessageBox.StandardButton.Yes:
+        w = MessageBox(
+            "Delete Profile",
+            f"Delete profile '{item.text()}'?",
+            self,
+        )
+        if w.exec():
             self._pm.delete_profile(item.data(256))
             self._refresh()
 
