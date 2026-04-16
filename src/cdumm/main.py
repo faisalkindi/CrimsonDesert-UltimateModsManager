@@ -89,21 +89,31 @@ def main() -> int:
     _lock_file = APP_DATA_DIR / ".gui_lock"
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        # Try to acquire exclusive lock on the file
-        import msvcrt
-        _lock_fh = open(_lock_file, "w")
-        msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
-        _lock_fh.write(str(os.getpid()))
-        _lock_fh.flush()
-        atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
-    except (OSError, IOError):
+        # Try to acquire exclusive lock on the file (Windows only)
+        if sys.platform == "win32":
+            import msvcrt
+            _lock_fh = open(_lock_file, "w")
+            msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+            _lock_fh.write(str(os.getpid()))
+            _lock_fh.flush()
+            atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
+        else:
+            # Unix: use fcntl file locking
+            import fcntl
+            _lock_fh = open(_lock_file, "w")
+            fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_fh.write(str(os.getpid()))
+            _lock_fh.flush()
+            atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
+    except (OSError, IOError, ImportError):
         # Another GUI instance holds the lock — bring it to front and exit
         logger.info("Another CDUMM instance is already running, exiting")
-        import ctypes
-        from cdumm import __version__
-        hwnd = ctypes.windll.user32.FindWindowW(None, f"CDUMM v{__version__}")
-        if hwnd:
-            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        if sys.platform == "win32":
+            import ctypes
+            from cdumm import __version__
+            hwnd = ctypes.windll.user32.FindWindowW(None, f"CDUMM v{__version__}")
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             ctypes.windll.user32.SetForegroundWindow(hwnd)
         return 0
 

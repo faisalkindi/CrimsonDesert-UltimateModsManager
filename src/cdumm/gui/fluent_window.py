@@ -2845,15 +2845,33 @@ class CdummWindow(FluentWindow):
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             return
         try:
-            subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
+            from cdumm.storage.game_finder import is_steam_install, is_xbox_install
+            if is_steam_install(self._game_dir):
+                # Launch through Steam for proper overlay/DRM
+                import os
+                os.startfile("steam://rungameid/2550430")
+            elif is_xbox_install(self._game_dir):
+                # Xbox Game Pass — launch through the Xbox app
+                import os
+                os.startfile("shell:AppsFolder\\PearlAbyss.CrimsonDesert_8wekyb3d8bbwe!Game")
+            else:
+                subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
             InfoBar.success(
                 title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             self.showMinimized()
         except Exception as e:
-            InfoBar.error(
-                title="Launch Failed", content=str(e),
-                duration=5000, position=InfoBarPosition.TOP, parent=self)
+            # Fallback: try direct exe launch
+            try:
+                subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
+                InfoBar.success(
+                    title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
+                    duration=3000, position=InfoBarPosition.TOP, parent=self)
+                self.showMinimized()
+            except Exception as e2:
+                InfoBar.error(
+                    title="Launch Failed", content=str(e2),
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     # ------------------------------------------------------------------
     # Tool dispatcher (removed -- tools are now sub-interface pages)
