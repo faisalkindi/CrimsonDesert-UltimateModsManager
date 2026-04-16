@@ -1,135 +1,94 @@
-# Crimson Desert Ultimate Mods Manager
+<![CDATA[<p align="center">
+  <img src="assets/cdumm-banner.png" alt="CDUMM Banner" width="100%">
+</p>
 
-A desktop mod manager for **Crimson Desert** that handles the game's PAZ/PAMT/PAPGT archive format. Install, manage, and safely combine multiple mods with automatic conflict detection, JSON patch merging, and one-click revert to vanilla.
+<p align="center">
+  <b>The only mod manager you need for Crimson Desert.</b><br>
+  Every format. Every platform. One click.
+</p>
 
-**Works with Steam.** Xbox Game Pass installations are detected but currently limited by platform restrictions (read-only game files).
+<p align="center">
+  <a href="https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases/latest"><img src="https://img.shields.io/github/v/release/faisalkindi/CrimsonDesert-UltimateModsManager?style=flat-square&color=2878D0&label=Download" alt="Download"></a>
+  <a href="https://ko-fi.com/kindiboy"><img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
+  <img src="https://img.shields.io/github/downloads/faisalkindi/CrimsonDesert-UltimateModsManager/total?style=flat-square&color=16A34A&label=Downloads" alt="Downloads">
+</p>
 
-![Screenshot](https://raw.githubusercontent.com/faisalkindi/CrimsonDesert-UltimateModsManager/master/screenshots/app.png?v=2)
+---
 
-## Features
+## How It Works
 
-### Drag-and-Drop Import
-Drop a mod onto the window and it's installed. Supports every mod format in the Crimson Desert modding scene:
+Your original game files are **never modified**. Mods are applied through an overlay directory. Reverting is instant.
+
+1. Download **CDUMM3.exe** and run it — no install needed
+2. Welcome wizard guides you through language, theme, and game folder setup
+3. Drop mods onto the window — drop many at once for fast batch import
+4. Click **Apply**
+
+> If something goes wrong, click **Fix Everything** to restore clean state.
+
+---
+
+## Supported Formats
 
 | Format | Description |
 |--------|-------------|
-| `.zip` / `.7z` | Archives containing modified game files or installer scripts |
-| Folders | Loose directories with modified PAZ/PAMT files |
-| `.json` | JSON byte-patch mods (compatible with [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113)) |
-| `manifest.json` + files | Crimson Browser loose-file mods — automatically repacked into PAZ |
-| `.bat` / `.py` | Script-based installers — runs in a visible console, captures changes automatically |
-| `.bsdiff` | Pre-generated binary patches (auto-detects target game file) |
-| `.asi` | Native ASI plugins (installed to `bin64/`) with bundled ASI Loader |
+| `.zip` / `.7z` / `.rar` | Archives — auto-extracted and detected |
+| Folders | Loose directories with PAZ/PAMT files or Crimson Browser mods |
+| `.json` | JSON byte-patch mods (compatible with JSON Mod Manager) |
+| `.dds` | DDS texture mods with full PATHC index registration |
+| `OG_*.xml` | XML full replacement mods |
+| `.asi` | ASI plugins — auto-detected, installed to `bin64/` |
+| `.bnk` | Wwise soundbank mods |
+| `.bat` / `.py` | Script installers — runs in console, captures changes |
+| `.bsdiff` / `.xdelta` | Binary patches |
+| Mixed archives | ZIPs with ASI + PAZ content — auto-separated |
 
-Batch import supported — drop multiple mods at once.
+---
 
-### JSON Patch Merging
-Multiple JSON mods that patch the **same game file** (e.g., Stamina mod + Fat Stacks both editing `iteminfo.pabgb`) are automatically merged at the decompressed content level. Non-overlapping patches from different mods compose perfectly. Overlapping bytes go to the higher-priority mod.
+## Key Features
 
-Works for both newly imported mods and mods imported in older versions (fallback three-way merge).
+### Performance
+- **Batch import** — drop dozens of mods at once, single-process import
+- **Fast apply** — overlay cache + Rust native engine, applies in seconds
+- **34 MB exe** — optimized build, no bloat
 
-### Entry-Level Script Mod Composition
-Script mods (`.bat`) are captured at the PAMT entry level — the manager identifies which individual game files changed inside each PAZ archive and stores the decompressed content. This means two script mods modifying different files in the same PAZ compose correctly instead of corrupting each other.
+### Mod Management
+- **Entry-level composition** — multiple mods safely modify the same PAZ file
+- **Semantic merging** — field-level diffing for 322 PABGB data table schemas
+- **Conflict detection** — see exactly what overlaps and why
+- **Override mode** — mod authors can declare conflict winners in `modinfo.json`
+- **Load order** — drag-and-drop reordering with folder groups
+- **Configurable mods** — preset picker for multi-variant mods, per-patch toggle
 
-### Delta-Based Patching
-Mods are stored as binary deltas against vanilla game files, not full file copies:
+### Game Integration
+- **Auto-detection** — finds your game on Steam, Epic Games, or Xbox Game Pass
+- **Update detection** — flags outdated mods after game patches
+- **ASI management** — full plugin page with version tracking, enable/disable, config editing
+- **Launch game** — start Crimson Desert directly from the manager
 
-- **Small on disk** — only the changed bytes are saved
-- **Composable** — multiple mods can modify the same PAZ file at different offsets
-- **Reversible** — vanilla files are always preserved and restorable
+### Interface
+- **Card-based UI** — Fluent Design with drag-reorder and folder groups
+- **Welcome wizard** — guided first-time setup with store logos
+- **Light & Dark themes** — choose during setup or switch anytime
+- **16 languages** — English, Deutsch, Español, Français, 한국어, 日本語, 简体中文, 繁體中文, العربية, Italiano, Polski, Русский, Türkçe, Українська, Bahasa Indonesia, Português
 
-The engine automatically selects between sparse patches (small, scattered changes), entry-level deltas (decompressed game files), and bsdiff4 (large modifications).
+### Safety
+- **Apply preview** — see what changes before modifying anything
+- **Verify game state** — scan all files, see vanilla vs modded
+- **One-click revert** — restores all files including PATHC and PAMTs
+- **Crash recovery** — atomic commits with `.pre-apply` markers
+- **Find Problem Mod** — delta debugging wizard finds which mod crashes the game
 
-### 3-Level Conflict Detection
-
-When two mods touch the same files, the manager detects the conflict and shows exactly what overlaps:
-
-| Level | What It Means | Action |
-|-------|--------------|--------|
-| **PAPGT** (metadata) | Mods modify PAMT in different directories | Auto-handled, no action needed |
-| **PAZ** (archive) | Same PAZ file, different byte ranges | Usually compatible — shown as info |
-| **Byte-Range** (data) | Overlapping byte ranges in the same file | Resolved by load order — winner shown in UI |
-
-**Dangerous overlaps are shown as a blocking warning before Apply** — lists every conflict pair and which mod wins.
-
-### Trust & Transparency
-- **Apply Preview** — see exactly what files will be changed before modifying anything
-- **Verify Game State** — scan all files and see what's vanilla vs modded
-- **Activity Log** — persistent, color-coded history of every action across sessions
-- **Post-apply verification** — confirms PAPGT/PAMT integrity after every Apply
-
-### Load Order & Priority
-- Drag mods up and down to set priority
-- Higher position = applied last = wins conflicts
-- Enable/disable individual mods without removing them
-- **Export/Import Mod List** — save and restore your entire setup (enabled state, load order, priorities)
-
-### One-Click Apply & Revert
-- **Apply** composes all enabled mods onto vanilla files in correct dependency order (PAZ first, then PAMT, then PAPGT)
-- **Revert to Vanilla** restores original game files from full vanilla backups
-- Crash recovery via `.pre-apply` markers if something goes wrong mid-apply
-
-### Game Update Detection
-- Detects game updates and hotfixes automatically (via Steam build ID + exe hash)
-- Warns about mods imported for a different game version
-- One-time migration on major updates — guides you through verify + rescan
-
-### Script Mod Support
-For mods distributed as installer scripts (`.bat` or `.py`):
-
-1. Drop the zip/script onto the manager
-2. A console window opens — interact with the installer normally
-3. The manager parses the PAMT to identify which game files changed, extracts and decompresses each entry, and stores the decompressed content
-4. The mod is now managed like any other — can be disabled, reordered, or reverted
-
-The manager passes `CDMM_GAME_DIR` as an environment variable so scripts can find the game directory automatically.
-
-### Mod Health Check
-Every mod is automatically validated before import:
-
-- **Duplicate PAMT paths** — detects overlay mods that add files already in another PAZ directory and handles them correctly (skips PAPGT entry to avoid crashes)
-- **Hash mismatches** — verifies PAMT and PAPGT integrity chains
-- **PAZ size errors** — catches when PAMT size fields don't match actual files
-- **Version mismatches** — warns if the mod was built for a different game version
-
-### Find Problem Mod (Delta Debugging)
-When a combination of mods crashes the game, the **Find Problem Mod** wizard uses the Delta Debugging algorithm (ddmin) to find the minimal set of mods causing the crash:
-
-- Tests subsets of your enabled mods automatically
-- You launch the game and report crash/no-crash after each test
-- Finds single bad mods, conflict pairs, and multi-mod interactions
-- Progress is saved — you can resume later if interrupted
-- Typically finds the culprit in 10-20 rounds
-
-### ASI Plugin Management
-A dedicated **ASI Plugins** tab for managing native DLL plugins:
-
-- Scans `bin64/` for installed `.asi` files
-- **Bundled ASI Loader** — auto-installs `winmm.dll` if missing
-- Install, update, uninstall, enable/disable plugins
-- Opens `.ini` config files in your text editor
-- Detects ASI Loader variants (winmm.dll, version.dll, dinput8.dll, dsound.dll)
-
-### Configurable Mods
-JSON mods with labeled presets (e.g., "x5 loot", "x10 loot", "x99 loot") show a toggle picker during import. Choose which variant you want. Configurable mods display a gear icon in the mod list.
-
-### Vanilla Snapshot
-On first launch, the manager takes a SHA-256 snapshot of all game files. This snapshot is used for:
-
-- Detecting changes made by script mods
-- Generating accurate deltas
-- Verifying game file integrity
-- Blocking snapshots on modded files (prevents dirty backups)
-
-### Bug Report
-Built-in diagnostic report generator that collects system info, installed mods, conflict status, database state, and recent log entries. Copy to clipboard or save as a file.
+---
 
 ## Installation
 
-### Option 1: Standalone Executable (Recommended)
-Download `CDUMM.exe` from the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page. No Python required. Just run it.
+### Standalone Executable (Recommended)
 
-### Option 2: Run from Source
+Download `CDUMM3.exe` from the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page. No Python required. Just run it.
+
+### Run from Source
+
 Requires Python 3.10+.
 
 ```bash
@@ -144,45 +103,58 @@ py -3 -m cdumm.main
 ```bash
 pip install pyinstaller
 pyinstaller cdumm.spec --noconfirm
+# Output: dist/CDUMM.exe — rename to CDUMM3.exe for distribution
 ```
 
-The exe is written to `dist/CDUMM.exe`.
-
-## How It Works
-
-Crimson Desert stores game data in PAZ archives, indexed by PAMT files, with PAPGT as a hash registry. This manager:
-
-1. **Snapshots** vanilla game files on first run
-2. **Imports** mods by diffing modified files against vanilla, storing only the binary delta (or decompressed entry content for script/JSON mods)
-3. **Merges** JSON patches from multiple mods at the decompressed content level (three-way merge against vanilla)
-4. **Composes** all enabled mod deltas onto vanilla in priority order when you click Apply (PAZ first, then PAMT, then PAPGT)
-5. **Rebuilds** the PAPGT integrity chain so the game accepts the modified files
-6. **Commits** atomically — all files are staged and swapped in one operation
-
-Mod data is stored in `<GameDir>/CDMods/`:
-- `vanilla/` — full backups of PAMT files, byte-range backups for PAZ files
-- `deltas/` — binary patches and entry-level deltas for each mod
-
-App config is stored in `%LOCALAPPDATA%\cdumm\cdumm.db`.
+---
 
 ## Requirements
 
 - Windows 10/11
-- Crimson Desert (Steam version recommended, Xbox Game Pass detected but limited)
+- Crimson Desert (Steam, Epic Games Store, or Xbox Game Pass)
 
-## Support
+---
 
-If you find this useful, consider supporting development:
+## For Mod Authors
 
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kindiboy)
+CDUMM supports these fields in `modinfo.json`:
+
+```json
+{
+  "name": "My Mod",
+  "version": "1.0",
+  "author": "You",
+  "description": "What it does",
+  "conflict_mode": "override",
+  "target_language": "ko"
+}
+```
+
+- `conflict_mode: "override"` — your mod always wins conflicts regardless of load order
+- `target_language` — marks the mod as a language/localization mod, shows a badge
+
+JSON patches support `editable_value` metadata for inline value editing in the config panel.
+
+---
 
 ## Credits
 
-- **Lazorr** — [Crimson Desert Unpacker](https://www.nexusmods.com/crimsondesert/mods/62) — PAZ parsing and repacking tools that CDUMM's archive pipeline is built on
-- **PhorgeForge** — [JSON Mod Manager](https://www.nexusmods.com/crimsondesert/mods/113) — JSON byte-patch mod format, natively supported by CDUMM
-- **993499094** — [Crimson Desert QT Mod Manager](https://www.nexusmods.com/crimsondesert/mods/218) — Hard link deployment approach and modinfo.json format
-- **callmeslinkycd** — [Crimson Desert PATHC Tool](https://www.nexusmods.com/crimsondesert/mods/396) — PATHC texture index parser and repacker that CDUMM's DDS texture mod support is built on
+- **Lazorr** — PAZ parsing and repacking tools
+- **PhorgeForge** — JSON byte-patch mod format
+- **993499094** — PATHC texture format reference
+- **callmeslinkycd** — Crimson Desert PATHC Tool
+- **p1xel8ted** — Performance analysis
+- **HaZt** — German translation
+
+---
+
+## Support
+
+If CDUMM saves you time, consider supporting development:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kindiboy)
 
 ## License
 
 MIT
+]]>
