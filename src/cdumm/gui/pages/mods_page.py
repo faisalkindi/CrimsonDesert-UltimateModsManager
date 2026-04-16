@@ -34,15 +34,7 @@ from cdumm.i18n import tr
 logger = logging.getLogger(__name__)
 
 def _dbg(msg: str) -> None:
-    """No-op — debug logging removed for release."""
     pass
-    if not _DBG_PATH:
-        return
-    try:
-        with open(_DBG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
-    except Exception:
-        pass
 
 def _dbg_status(action: str, mod_id: int, old_status: str, new_status: str,
                 reason: str = "") -> None:
