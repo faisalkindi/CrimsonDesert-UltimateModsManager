@@ -33,21 +33,9 @@ from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
 
-_DBG_PATH = None
 def _dbg(msg: str) -> None:
-    """Write debug line to cdumm_gui_debug.log."""
-    global _DBG_PATH
-    import time
-    if _DBG_PATH is None:
-        import os
-        from pathlib import Path
-        dl = Path(os.environ.get("USERPROFILE", "C:/Users")) / "Downloads" / "cdumm_gui_debug.log"
-        try:
-            with open(dl, "w", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%H:%M:%S')} DEBUG LOG STARTED\n")
-            _DBG_PATH = str(dl)
-        except Exception:
-            _DBG_PATH = ""
+    """No-op — debug logging removed for release."""
+    pass
     if not _DBG_PATH:
         return
     try:
