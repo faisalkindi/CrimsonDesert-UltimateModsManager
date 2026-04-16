@@ -1,4 +1,4 @@
-<![CDATA[<p align="center">
+<p align="center">
   <img src="assets/cdumm-banner.png" alt="CDUMM Banner" width="100%">
 </p>
 
@@ -157,4 +157,3 @@ If CDUMM saves you time, consider supporting development:
 ## License
 
 MIT
-]]>
