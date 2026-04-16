@@ -33,6 +33,36 @@ from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
 
+_DBG_PATH = None
+def _dbg(msg: str) -> None:
+    """Write debug line to cdumm_gui_debug.log."""
+    global _DBG_PATH
+    import time
+    if _DBG_PATH is None:
+        import os
+        from pathlib import Path
+        dl = Path(os.environ.get("USERPROFILE", "C:/Users")) / "Downloads" / "cdumm_gui_debug.log"
+        try:
+            with open(dl, "w", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} DEBUG LOG STARTED\n")
+            _DBG_PATH = str(dl)
+        except Exception:
+            _DBG_PATH = ""
+    if not _DBG_PATH:
+        return
+    try:
+        with open(_DBG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+def _dbg_status(action: str, mod_id: int, old_status: str, new_status: str,
+                reason: str = "") -> None:
+    """Log every status change with context."""
+    changed = "CHANGED" if old_status != new_status else "NO-CHANGE"
+    _dbg(f"STATUS {changed}: [{action}] id={mod_id} '{old_status}' → '{new_status}'"
+         f"{' reason=' + reason if reason else ''}")
+
 
 # ======================================================================
 # ModsPage
@@ -71,6 +101,7 @@ class ModsPage(QWidget):
         self._folder_groups: dict[int | None, FolderGroup] = {}  # group_id -> FolderGroup
         self._last_clicked_index: int | None = None  # for Shift+Click range select
         self._initial_load_done = False  # staggered animation only on first load
+        self._applied_state: dict[int, bool] = {}  # mod_id -> was enabled at last Apply
 
         self._build_ui()
 
@@ -119,7 +150,7 @@ class ModsPage(QWidget):
         select_row = QHBoxLayout()
         select_row.setContentsMargins(14, 0, 0, 0)
         self._select_all_cb = CheckBox(tr("mod_list.select_all"))
-        self._select_all_cb.setTristate(True)
+        self._select_all_cb.setTristate(False)
         self._select_all_cb.clicked.connect(self._on_select_all)
         select_row.addWidget(self._select_all_cb)
         select_row.addStretch()
@@ -148,12 +179,63 @@ class ModsPage(QWidget):
         self._scroll.setScrollAnimation(Qt.Orientation.Vertical, 400, QEasingCurve.Type.OutQuint)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(SmoothScrollArea.Shape.NoFrame)
+        self._replace_scrollbar()
 
         self._scroll_content = QWidget()
         self._scroll_layout = QVBoxLayout(self._scroll_content)
         self._scroll_layout.setContentsMargins(0, 0, 0, 0)
         self._scroll_layout.setSpacing(4)
 
+        # ── Empty state hero (shown when no mods installed) ──
+        from qfluentwidgets import SubtitleLabel, CaptionLabel, CardWidget
+        from PySide6.QtGui import QFont
+
+        self._empty_hero = CardWidget(self._scroll_content)
+        hero_layout = QVBoxLayout(self._empty_hero)
+        hero_layout.setContentsMargins(40, 60, 40, 60)
+        hero_layout.setSpacing(16)
+        hero_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        hero_icon = SubtitleLabel(tr("mods.drop_title"), self._empty_hero)
+        hif = hero_icon.font()
+        hif.setPixelSize(48)
+        hif.setWeight(QFont.Weight.Bold)
+        hero_icon.setFont(hif)
+        hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(hero_icon,
+            "SubtitleLabel { color: #2878D0; }",
+            "SubtitleLabel { color: #5CB8F0; }")
+        hero_layout.addWidget(hero_icon)
+
+        hero_title = SubtitleLabel(tr("mods.drop_subtitle"), self._empty_hero)
+        htf = hero_title.font()
+        htf.setPixelSize(22)
+        htf.setWeight(QFont.Weight.Bold)
+        hero_title.setFont(htf)
+        hero_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(hero_title)
+
+        hero_hint = CaptionLabel(
+            tr("mods.drop_formats"), self._empty_hero)
+        hhf = hero_hint.font()
+        hhf.setPixelSize(14)
+        hero_hint.setFont(hhf)
+        hero_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(hero_hint)
+
+        hero_sub = CaptionLabel(
+            tr("mods.drop_hint"), self._empty_hero)
+        hsf = hero_sub.font()
+        hsf.setPixelSize(12)
+        hero_sub.setFont(hsf)
+        hero_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        setCustomStyleSheet(hero_sub,
+            "CaptionLabel { color: #A0AEC0; }",
+            "CaptionLabel { color: #718096; }")
+        hero_layout.addWidget(hero_sub)
+
+        self._scroll_layout.addWidget(self._empty_hero)
         self._scroll_layout.addStretch()
 
         self._scroll.setWidget(self._scroll_content)
@@ -172,6 +254,42 @@ class ModsPage(QWidget):
         body.addWidget(self._config_panel, 0)
 
         main.addLayout(body, 1)
+
+    # ------------------------------------------------------------------
+    # Scrollbar replacement
+    # ------------------------------------------------------------------
+
+    def _replace_scrollbar(self) -> None:
+        """Replace the QFluentWidgets scrollbar with our forked version
+        that supports asymmetric top padding to align with mod cards."""
+        from cdumm.gui.components.scroll_bar import CdummScrollBar
+
+        delegate = self._scroll.delegate
+
+        # Tear down the old vertical scrollbar — disconnect specific slots only
+        # (disconnecting all slots breaks the native scrollbar's other connections)
+        old = delegate.vScrollBar
+        try:
+            old.partnerBar.rangeChanged.disconnect(old.setRange)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            old.partnerBar.valueChanged.disconnect(old._onValueChanged)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            old.valueChanged.disconnect(old.partnerBar.setValue)
+        except (RuntimeError, TypeError):
+            pass
+        self._scroll.removeEventFilter(old)
+        old.hide()
+        old.setParent(None)
+        old.deleteLater()
+
+        # Create replacement with top padding to skip folder group header
+        new_bar = CdummScrollBar(Qt.Vertical, self._scroll, top_padding=51)
+        delegate.vScrollBar = new_bar
+        new_bar.setScrollAnimation(400, QEasingCurve.Type.OutQuint)
 
     # ------------------------------------------------------------------
     # Engine wiring
@@ -199,10 +317,16 @@ class ModsPage(QWidget):
 
     def refresh(self) -> None:
         """Reload mods, rebuild cards, refresh conflicts, update stats."""
+        _dbg(f"REFRESH: _applied_state has {len(self._applied_state)} entries, "
+             f"{sum(1 for v in self._applied_state.values() if v)} applied")
         self._build_mod_cards()
         self._build_conflict_cards()
         self._update_stats()
-        self._sync_select_all()
+        # Sync select-all to match actual card state
+        all_checked = bool(self._mod_cards) and all(c._checkbox.isChecked() for c in self._mod_cards)
+        self._select_all_cb.blockSignals(True)
+        self._select_all_cb.setChecked(bool(all_checked))
+        self._select_all_cb.blockSignals(False)
 
     def retranslate_ui(self) -> None:
         """Update text with current translations."""
@@ -250,6 +374,7 @@ class ModsPage(QWidget):
             fg.mod_moved_to_group.connect(self._on_mod_moved_to_group)
             fg.header_context_menu.connect(self._on_group_header_menu)
             fg.select_all_in_group.connect(self._on_select_all_in_group)
+            fg.folder_dropped.connect(self._on_folder_reorder)
             self._folder_groups[g["id"]] = fg
             self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, fg)
 
@@ -266,16 +391,34 @@ class ModsPage(QWidget):
 
         # Track counts per group
         group_counts: dict[int | None, int] = {gid: 0 for gid in self._folder_groups}
+        from datetime import datetime, timedelta
+        _now = datetime.now()
 
         for order, mod in enumerate(mods, start=1):
             mod_id = mod["id"]
 
+            # Check if recently imported (< 24 hours)
+            is_new = False
+            import_date_str = mod.get("import_date")
+            if import_date_str:
+                try:
+                    import_dt = datetime.strptime(import_date_str, "%Y-%m-%d %H:%M:%S")
+                    is_new = (_now - import_dt) < timedelta(hours=2)
+                except ValueError:
+                    pass
+
             # Fast status from DB (no filesystem checks)
-            # active = enabled + applied, loaded = enabled + not yet applied, unloaded = disabled
-            if not mod["enabled"]:
-                status = "unloaded"
+            # Two-badge status: game state + pending action
+            applied = self._applied_state.get(mod_id) is True
+            game_status = "active" if applied else "inactive"
+            if mod["enabled"] and not applied:
+                pending = "Apply to Activate"
+            elif not mod["enabled"] and applied:
+                pending = "Apply to Deactivate"
             else:
-                status = "loaded"  # will become "active" after Apply
+                pending = None
+            status = game_status
+            _dbg(f"Card build: id={mod_id} name={mod['name'][:20]} enabled={mod['enabled']} applied={applied} → game={game_status} pending={pending}")
 
             # Check if configurable
             has_config = bool(mod.get("configurable"))
@@ -283,19 +426,51 @@ class ModsPage(QWidget):
                 json_src = self._mod_manager.get_json_source(mod_id)
                 has_config = json_src is not None
 
+            # Extract version: drop_name (clean) → DB version → ?
+            # drop_name has cleaner naming from NexusMods/folder names
+            # DB version may contain internal metadata like "1.1_ArmorPatched"
+            import re as _re
+            from cdumm.gui.fluent_window import _parse_nexus_filename
+            display_ver = ""
+            dn = mod.get("drop_name") or ""
+            if dn:
+                _nid, _nver = _parse_nexus_filename(dn)
+                if _nid and _nver:
+                    display_ver = _nver
+                else:
+                    _vm = _re.search(r'[vV](\d+(?:\.\d+)*)', dn)
+                    if _vm:
+                        display_ver = _vm.group(1)
+            if not display_ver:
+                # Fall back to DB version, but clean it up
+                raw = mod.get("version") or ""
+                # Strip internal metadata suffixes (e.g. "1.1_ArmorPatched" → "1.1")
+                _vm = _re.match(r'(\d+(?:\.\d+)*)', raw)
+                display_ver = _vm.group(1) if _vm else raw
+            if not display_ver:
+                display_ver = "\u2014"
+            # Truncate if still too long for the pill
+            if len(display_ver) > 7:
+                display_ver = display_ver[:6] + "…"
+
             card = ModCard(
                 mod_id=mod_id,
                 order=order,
                 name=mod["name"],
-                author=mod.get("author") or "Unknown",
-                version=mod.get("version") or "1.0",
+                author=mod.get("author") if mod.get("author") and mod.get("author") != "Unknown" else "",
+                version=display_ver,
                 status=status,
                 file_count=file_counts.get(mod_id, 0),
                 has_config=has_config,
                 has_notes=bool(mod.get("notes")),
+                is_new=is_new,
+                enabled=bool(mod["enabled"]),
+                target_language=mod.get("target_language"),
+                conflict_mode=mod.get("conflict_mode", "normal"),
                 parent=self._scroll_content,
             )
             card.set_note_text(mod.get("notes") or "")
+            card.set_pending(pending)
             card.toggled.connect(self._on_mod_toggled)
             card.config_clicked.connect(self._on_config_clicked)
             card.context_menu_requested.connect(self._show_mod_context_menu)
@@ -315,8 +490,18 @@ class ModsPage(QWidget):
         for gid, fg in self._folder_groups.items():
             fg.set_count(group_counts.get(gid, 0))
 
+        # Show/hide empty state hero
+        if hasattr(self, '_empty_hero'):
+            if self._mod_cards:
+                self._empty_hero.hide()
+            else:
+                # Re-add to layout if it was removed during cleanup
+                if self._scroll_layout.indexOf(self._empty_hero) < 0:
+                    self._scroll_layout.insertWidget(0, self._empty_hero)
+                self._empty_hero.show()
+
         # Staggered entrance animation only on first load
-        if not self._initial_load_done:
+        if not self._initial_load_done and self._mod_cards:
             from cdumm.gui.components.card_animations import staggered_fade_in
             self._entrance_anim = staggered_fade_in(self._mod_cards)
             self._initial_load_done = True
@@ -336,10 +521,19 @@ class ModsPage(QWidget):
     def _update_stats(self) -> None:
         """Count totals and update the summary bar."""
         total = len(self._mod_cards)
-        loaded = sum(1 for c in self._mod_cards if c._checkbox.isChecked())
-        unloaded = total - loaded
-        installed = 0  # TODO: count mods that are actually applied to game
-        self._summary_bar.update_stats(total, installed, loaded, unloaded)
+        active = 0
+        inactive = 0
+        pending = 0
+        for c in self._mod_cards:
+            is_applied = self._applied_state.get(c.mod_id) is True
+            checked = c._checkbox.isChecked()
+            if is_applied and checked:
+                active += 1
+            elif not is_applied and not checked:
+                inactive += 1
+            else:
+                pending += 1  # needs Apply (either add or remove)
+        self._summary_bar.update_stats(total, active, pending, inactive)
 
     # ------------------------------------------------------------------
     # Search
@@ -353,63 +547,83 @@ class ModsPage(QWidget):
                 card.setVisible(True)
             else:
                 card.setVisible(needle in card._name_label.text().lower())
-        self._sync_select_all()
 
     # ------------------------------------------------------------------
     # Select all
     # ------------------------------------------------------------------
 
     def _on_select_all(self) -> None:
-        """Toggle all visible mod cards when select-all is clicked."""
+        """Toggle all visible mod cards. Simple: checked=enable all, unchecked=disable all."""
         checked = self._select_all_cb.isChecked()
+        _dbg(f"SELECT ALL: checked={checked}")
+        self._pause_db_watcher()
         for card in self._mod_cards:
             if card.isVisible():
                 card.set_checked(checked)
-        if self._mod_manager:
-            for card in self._mod_cards:
-                if card.isVisible():
+                if self._mod_manager:
                     self._mod_manager.set_enabled(card.mod_id, checked)
-        total = len(self._mod_cards)
-        active = sum(1 for c in self._mod_cards if c._checkbox.isChecked())
-        self._summary_bar.update_stats(total, 0, active, total - active)
+                is_applied = self._applied_state.get(card.mod_id) is True
+                if checked and not is_applied:
+                    card.set_pending("Apply to Activate")
+                elif not checked and is_applied:
+                    card.set_pending("Apply to Deactivate")
+                else:
+                    card.set_pending(None)
+        self._update_stats()
+        self._resume_db_watcher()
 
     def _sync_select_all(self) -> None:
-        """Update select-all checkbox to match current card states."""
+        """Update select-all checkbox to match current card states. Two states only."""
         visible = [c for c in self._mod_cards if c.isVisible()]
-        if not visible:
-            self._select_all_cb.blockSignals(True)
-            self._select_all_cb.setCheckState(Qt.CheckState.Unchecked)
-            self._select_all_cb.blockSignals(False)
-            return
-
-        checked_count = sum(1 for c in visible if c._checkbox.isChecked())
+        all_checked = bool(visible) and all(c._checkbox.isChecked() for c in visible)
         self._select_all_cb.blockSignals(True)
-        if checked_count == 0:
-            self._select_all_cb.setCheckState(Qt.CheckState.Unchecked)
-        elif checked_count == len(visible):
-            self._select_all_cb.setCheckState(Qt.CheckState.Checked)
-        else:
-            self._select_all_cb.setCheckState(Qt.CheckState.PartiallyChecked)
+        self._select_all_cb.setChecked(bool(all_checked))
         self._select_all_cb.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Mod toggle
     # ------------------------------------------------------------------
 
+    def _pause_db_watcher(self) -> None:
+        """Pause DB file watcher to prevent our own writes from triggering refresh."""
+        window = self.window()
+        if hasattr(window, '_db_watcher_paused'):
+            window._db_watcher_paused = True
+
+    def _resume_db_watcher(self) -> None:
+        """Resume DB file watcher after a delay, resetting mtime so poll doesn't re-trigger."""
+        window = self.window()
+        if hasattr(window, '_unpause_db_watcher'):
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, window._unpause_db_watcher)
+
     def _on_mod_toggled(self, mod_id: int, enabled: bool) -> None:
         """Handle a mod being enabled/disabled via its card checkbox."""
+        _dbg(f"TOGGLE: id={mod_id} enabled={enabled}")
+        self._pause_db_watcher()
         if self._mod_manager:
             self._mod_manager.set_enabled(mod_id, enabled)
 
-        # Update just the toggled card's badge (no full rebuild)
-        new_status = "loaded" if enabled else "unloaded"
+        # Determine pending action based on applied state
+        is_applied = self._applied_state.get(mod_id) is True
+
+        # Update the card's badges
         for card in self._mod_cards:
             if card.mod_id == mod_id:
-                card.set_status(new_status)
+                # Game state badge doesn't change on toggle — it reflects reality
+                # Pending badge shows what Apply will do
+                if enabled and not is_applied:
+                    pending = "Apply to Activate"
+                elif not enabled and is_applied:
+                    pending = "Apply to Deactivate"
+                else:
+                    pending = None
+                _dbg(f"TOGGLE: id={mod_id} enabled={enabled} applied={is_applied} → pending={pending}")
+                card.set_pending(pending)
                 break
 
-        self._sync_select_all()
         self._update_stats()
+        self._resume_db_watcher()
 
     # ------------------------------------------------------------------
     # Ctrl+Click / Shift+Click selection
@@ -470,8 +684,13 @@ class ModsPage(QWidget):
             c.set_checked(new_state)
             if self._mod_manager:
                 self._mod_manager.set_enabled(c.mod_id, new_state)
-                c.set_status("loaded" if new_state else "unloaded")
-        self._sync_select_all()
+                is_applied = self._applied_state.get(c.mod_id) is True
+                if new_state and not is_applied:
+                    c.set_pending("Apply to Activate")
+                elif not new_state and is_applied:
+                    c.set_pending("Apply to Deactivate")
+                else:
+                    c.set_pending(None)
         self._update_stats()
 
     def _deselect_all_cards(self) -> None:
@@ -511,11 +730,49 @@ class ModsPage(QWidget):
 
         file_counts = self._mod_manager.get_file_counts()
 
-        # Build patches list from json_source using FLAT change-level indices
-        # (matching how json_patch_handler.py consumes disabled_patches)
+        # Check if mod has source_path with multiple presets — show them in side panel
         patches: list[dict] = []
+        self._preset_paths: list[tuple] = []  # (file_path, data) for preset apply
+        source_path = mod.get("source_path")
+        if source_path:
+            from pathlib import Path as _Path
+            sp = _Path(source_path)
+            if sp.exists() and sp.is_dir():
+                try:
+                    from cdumm.gui.preset_picker import find_json_presets
+                    presets = find_json_presets(sp)
+                    if len(presets) > 1:
+                        # Get current json_source to mark which preset is active
+                        current_json = self._mod_manager.get_json_source(mod_id)
+                        current_name = ""
+                        if current_json:
+                            try:
+                                import json as _json
+                                with open(current_json, "r", encoding="utf-8") as _f:
+                                    current_name = _json.load(_f).get("name", "")
+                            except Exception:
+                                pass
+
+                        self._preset_paths = presets
+                        for fp, data in presets:
+                            name = data.get("name", fp.stem)
+                            desc = data.get("description", "")
+                            change_count = sum(len(p.get("changes", [])) for p in data.get("patches", []))
+                            is_active = (name == current_name) if current_name else False
+                            label = name
+                            if desc:
+                                label += f" — {desc[:50]}"
+                            patches.append({
+                                "label": label,
+                                "description": f"{change_count} changes" + (" (active)" if is_active else ""),
+                                "enabled": is_active,
+                            })
+                except Exception as e:
+                    logger.debug("Preset load failed: %s", e)
+
+        # If no presets found, build per-change toggles from json_source
         json_source = self._mod_manager.get_json_source(mod_id)
-        if json_source:
+        if not patches and json_source:
             try:
                 import json
                 with open(json_source, "r", encoding="utf-8") as f:
@@ -557,8 +814,8 @@ class ModsPage(QWidget):
         self._config_panel.show_mod(
             mod_id=mod_id,
             name=mod["name"],
-            author=mod.get("author") or "Unknown",
-            version=mod.get("version") or "1.0",
+            author=mod.get("author") if mod.get("author") and mod.get("author") != "Unknown" else "",
+            version=mod.get("version") or "\u2014",
             status=status,
             file_count=file_counts.get(mod_id, 0),
             patches=patches,
@@ -566,16 +823,57 @@ class ModsPage(QWidget):
         )
 
     def _on_config_apply(self, mod_id: int, patches: list) -> None:
-        """Apply config panel changes -- save disabled patch indices."""
+        """Apply config panel changes — either switch preset or save disabled indices."""
         if not self._mod_manager:
             return
 
+        # If this is a preset selection (from _preset_paths), reimport with chosen preset
+        if hasattr(self, '_preset_paths') and self._preset_paths:
+            # Find which preset was enabled (toggled ON)
+            for i, p in enumerate(patches):
+                if p["enabled"] and i < len(self._preset_paths):
+                    fp, data = self._preset_paths[i]
+                    # Get current mod info for state restoration
+                    mod = None
+                    for m in self._mod_manager.list_mods():
+                        if m["id"] == mod_id:
+                            mod = m
+                            break
+                    if mod:
+                        old_priority = mod.get("priority")
+                        old_enabled = mod.get("enabled")
+                        source_path = mod.get("source_path")
+                        self._mod_manager.remove_mod(mod_id)
+                        window = self.window()
+                        window._update_priority = old_priority
+                        window._update_enabled = old_enabled
+                        window._configurable_source = source_path
+                        window._launch_import_worker(fp)
+                    self._config_panel.close_panel()
+                    self._preset_paths = []
+                    return
+            self._preset_paths = []
+            self._config_panel.close_panel()
+            return
+
+        # Standard per-change toggle mode
         disabled_indices = [
-            i for i, p in enumerate(patches) if not p["enabled"]
+            i for i, p in enumerate(patches)
+            if not p.get("enabled", True) and "value" not in p
         ]
         self._mod_manager.set_disabled_patches(mod_id, disabled_indices)
+
+        # Save custom values from inline editing
+        custom_values = {}
+        for i, p in enumerate(patches):
+            if "value" in p and p["value"] is not None:
+                custom_values[str(i)] = p["value"]
+        if custom_values:
+            self._mod_manager.set_custom_values(mod_id, custom_values)
+
         self._config_panel.close_panel()
-        logger.info("Config applied for mod %d: disabled=%s", mod_id, disabled_indices)
+        logger.info("Config applied for mod %d: disabled=%s, custom_values=%s",
+                     mod_id, disabled_indices, custom_values or "none")
 
     def _on_config_closed(self) -> None:
         """Stub for when the config panel closes."""
@@ -645,7 +943,7 @@ class ModsPage(QWidget):
             menu.addAction(Action(FluentIcon.EDIT, "Rename", triggered=lambda: self._ctx_rename(mod_id)))
 
             # Notes
-            menu.addAction(Action(FluentIcon.PENCIL_INK, "Edit Notes" if mod.get("notes") else "Add Notes",
+            menu.addAction(Action(FluentIcon.PENCIL_INK, tr("mods.edit_notes") if mod.get("notes") else tr("mods.add_notes"),
                                   triggered=lambda: self._ctx_notes(mod_id)))
 
             # Move to folder submenu
@@ -681,31 +979,45 @@ class ModsPage(QWidget):
         menu.exec(global_pos)
 
     def _ctx_toggle(self, mod_id: int, enabled: bool) -> None:
+        self._pause_db_watcher()
         self._mod_manager.set_enabled(mod_id, enabled)
+        is_applied = self._applied_state.get(mod_id) is True
         for card in self._mod_cards:
             if card.mod_id == mod_id:
                 card.set_checked(enabled)
-                card.set_status("loaded" if enabled else "unloaded")
+                if enabled and not is_applied:
+                    card.set_pending("Apply to Activate")
+                elif not enabled and is_applied:
+                    card.set_pending("Apply to Deactivate")
+                else:
+                    card.set_pending(None)
                 break
-        self._sync_select_all()
         self._update_stats()
+        self._resume_db_watcher()
 
     def _ctx_batch_toggle(self, mod_ids: list[int], enabled: bool) -> None:
         """Enable or disable multiple selected mods."""
+        self._pause_db_watcher()
         for mid in mod_ids:
             self._mod_manager.set_enabled(mid, enabled)
+            is_applied = self._applied_state.get(mid) is True
             for card in self._mod_cards:
                 if card.mod_id == mid:
                     card.set_checked(enabled)
-                    card.set_status("loaded" if enabled else "unloaded")
+                    if enabled and not is_applied:
+                        card.set_pending("Apply to Activate")
+                    elif not enabled and is_applied:
+                        card.set_pending("Apply to Deactivate")
+                    else:
+                        card.set_pending(None)
                     break
-        self._sync_select_all()
         self._update_stats()
+        self._resume_db_watcher()
 
     def _ctx_batch_uninstall(self, mod_ids: list[int]) -> None:
         """Uninstall multiple selected mods — disables first, reverts via Apply, then removes."""
         from qfluentwidgets import MessageBox
-        box = MessageBox("Uninstall Mods", f"Remove {len(mod_ids)} selected mods? This cannot be undone.", self.window())
+        box = MessageBox(tr("mods.uninstall_title"), tr("mods.uninstall_confirm", count=len(mod_ids)), self.window())
         if not box.exec():
             return
 
@@ -725,14 +1037,18 @@ class ModsPage(QWidget):
         for mid in disabled_ids:
             self._mod_manager.remove_mod(mid)
 
+        if not enabled_ids:
+            # All mods were disabled — just refresh
+            self.refresh()
+            return
+
         if enabled_ids:
             # Disable enabled mods and trigger apply to revert their game files
             for mid in enabled_ids:
                 self._mod_manager.set_enabled(mid, False)
             # Store IDs for removal after apply finishes
             window = self.window()
-            if hasattr(window, '_pending_removals'):
-                window._pending_removals = enabled_ids
+            window._pending_removals = enabled_ids
             # Trigger apply which will revert files, then on_apply_done removes mods
             if hasattr(window, '_on_apply'):
                 window._on_apply()
@@ -767,7 +1083,7 @@ class ModsPage(QWidget):
         class NotesBox(MessageBoxBase):
             def __init__(self, notes, parent):
                 super().__init__(parent)
-                self.titleLabel = SubtitleLabel("Mod Notes")
+                self.titleLabel = SubtitleLabel(tr("mods.mod_notes"))
                 self.input = TextEdit()
                 self.input.setPlainText(notes or "")
                 self.input.setMinimumHeight(120)
@@ -939,7 +1255,7 @@ class ModsPage(QWidget):
 
         menu = RoundMenu(parent=self)
 
-        menu.addAction(Action(FluentIcon.EDIT, "Rename Folder", triggered=lambda: self._rename_folder(group_id, group_name)))
+        menu.addAction(Action(FluentIcon.EDIT, tr("mods.rename_folder"), triggered=lambda: self._rename_folder(group_id, group_name)))
         menu.addSeparator()
         menu.addAction(Action(FluentIcon.DELETE, "Delete Folder", triggered=lambda: self._delete_folder(group_id)))
 
@@ -955,7 +1271,7 @@ class ModsPage(QWidget):
         class RenameFolderBox(MessageBoxBase):
             def __init__(self, name, parent):
                 super().__init__(parent)
-                self.titleLabel = SubtitleLabel("Rename Folder")
+                self.titleLabel = SubtitleLabel(tr("mods.rename_folder"))
                 self.input = LineEdit()
                 self.input.setText(name)
                 self.input.selectAll()
@@ -998,6 +1314,27 @@ class ModsPage(QWidget):
             )
             self._db.connection.commit()
             self.refresh()
+
+    def _on_folder_reorder(self, dragged_id: int, target_id: int) -> None:
+        """Reorder folders: place dragged folder before the target folder."""
+        if not self._db:
+            return
+        groups = self._load_folder_groups()
+        ids = [g["id"] for g in groups]
+        if dragged_id not in ids or target_id not in ids:
+            return
+        # Remove dragged, insert before target
+        ids.remove(dragged_id)
+        target_pos = ids.index(target_id)
+        ids.insert(target_pos, dragged_id)
+        # Persist new sort_order
+        for order, gid in enumerate(ids):
+            self._db.connection.execute(
+                "UPDATE mod_groups SET sort_order = ? WHERE id = ?",
+                (order, gid),
+            )
+        self._db.connection.commit()
+        self.refresh()
 
     def _move_mod_to_group(self, mod_id: int, group_id: int | None) -> None:
         """Move a mod to a different folder group."""

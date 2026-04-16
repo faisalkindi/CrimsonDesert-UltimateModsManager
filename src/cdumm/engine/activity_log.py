@@ -12,17 +12,20 @@ from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Action categories with display colors
+# Action categories with display colors (used as TEXT color on tinted bg)
 CATEGORY_COLORS = {
-    "apply":    "#A3BE8C",  # green — mods applied to game
-    "revert":   "#81A1C1",  # blue — files restored to vanilla
-    "import":   "#D4A43C",  # gold — mod imported
-    "remove":   "#BF616A",  # red — mod removed
-    "snapshot": "#B48EAD",  # purple — snapshot taken
-    "verify":   "#88C0D0",  # cyan — verification ran
-    "cleanup":  "#D08770",  # orange — cleanup/maintenance
-    "warning":  "#EBCB8B",  # yellow — something unexpected
-    "error":    "#BF616A",  # red — error occurred
+    "apply":    "#16A34A",  # green — mods applied to game
+    "revert":   "#2878D0",  # blue — files restored to vanilla
+    "import":   "#7C3AED",  # purple — mod imported
+    "remove":   "#DC2626",  # red — mod removed
+    "snapshot": "#2878D0",  # blue — snapshot taken
+    "verify":   "#0891B2",  # teal — verification ran
+    "cleanup":  "#D97706",  # amber — cleanup/maintenance
+    "warning":  "#D97706",  # amber — something unexpected
+    "error":    "#DC2626",  # red — error occurred
+    "health":   "#16A34A",  # green — health check
+    "fix":      "#2878D0",  # blue — fix operation
+    "uninstall":"#DC2626",  # red — mod uninstalled
 }
 
 

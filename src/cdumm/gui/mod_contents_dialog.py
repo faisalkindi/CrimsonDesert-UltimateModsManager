@@ -14,6 +14,7 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from cdumm.i18n import tr
 from cdumm.engine.mod_manager import ModManager
 
 
@@ -42,10 +43,25 @@ class ModContentsDialog(MessageBoxBase):
 
         # File tree
         details = mod_manager.get_mod_details(mod["id"])
+        from qfluentwidgets import isDarkTheme
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["File", "Byte Range", "Type"])
         self._tree.setColumnCount(3)
         self._tree.setMinimumHeight(250)
+        if isDarkTheme():
+            self._tree.setStyleSheet(
+                "QTreeWidget { background: #1C2028; color: #E2E8F0; "
+                "border: 1px solid #2D3340; border-radius: 6px; }"
+                "QTreeWidget::item { padding: 4px; }"
+                "QHeaderView::section { background: #252830; color: #A0AEC0; "
+                "border: none; padding: 6px; }")
+        else:
+            self._tree.setStyleSheet(
+                "QTreeWidget { background: #FAFBFC; color: #1A202C; "
+                "border: 1px solid #E2E8F0; border-radius: 6px; }"
+                "QTreeWidget::item { padding: 4px; }"
+                "QHeaderView::section { background: #F0F4F8; color: #4A5568; "
+                "border: none; padding: 6px; }")
 
         if details:
             # Group by directory
@@ -74,14 +90,14 @@ class ModContentsDialog(MessageBoxBase):
 
         # Copy button
         btn_row = QHBoxLayout()
-        copy_btn = PushButton("Copy to Clipboard")
+        copy_btn = PushButton(tr("contents.copy"))
         copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(copy_btn)
         btn_row.addStretch()
         self.viewLayout.addLayout(btn_row)
 
         # Override default buttons
-        self.yesButton.setText("Close")
+        self.yesButton.setText(tr("main.close"))
         self.cancelButton.hide()
 
         self.widget.setMinimumWidth(600)

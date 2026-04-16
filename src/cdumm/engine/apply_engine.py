@@ -14,9 +14,20 @@ Bsdiff deltas use full file backups (but those files are always small).
 """
 import logging
 import struct
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
+
+
+def _yield_gil() -> None:
+    """Release the GIL momentarily so the GUI thread can process events.
+
+    Python's GIL means QThread workers starve the main thread of CPU time
+    during pure-Python loops.  time.sleep(0) is the standard way to yield
+    the GIL without any real delay.
+    """
+    time.sleep(0)
 
 from cdumm.archive.papgt_manager import PapgtManager
 from cdumm.archive.transactional_io import TransactionalIO
@@ -324,9 +335,67 @@ class ApplyWorker(QObject):
             logger.error("Apply failed: %s", e, exc_info=True)
             self.error_occurred.emit(f"Apply failed: {e}")
 
+    def _compute_apply_fingerprint(self) -> str:
+        """Compute a hash of all inputs that affect Apply output.
+
+        If this fingerprint matches the last Apply, the game files are
+        already correct and the entire Apply can be skipped.
+        """
+        import hashlib
+        h = hashlib.sha256()
+
+        # Enabled mods + their delta hashes
+        rows = self._db.connection.execute(
+            "SELECT m.id, m.enabled, m.json_source, m.disabled_patches, "
+            "       GROUP_CONCAT(md.delta_path || ':' || md.file_path, '|') "
+            "FROM mods m LEFT JOIN mod_deltas md ON m.id = md.mod_id "
+            "GROUP BY m.id ORDER BY m.id"
+        ).fetchall()
+        for row in rows:
+            h.update(f"{row[0]}:{row[1]}:{row[2]}:{row[3]}:{row[4]}\n".encode())
+
+        return h.hexdigest()[:16]
+
     def _apply(self) -> None:
+        _t0 = time.perf_counter()
+        def _phase(name):
+            elapsed = time.perf_counter() - _t0
+            logger.info("APPLY PHASE [%.1fs]: %s", elapsed, name)
+
+        _phase("Starting apply")
+
+        # Fast-path: check if game files already match the current mod state
+        import json as _json_mod
+        fingerprint = self._compute_apply_fingerprint()
+        fp_path = self._game_dir / "CDMods" / ".apply_fingerprint"
+        try:
+            if fp_path.exists():
+                stored = fp_path.read_text(encoding="utf-8").strip()
+                if stored == fingerprint:
+                    # Verify overlay PAZ is intact
+                    cache_json = self._game_dir / "CDMods" / ".overlay_cache.json"
+                    if cache_json.exists():
+                        manifest = _json_mod.loads(cache_json.read_text(encoding="utf-8"))
+                        overlay_dir = manifest.get("_overlay_dir", "")
+                        overlay_paz = self._game_dir / overlay_dir / "0.paz" if overlay_dir else None
+                        if overlay_paz and overlay_paz.exists():
+                            _phase("SKIPPED — game files already up to date")
+                            self.progress_updated.emit(100, "Already up to date!")
+                            self.finished.emit()
+                            return
+                    # No overlay needed (all mods disabled?) — check PAPGT
+                    papgt = self._game_dir / "meta" / "0.papgt"
+                    if papgt.exists():
+                        _phase("SKIPPED — game files already up to date (no overlay)")
+                        self.progress_updated.emit(100, "Already up to date!")
+                        self.finished.emit()
+                        return
+        except Exception as e:
+            logger.debug("Fingerprint check failed, proceeding with full apply: %s", e)
+
         file_deltas = self._get_file_deltas()
         revert_files = self._get_files_to_revert(set(file_deltas.keys()))
+        _phase(f"Loaded {len(file_deltas)} file deltas, {len(revert_files)} reverts")
 
         if not file_deltas and not revert_files:
             self.error_occurred.emit("No mod changes to apply or revert.")
@@ -401,11 +470,13 @@ class ApplyWorker(QObject):
         try:
             file_idx = 0
 
+            _phase("Phase 1: Compose PAZ files")
             # ── Phase 1: Compose PAZ and other non-PAMT files ──────────
             for file_path, deltas in file_deltas.items():
                 pct = int((file_idx / total_files) * 55)
                 self.progress_updated.emit(pct, f"Processing {file_path}...")
                 file_idx += 1
+                _yield_gil()
 
                 # Skip PAPGT (rebuilt at end) and PAMT (Phase 2)
                 if file_path == "meta/0.papgt":
@@ -452,6 +523,7 @@ class ApplyWorker(QObject):
                 txn.stage_file(file_path, result_bytes)
 
 
+            _phase("Phase 1a: Mount-time JSON patching")
             # ── Phase 1a: Mount-time patching for JSON mods ──────────
             # JSON mods with json_source are patched fresh from vanilla
             # at Apply time (no stored ENTR deltas needed).
@@ -470,14 +542,26 @@ class ApplyWorker(QObject):
                         disabled = _json.loads(disabled_raw) if disabled_raw else None
                     except (ValueError, TypeError):
                         disabled = None
+                    # Load custom values for inline editing
+                    custom_vals = None
+                    try:
+                        cv_row = self._db.connection.execute(
+                            "SELECT custom_values FROM mod_config WHERE mod_id = ?",
+                            (mod_id,)).fetchone()
+                        if cv_row and cv_row[0]:
+                            custom_vals = _json.loads(cv_row[0])
+                    except (ValueError, TypeError):
+                        pass
                     entries = process_json_patches_for_overlay(
                         mod_id, json_source, self._game_dir,
-                        disabled_indices=disabled)
+                        disabled_indices=disabled,
+                        custom_values=custom_vals)
                     self._overlay_entries.extend(entries)
                     if entries:
                         logger.info("Mount-time: %s produced %d overlay entries",
                                     mod_name, len(entries))
 
+            _phase(f"Phase 1b: Build overlay ({len(self._overlay_entries)} entries)")
             # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
             if self._overlay_entries:
                 # Collect directories claimed by standalone mods so overlay
@@ -514,12 +598,14 @@ class ApplyWorker(QObject):
 
                 from cdumm.archive.overlay_builder import build_overlay
 
-                _last_pct = [0]
+                _last_report = [0.0]
                 def _overlay_progress(idx, total, entry_name=""):
-                    pct = 60 + int((idx / total) * 25)
-                    if pct != _last_pct[0]:
-                        _last_pct[0] = pct
-                        self.progress_updated.emit(pct, f"Building overlay ({idx}/{total} entries)...")
+                    # Emit progress every 0.5 seconds to keep GUI responsive
+                    now = time.perf_counter()
+                    if now - _last_report[0] > 0.5 or idx == total - 1:
+                        _last_report[0] = now
+                        pct = 60 + int((idx / max(total, 1)) * 25)
+                        self.progress_updated.emit(pct, f"Building overlay ({idx + 1}/{total})...")
 
                 paz_bytes, pamt_bytes = build_overlay(self._overlay_entries,
                                                        game_dir=self._game_dir,
@@ -531,7 +617,9 @@ class ApplyWorker(QObject):
                 overlay_path.mkdir(parents=True, exist_ok=True)
                 # Stage through transactional IO so overlay files are committed
                 # atomically with everything else (and not overwritten by other staged files)
+                self.progress_updated.emit(86, f"Staging overlay PAZ ({len(paz_bytes) // 1048576} MB)...")
                 txn.stage_file(f"{overlay_dir}/0.paz", paz_bytes)
+                self.progress_updated.emit(88, "Staging overlay PAMT...")
                 txn.stage_file(f"{overlay_dir}/0.pamt", pamt_bytes)
                 modified_pamts[overlay_dir] = pamt_bytes
                 logger.info("Overlay PAZ: %s (%d entries, PAZ=%d bytes, PAMT=%d bytes)",
@@ -548,6 +636,7 @@ class ApplyWorker(QObject):
                 # DMM does this for all DDS overlay entries.
                 self._update_pathc_for_overlay(txn)
 
+            _phase("Phase 2: Compose PAMT files")
             # ── Phase 2: Compose PAMT files (entry updates + byte deltas) ──
             # Collect all PAMTs that need processing
             pamt_paths = set()
@@ -590,12 +679,14 @@ class ApplyWorker(QObject):
                 txn.stage_file(pamt_path, result_bytes)
                 modified_pamts[pamt_dir] = result_bytes
 
+            _phase("Phase 3: Revert disabled mods")
             # ── Phase 3: Revert files from disabled mods ───────────────
             new_files_to_delete = self._get_new_files_to_delete(set(file_deltas.keys()))
             for file_path in revert_files:
                 pct = int((file_idx / total_files) * 80)
                 self.progress_updated.emit(pct, f"Reverting {file_path}...")
                 file_idx += 1
+                _yield_gil()
 
                 if file_path in new_files_to_delete:
                     game_path = self._game_dir / file_path.replace("/", "\\")
@@ -660,6 +751,7 @@ class ApplyWorker(QObject):
                 except Exception as e:
                     logger.debug("Safety net scan failed: %s", e)
 
+            _phase("Phase 4: PAPGT rebuild")
             # ── Phase 4: PAPGT ─────────────────────────────────────────
             self.progress_updated.emit(90, "Updating PAPGT...")
 
@@ -753,9 +845,18 @@ class ApplyWorker(QObject):
             except FileNotFoundError:
                 logger.warning("PAPGT not found, skipping rebuild")
 
+            _phase("Phase 5: Committing changes")
             self.progress_updated.emit(95, "Committing changes...")
             txn.commit()
 
+            # Save fingerprint so next Apply can skip if nothing changed
+            try:
+                fp_path = self._game_dir / "CDMods" / ".apply_fingerprint"
+                fp_path.write_text(fingerprint, encoding="utf-8")
+            except Exception:
+                pass
+
+            _phase("DONE — Apply complete")
             self.progress_updated.emit(100, "Apply complete!")
             self.finished.emit()
 
@@ -1986,7 +2087,8 @@ class ApplyWorker(QObject):
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
-            "ORDER BY m.priority DESC, md.file_path"
+            "ORDER BY CASE WHEN m.conflict_mode='override' THEN 1 ELSE 0 END, "
+            "m.priority DESC, md.file_path"
         )
 
         file_deltas: dict[str, list[dict]] = {}
@@ -2042,6 +2144,14 @@ class RevertWorker(QObject):
 
     def _revert(self) -> None:
         """Revert all mod-affected files to vanilla using range or full backups."""
+        # Invalidate apply fingerprint
+        try:
+            fp_path = self._game_dir / "CDMods" / ".apply_fingerprint"
+            if fp_path.exists():
+                fp_path.unlink()
+        except Exception:
+            pass
+
         # Get all files any mod has ever touched
         cursor = self._db.connection.execute(
             "SELECT DISTINCT file_path, is_new, entry_path FROM mod_deltas")
@@ -2075,6 +2185,7 @@ class RevertWorker(QObject):
             for i, file_path in enumerate(mod_files):
                 pct = int((i / total) * 90)
                 self.progress_updated.emit(pct, f"Restoring {file_path}...")
+                _yield_gil()
 
                 if file_path in new_files:
                     # New file — delete it (didn't exist in vanilla)
@@ -2103,6 +2214,42 @@ class RevertWorker(QObject):
                 self.error_occurred.emit(
                     "No vanilla backups found. Use Steam 'Verify Integrity' to restore.")
                 return
+
+            # Restore implicitly modified files (PATHC, PAMTs with CRC fixes)
+            for implicit_file in ["meta/0.pathc"]:
+                vanilla_bytes = self._get_vanilla_bytes(implicit_file)
+                if vanilla_bytes:
+                    game_path = self._game_dir / implicit_file.replace("/", "\\")
+                    if game_path.exists():
+                        current = game_path.read_bytes()
+                        if current != vanilla_bytes:
+                            txn.stage_file(implicit_file, vanilla_bytes)
+                            logger.info("Restored implicit backup: %s", implicit_file)
+                            reverted += 1
+
+            # Restore any PAMTs and PAZs that differ from vanilla
+            for d in sorted(self._game_dir.iterdir()):
+                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                    continue
+                if int(d.name) >= 36:
+                    continue  # overlay dirs handled separately
+                for fname in ["0.pamt", "0.paz"]:
+                    rel = f"{d.name}/{fname}"
+                    vanilla_bytes = self._get_vanilla_bytes(rel)
+                    if vanilla_bytes:
+                        fpath = d / fname
+                        if fpath.exists():
+                            actual_size = fpath.stat().st_size
+                            if actual_size == len(vanilla_bytes):
+                                # Same size — check content
+                                if fpath.read_bytes() != vanilla_bytes:
+                                    txn.stage_file(rel, vanilla_bytes)
+                                    logger.info("Restored %s (content diff)", rel)
+                                    reverted += 1
+                            elif actual_size != len(vanilla_bytes):
+                                txn.stage_file(rel, vanilla_bytes)
+                                logger.info("Restored %s (size diff)", rel)
+                                reverted += 1
 
             # Clean up orphan mod directories (0036+) that are empty or
             # only existed because of standalone mods

@@ -18,6 +18,7 @@ from qfluentwidgets import (
     setCustomStyleSheet,
 )
 
+from cdumm.i18n import tr
 from cdumm.storage.game_finder import find_game_directories, validate_game_directory
 
 logger = logging.getLogger(__name__)
@@ -37,15 +38,24 @@ class SetupDialog(MessageBoxBase):
 
         self._selected_path: Path | None = None
 
-        self.titleLabel = SubtitleLabel("Game Directory Setup")
+        self.titleLabel = SubtitleLabel(tr("setup.title"))
         self.viewLayout.addWidget(self.titleLabel)
 
         self.viewLayout.addWidget(
-            BodyLabel("Select your Crimson Desert installation folder:"))
+            BodyLabel(tr("setup.select")))
 
+        from qfluentwidgets import isDarkTheme
         path_row = QHBoxLayout()
         self._path_edit = QLineEdit()
-        self._path_edit.setPlaceholderText("Steam or Xbox Game Pass install folder")
+        self._path_edit.setPlaceholderText(tr("setup.placeholder"))
+        if isDarkTheme():
+            self._path_edit.setStyleSheet(
+                "QLineEdit { background: #1C2028; color: #E2E8F0; "
+                "border: 1px solid #2D3340; border-radius: 6px; padding: 8px; }")
+        else:
+            self._path_edit.setStyleSheet(
+                "QLineEdit { background: #FAFBFC; color: #1A202C; "
+                "border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; }")
         self._path_edit.textChanged.connect(self._on_path_changed)
         path_row.addWidget(self._path_edit)
 
@@ -58,9 +68,9 @@ class SetupDialog(MessageBoxBase):
         self.viewLayout.addWidget(self._status_label)
 
         # Configure default buttons
-        self.yesButton.setText("OK")
+        self.yesButton.setText(tr("setup.ok"))
         self.yesButton.setEnabled(False)
-        self.cancelButton.setText("Cancel")
+        self.cancelButton.setText(tr("main.cancel"))
 
         self.widget.setMinimumWidth(500)
 
@@ -84,7 +94,7 @@ class SetupDialog(MessageBoxBase):
         if validate_game_directory(path):
             self._selected_path = path
             self.yesButton.setEnabled(True)
-            self._status_label.setText("Valid Crimson Desert installation found.")
+            self._status_label.setText(tr("setup.valid"))
             setCustomStyleSheet(
                 self._status_label,
                 "CaptionLabel { color: #16a34a; }",
@@ -94,7 +104,7 @@ class SetupDialog(MessageBoxBase):
             self._selected_path = None
             self.yesButton.setEnabled(False)
             if text:
-                self._status_label.setText("bin64/CrimsonDesert.exe not found at this path.")
+                self._status_label.setText(tr("setup.invalid"))
                 setCustomStyleSheet(
                     self._status_label,
                     "CaptionLabel { color: #dc2626; }",

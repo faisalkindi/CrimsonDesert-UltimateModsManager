@@ -6,6 +6,8 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect, QVBoxLayout, QWidget
 
 from qfluentwidgets import CaptionLabel, SubtitleLabel, isDarkTheme
 
+from cdumm.i18n import tr
+
 
 class DropOverlay(QWidget):
     """Translucent drop overlay. Invisible by default.
@@ -34,18 +36,18 @@ class DropOverlay(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Large icon
-        self._icon_label = SubtitleLabel("Drop")
+        self._icon_label = SubtitleLabel(tr("drop.title"))
         self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._icon_label.setStyleSheet("font-size: 48px; background: transparent;")
         layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignCenter)
 
         # Primary text
-        self._title = SubtitleLabel("Drop mods here to import")
+        self._title = SubtitleLabel(tr("drop.subtitle"))
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._title, 0, Qt.AlignmentFlag.AlignCenter)
 
         # Hint text
-        self._hint = CaptionLabel("ZIP, folder, JSON patch, or any mod format")
+        self._hint = CaptionLabel(tr("drop.formats"))
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._hint, 0, Qt.AlignmentFlag.AlignCenter)
 

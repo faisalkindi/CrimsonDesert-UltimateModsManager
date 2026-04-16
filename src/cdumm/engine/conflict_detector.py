@@ -151,13 +151,13 @@ class ConflictDetector:
         """Get all enabled PAZ mods with their delta byte ranges and priority."""
         cursor = self._db.connection.execute(
             "SELECT m.id, m.name, m.priority, md.file_path, md.byte_start, md.byte_end, "
-            "md.entry_path, md.delta_path "
+            "md.entry_path, md.delta_path, m.conflict_mode "
             "FROM mods m JOIN mod_deltas md ON m.id = md.mod_id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
             "ORDER BY m.priority"
         )
         mods: dict[int, list[dict]] = {}
-        for mod_id, mod_name, priority, file_path, byte_start, byte_end, entry_path, delta_path in cursor.fetchall():
+        for mod_id, mod_name, priority, file_path, byte_start, byte_end, entry_path, delta_path, conflict_mode in cursor.fetchall():
             if mod_id not in mods:
                 mods[mod_id] = []
             mods[mod_id].append({
@@ -168,6 +168,7 @@ class ConflictDetector:
                 "byte_end": byte_end,
                 "entry_path": entry_path,
                 "delta_path": delta_path,
+                "conflict_mode": conflict_mode or "normal",
             })
         return mods
 
@@ -182,11 +183,27 @@ class ConflictDetector:
         mod_b_name = mod_b_deltas[0]["name"] if mod_b_deltas else f"Mod {mod_b_id}"
         mod_a_priority = mod_a_deltas[0].get("priority", 0) if mod_a_deltas else 0
         mod_b_priority = mod_b_deltas[0].get("priority", 0) if mod_b_deltas else 0
-        # Lower priority number = higher in list = applied last = wins
-        if mod_a_priority <= mod_b_priority:
+        a_override = mod_a_deltas[0].get("conflict_mode") == "override" if mod_a_deltas else False
+        b_override = mod_b_deltas[0].get("conflict_mode") == "override" if mod_b_deltas else False
+
+        double_override = a_override and b_override
+        if a_override and not b_override:
+            winner_id, winner_name = mod_a_id, mod_a_name
+        elif b_override and not a_override:
+            winner_id, winner_name = mod_b_id, mod_b_name
+        elif mod_a_priority <= mod_b_priority:
+            # Lower priority number = higher in list = applied last = wins
             winner_id, winner_name = mod_a_id, mod_a_name
         else:
             winner_id, winner_name = mod_b_id, mod_b_name
+
+        # Build winner reason for explanations
+        if double_override:
+            _winner_reason = f"WARNING: both mods declare override — {winner_name} wins by priority"
+        elif a_override or b_override:
+            _winner_reason = f"{winner_name} (override mode)"
+        else:
+            _winner_reason = f"{winner_name} (higher load order)"
 
         # Group deltas by file
         a_files: dict[str, list[dict]] = {}
@@ -248,7 +265,7 @@ class ConflictDetector:
                             explanation = (
                                 f"{mod_a_name} and {mod_b_name} both modify "
                                 f"{entry_path} in {file_path}. "
-                                f"Winner: {winner_name} (higher load order).")
+                                f"Winner: {_winner_reason}.")
                         conflicts.append(Conflict(
                             mod_a_id=mod_a_id, mod_a_name=mod_a_name,
                             mod_b_id=mod_b_id, mod_b_name=mod_b_name,
@@ -329,13 +346,13 @@ class ConflictDetector:
                             explanation = (
                                 f"{mod_a_name} and {mod_b_name} both modify "
                                 f"{record_info} in {file_path}. "
-                                f"Winner: {winner_name} (higher load order)."
+                                f"Winner: {_winner_reason}."
                             )
                         else:
                             explanation = (
                                 f"{mod_a_name} and {mod_b_name} both modify "
                                 f"bytes {overlap_start}-{overlap_end} in {file_path}. "
-                                f"Winner: {winner_name} (higher load order)."
+                                f"Winner: {_winner_reason}."
                             )
 
                         conflicts.append(Conflict(

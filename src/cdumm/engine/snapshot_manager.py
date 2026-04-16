@@ -1,4 +1,5 @@
 import hashlib
+import time
 
 try:
     import xxhash
@@ -204,6 +205,7 @@ class SnapshotWorker(QObject):
             pct = int(bytes_hashed / total_bytes * 100) if total_bytes > 0 else 0
             self.progress_updated.emit(pct, f"[{i + 1}/{total}] {rel_path} — done")
             logger.debug("Hashed: %s -> %s", rel_path, file_hash[:16])
+            time.sleep(0)  # yield GIL so GUI stays responsive
 
         self._thread_db.connection.commit()
         logger.info("Snapshot complete: %d files hashed", total)

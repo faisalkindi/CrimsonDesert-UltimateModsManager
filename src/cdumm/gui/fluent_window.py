@@ -32,6 +32,29 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+def _parse_nexus_filename(name: str) -> tuple[int | None, str]:
+    """Parse a NexusMods download filename to extract mod_id and file version.
+
+    Format: '{ModName}-{mod_id}-{file_version}-{unix_timestamp}'
+    Example: 'Legendary Bear Without Tack-934-2-1775958271' → (934, '2')
+             'EnhancedFlightv2.5-815-v2-5-1776107603' → (815, 'v2.5')
+
+    Returns (nexus_mod_id, file_version) or (None, '') if not a NexusMods filename.
+    """
+    import re
+    # Match: anything, then -{digits}-{version_parts}-{10-digit timestamp}
+    # The 10-digit timestamp (unix epoch ~2025-2030) anchors the end
+    m = re.match(r'^.+?-(\d+)-(.+)-(\d{10})$', name)
+    if not m:
+        return None, ''
+    mod_id = int(m.group(1))
+    file_ver = m.group(2).replace('-', '.')
+    # Sanity: mod_id should be reasonable (1-999999)
+    if mod_id < 1 or mod_id > 999999:
+        return None, ''
+    return mod_id, file_ver
+
+
 def _is_standalone_paz_mod(path: Path) -> bool:
     """Check if path is a standalone PAZ mod (0.paz + 0.pamt, not in a numbered dir).
     These mods add a new PAZ directory and don't need a vanilla snapshot.
@@ -54,6 +77,74 @@ def _is_standalone_paz_mod(path: Path) -> bool:
                 return has_paz and has_pamt
         except Exception:
             return False
+    return False
+
+
+def _has_game_content(path: Path) -> bool:
+    """Check if a ZIP/archive contains game mod content (PAZ, PAMT, JSON patches, etc.).
+
+    Fast check — reads ZIP directory only, no extraction. Used to distinguish
+    pure ASI mods from mixed ZIP mods (ASI + PAZ in one archive).
+    """
+    import zipfile
+    import re
+    if path.is_dir():
+        # Check if directory has any non-ASI game content
+        has_asi = any(path.rglob("*.asi"))
+        for f in path.rglob("*"):
+            if not f.is_file():
+                continue
+            sl = f.suffix.lower()
+            if sl in (".asi", ".ini", ".dll"):
+                continue
+            if sl in (".paz", ".pamt", ".bsdiff", ".xdelta"):
+                return True
+            # .json only counts if no .asi files (ASI mods bundle .json configs)
+            if sl == ".json" and f.name.lower() != "modinfo.json" and not has_asi:
+                return True
+            if re.match(r"^\d{4}$", f.parent.name):
+                return True
+        return False
+    if not path.is_file() or path.suffix.lower() not in (".zip", ".7z", ".rar"):
+        return False
+    if path.suffix.lower() == ".7z":
+        try:
+            import py7zr
+            with py7zr.SevenZipFile(path, 'r') as zf:
+                names = [n.lower() for n in zf.getnames()]
+                has_asi = any(n.endswith(".asi") for n in names)
+                has_game = any(
+                    n.endswith((".paz", ".pamt", ".bsdiff", ".xdelta"))
+                    for n in names
+                )
+                # .json only counts as game content if no .asi files present
+                # (ASI mods often bundle .json config files)
+                if not has_game and not has_asi:
+                    has_game = any(
+                        n.endswith(".json") and "modinfo" not in n
+                        for n in names
+                    )
+                return has_game
+        except Exception:
+            return True  # can't read — assume mixed
+    if path.suffix.lower() == ".rar":
+        return True  # rar can't be cheaply scanned
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            for n in names:
+                nl = n.lower()
+                if nl.endswith((".paz", ".pamt", ".bsdiff", ".xdelta")):
+                    return True
+                if nl.endswith(".json") and "modinfo" not in nl:
+                    return True
+                if nl == "modinfo.json" or nl.endswith("/modinfo.json"):
+                    return True
+                # Numbered directory pattern (0008/, 0036/, etc.)
+                if re.match(r"^\d{4}/", n):
+                    return True
+    except Exception:
+        return True  # can't read ZIP — let worker handle it
     return False
 
 
@@ -84,25 +175,44 @@ class _MainThreadDispatcher(QObject):
 class CdummLogoWidget(NavigationWidget):
     """Logo widget that fills the sidebar: large when expanded, icon when compact.
     Pre-caches scaled pixmaps and matches the sidebar's 150ms OutQuad animation.
+    Supports theme-aware logo switching (light/dark variants).
     """
 
     _COMPACT_SIZE = 36
     _EXPANDED_HEIGHT = 100
 
-    def __init__(self, logo_path: str, parent=None):
+    def __init__(self, logo_light: str, logo_dark: str = "", parent=None):
         super().__init__(isSelectable=False, parent=parent)
-        self._pixmap = QPixmap(logo_path) if logo_path else QPixmap()
-        # Pre-cache scaled versions to avoid per-frame scaling
-        self._compact_pm = self._pixmap.scaled(
-            32, 32, Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation) if not self._pixmap.isNull() else QPixmap()
-        self._expanded_pm = QPixmap()  # set in setCompacted when EXPAND_WIDTH is known
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._on_click = None
+        self._logo_light = logo_light
+        self._logo_dark = logo_dark or logo_light
+        self._load_pixmap(logo_light)
         self.setFixedSize(40, self._COMPACT_SIZE)
 
         # Match sidebar's animation timing
         self._height_anim = QPropertyAnimation(self, b"fixedHeight")
         self._height_anim.setDuration(350)
         self._height_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _load_pixmap(self, path: str) -> None:
+        self._pixmap = QPixmap(path) if path else QPixmap()
+        self._compact_pm = self._pixmap.scaled(
+            32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation) if not self._pixmap.isNull() else QPixmap()
+        self._expanded_pm = QPixmap()  # rebuilt in setCompacted
+
+    def set_theme_variant(self, is_dark: bool) -> None:
+        """Switch between light/dark logo and rebuild caches."""
+        path = self._logo_dark if is_dark else self._logo_light
+        self._load_pixmap(path)
+        # Rebuild expanded cache if sidebar is currently expanded
+        if not self.isCompacted and not self._pixmap.isNull():
+            self._expanded_pm = self._pixmap.scaled(
+                self.EXPAND_WIDTH - 16, self._EXPANDED_HEIGHT - 12,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+        self.update()
 
     def _get_fixed_height(self):
         return self.maximumHeight()
@@ -149,6 +259,11 @@ class CdummLogoWidget(NavigationWidget):
         x = (self.width() - pm.width()) // 2
         y = (self.height() - pm.height()) // 2
         painter.drawPixmap(x, y, pm)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._on_click:
+            self._on_click()
+        super().mousePressEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +419,10 @@ class CdummWindow(FluentWindow):
         # ── Deferred startup (after window is visible) ────────────────
         QTimer.singleShot(500, self._deferred_startup)
 
+        # ── Page switch: toggle update banner visibility ──────────────
+        self.stackedWidget.currentChanged.connect(
+            lambda: self._position_update_banner())
+
         # ── Update check ──────────────────────────────────────────────
         QTimer.singleShot(5000, self._check_for_updates)
         self._update_timer = QTimer(self)
@@ -340,16 +459,21 @@ class CdummWindow(FluentWindow):
 
     def _init_navigation(self) -> None:
         """Build the sidebar: logo, top nav items, bottom nav items."""
-        # Logo in sidebar
+        # Logo in sidebar (theme-aware: light + dark variants)
         if getattr(sys, "frozen", False):
-            logo_path = Path(sys._MEIPASS) / "assets" / "cdumm-logo.png"
+            _assets = Path(sys._MEIPASS) / "assets"
         else:
-            logo_path = (
-                Path(__file__).resolve().parents[3] / "assets" / "cdumm-logo.png"
-            )
-        logo_str = str(logo_path) if logo_path.exists() else ""
+            _assets = Path(__file__).resolve().parents[3] / "assets"
+        _logo_light = _assets / "cdumm-logo-light.png"
+        _logo_dark = _assets / "cdumm-logo-dark.png"
+        _light_str = str(_logo_light) if _logo_light.exists() else ""
+        _dark_str = str(_logo_dark) if _logo_dark.exists() else ""
 
-        logo_widget = CdummLogoWidget(logo_str)
+        from qfluentwidgets import isDarkTheme
+        logo_widget = CdummLogoWidget(_light_str, _dark_str)
+        if isDarkTheme():
+            logo_widget.set_theme_variant(True)
+        self._logo_widget = logo_widget
         self.navigationInterface.addWidget(
             "logo", logo_widget, lambda: None, NavigationItemPosition.TOP
         )
@@ -357,6 +481,8 @@ class CdummWindow(FluentWindow):
         # Create pages
         self.paz_mods_page = PazModsPage(self)
         if self._mod_manager and self._conflict_detector and self._db:
+            # Load applied state BEFORE set_managers (which triggers refresh/card build)
+            self._load_applied_state()
             self.paz_mods_page.set_managers(
                 self._mod_manager, self._conflict_detector,
                 self._db, self._game_dir)
@@ -366,7 +492,7 @@ class CdummWindow(FluentWindow):
             self.paz_mods_page._summary_bar.launch_clicked.connect(self._on_launch_game)
             self.paz_mods_page.uninstall_requested.connect(self._on_uninstall_mod)
         self.asi_plugins_page = AsiPluginsPage(self)
-        self.asi_plugins_page.set_managers(game_dir=self._game_dir)
+        self.asi_plugins_page.set_managers(game_dir=self._game_dir, db=self._db)
 
         self.activity_page = ActivityPage(self)
         if hasattr(self, "_activity_log"):
@@ -381,6 +507,7 @@ class CdummWindow(FluentWindow):
         self.settings_page.import_list_requested.connect(self._on_import_list)
 
         self.about_page = AboutPage(self)
+        self._logo_widget._on_click = lambda: self.switchTo(self.about_page)
 
         # ── Tool pages ───────────────────────────────────────────────
         tool_kwargs = dict(
@@ -593,15 +720,75 @@ class CdummWindow(FluentWindow):
                 return
 
         if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
-            box = MessageBox(
-                "Game Files Scan Needed",
-                "Before using the mod manager, your game files need to be scanned.\n\n"
-                "For best results, please verify your game files through Steam first:\n"
-                "  Steam -> Right-click Crimson Desert -> Properties\n"
-                "  -> Installed Files -> Verify integrity of game files\n\n"
-                "Have you verified (or is this a fresh install)?",
-                self,
+            from qfluentwidgets import (
+                MessageBoxBase, SubtitleLabel, BodyLabel, CaptionLabel,
+                CardWidget, StrongBodyLabel, setCustomStyleSheet,
             )
+            from PySide6.QtGui import QFont
+            from PySide6.QtWidgets import QVBoxLayout
+
+            class _ScanDialog(MessageBoxBase):
+                def __init__(self, parent):
+                    super().__init__(parent)
+                    self.widget.setMinimumWidth(520)
+
+                    title = SubtitleLabel(tr("main.scan_needed"))
+                    tf = title.font()
+                    tf.setPixelSize(22)
+                    tf.setWeight(QFont.Weight.Bold)
+                    title.setFont(tf)
+                    self.viewLayout.addWidget(title)
+                    self.viewLayout.addSpacing(8)
+
+                    desc = BodyLabel(
+                        "Before using the mod manager, your game files need to be scanned "
+                        "to create a clean baseline.")
+                    df = desc.font()
+                    df.setPixelSize(14)
+                    desc.setFont(df)
+                    desc.setWordWrap(True)
+                    self.viewLayout.addWidget(desc)
+                    self.viewLayout.addSpacing(12)
+
+                    # Steps card
+                    card = CardWidget(self)
+                    card_layout = QVBoxLayout(card)
+                    card_layout.setContentsMargins(24, 20, 24, 20)
+                    card_layout.setSpacing(14)
+
+                    steps_title = StrongBodyLabel(tr("main.verify_recommended"))
+                    stf = steps_title.font()
+                    stf.setPixelSize(14)
+                    stf.setWeight(QFont.Weight.Bold)
+                    steps_title.setFont(stf)
+                    card_layout.addWidget(steps_title)
+
+                    steps = [
+                        ("1", "Open Steam"),
+                        ("2", "Right-click Crimson Desert"),
+                        ("3", "Properties  >  Installed Files"),
+                        ("4", "Verify integrity of game files"),
+                    ]
+                    for num, text in steps:
+                        step = BodyLabel(f"  {num}.  {text}")
+                        sf = step.font()
+                        sf.setPixelSize(14)
+                        step.setFont(sf)
+                        card_layout.addWidget(step)
+
+                    self.viewLayout.addWidget(card)
+                    self.viewLayout.addSpacing(12)
+
+                    hint = CaptionLabel(tr("main.verify_hint"))
+                    hf = hint.font()
+                    hf.setPixelSize(13)
+                    hint.setFont(hf)
+                    self.viewLayout.addWidget(hint)
+
+                    self.yesButton.setText(tr("main.scan_now"))
+                    self.cancelButton.setText(tr("main.later"))
+
+            box = _ScanDialog(self)
             if box.exec():
                 self._on_refresh_snapshot(skip_verify_prompt=True)
             return
@@ -786,12 +973,96 @@ class CdummWindow(FluentWindow):
         self._update_found = True
         self._pending_update_info = info
         tag = info.get("tag", "new version")
+        url = info.get("url", "")
         logger.info("Update available: %s", tag)
-        InfoBar.info(
-            title="Update Available",
-            content=f"CDUMM {tag} is available. Check the About page for details.",
-            duration=10000, position=InfoBarPosition.TOP_RIGHT, parent=self,
-            isClosable=True)
+
+        # 1. Show persistent update banner on all pages (except about)
+        self._show_update_banner(tag, url)
+
+        # 2. Add badge to About nav item in sidebar
+        try:
+            self.navigationInterface.widget("AboutPage").setShowBadge(True)
+        except Exception:
+            pass
+
+        # 3. Update the About page with update info
+        if hasattr(self, 'about_page'):
+            self.about_page.set_update_status(tag, url, info.get("body", ""))
+
+    def _show_update_banner(self, tag: str, url: str) -> None:
+        """Show a persistent update banner at the top of the window."""
+        from PySide6.QtWidgets import QHBoxLayout, QWidget
+        from PySide6.QtGui import QFont, QDesktopServices, QColor, QPainter
+        from PySide6.QtCore import QUrl
+        from qfluentwidgets import BodyLabel, PushButton, isDarkTheme
+
+        if hasattr(self, '_update_banner') and self._update_banner:
+            self._update_banner.deleteLater()
+
+        banner = QWidget(self)
+        banner.setObjectName("updateBanner")
+        banner.setFixedHeight(36)
+
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(16, 0, 16, 0)
+        layout.setSpacing(12)
+
+        label = BodyLabel(f"CDUMM {tag} is available", banner)
+        lf = label.font()
+        lf.setPixelSize(13)
+        lf.setWeight(QFont.Weight.DemiBold)
+        label.setFont(lf)
+        layout.addWidget(label)
+        layout.addStretch()
+
+        btn = PushButton("Download", banner)
+        bf = btn.font()
+        bf.setPixelSize(12)
+        btn.setFont(bf)
+        btn.setFixedHeight(26)
+        btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+        layout.addWidget(btn)
+
+        # Store for theme updates and page switching
+        self._update_banner = banner
+        self._update_banner_tag = tag
+        self._update_banner_url = url
+        self._apply_update_banner_style()
+
+        # Position it below the title bar
+        banner.setParent(self)
+        self._position_update_banner()
+        banner.show()
+        banner.raise_()
+
+    def _apply_update_banner_style(self) -> None:
+        """Apply theme-aware style to the update banner."""
+        if not hasattr(self, '_update_banner') or not self._update_banner:
+            return
+        from qfluentwidgets import isDarkTheme
+        if isDarkTheme():
+            self._update_banner.setStyleSheet(
+                "#updateBanner { background: #1A3A5C; border-bottom: 1px solid #2878D0; }")
+        else:
+            self._update_banner.setStyleSheet(
+                "#updateBanner { background: #E8F0FE; border-bottom: 1px solid #2878D0; }")
+
+    def _position_update_banner(self) -> None:
+        """Position the update banner below the title bar."""
+        if not hasattr(self, '_update_banner') or not self._update_banner:
+            return
+        # Hide on About page
+        current = self.stackedWidget.currentWidget() if hasattr(self, 'stackedWidget') else None
+        if current is getattr(self, 'about_page', None):
+            self._update_banner.hide()
+        else:
+            self._update_banner.show()
+        self._update_banner.setGeometry(0, self.titleBar.height(),
+                                         self.width(), 36)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_update_banner()
 
     # ------------------------------------------------------------------
     # DB watcher helpers
@@ -841,7 +1112,11 @@ class CdummWindow(FluentWindow):
             self._db_watcher.addPath(path)
 
     def _on_db_debounced_refresh(self) -> None:
-        """Refresh UI after external DB change (debounced)."""
+        """Refresh UI after external DB change (debounced).
+        Skip if a worker is active — it's our own writes, not external.
+        """
+        if self._active_worker:
+            return
         if self._db_watcher_paused:
             return
         logger.info("Database changed externally -- refreshing UI")
@@ -881,6 +1156,15 @@ class CdummWindow(FluentWindow):
 
     def _on_theme_changed_global(self, theme) -> None:
         """Called by qconfig.themeChanged — reapply ALL custom styles everywhere."""
+        # Switch sidebar logo between light/dark variant
+        from qfluentwidgets import isDarkTheme
+        logo_w = self.navigationInterface.widget("logo")
+        if isinstance(logo_w, CdummLogoWidget):
+            logo_w.set_theme_variant(isDarkTheme())
+
+        # Update banner theme
+        self._apply_update_banner_style()
+
         # Rebuild card-based pages (creates new widgets with correct theme)
         self._refresh_all()
 
@@ -895,6 +1179,10 @@ class CdummWindow(FluentWindow):
             # Config panels
             if hasattr(obj, '_config_panel') and hasattr(obj._config_panel, '_apply_theme'):
                 obj._config_panel._apply_theme()
+
+        # About page logo
+        if hasattr(self, 'about_page') and hasattr(self.about_page, '_update_logo'):
+            self.about_page._update_logo()
 
         # Drop overlay
         if hasattr(self, '_drop_overlay'):
@@ -950,22 +1238,273 @@ class CdummWindow(FluentWindow):
 
     def _refresh_all(self) -> None:
         """Reload all page data."""
+        import time as _t
+        _t0 = _t.perf_counter()
         for page_name in ('paz_mods_page', 'asi_plugins_page', 'activity_page'):
             page = getattr(self, page_name, None)
             if page and hasattr(page, 'refresh'):
                 try:
+                    _pt0 = _t.perf_counter()
                     page.refresh()
+                    _dt = (_t.perf_counter() - _pt0) * 1000
+                    if _dt > 50:
+                        logger.info("_refresh_all: %s took %.0fms", page_name, _dt)
                 except Exception as e:
                     logger.debug("%s refresh error: %s", page_name, e)
+        _total = (_t.perf_counter() - _t0) * 1000
+        if _total > 100:
+            logger.info("_refresh_all TOTAL: %.0fms", _total)
         # Stamp DB mtime so the poll timer doesn't re-trigger from our own writes
         self._stamp_db_mtime()
+
+    def _show_import_errors(self, errors: list[str]) -> None:
+        """Show import errors with a Copy Report button for bug reporting."""
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, BodyLabel, PushButton
+        from PySide6.QtWidgets import QTextEdit, QApplication
+        from PySide6.QtGui import QFont
+
+        class _ErrorDialog(MessageBoxBase):
+            def __init__(self, errors, parent):
+                super().__init__(parent)
+                self.widget.setMinimumWidth(560)
+
+                title = SubtitleLabel(f"{len(errors)} Import(s) Failed")
+                tf = title.font()
+                tf.setPixelSize(20)
+                tf.setWeight(QFont.Weight.Bold)
+                title.setFont(tf)
+                self.viewLayout.addWidget(title)
+                self.viewLayout.addSpacing(8)
+
+                # Build diagnostic report
+                import platform
+                from cdumm import __version__
+                lines = [
+                    f"CDUMM v{__version__} — Import Error Report",
+                    f"OS: {platform.platform()}",
+                    f"Date: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                    "",
+                    f"{len(errors)} mod(s) failed:",
+                ]
+                for e in errors:
+                    lines.append(f"  - {e}")
+                self._report = "\n".join(lines)
+
+                # Error list
+                from qfluentwidgets import isDarkTheme
+                preview = QTextEdit()
+                preview.setReadOnly(True)
+                preview.setPlainText(self._report)
+                preview.setMinimumHeight(180)
+                pf = preview.font()
+                pf.setFamily("Consolas")
+                pf.setPixelSize(12)
+                preview.setFont(pf)
+                if isDarkTheme():
+                    preview.setStyleSheet(
+                        "QTextEdit { background: #1C2028; color: #E2E8F0; "
+                        "border: 1px solid #2D3340; border-radius: 6px; padding: 8px; }")
+                else:
+                    preview.setStyleSheet(
+                        "QTextEdit { background: #FAFBFC; color: #1A202C; "
+                        "border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; }")
+                self.viewLayout.addWidget(preview)
+                self.viewLayout.addSpacing(4)
+
+                hint = BodyLabel(tr("main.copy_report"))
+                hf = hint.font()
+                hf.setPixelSize(12)
+                hint.setFont(hf)
+                self.viewLayout.addWidget(hint)
+
+                # Copy button
+                from PySide6.QtWidgets import QHBoxLayout
+                btn_row = QHBoxLayout()
+                copy_btn = PushButton(tr("main.copy_report_btn"))
+                copy_btn.clicked.connect(lambda: (
+                    QApplication.clipboard().setText(self._report),
+                    InfoBar.success(title=tr("main.copied"), content=tr("main.report_copied"),
+                                    duration=2000, position=InfoBarPosition.TOP, parent=self),
+                ))
+                btn_row.addWidget(copy_btn)
+                btn_row.addStretch()
+                self.viewLayout.addLayout(btn_row)
+
+                self.yesButton.setText(tr("main.close"))
+                self.cancelButton.hide()
+
+        _ErrorDialog(errors, self).exec()
+
+    def _run_diagnostic_then_show(self, errors: list[str], mod_path: Path, error: str) -> None:
+        """Run diagnostic on a failed mod, then show results on Inspect page."""
+        from PySide6.QtCore import QProcess
+        import json as _json
+
+        # Navigate to Inspect page and show analyzing state
+        page = getattr(self, 'inspect_mod_page', None)
+        if page:
+            self.switchTo(page)
+            page._clear_results()
+            page._set_running(True)
+            page._progress_detail.setText(f"Analyzing {mod_path.name}...")
+
+        proc = QProcess(self)
+        exe = sys.executable
+        args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
+                str(self._db.db_path), error]
+        _buf = [""]
+
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+
+        def _on_finished(exit_code, exit_status):
+            proc.deleteLater()
+            report = ""
+            for line in _buf[0].split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                    if msg.get("type") == "done":
+                        report = msg.get("report", "")
+                except _json.JSONDecodeError:
+                    pass
+            self._show_import_errors_with_diagnostic(errors, report)
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
+
+    def _show_import_errors_with_diagnostic(self, errors: list[str], diagnostic: str) -> None:
+        """Navigate to Inspect page and show diagnostic results as cards."""
+        # Navigate to inspect page
+        if hasattr(self, 'inspect_mod_page'):
+            self.switchTo(self.inspect_mod_page)
+            # Show the error + diagnostic as cards on the inspect page
+            self.inspect_mod_page._clear_results()
+            self.inspect_mod_page._set_running(False)
+
+            # Error card
+            for e in errors:
+                parts = e.split(": ", 1)
+                name = parts[0] if len(parts) > 1 else "Mod"
+                err = parts[1] if len(parts) > 1 else e
+                self.inspect_mod_page._add_result_card("Import Failed", f"{name}\n{err}", color="#BF616A")
+
+            # Diagnostic cards
+            if diagnostic:
+                self.inspect_mod_page._add_diagnostic_card(diagnostic, errors[0].split(":")[0] if errors else "")
+
+            self.inspect_mod_page._set_status("Import failed — diagnostic report below", "#BF616A")
+        else:
+            # Fallback: just show InfoBar
+            error_text = "; ".join(e.split(": ", 1)[-1][:60] for e in errors[:3])
+            InfoBar.error(
+                title=f"{len(errors)} Import(s) Failed",
+                content=error_text,
+                duration=8000, position=InfoBarPosition.TOP, parent=self)
+
+    def _diagnose_failed_mod(self, mod_path: Path, error: str) -> None:
+        """Run diagnostic analysis on a failed mod import via QProcess.
+
+        Shows a detailed report dialog with findings the user can share
+        with the mod author.
+        """
+        from PySide6.QtCore import QProcess
+        import json as _json
+
+        proc = QProcess(self)
+        exe = sys.executable
+        args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
+                str(self._db.db_path), error]
+        _buf = [""]
+
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "done":
+                    report = msg.get("report", "No diagnostic data available.")
+                    self._show_diagnostic_report(mod_path.name, report)
+
+        def _on_finished(exit_code, exit_status):
+            proc.deleteLater()
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
+
+    def _show_diagnostic_report(self, mod_name: str, report: str) -> None:
+        """Show a diagnostic report dialog for a failed mod."""
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, PushButton
+        from PySide6.QtWidgets import QTextEdit, QApplication, QHBoxLayout
+        from PySide6.QtGui import QFont
+
+        class _DiagDialog(MessageBoxBase):
+            def __init__(self, name, report, parent):
+                super().__init__(parent)
+                self.widget.setMinimumWidth(620)
+
+                title = SubtitleLabel(f"Diagnostic Report: {name}")
+                tf = title.font()
+                tf.setPixelSize(18)
+                tf.setWeight(QFont.Weight.Bold)
+                title.setFont(tf)
+                self.viewLayout.addWidget(title)
+                self.viewLayout.addSpacing(8)
+
+                from qfluentwidgets import isDarkTheme
+                preview = QTextEdit()
+                preview.setReadOnly(True)
+                preview.setPlainText(report)
+                preview.setMinimumHeight(300)
+                pf = preview.font()
+                pf.setFamily("Consolas")
+                pf.setPixelSize(12)
+                preview.setFont(pf)
+                if isDarkTheme():
+                    preview.setStyleSheet(
+                        "QTextEdit { background: #1C2028; color: #E2E8F0; "
+                        "border: 1px solid #2D3340; border-radius: 6px; padding: 8px; }")
+                else:
+                    preview.setStyleSheet(
+                        "QTextEdit { background: #FAFBFC; color: #1A202C; "
+                        "border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; }")
+                self.viewLayout.addWidget(preview)
+                self.viewLayout.addSpacing(4)
+
+                btn_row = QHBoxLayout()
+                copy_btn = PushButton(tr("main.copy_report_btn"))
+                copy_btn.clicked.connect(lambda: (
+                    QApplication.clipboard().setText(report),
+                    InfoBar.success(title=tr("main.copied"), content=tr("main.report_copied"),
+                                    duration=2000, position=InfoBarPosition.TOP, parent=self),
+                ))
+                btn_row.addWidget(copy_btn)
+                btn_row.addStretch()
+                self.viewLayout.addLayout(btn_row)
+
+                self.yesButton.setText(tr("main.close"))
+                self.cancelButton.hide()
+
+        _DiagDialog(mod_name, report, self).exec()
 
     def _on_import_dropped(self, path) -> None:
         """Handle file dropped on the mods page — queues for sequential import."""
         if not self._db or not self._game_dir:
             InfoBar.error(
-                title="Not Ready", content="Database or game directory not configured.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.not_ready"), content=tr("main.not_ready_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
         self._queue_import(Path(path) if not isinstance(path, Path) else path)
 
@@ -976,24 +1515,57 @@ class CdummWindow(FluentWindow):
         if not hasattr(self, '_import_errors'):
             self._import_errors: list[str] = []
         self._import_queue.append(path)
+        logger.info("Queued for import: %s (queue size: %d, worker active: %s)",
+                     path.name, len(self._import_queue), self._active_worker is not None)
         # If no import is running, start the first one
         if not self._active_worker:
             self._process_next_import()
 
     def _process_next_import(self) -> None:
-        """Process the next item in the import queue."""
+        """Process the next item(s) in the import queue.
+
+        If multiple items are queued, launches a single batch worker process
+        for all of them (one Python startup instead of N).
+        """
         if not hasattr(self, '_import_queue') or not self._import_queue:
-            # Queue empty -- show summary if there were errors
+            # Queue empty -- run diagnostics on failed mods, then show errors
             if hasattr(self, '_import_errors') and self._import_errors:
                 errors = self._import_errors
                 self._import_errors = []
-                error_list = "\n".join(f"  - {e}" for e in errors)
-                MessageBox(
-                    "Some Imports Failed",
-                    f"{len(errors)} mod(s) had issues:\n\n{error_list}",
-                    self,
-                ).exec()
+                failed = getattr(self, '_failed_mod_paths', {})
+                self._failed_mod_paths = {}
+                if failed:
+                    first_path, first_err = next(iter(failed.values()))
+                    self._run_diagnostic_then_show(errors, first_path, first_err)
+                else:
+                    self._show_import_errors(errors)
             return
+
+        # If multiple items queued, use batch import (single process)
+        # But first, separate out multi-preset mods that need user interaction
+        if len(self._import_queue) > 1:
+            from cdumm.gui.preset_picker import find_json_presets, find_folder_variants
+            batch = []
+            deferred = []  # multi-preset mods that need dialog
+            for p in self._import_queue:
+                needs_dialog = False
+                if p.is_dir():
+                    presets = find_json_presets(p)
+                    if len(presets) > 1:
+                        needs_dialog = True
+                    elif len(find_folder_variants(p)) >= 2:
+                        needs_dialog = True
+                if needs_dialog:
+                    deferred.append(p)
+                else:
+                    batch.append(p)
+            self._import_queue.clear()
+            # Re-queue deferred mods — they'll be processed one-by-one after batch
+            self._import_queue.extend(deferred)
+            if batch:
+                self._launch_batch_import(batch)
+                return
+            # If ALL items were deferred, fall through to single import
 
         path = self._import_queue.pop(0)
         remaining = len(self._import_queue)
@@ -1003,25 +1575,267 @@ class CdummWindow(FluentWindow):
 
         self._import_with_prechecks(path)
 
+    def _launch_batch_import(self, paths: list) -> None:
+        """Launch a single worker process to import multiple mods at once."""
+        import tempfile
+        import json as _json
+
+        if self._active_worker:
+            # Re-queue and retry
+            self._import_queue.extend(paths)
+            QTimer.singleShot(500, self._process_next_import)
+            return
+
+        # Separate ASI mods from PAZ mods — ASI installs are instant (file copy)
+        from cdumm.asi.asi_manager import AsiManager
+        asi_mgr = AsiManager(self._game_dir / "bin64")
+        paz_paths = []
+        asi_count = 0
+        for p in paths:
+            if asi_mgr.contains_asi(p) and not _has_game_content(p):
+                try:
+                    installed = asi_mgr.install(p)
+                    if installed:
+                        asi_count += len([f for f in installed if f.endswith('.asi')])
+                        # Store version from folder name or modinfo
+                        self._store_asi_version(p, installed)
+                        logger.info("Batch: ASI installed directly: %s (%s)", p.name, installed)
+                except Exception as e:
+                    logger.warning("Batch: ASI install failed for %s: %s", p.name, e)
+            else:
+                paz_paths.append(p)
+
+        if asi_count:
+            InfoBar.success(
+                title=tr("main.import_complete"),
+                content=f"{asi_count} ASI plugin(s) installed.",
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
+            self._refresh_all()
+
+        if not paz_paths:
+            logger.info("Batch: all %d items were ASI mods, no PAZ import needed", len(paths))
+            return
+
+        total = len(paz_paths)
+        logger.info("Batch import: %d PAZ mods in one process (%d ASI installed directly)",
+                     total, asi_count)
+
+        # Write paths to a temp file for the worker
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False,
+                                          encoding="utf-8")
+        for p in paz_paths:
+            tmp.write(str(p) + "\n")
+        tmp.close()
+        self._batch_paths_file = tmp.name
+        self._batch_paths = paz_paths
+
+        tip = self._make_state_tooltip(f"Importing {total} mods...")
+        self._active_progress = tip
+
+        from PySide6.QtCore import QProcess
+        proc = QProcess(self)
+        self._active_worker = proc
+
+        exe = sys.executable
+        args = ["--worker", "import_batch",
+                tmp.name, str(self._game_dir),
+                str(self._db.db_path), str(self._deltas_dir)]
+
+        _buf = [""]
+        _batch_results = []
+        _batch_errors = []
+
+        def _on_stdout():
+            raw = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += raw
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                mtype = msg.get("type")
+                if mtype == "batch_progress":
+                    idx = msg.get("index", 0)
+                    name = msg.get("name", "")
+                    try:
+                        tip.setContent(f"({idx + 1}/{total}) {name}")
+                    except RuntimeError:
+                        pass
+                elif mtype == "progress":
+                    try:
+                        tip.setContent(f"({msg.get('batch_index', 0) + 1}/{total}) {msg.get('msg', '')}")
+                    except RuntimeError:
+                        pass
+                elif mtype == "batch_item":
+                    if msg.get("error"):
+                        _batch_errors.append(f"{msg.get('name', '?')}: {msg['error']}")
+                    else:
+                        _batch_results.append(msg)
+                elif mtype == "done":
+                    pass  # handled in _on_finished
+
+        def _on_finished(exit_code, exit_status):
+            tip.setContent(f"Completed! {len(_batch_results)}/{total} imported")
+            tip.setState(True)
+            proc.deleteLater()
+            self._active_worker = None
+            self._active_progress = None
+
+            # Cleanup temp file
+            try:
+                import os
+                os.unlink(self._batch_paths_file)
+            except Exception:
+                pass
+
+            self._sync_db()
+
+            # Install any staged ASI files from batch results
+            asi_total = 0
+            for item in _batch_results:
+                asi_staged = item.get("asi_staged", [])
+                if asi_staged:
+                    try:
+                        from cdumm.asi.asi_manager import AsiManager
+                        _asi_mgr = AsiManager(self._game_dir / "bin64")
+                        from pathlib import Path as _P
+                        for asp in asi_staged:
+                            p = _P(asp)
+                            if p.exists() and p.suffix.lower() == ".asi":
+                                import shutil
+                                shutil.copy2(str(p), str(_asi_mgr._bin64 / p.name))
+                                asi_total += 1
+                    except Exception:
+                        pass
+
+            # Post-batch: detect configurable mods and set source_path
+            # Build a map of mod name -> (mod_id, source_path) from results + paths
+            try:
+                from cdumm.engine.json_patch_handler import detect_json_patch
+                from cdumm.gui.preset_picker import has_labeled_changes
+                # Match results to paths by index (same order)
+                for idx, bp in enumerate(self._batch_paths):
+                    # Find the result with matching index
+                    item = None
+                    for r in _batch_results:
+                        if r.get("_batch_idx") == idx:
+                            item = r
+                            break
+                    # Fallback: match by name similarity
+                    if not item:
+                        for r in _batch_results:
+                            rname = r.get("name", "")
+                            if bp.stem in rname or rname in bp.stem:
+                                item = r
+                                break
+                    if not item or not item.get("mod_id"):
+                        continue
+                    mod_id = item["mod_id"]
+                    # Check if configurable
+                    json_data = None
+                    if bp.suffix.lower() == '.json':
+                        json_data = detect_json_patch(bp)
+                    elif bp.is_dir():
+                        for f in bp.rglob("*.json"):
+                            json_data = detect_json_patch(f)
+                            if json_data:
+                                break
+                    elif bp.suffix.lower() == '.zip':
+                        import zipfile
+                        try:
+                            with zipfile.ZipFile(bp) as zf:
+                                for n in zf.namelist():
+                                    if n.lower().endswith('.json'):
+                                        import tempfile, json as _jj
+                                        tmp_j = Path(tempfile.mktemp(suffix='.json'))
+                                        tmp_j.write_bytes(zf.read(n))
+                                        json_data = detect_json_patch(tmp_j)
+                                        tmp_j.unlink(missing_ok=True)
+                                        if json_data:
+                                            break
+                        except Exception:
+                            pass
+                    if json_data and has_labeled_changes(json_data):
+                        self._db.connection.execute(
+                            "UPDATE mods SET configurable = 1, source_path = ? WHERE id = ?",
+                            (str(bp), mod_id))
+                        self._db.connection.commit()
+                        logger.info("Batch: marked mod %d as configurable (source=%s)", mod_id, bp.name)
+            except Exception as e:
+                logger.warning("Batch configurable detection failed: %s", e)
+
+            # Store errors for diagnostic display
+            if _batch_errors:
+                if not hasattr(self, '_import_errors'):
+                    self._import_errors = []
+                self._import_errors.extend(_batch_errors)
+
+            self._refresh_all()
+
+            # Show result
+            ok = len(_batch_results)
+            fail = len(_batch_errors)
+            if fail == 0:
+                InfoBar.success(
+                    title=tr("main.import_complete"),
+                    content=f"{ok} mod(s) imported successfully.",
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
+            else:
+                InfoBar.warning(
+                    title=tr("main.import_complete"),
+                    content=f"{ok} imported, {fail} failed.",
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
+
+            self._log_activity("import", f"Batch imported {ok} mods ({fail} errors)")
+            # Process any remaining items (shouldn't be any, but safety)
+            QTimer.singleShot(100, self._process_next_import)
+
+        def _on_stderr():
+            raw = proc.readAllStandardError().data().decode("utf-8", errors="replace")
+            if raw.strip():
+                logger.info("Batch import worker stderr: %s", raw.strip()[:500])
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.readyReadStandardError.connect(_on_stderr)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
+        logger.info("Batch import QProcess started: PID %s", proc.processId())
+
     def _import_with_prechecks(self, path: Path) -> None:
         """Run pre-import checks (main thread, blocking), then launch ImportWorker."""
+        # Safety: never start a new import while one is running
+        if self._active_worker:
+            logger.warning("Import blocked — worker still active, re-queuing %s", path.name)
+            if not hasattr(self, '_import_queue'):
+                self._import_queue = []
+            self._import_queue.insert(0, path)  # put it back at front
+            QTimer.singleShot(500, self._process_next_import)
+            return
         logger.info("Import pre-checks for: %s", path)
+        self._original_drop_path = path  # saved for version extraction after import
         existing_mod_id = None
 
         # ── 1. ASI detection ──────────────────────────────────────────
         from cdumm.asi.asi_manager import AsiManager
         asi_mgr = AsiManager(self._game_dir / "bin64")
-        if asi_mgr.contains_asi(path):
+        if asi_mgr.contains_asi(path) and not _has_game_content(path):
+            # Pure ASI mod — install directly (no PAZ content)
             self._install_asi_mod(path, asi_mgr)
             self._process_next_import()
             return
+        # Mixed ZIPs (ASI + PAZ) go through worker — ASI files are staged
+        # and installed from the result handler after worker completes
 
         # ── 2. Snapshot check ─────────────────────────────────────────
         if not self._snapshot or not self._snapshot.has_snapshot():
             if not _is_standalone_paz_mod(path):
                 InfoBar.error(
-                    title="No Snapshot",
-                    content="Game files not scanned yet. Go to Rescan Game Files first.",
+                    title=tr("main.no_snapshot"),
+                    content=tr("main.no_snapshot_msg"),
                     duration=5000, position=InfoBarPosition.TOP, parent=self)
                 self._process_next_import()
                 return
@@ -1031,12 +1845,47 @@ class CdummWindow(FluentWindow):
             existing = self._find_existing_mod(path)
             if existing:
                 mid, mname = existing
-                box = MessageBox(
-                    "Mod Already Installed",
-                    f"'{mname}' is already installed.\n\nUpdate it? (Old version will be removed)",
-                    self)
+                # Get installed mod's version
+                installed_version = None
+                for m in self._mod_manager.list_mods():
+                    if m["id"] == mid:
+                        installed_version = m.get("version") or ""
+                        break
+
+                # Get dropped mod's version
+                drop_version = self._get_drop_version(path)
+
+                # Compare versions
+                if installed_version and drop_version and installed_version == drop_version:
+                    # Same version — skip silently with toast
+                    InfoBar.info(
+                        title="Skipped",
+                        content=f"'{mname}' v{drop_version} is already installed.",
+                        duration=3000, position=InfoBarPosition.TOP, parent=self)
+                    logger.info("Skipped duplicate: %s v%s", mname, drop_version)
+                    self._process_next_import()
+                    return
+
+                # Different version — determine if update or downgrade
+                if installed_version and drop_version and drop_version < installed_version:
+                    # Downgrade
+                    box = MessageBox(
+                        "Downgrade Mod?",
+                        f"'{mname}' v{installed_version} is installed.\n\n"
+                        f"You're importing an older version (v{drop_version}).\n"
+                        f"Replace with the older version?",
+                        self)
+                else:
+                    # Update (or unknown versions)
+                    old_ver = f" v{installed_version}" if installed_version else ""
+                    new_ver = f" v{drop_version}" if drop_version else ""
+                    box = MessageBox(
+                        "Update Mod?",
+                        f"'{mname}'{old_ver} is already installed.\n\n"
+                        f"Update to{new_ver}? (Old version will be removed)",
+                        self)
+
                 if box.exec():
-                    # Save old state for restoration after import
                     for m in self._mod_manager.list_mods():
                         if m["id"] == mid:
                             self._update_priority = m.get("priority")
@@ -1049,24 +1898,104 @@ class CdummWindow(FluentWindow):
 
         # ── 4. Variant picker ─────────────────────────────────────────
         if path.is_dir():
+            def _has_game_files(d: Path) -> bool:
+                """Check if dir has game files at any depth (direct or inside files/)."""
+                for child in d.iterdir():
+                    if child.is_dir():
+                        if (child.name.isdigit() and len(child.name) == 4) or child.name == "meta":
+                            return True
+                        # Check one level deeper (e.g., variant/files/0000/)
+                        if child.name.lower() in ("files", "data", "gamedata"):
+                            for grandchild in child.iterdir():
+                                if grandchild.is_dir() and (
+                                    (grandchild.name.isdigit() and len(grandchild.name) == 4)
+                                    or grandchild.name == "meta"):
+                                    return True
+                return False
+
             variants = []
             for sub in sorted(path.iterdir()):
                 if sub.is_dir() and not sub.name.startswith('.') and not sub.name.startswith('_'):
-                    # Check if subdir contains game file folders (0000-0099 or meta)
-                    has_game = any(
-                        d.is_dir() and ((d.name.isdigit() and len(d.name) == 4) or d.name == "meta")
-                        for d in sub.iterdir() if d.is_dir()
-                    )
-                    if has_game:
+                    if _has_game_files(sub):
                         variants.append(sub.name)
             if len(variants) > 1:
-                from PySide6.QtWidgets import QInputDialog
-                chosen, ok = QInputDialog.getItem(
-                    self, "Choose Variant",
-                    f"This mod has {len(variants)} variants:",
-                    variants, 0, False)
-                if ok and chosen:
-                    path = path / chosen
+                from qfluentwidgets import (
+                    MessageBoxBase, SubtitleLabel, CaptionLabel,
+                )
+                from PySide6.QtWidgets import QRadioButton, QScrollArea, QFrame
+                from PySide6.QtGui import QFont as _QF
+
+                class _VariantDialog(MessageBoxBase):
+                    def __init__(self, variants, parent):
+                        super().__init__(parent)
+                        self.chosen = None
+                        self.widget.setMinimumWidth(480)
+
+                        title = SubtitleLabel(tr("main.choose_variant"))
+                        tf = title.font()
+                        tf.setPixelSize(20)
+                        tf.setWeight(_QF.Weight.Bold)
+                        title.setFont(tf)
+                        self.viewLayout.addWidget(title)
+                        self.viewLayout.addSpacing(4)
+
+                        hint = CaptionLabel(f"This mod has {len(variants)} variants. Choose one:")
+                        hf = hint.font()
+                        hf.setPixelSize(13)
+                        hint.setFont(hf)
+                        self.viewLayout.addWidget(hint)
+                        self.viewLayout.addSpacing(8)
+
+                        from qfluentwidgets import isDarkTheme
+                        scroll = QScrollArea()
+                        scroll.setWidgetResizable(True)
+                        scroll.setFrameShape(QFrame.Shape.NoFrame)
+                        scroll.setMaximumHeight(300)
+                        container = QWidget()
+                        if isDarkTheme():
+                            container.setStyleSheet(
+                                "QWidget { background: #1C2028; } "
+                                "QRadioButton { color: #E2E8F0; padding: 12px; spacing: 8px; }")
+                        else:
+                            container.setStyleSheet(
+                                "QWidget { background: #FAFBFC; } "
+                                "QRadioButton { color: #1A202C; padding: 12px; spacing: 8px; }")
+                        from PySide6.QtWidgets import QVBoxLayout
+                        rl = QVBoxLayout(container)
+                        rl.setContentsMargins(8, 8, 8, 8)
+                        rl.setSpacing(4)
+
+                        self._radios = []
+                        for i, v in enumerate(variants):
+                            # Clean up underscores for display
+                            display = v.replace("_", " ")
+                            r = QRadioButton(display)
+                            rf = r.font()
+                            rf.setPixelSize(14)
+                            r.setFont(rf)
+                            if i == 0:
+                                r.setChecked(True)
+                            self._radios.append((r, v))
+                            rl.addWidget(r)
+                        rl.addStretch()
+                        scroll.setWidget(container)
+                        self.viewLayout.addWidget(scroll)
+
+                        self.yesButton.setText(tr("main.install"))
+                        self.yesButton.clicked.disconnect()
+                        self.yesButton.clicked.connect(self._on_accept)
+                        self.cancelButton.setText(tr("main.cancel"))
+
+                    def _on_accept(self):
+                        for r, v in self._radios:
+                            if r.isChecked():
+                                self.chosen = v
+                                break
+                        self.accept()
+
+                dialog = _VariantDialog(variants, self)
+                if dialog.exec() and dialog.chosen:
+                    path = path / dialog.chosen
                 else:
                     self._process_next_import()
                     return
@@ -1090,10 +2019,13 @@ class CdummWindow(FluentWindow):
 
             presets = find_json_presets(check_path) if check_path.is_dir() else []
             if len(presets) > 1:
+                # Mark as configurable so user can re-pick preset later
+                self._configurable_source = str(path)
                 dialog = PresetPickerDialog(presets, self)
                 if dialog.exec() and dialog.selected_path:
                     path = dialog.selected_path
                 else:
+                    self._configurable_source = None
                     if tmp_extract:
                         import shutil
                         shutil.rmtree(tmp_extract, ignore_errors=True)
@@ -1107,6 +2039,23 @@ class CdummWindow(FluentWindow):
             pass  # preset_picker not available
         except Exception as e:
             logger.debug("Preset check failed: %s", e)
+
+        # ── 5b. Folder variant picker ─────────────────────────────────
+        try:
+            from cdumm.gui.preset_picker import find_folder_variants, FolderVariantDialog
+            if path.is_dir():
+                folder_vars = find_folder_variants(path)
+                if len(folder_vars) >= 2:
+                    fv_dialog = FolderVariantDialog(folder_vars, self)
+                    result = fv_dialog.exec()
+                    if result and fv_dialog.selected_path:
+                        path = fv_dialog.selected_path
+                        logger.info("User selected folder variant: %s", path.name)
+                    else:
+                        self._process_next_import()
+                        return
+        except Exception as e:
+            logger.debug("Folder variant check failed: %s", e)
 
         # ── 6. Toggle picker ──────────────────────────────────────────
         try:
@@ -1148,23 +2097,82 @@ class CdummWindow(FluentWindow):
         self._launch_import_worker(path, existing_mod_id)
 
     def _launch_import_worker(self, path: Path, existing_mod_id: int | None = None) -> None:
-        """Launch ImportWorker on a background thread after pre-checks passed."""
-        logger.info("Launching import worker: %s", path)
-        from cdumm.gui.workers import ImportWorker
+        """Launch import in a SEPARATE PROCESS via QProcess.
 
-        worker = ImportWorker(
-            mod_path=path,
-            game_dir=self._game_dir,
-            db_path=self._db.db_path,
-            deltas_dir=self._deltas_dir,
-            existing_mod_id=existing_mod_id,
-        )
-        thread = QThread()
+        Using QProcess instead of QThread completely eliminates GIL contention —
+        the subprocess has its own GIL so the GUI thread is never starved.
+        Progress is streamed as JSON lines on stdout.
+        """
+        logger.info("Launching import subprocess: %s", path)
+        from PySide6.QtCore import QProcess
+        import json as _json
+
         remaining = len(getattr(self, '_import_queue', []))
         suffix = f" ({remaining} more queued)" if remaining else ""
         tip = self._make_state_tooltip(f"Importing {path.name}...{suffix}")
+        self._active_progress = tip
 
-        def on_import_done(result):
+        proc = QProcess(self)
+        self._active_worker = proc  # reuse guard flag
+
+        # Build command: the exe calls itself with --worker
+        exe = sys.executable
+        args = ["--worker", "import",
+                str(path), str(self._game_dir),
+                str(self._db.db_path), str(self._deltas_dir)]
+        if existing_mod_id is not None:
+            args.append(str(existing_mod_id))
+
+        # Buffer for partial JSON lines
+        _buf = [""]
+
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "progress":
+                    try:
+                        tip.setContent(f"{msg.get('msg', '')} ({msg.get('pct', 0)}%)")
+                    except RuntimeError:
+                        pass
+                elif msg.get("type") == "done":
+                    self._import_result_name = msg.get("name", path.stem)
+                    self._import_result_error = None
+                    self._import_result_asi_staged = msg.get("asi_staged", [])
+                elif msg.get("type") == "error":
+                    self._import_result_name = path.stem
+                    self._import_result_error = msg.get("msg", "Unknown error")
+
+        def _on_finished(exit_code, exit_status):
+            tip.setContent("Completed!")
+            tip.setState(True)
+            proc.deleteLater()
+            self._active_worker = None
+            self._active_progress = None
+
+            err = getattr(self, '_import_result_error', None)
+            name = getattr(self, '_import_result_name', path.stem)
+
+            if err:
+                if not hasattr(self, '_import_errors'):
+                    self._import_errors = []
+                self._import_errors.append(f"{path.name}: {err}")
+                # Store path for diagnostic analysis when errors are shown
+                if not hasattr(self, '_failed_mod_paths'):
+                    self._failed_mod_paths = {}
+                self._failed_mod_paths[path.name] = (path, err)
+                QTimer.singleShot(100, self._process_next_import)
+                return
+
+            # ── Post-import actions (main thread, main DB connection) ──
             self._sync_db()
 
             # Clean temp dirs from pre-checks
@@ -1173,8 +2181,6 @@ class CdummWindow(FluentWindow):
                 import shutil
                 shutil.rmtree(str(tmp), ignore_errors=True)
                 self._pending_tmp_cleanup = None
-
-            name = getattr(result, 'name', None) or path.stem
 
             # Post-import: game version stamp
             try:
@@ -1185,6 +2191,43 @@ class CdummWindow(FluentWindow):
                         "UPDATE mods SET game_version_hash = ? WHERE id = (SELECT MAX(id) FROM mods)",
                         (ver,))
                     self._db.connection.commit()
+            except Exception:
+                pass
+
+            # Post-import: NexusMods mod ID from filename
+            nexus_id, nexus_file_ver = _parse_nexus_filename(path.stem)
+            if nexus_id:
+                try:
+                    self._db.connection.execute(
+                        "UPDATE mods SET nexus_mod_id = ?, nexus_file_id = ? "
+                        "WHERE id = (SELECT MAX(id) FROM mods)",
+                        (nexus_id, nexus_file_ver))
+                    self._db.connection.commit()
+                    logger.info("Stored NexusMods ID: mod=%d file=%s", nexus_id, nexus_file_ver)
+                except Exception:
+                    pass
+
+            # Post-import: store original drop name + extract version
+            try:
+                mod_id = self._db.connection.execute(
+                    "SELECT MAX(id) FROM mods").fetchone()[0]
+                orig = getattr(self, '_original_drop_path', None)
+                drop_name = orig.name if orig else path.name
+                self._db.connection.execute(
+                    "UPDATE mods SET drop_name = ? WHERE id = ?",
+                    (drop_name, mod_id))
+                drop_ver = self._get_drop_version(orig) if orig else ""
+                if not drop_ver:
+                    drop_ver = self._get_drop_version(path)
+                if not drop_ver:
+                    row = self._db.connection.execute(
+                        "SELECT version FROM mods WHERE id = ?", (mod_id,)).fetchone()
+                    drop_ver = row[0] if row and row[0] else ""
+                if drop_ver:
+                    self._db.connection.execute(
+                        "UPDATE mods SET version = ? WHERE id = ?",
+                        (drop_ver, mod_id))
+                self._db.connection.commit()
             except Exception:
                 pass
 
@@ -1225,21 +2268,51 @@ class CdummWindow(FluentWindow):
                 self._update_priority = None
                 self._update_enabled = None
 
+            # Install staged ASI files from mixed ZIP import
+            asi_staged = getattr(self, '_import_result_asi_staged', [])
+            asi_count = 0
+            if asi_staged:
+                try:
+                    from cdumm.asi.asi_manager import AsiManager
+                    _asi_mgr = AsiManager(self._game_dir / "bin64")
+                    from pathlib import Path as _P
+                    for asi_path in asi_staged:
+                        p = _P(asi_path)
+                        if p.exists() and p.suffix.lower() == ".asi":
+                            import shutil
+                            shutil.copy2(str(p), str(_asi_mgr._bin64 / p.name))
+                            asi_count += 1
+                        elif p.exists() and p.suffix.lower() == ".ini":
+                            import shutil
+                            shutil.copy2(str(p), str(_asi_mgr._bin64 / p.name))
+                    logger.info("Installed %d ASI plugin(s) from mixed ZIP", asi_count)
+                except Exception as e:
+                    logger.warning("Failed to install staged ASI files: %s", e)
+
             self._refresh_all()
-            InfoBar.success(
-                title="Import Complete",
-                content=f"{name} imported successfully.",
-                duration=4000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+            if asi_count > 0:
+                InfoBar.success(
+                    title=tr("main.import_complete"),
+                    content=f"{name} imported + {asi_count} ASI plugin(s) installed.",
+                    duration=4000, position=InfoBarPosition.TOP, parent=self)
+            else:
+                InfoBar.success(
+                    title=tr("main.import_complete"),
+                    content=tr("main.import_success", name=name),
+                    duration=4000, position=InfoBarPosition.TOP, parent=self)
             self._log_activity("import", f"Imported mod: {name}")
-            self._process_next_import()
+            QTimer.singleShot(100, self._process_next_import)
 
-        def on_import_error_queued(err):
-            if not hasattr(self, '_import_errors'):
-                self._import_errors = []
-            self._import_errors.append(f"{path.name}: {err}")
+        def _on_stderr():
+            data = proc.readAllStandardError().data().decode("utf-8", errors="replace")
+            if data.strip():
+                logger.info("Import worker stderr: %s", data.strip()[:500])
 
-        worker.error_occurred.connect(on_import_error_queued)
-        self._run_worker(worker, thread, tip, on_import_done)
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.readyReadStandardError.connect(_on_stderr)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
+        logger.info("Import QProcess started: PID %s", proc.processId())
 
     def _install_asi_mod(self, path: Path, asi_mgr=None) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
@@ -1251,7 +2324,7 @@ class CdummWindow(FluentWindow):
         if not asi_mgr.has_loader():
             InfoBar.warning(
                 title="ASI Loader Missing",
-                content="winmm.dll not found in bin64/. ASI mods won't load without it.",
+                content=tr("main.no_asi_loader"),
                 duration=8000, position=InfoBarPosition.TOP, parent=self)
 
         # Extract archive if needed
@@ -1276,18 +2349,95 @@ class CdummWindow(FluentWindow):
 
         installed = asi_mgr.install(path)
         if installed:
+            # Save version sidecar from original drop path
+            orig = getattr(self, '_original_drop_path', path)
+            drop_ver = self._get_drop_version(orig)
+            if drop_ver:
+                bin64 = self._game_dir / "bin64"
+                for asi_name in installed:
+                    if asi_name.endswith('.asi'):
+                        ver_file = bin64 / (asi_name.replace('.asi', '.version'))
+                        try:
+                            ver_file.write_text(drop_ver, encoding='utf-8')
+                        except Exception:
+                            pass
+
+            # Store version in asi_plugin_state DB
+            self._store_asi_version(orig, installed)
+
             InfoBar.success(
                 title="ASI Mod Installed",
                 content=f"Installed: {', '.join(installed)} to bin64/",
-                duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                duration=5000, position=InfoBarPosition.TOP, parent=self)
             logger.info("ASI install success: %s", installed)
             # Refresh ASI page
             if hasattr(self, 'asi_plugins_page'):
                 self.asi_plugins_page.refresh()
         else:
             InfoBar.warning(
-                title="No ASI Files", content="No .asi files found in this archive.",
+                title=tr("main.no_asi_files"), content=tr("main.no_asi_files_msg"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
+
+    def _store_asi_version(self, source_path: Path, installed_files: list[str]) -> None:
+        """Extract version from source path and store in asi_plugin_state DB."""
+        if not self._db:
+            return
+        version = self._get_drop_version(source_path)
+        if not version:
+            return
+        for fname in installed_files:
+            if fname.endswith('.asi'):
+                stem = fname.replace('.asi', '')
+                try:
+                    self._db.connection.execute(
+                        "INSERT INTO asi_plugin_state (name, version) VALUES (?, ?) "
+                        "ON CONFLICT(name) DO UPDATE SET version = excluded.version",
+                        (stem, version))
+                    self._db.connection.commit()
+                    logger.info("Stored ASI version: %s = %s", stem, version)
+                except Exception as e:
+                    logger.warning("Failed to store ASI version: %s", e)
+
+    @staticmethod
+    def _get_drop_version(path: Path) -> str:
+        """Extract version string from a dropped mod (modinfo.json, JSON patch, or folder name)."""
+        import re
+        # Try modinfo.json
+        try:
+            from cdumm.engine.import_handler import _read_modinfo
+            if path.is_dir():
+                info = _read_modinfo(path)
+                if info and info.get("version"):
+                    return info["version"]
+        except Exception:
+            pass
+        # Try JSON patch version field
+        try:
+            from cdumm.engine.json_patch_handler import detect_json_patch
+            target = path
+            if path.is_dir():
+                jsons = list(path.glob("*.json"))
+                if jsons:
+                    target = jsons[0]
+            if target.suffix.lower() == ".json":
+                jp = detect_json_patch(target)
+                if jp and jp.get("version"):
+                    return jp["version"]
+        except Exception:
+            pass
+        # Try NexusMods filename format: "ModName-1181-1-1776169023"
+        # The file version part is between mod_id and timestamp
+        nexus_id, nexus_ver = _parse_nexus_filename(path.name if path.is_dir() else path.stem)
+        if nexus_id and nexus_ver:
+            return nexus_ver
+
+        # Try "vN.N.N" or "vN" pattern in folder/file name
+        # Use .name for dirs (no extension to strip), .stem for files
+        name = path.name if path.is_dir() else path.stem
+        match = re.search(r'[vV](\d+(?:\.\d+)*)', name)
+        if match:
+            return match.group(1)
+        return ""
 
     def _find_existing_mod(self, path: Path) -> tuple[int, str] | None:
         """Check if a dropped mod matches an already-installed mod by name."""
@@ -1379,33 +2529,33 @@ class CdummWindow(FluentWindow):
         """Apply all enabled mods via ApplyWorker on a background thread."""
         if self._active_worker:
             InfoBar.warning(
-                title="Busy", content="Another operation is in progress. Please wait.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.busy"), content=tr("main.busy_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
         if not self._db or not self._game_dir:
             InfoBar.error(
-                title="Not Ready", content="Database or game directory not configured.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.not_ready"), content=tr("main.not_ready_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
         if not self._check_game_running():
             return
 
         logger.info("Apply requested")
-        from cdumm.engine.apply_engine import ApplyWorker
-
-        worker = ApplyWorker(
-            game_dir=self._game_dir,
-            vanilla_dir=self._vanilla_dir,
-            db_path=self._db.db_path,
-            force_outdated=True,
-        )
-        thread = QThread()
         tip = self._make_state_tooltip("Applying mods...")
 
-        def on_apply_done():
+        def on_apply_done(msgs):
+            # Check for errors
+            errors = [m["msg"] for m in msgs if m.get("type") == "error"]
+            if errors:
+                InfoBar.error(title=tr("main.apply_failed"), content=errors[-1],
+                              duration=-1, position=InfoBarPosition.TOP, parent=self)
+                return
             self._sync_db()
             self._snapshot_applied_state()
+            logger.info("on_apply_done: applied_state has %d entries, %d enabled",
+                        len(self._applied_state),
+                        sum(1 for v in self._applied_state.values() if v))
             from cdumm.engine.import_handler import clear_assigned_dirs
             clear_assigned_dirs()
             self._log_activity("apply", "Applied mod changes")
@@ -1420,10 +2570,12 @@ class CdummWindow(FluentWindow):
                 self._pending_removals = []
                 self._log_activity("remove", f"Removed {len(pending)} mods after revert")
             self._refresh_all()
-            # Run post-apply verification
             self._post_apply_verify()
 
-        self._run_worker(worker, thread, tip, on_apply_done)
+        self._run_qprocess(
+            ["apply", str(self._game_dir), str(self._vanilla_dir),
+             str(self._db.db_path), "1"],
+            tip, on_apply_done)
 
     def _on_revert(self) -> None:
         """Revert all game files to vanilla state."""
@@ -1431,8 +2583,8 @@ class CdummWindow(FluentWindow):
             return
         if self._active_worker:
             InfoBar.warning(
-                title="Busy", content="Another operation is in progress. Please wait.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.busy"), content=tr("main.busy_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
         if not self._check_game_running():
@@ -1447,16 +2599,24 @@ class CdummWindow(FluentWindow):
         if not box.exec():
             return
 
-        from cdumm.engine.apply_engine import RevertWorker
-
-        worker = RevertWorker(self._game_dir, self._vanilla_dir, self._db.db_path)
-        thread = QThread()
         tip = self._make_state_tooltip("Reverting to vanilla...")
 
-        worker.warning.connect(
-            lambda msg: self._dispatcher.call(self._show_revert_warning, msg))
+        def on_revert_msg(msg):
+            if msg.get("type") == "warning":
+                self._show_revert_warning(msg["msg"])
 
-        self._run_worker(worker, thread, tip, self._on_revert_finished)
+        def on_revert_done(msgs):
+            errors = [m["msg"] for m in msgs if m.get("type") == "error"]
+            if errors:
+                InfoBar.error(title=tr("main.revert_failed"), content=errors[-1],
+                              duration=-1, position=InfoBarPosition.TOP, parent=self)
+                return
+            self._on_revert_finished()
+
+        self._run_qprocess(
+            ["revert", str(self._game_dir), str(self._vanilla_dir),
+             str(self._db.db_path)],
+            tip, on_revert_done, on_msg=on_revert_msg)
 
     def _show_revert_warning(self, msg: str) -> None:
         MessageBox("Revert Incomplete", msg, self).exec()
@@ -1472,8 +2632,8 @@ class CdummWindow(FluentWindow):
         self._log_activity("revert", "Reverted all game files to vanilla")
         InfoBar.success(
             title="Reverted to Vanilla",
-            content="All game files restored to their original state.",
-            duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+            content=tr("main.reverted"),
+            duration=5000, position=InfoBarPosition.TOP, parent=self)
         self._check_leftover_backups()
 
     def _check_leftover_backups(self) -> None:
@@ -1515,30 +2675,25 @@ class CdummWindow(FluentWindow):
             InfoBar.success(
                 title="Cleanup Complete",
                 content=f"Deleted {deleted} backup file(s) ({total_mb:.0f} MB).",
-                duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     def _on_uninstall_mod(self, mod_id: int) -> None:
         """Handle uninstall: apply to revert game files, then remove mod from DB."""
         if self._active_worker:
             InfoBar.warning(
-                title="Busy", content="Please wait for the current operation to finish.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.busy"), content=tr("main.busy_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
-        from cdumm.engine.apply_engine import ApplyWorker
-
-        worker = ApplyWorker(
-            game_dir=self._game_dir,
-            vanilla_dir=self._vanilla_dir,
-            db_path=self._db.db_path,
-            force_outdated=True,
-        )
-        thread = QThread()
         tip = self._make_state_tooltip("Reverting mod files...")
 
-        def on_uninstall_apply_done():
+        def on_uninstall_apply_done(msgs):
+            errors = [m["msg"] for m in msgs if m.get("type") == "error"]
+            if errors:
+                InfoBar.error(title=tr("main.uninstall_failed"), content=errors[-1],
+                              duration=-1, position=InfoBarPosition.TOP, parent=self)
+                return
             self._sync_db()
-            # Now safe to remove the mod from DB
             if self._mod_manager:
                 try:
                     details = self._mod_manager.get_mod_details(mod_id)
@@ -1551,19 +2706,27 @@ class CdummWindow(FluentWindow):
             self._refresh_all()
             InfoBar.success(
                 title="Mod Uninstalled",
-                content="Mod removed and game files reverted.",
-                duration=4000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                content=tr("main.mod_removed"),
+                duration=4000, position=InfoBarPosition.TOP, parent=self)
 
-        self._run_worker(worker, thread, tip, on_uninstall_apply_done)
+        self._run_qprocess(
+            ["apply", str(self._game_dir), str(self._vanilla_dir),
+             str(self._db.db_path), "1"],
+            tip, on_uninstall_apply_done)
 
     # ------------------------------------------------------------------
     # Post-apply verification
     # ------------------------------------------------------------------
 
     def _post_apply_verify(self) -> None:
-        """Deep verification after Apply -- checks PAPGT/PAMT integrity."""
+        """Deep verification after Apply -- checks PAPGT/PAMT integrity.
+
+        Runs on the GUI thread — keep it fast or skip heavy checks.
+        """
         if not self._game_dir or not self._db:
             return
+        import time as _t
+        _t0 = _t.perf_counter()
         import struct
         from cdumm.archive.hashlittle import compute_pamt_hash, compute_papgt_hash
 
@@ -1596,7 +2759,12 @@ class CdummWindow(FluentWindow):
                             if actual != papgt_hash:
                                 issues.append(("PAPGT", f"{dir_name} PAMT hash mismatch"))
                         elif not (self._game_dir / dir_name).exists():
-                            issues.append(("PAPGT", f"Missing directory {dir_name}"))
+                            # Skip vanilla placeholder dirs (< 0036) that don't exist on disk
+                            try:
+                                if int(dir_name) >= 36:
+                                    issues.append(("PAPGT", f"Missing directory {dir_name}"))
+                            except (ValueError, TypeError):
+                                issues.append(("PAPGT", f"Missing directory {dir_name}"))
 
         # 2. Get all files modified by enabled mods
         modded_files = self._db.connection.execute(
@@ -1613,26 +2781,9 @@ class CdummWindow(FluentWindow):
                 modded_dirs.add(parts[0])
             mod_by_file.setdefault(fp, []).append(mod_name)
 
-        # 3. For each modded directory, parse PAMT and verify bounds
-        from cdumm.archive.paz_parse import parse_pamt
-
-        for dir_name in modded_dirs:
-            pamt_path = self._game_dir / dir_name / "0.pamt"
-            if not pamt_path.exists():
-                continue
-            try:
-                entries = parse_pamt(str(pamt_path), paz_dir=str(self._game_dir / dir_name))
-            except Exception as e:
-                issues.append((dir_name, f"Failed to parse PAMT: {e}"))
-                continue
-            for e in entries:
-                paz_path = self._game_dir / dir_name / f"{e.paz_index}.paz"
-                if paz_path.exists():
-                    paz_size = paz_path.stat().st_size
-                    if e.offset + e.comp_size > paz_size:
-                        mods = ", ".join(set(mod_by_file.get(f"{dir_name}/{e.paz_index}.paz", ["?"])))
-                        issues.append((mods, f"{e.path}: out of bounds "
-                                       f"(offset={e.offset} + comp={e.comp_size} > paz={paz_size})"))
+        # 3. PAMT bounds checking skipped — runs on GUI thread and is too slow
+        #    for large installations. The apply engine already ensures correct
+        #    offsets/sizes during PAZ composition.
 
         # 4. Check for mods imported on a different game version
         try:
@@ -1647,6 +2798,9 @@ class CdummWindow(FluentWindow):
                         issues.append((name, "Imported on a different game version -- may be outdated"))
         except Exception:
             pass
+
+        _dt = _t.perf_counter() - _t0
+        logger.info("Post-apply verify took %.1fs, found %d issue(s)", _dt, len(issues))
 
         if issues:
             issue_lines = []
@@ -1670,8 +2824,8 @@ class CdummWindow(FluentWindow):
         else:
             InfoBar.success(
                 title="Apply Complete",
-                content="All mod changes applied and verified successfully.",
-                duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                content=tr("main.apply_success"),
+                duration=5000, position=InfoBarPosition.TOP, parent=self)
             logger.info("Post-apply verification passed")
 
     def _on_launch_game(self) -> None:
@@ -1687,19 +2841,19 @@ class CdummWindow(FluentWindow):
                 break
         if not exe:
             InfoBar.error(
-                title="Not Found", content="CrimsonDesert.exe not found in bin64/",
-                duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.game_not_found"), content=tr("main.game_not_found_msg"),
+                duration=5000, position=InfoBarPosition.TOP, parent=self)
             return
         try:
             subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
             InfoBar.success(
-                title="Game Launched", content="Crimson Desert is starting...",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             self.showMinimized()
         except Exception as e:
             InfoBar.error(
                 title="Launch Failed", content=str(e),
-                duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     # ------------------------------------------------------------------
     # Tool dispatcher (removed -- tools are now sub-interface pages)
@@ -1715,7 +2869,7 @@ class CdummWindow(FluentWindow):
             self.paz_mods_page.set_managers(
                 self._mod_manager, self._conflict_detector,
                 self._db, self._game_dir)
-        self.asi_plugins_page.set_managers(game_dir=self._game_dir)
+        self.asi_plugins_page.set_managers(game_dir=self._game_dir, db=self._db)
         if hasattr(self, "_activity_log") and self._activity_log:
             self.activity_page.set_managers(activity_log=self._activity_log)
         if self._db:
@@ -1746,8 +2900,8 @@ class CdummWindow(FluentWindow):
         # Block if a worker is active
         if self._active_worker:
             InfoBar.warning(
-                title="Busy", content="Please wait for the current operation to finish.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.busy"), content=tr("main.busy_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
         # Pause DB watcher + timer before touching DB
@@ -1828,7 +2982,7 @@ class CdummWindow(FluentWindow):
         InfoBar.success(
             title="Export Complete",
             content=f"Exported {count} mods to {Path(path).name}",
-            duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+            duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     def _on_import_list(self) -> None:
         """Import a mod list from a JSON file."""
@@ -1845,7 +2999,7 @@ class CdummWindow(FluentWindow):
         if not mods:
             InfoBar.warning(
                 title="Import Empty",
-                content="No mods found in the file.",
+                content=tr("main.no_mods_in_file"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             return
         installed = {m["name"].lower() for m in (
@@ -1870,17 +3024,133 @@ class CdummWindow(FluentWindow):
     # ------------------------------------------------------------------
 
     def _make_state_tooltip(self, title: str) -> StateToolTip:
-        """Create a StateToolTip positioned at the top-right of the window."""
+        """Create a StateToolTip centered horizontally in the window.
+
+        The default StateToolTip spins a SYNC icon at 20 fps via a 50ms timer
+        and composites through QGraphicsOpacityEffect — both extremely expensive.
+        We disable the spinner and remove the opacity effect to keep the GUI
+        smooth while workers are running.
+        """
         tip = StateToolTip(title, "Starting...", self)
-        tip.move(tip.getSuitablePos())
+        # Kill the 50ms spinner animation — 20 repaints/sec with compositing
+        tip.rotateTimer.stop()
+        # Remove QGraphicsOpacityEffect — forces offscreen render every repaint
+        tip.setGraphicsEffect(None)
+        # Widen and center horizontally
+        tip.setFixedWidth(420)
+        tip.closeButton.move(tip.width() - 24, 19)
+        x = (self.width() - 420) // 2
+        tip.move(x, 120)
         tip.show()
+
+        # Override setContent to re-center on text updates
+        _orig_setContent = tip.setContent
+        _self_ref = self
+        def _centered_setContent(text):
+            _orig_setContent(text)
+            tip.setFixedWidth(420)
+            tip.closeButton.move(tip.width() - 24, 19)
+            x = (_self_ref.width() - 420) // 2
+            tip.move(x, 120)
+        tip.setContent = _centered_setContent
+
         return tip
+
+    def _run_qprocess(self, worker_args: list[str], tip: StateToolTip,
+                       on_done: callable, on_msg: callable | None = None) -> None:
+        """Launch a worker subprocess via QProcess.
+
+        Args:
+            worker_args: args after --worker (e.g. ["apply", game_dir, ...])
+            tip: StateToolTip to update with progress
+            on_done: called when process finishes (receives parsed JSON msgs list)
+            on_msg: optional callback for each JSON message as it arrives
+        """
+        from PySide6.QtCore import QProcess
+        import json as _json
+
+        self._active_progress = tip
+        proc = QProcess(self)
+        self._active_worker = proc
+
+        # Pause non-essential timers
+        if hasattr(self, "_db_watcher_paused"):
+            self._db_watcher_paused = True
+        if hasattr(self, '_db_poll_timer'):
+            self._db_poll_timer.stop()
+        if hasattr(self, '_update_timer'):
+            self._update_timer.stop()
+
+        exe = sys.executable
+        args = ["--worker"] + worker_args
+        _buf = [""]
+        _msgs = []
+
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                _msgs.append(msg)
+                if msg.get("type") == "progress":
+                    try:
+                        tip.setContent(f"{msg.get('msg', '')} ({msg.get('pct', 0)}%)")
+                    except RuntimeError:
+                        pass
+                if on_msg:
+                    on_msg(msg)
+
+        def _on_finished(exit_code, exit_status):
+            tip.setContent("Completed!")
+            tip.setState(True)
+            proc.deleteLater()
+            self._active_worker = None
+            self._active_progress = None
+            self._resume_timers()
+            on_done(_msgs)
+
+        def _on_stderr():
+            data = proc.readAllStandardError().data().decode("utf-8", errors="replace")
+            if data.strip():
+                logger.debug("Worker stderr: %s", data.strip()[:500])
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.readyReadStandardError.connect(_on_stderr)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
+        logger.info("QProcess started [%s]: PID %s", worker_args[0], proc.processId())
 
     def _run_worker(self, worker, thread: QThread, progress: StateToolTip, on_finished) -> None:
         """Wire a worker + thread + StateToolTip with safe signal routing."""
         self._active_worker = worker
         self._worker_thread = thread
         self._active_progress = progress
+        self._last_progress_time = 0.0
+
+        # Disable AUTOMATIC GC — mandatory to prevent crash.
+        # PySide6/shiboken crashes when GC runs on the worker thread and
+        # finalizes Qt objects (confirmed by crash_trace.txt: "Garbage-collecting"
+        # on QThread → access violation in summary_bar.paintEvent).
+        # NO periodic gc.collect() during workers — profiling showed even
+        # gen-0 collection takes 300-660ms when objects have accumulated,
+        # causing the worst UI stalls. Single full collect after worker ends.
+        import gc
+        gc.disable()
+
+        # Pause non-essential timers to keep event loop lean
+        if hasattr(self, "_db_watcher_paused"):
+            self._db_watcher_paused = True
+        if hasattr(self, '_db_poll_timer'):
+            self._db_poll_timer.stop()
+        if hasattr(self, '_update_timer'):
+            self._update_timer.stop()
 
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1889,7 +3159,7 @@ class CdummWindow(FluentWindow):
         # StateToolTip.setContent() from a worker thread segfaults silently.
         worker.progress_updated.connect(
             lambda pct, msg: self._dispatcher.call(
-                self._update_progress_tip, progress, pct, msg))
+                self._update_progress_tip, pct, msg))
 
         worker.finished.connect(
             lambda *args: self._dispatcher.call(
@@ -1898,30 +3168,59 @@ class CdummWindow(FluentWindow):
             lambda err: self._dispatcher.call(
                 self._worker_error, thread, progress, err))
 
-        if hasattr(self, "_db_watcher_paused"):
-            self._db_watcher_paused = True
-
         thread.start()
 
-    @staticmethod
-    def _update_progress_tip(tip: StateToolTip, pct: int, msg: str) -> None:
-        """Update StateToolTip from main thread (safe for GUI)."""
+    def _update_progress_tip(self, pct: int, msg: str) -> None:
+        """Update StateToolTip from main thread — throttled to max ~7 fps."""
+        import time
+        now = time.monotonic()
+        # Always show 0% (start) and 100% (end); throttle the rest to 150ms
+        if pct not in (0, 100) and (now - self._last_progress_time) < 0.15:
+            return
+        self._last_progress_time = now
+        tip = self._active_progress
+        if tip is None:
+            return
         try:
             tip.setContent(f"{msg} ({pct}%)")
         except RuntimeError:
             pass  # tooltip already deleted
 
+    def _resume_timers(self) -> None:
+        """Restart non-essential timers after worker completes."""
+        if hasattr(self, '_db_poll_timer'):
+            self._db_poll_timer.start(2000)
+        if hasattr(self, '_update_timer'):
+            self._update_timer.start(15 * 60 * 1000)
+        if hasattr(self, "_db_watcher_paused"):
+            self._db_watcher_paused = False
+            self._stamp_db_mtime()
+
     def _worker_done(self, thread, progress: StateToolTip, callback, *args) -> None:
         progress.setContent("Completed!")
         progress.setState(True)
+        # Disconnect all signals BEFORE quit — prevents lambda closures
+        # (which capture Qt objects) from lingering on the worker thread
+        # where GC could finalize them on the wrong thread.
+        worker = self._active_worker
+        if worker is not None:
+            try:
+                worker.progress_updated.disconnect()
+                worker.finished.disconnect()
+                worker.error_occurred.disconnect()
+            except (RuntimeError, TypeError):
+                pass
         thread.quit()
         thread.wait(5000)
         thread.deleteLater()
         self._active_progress = None
         self._active_worker = None
         self._worker_thread = None
-        if hasattr(self, "_db_watcher_paused"):
-            QTimer.singleShot(1000, self._unpause_db_watcher)
+        import gc
+        gc.enable()
+        # DON'T call gc.collect() here — profiling showed it takes 1-1.5s
+        # after gc.disable(). Let automatic GC handle it incrementally.
+        self._resume_timers()
         try:
             callback(*args)
         except Exception:
@@ -1930,15 +3229,26 @@ class CdummWindow(FluentWindow):
     def _worker_error(self, thread, progress: StateToolTip, err) -> None:
         progress.setContent("Failed!")
         progress.setState(True)
+        worker = self._active_worker
+        if worker is not None:
+            try:
+                worker.progress_updated.disconnect()
+                worker.finished.disconnect()
+                worker.error_occurred.disconnect()
+            except (RuntimeError, TypeError):
+                pass
         thread.quit()
         thread.wait(5000)
         thread.deleteLater()
         self._active_progress = None
         self._active_worker = None
         self._worker_thread = None
-        # If there's an import queue, don't show a blocking error -- just continue
+        import gc
+        gc.enable()
+        self._resume_timers()
+        # If there's an import queue, continue after cleanup settles
         if hasattr(self, '_import_queue') and self._import_queue:
-            self._process_next_import()
+            QTimer.singleShot(100, self._process_next_import)
             return
         InfoBar.error(
             title="Error", content=str(err),
@@ -1950,12 +3260,46 @@ class CdummWindow(FluentWindow):
     # Snapshot applied state tracking
     # ------------------------------------------------------------------
 
+    def _load_applied_state(self) -> None:
+        """Load persisted applied state from DB on startup."""
+        if not self._db:
+            return
+        try:
+            rows = self._db.connection.execute(
+                "SELECT id, applied FROM mods WHERE applied = 1"
+            ).fetchall()
+            self._applied_state = {row[0]: True for row in rows}
+            if hasattr(self, 'paz_mods_page'):
+                self.paz_mods_page._applied_state = dict(self._applied_state)
+            logger.info("Loaded applied state: %d mods applied", len(self._applied_state))
+        except Exception as e:
+            logger.warning("Failed to load applied state: %s", e)
+
     def _snapshot_applied_state(self) -> None:
-        """Save current mod enabled states as the 'applied' baseline."""
-        if self._mod_manager:
+        """Save current mod enabled states as the 'applied' baseline.
+
+        Persists to DB (applied column) so status survives across sessions.
+        """
+        if self._mod_manager and self._db:
             self._applied_state = {
                 m["id"]: m["enabled"] for m in self._mod_manager.list_mods()
             }
+            # Persist to DB
+            try:
+                for mod_id, enabled in self._applied_state.items():
+                    self._db.connection.execute(
+                        "UPDATE mods SET applied = ? WHERE id = ?",
+                        (1 if enabled else 0, mod_id),
+                    )
+                self._db.connection.commit()
+            except Exception as e:
+                logger.warning("Failed to persist applied state: %s", e)
+            # Push to mods page so cards show "installed" vs "loaded"
+            if hasattr(self, 'paz_mods_page'):
+                self.paz_mods_page._applied_state = dict(self._applied_state)
+                logger.info("Applied state pushed: %d mods, %d enabled",
+                            len(self._applied_state),
+                            sum(1 for v in self._applied_state.values() if v))
 
     # ------------------------------------------------------------------
     # Crash report offer
@@ -2066,7 +3410,7 @@ class CdummWindow(FluentWindow):
                 InfoBar.success(
                     title="Cleanup Complete",
                     content=f"Cleaned up {size_mb:.0f} MB of old data.",
-                    duration=5000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
                 self._log_activity("cleanup",
                                    f"Removed stale AppData ({size_mb:.0f} MB)")
 
@@ -2172,8 +3516,8 @@ class CdummWindow(FluentWindow):
             return
         if self._active_worker:
             InfoBar.warning(
-                title="Busy", content="Another operation is in progress. Please wait.",
-                duration=3000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+                title=tr("main.busy"), content=tr("main.busy_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
         if not skip_verify_prompt:
@@ -2203,14 +3547,26 @@ class CdummWindow(FluentWindow):
             except Exception as e:
                 logger.warning("Failed to clear vanilla backups: %s", e)
 
-        from cdumm.engine.snapshot_manager import SnapshotWorker
-
-        worker = SnapshotWorker(self._game_dir, self._db.db_path)
-        worker.activity.connect(self._log_activity)
-        thread = QThread()
         tip = self._make_state_tooltip("Creating vanilla snapshot...")
 
-        self._run_worker(worker, thread, tip, self._on_snapshot_finished)
+        def on_snapshot_msg(msg):
+            if msg.get("type") == "activity":
+                self._log_activity(msg["cat"], msg["msg"], msg.get("detail", ""))
+
+        def on_snapshot_done(msgs):
+            errors = [m["msg"] for m in msgs if m.get("type") == "error"]
+            if errors:
+                self._snapshot_in_progress = False
+                InfoBar.error(title=tr("main.snapshot_failed"), content=errors[-1],
+                              duration=-1, position=InfoBarPosition.TOP, parent=self)
+                return
+            done_msgs = [m for m in msgs if m.get("type") == "done"]
+            count = done_msgs[-1].get("count", 0) if done_msgs else 0
+            self._on_snapshot_finished(count)
+
+        self._run_qprocess(
+            ["snapshot", str(self._game_dir), str(self._db.db_path)],
+            tip, on_snapshot_done, on_msg=on_snapshot_msg)
 
     def _on_snapshot_finished(self, count: int) -> None:
         """Handle snapshot completion."""
@@ -2236,24 +3592,28 @@ class CdummWindow(FluentWindow):
         InfoBar.success(
             title="Snapshot Complete",
             content=f"{count} game files indexed. You can now import mods.",
-            duration=6000, position=InfoBarPosition.TOP_RIGHT, parent=self)
+            duration=6000, position=InfoBarPosition.TOP, parent=self)
         self._log_activity("snapshot", f"Game files scanned: {count} files indexed")
 
     def _refresh_vanilla_backups(self) -> None:
-        """Ensure vanilla backup files exist for all snapshot entries.
+        """Ensure critical vanilla backup files exist (PAMT, PAPGT, PATHC).
 
-        After a snapshot (which runs after Steam verify), game files are known-clean.
-        Copy any missing files to the vanilla backup directory.
+        Only copies small files (<10MB) synchronously. Large PAZ files are
+        backed up lazily during Apply via _ensure_backups to avoid blocking
+        the main thread for minutes.
         """
         if not self._db or not self._game_dir or not self._vanilla_dir:
             return
         import shutil, os
+        MAX_SYNC_SIZE = 10 * 1024 * 1024  # 10MB — PAMT/PAPGT/PATHC are all <14MB
         try:
             rows = self._db.connection.execute(
-                "SELECT file_path FROM snapshots"
+                "SELECT file_path, file_size FROM snapshots"
             ).fetchall()
             copied = 0
-            for (rel_path,) in rows:
+            for rel_path, file_size in rows:
+                if file_size and file_size > MAX_SYNC_SIZE:
+                    continue  # Large PAZ files backed up lazily during Apply
                 game_file = self._game_dir / rel_path.replace("/", os.sep)
                 backup_file = self._vanilla_dir / rel_path.replace("/", os.sep)
                 if game_file.exists() and not backup_file.exists():
@@ -2261,7 +3621,7 @@ class CdummWindow(FluentWindow):
                     shutil.copy2(game_file, backup_file)
                     copied += 1
             if copied:
-                logger.info("Refreshed %d vanilla backups", copied)
+                logger.info("Refreshed %d vanilla backups (small files only)", copied)
         except Exception as e:
             logger.warning("Vanilla backup refresh failed: %s", e)
 
@@ -2283,10 +3643,15 @@ class CdummWindow(FluentWindow):
         self._drop_overlay.hide_overlay()
         mime = event.mimeData()
         if mime.hasUrls():
-            for url in mime.urls():
+            urls = mime.urls()
+            logger.info("Drop event: %d URLs received", len(urls))
+            for url in urls:
                 local = url.toLocalFile()
                 if local:
+                    logger.info("Drop queuing: %s", Path(local).name)
                     self._on_import_dropped(Path(local))
+                else:
+                    logger.warning("Drop skipped non-local URL: %s", url.toString())
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

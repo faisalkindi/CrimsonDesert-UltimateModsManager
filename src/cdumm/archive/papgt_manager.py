@@ -102,7 +102,14 @@ class PapgtManager:
         for dir_name, flags, pamt_hash in parsed_entries:
             pamt_on_disk = (self._game_dir / dir_name / "0.pamt").exists()
             in_modified = modified_pamts and dir_name in modified_pamts
-            if pamt_on_disk or in_modified:
+            # Keep vanilla entries (dirs < 0036) even if not on disk — they may
+            # be placeholders for DLC/patches. Only remove mod-added dirs (0036+).
+            is_vanilla_dir = True
+            try:
+                is_vanilla_dir = int(dir_name) < 36
+            except (ValueError, TypeError):
+                pass
+            if pamt_on_disk or in_modified or is_vanilla_dir:
                 live_entries.append((dir_name, flags, pamt_hash))
             else:
                 removed.append(dir_name)

@@ -36,9 +36,18 @@ a = Analysis(
            ('schemas/pabgb_complete_schema.json', 'schemas'),
            ('assets/fonts/Oxanium-VariableFont_wght.ttf', 'assets/fonts'),
            ('assets/cdumm-logo.png', 'assets'),
+           ('assets/cdumm-logo-light.png', 'assets'),
+           ('assets/cdumm-logo-dark.png', 'assets'),
+           ('assets/store-steam.svg', 'assets'),
+           ('assets/store-xbox.svg', 'assets'),
+           ('assets/store-epic.svg', 'assets'),
+           ('assets/store-steam-white.svg', 'assets'),
+           ('assets/store-xbox-white.svg', 'assets'),
+           ('assets/store-epic-white.svg', 'assets'),
            ] + _qfw_datas + _qflw_datas,
     hiddenimports=[
         'cdumm.cli',
+        'cdumm.worker_process',
         'cdumm.gui.main_window',
         'cdumm.gui.setup_dialog',
         'cdumm.gui.import_widget',
@@ -73,8 +82,6 @@ a = Analysis(
         'qframelesswindow._rc',
         'qframelesswindow._rc.resource',
         'darkdetect',
-        # colorthief (lightweight, no scipy/numpy)
-        'colorthief',
         'xxhash', 'xxhash._xxhash',
         'cdumm_native',
         'cdumm.engine.snapshot_manager',
@@ -114,6 +121,7 @@ a = Analysis(
         'cdumm.gui.splash',
         'cdumm.gui.mod_contents_dialog',
         'cdumm.gui.profile_dialog',
+        'cdumm.gui.welcome_wizard',
         'cdumm.engine.update_checker',
         'cdumm.engine.version_detector',
         'cdumm.engine.profile_manager',
@@ -151,6 +159,16 @@ a = Analysis(
         'PySide6.QtTest', 'PySide6.QtDBus', 'PySide6.QtConcurrent',
         # scipy/numpy — only needed for acrylic blur (disabled)
         'scipy', 'numpy', 'numpy.core', 'numpy.linalg',
+        # PIL/Pillow — not imported by CDUMM (colorthief dep, unused)
+        'PIL', 'PIL._imaging', 'PIL._avif', 'PIL._webp', 'PIL.Image',
+        'Pillow', 'colorthief',
+        # brotli — not used by CDUMM (transitive dep from py7zr)
+        'brotli', '_brotli', 'brotlicffi',
+        # cryptography — only used as ChaCha20 fallback in paz_crypto.py.
+        # cdumm_native Rust module handles all crypto at runtime.
+        'cryptography', 'cryptography.hazmat', 'cryptography.hazmat.primitives',
+        'cryptography.hazmat.primitives.ciphers', 'cryptography.hazmat.bindings',
+        'cryptography.x509', 'cryptography.fernet',
         # setuptools/pkg_resources not needed at runtime
         'setuptools', 'pkg_resources',
     ],
@@ -167,13 +185,62 @@ _dll_excludes = {
     'Qt6Qml.dll',            # ~5 MB
     'Qt6ShaderTools.dll',    # ~4 MB
     'Qt6Quick3DRuntimeRender.dll',
+    'Qt6OpenGL.dll',         # ~1.9 MB (not used — no OpenGL rendering)
+    'Qt6QmlModels.dll',      # ~0.95 MB
+    'Qt6QmlMeta.dll',        # ~0.15 MB
+    'Qt6QmlWorkerScript.dll',  # ~0.08 MB
+    'Qt6VirtualKeyboard.dll',  # ~0.4 MB (desktop app, no touch keyboard)
+    'qdirect2d.dll',         # ~1 MB (qwindows.dll is sufficient)
     'avcodec-61.dll',        # ~13 MB multimedia codec
     'avformat-61.dll',
     'avutil-59.dll',
     'swresample-5.dll',
     'swscale-8.dll',
+    # cryptography native DLLs (cdumm_native handles ChaCha20)
+    'libcrypto-3.dll',       # ~5 MB
+    'libssl-3.dll',          # ~0.76 MB
+    # Image format plugins CDUMM doesn't use (keep qico, qsvg, qgif)
+    'qtiff.dll',             # ~0.43 MB
+    'qwebp.dll',             # ~0.55 MB
+    'qjpeg.dll',             # ~0.56 MB
+    'qpdf.dll',              # ~0.04 MB
+    'qicns.dll',             # ~0.05 MB (Apple icon format)
+    'qtga.dll',              # ~0.04 MB
+    'qwbmp.dll',             # ~0.04 MB
 }
-a.binaries = [b for b in a.binaries if b[0].split('/')[-1].split('\\')[-1] not in _dll_excludes]
+# Also filter out PIL/brotli/cryptography binary extensions
+_binary_name_excludes = {
+    '_avif', '_imaging', '_webp', '_imagingcms', '_brotli',
+    '_rust',       # cryptography Rust binding (8.7 MB)
+    '_ec_ws',      # Cryptodome elliptic curve (not used by CDUMM)
+    '_ed448',      # Cryptodome Ed448
+    '_curve448',   # Cryptodome Curve448
+}
+
+def _should_exclude_bin(name):
+    basename = name.split('/')[-1].split('\\')[-1]
+    if basename in _dll_excludes:
+        return True
+    stem = basename.rsplit('.', 1)[0]
+    for excl in _binary_name_excludes:
+        if stem.startswith(excl):
+            return True
+    return False
+
+a.binaries = [b for b in a.binaries if not _should_exclude_bin(b[0])]
+
+# Strip Qt translations for languages CDUMM doesn't support (save ~4.4 MB)
+_keep_langs = {'en', 'de', 'es', 'fr', 'ko', 'pt', 'zh', 'ar', 'it', 'pl', 'ru', 'tr', 'ja', 'uk', 'id'}
+def _should_keep_data(name):
+    if name.endswith('.qm') and 'translations' in name:
+        import os
+        basename = os.path.basename(name).replace('.qm', '')
+        parts = basename.split('_')
+        lang = parts[-1] if len(parts) > 1 else ''
+        return lang in _keep_langs
+    return True
+
+a.datas = [d for d in a.datas if _should_keep_data(d[0])]
 
 pyz = PYZ(a.pure)
 
@@ -186,7 +253,7 @@ exe = EXE(
     name='CDUMM',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,

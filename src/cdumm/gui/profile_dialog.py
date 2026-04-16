@@ -13,6 +13,7 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from cdumm.i18n import tr
 from cdumm.engine.profile_manager import ProfileManager
 from cdumm.storage.database import Database
 
@@ -24,31 +25,44 @@ class ProfileDialog(MessageBoxBase):
         self._pm = ProfileManager(db)
         self._profile_loaded = False
 
-        self.titleLabel = SubtitleLabel("Mod Profiles")
+        self.titleLabel = SubtitleLabel(tr("profile.title"))
         self.viewLayout.addWidget(self.titleLabel)
+
+        from qfluentwidgets import isDarkTheme
+        if isDarkTheme():
+            _lw_style = ("QListWidget { background: #1C2028; color: #E2E8F0; "
+                         "border: 1px solid #2D3340; border-radius: 6px; padding: 4px; }"
+                         "QListWidget::item { padding: 6px; }"
+                         "QListWidget::item:selected { background: #2878D0; color: white; border-radius: 4px; }")
+        else:
+            _lw_style = ("QListWidget { background: #FAFBFC; color: #1A202C; "
+                         "border: 1px solid #E2E8F0; border-radius: 6px; padding: 4px; }"
+                         "QListWidget::item { padding: 6px; }"
+                         "QListWidget::item:selected { background: #2878D0; color: white; border-radius: 4px; }")
 
         body = QHBoxLayout()
 
         # Left: profile list
         left = QVBoxLayout()
-        left.addWidget(BodyLabel("Saved Profiles:"))
+        left.addWidget(BodyLabel(tr("profile.saved")))
         self._list = QListWidget()
+        self._list.setStyleSheet(_lw_style)
         self._list.currentRowChanged.connect(self._on_selection_changed)
         left.addWidget(self._list)
 
         btn_row = QHBoxLayout()
-        save_btn = PushButton("Save Current")
+        save_btn = PushButton(tr("profile.save_current"))
         save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(save_btn)
-        delete_btn = PushButton("Delete")
+        delete_btn = PushButton(tr("profile.delete"))
         delete_btn.clicked.connect(self._on_delete)
         btn_row.addWidget(delete_btn)
-        rename_btn = PushButton("Rename")
+        rename_btn = PushButton(tr("profile.rename"))
         rename_btn.clicked.connect(self._on_rename)
         btn_row.addWidget(rename_btn)
         left.addLayout(btn_row)
 
-        load_btn = PrimaryPushButton("Load Selected Profile")
+        load_btn = PrimaryPushButton(tr("profile.load"))
         load_btn.clicked.connect(self._on_load)
         left.addWidget(load_btn)
 
@@ -56,15 +70,16 @@ class ProfileDialog(MessageBoxBase):
 
         # Right: preview
         right = QVBoxLayout()
-        right.addWidget(BodyLabel("Mods in profile:"))
+        right.addWidget(BodyLabel(tr("profile.mods_in")))
         self._preview = QListWidget()
+        self._preview.setStyleSheet(_lw_style)
         right.addWidget(self._preview)
         body.addLayout(right, 3)
 
         self.viewLayout.addLayout(body)
 
         # Override default buttons
-        self.yesButton.setText("Close")
+        self.yesButton.setText(tr("main.close"))
         self.cancelButton.hide()
 
         self.widget.setMinimumWidth(550)
@@ -89,7 +104,7 @@ class ProfileDialog(MessageBoxBase):
             self._preview.addItem(f"[{status}] {mod['name']}")
 
     def _on_save(self) -> None:
-        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:")
+        name, ok = QInputDialog.getText(self, tr("profile.save_name"), tr("profile.name_prompt"))
         if ok and name.strip():
             self._pm.save_profile(name.strip())
             self._refresh()
@@ -101,8 +116,8 @@ class ProfileDialog(MessageBoxBase):
         pid = item.data(256)
         name = item.text()
         w = MessageBox(
-            "Load Profile",
-            f"Load profile '{name}'?\n\nThis will change which mods are enabled/disabled.",
+            tr("profile.load_confirm"),
+            tr("profile.load_msg", name=name),
             self,
         )
         if w.exec():
@@ -115,8 +130,8 @@ class ProfileDialog(MessageBoxBase):
         if not item:
             return
         w = MessageBox(
-            "Delete Profile",
-            f"Delete profile '{item.text()}'?",
+            tr("profile.delete_confirm"),
+            tr("profile.delete_msg", name=item.text()),
             self,
         )
         if w.exec():
@@ -127,7 +142,7 @@ class ProfileDialog(MessageBoxBase):
         item = self._list.currentItem()
         if not item:
             return
-        name, ok = QInputDialog.getText(self, "Rename Profile", "New name:", text=item.text())
+        name, ok = QInputDialog.getText(self, tr("profile.rename_title"), tr("profile.rename_prompt"), text=item.text())
         if ok and name.strip():
             self._pm.rename_profile(item.data(256), name.strip())
             self._refresh()

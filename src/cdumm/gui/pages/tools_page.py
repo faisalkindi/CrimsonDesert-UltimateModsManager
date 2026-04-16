@@ -17,6 +17,8 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from cdumm.i18n import tr
+
 logger = logging.getLogger(__name__)
 
 # Tool definitions: (id, icon, title, description)
@@ -89,7 +91,7 @@ class _ToolCard(CardWidget):
         title_label = StrongBodyLabel(title, self)
         top.addWidget(title_label, stretch=1)
 
-        run_btn = PrimaryPushButton("Run", self, icon)
+        run_btn = PrimaryPushButton(tr("tool.run"), self, icon)
         run_btn.setFixedWidth(100)
         run_btn.clicked.connect(lambda: self.clicked.emit(self._tool_id))
         top.addWidget(run_btn)
@@ -119,7 +121,7 @@ class ToolsPage(SmoothScrollArea):
         self._layout.setSpacing(8)
 
         # Header
-        title = SubtitleLabel("Diagnostic Tools", self._container)
+        title = SubtitleLabel(tr("tool.diagnostic_tools"), self._container)
         self._layout.addWidget(title)
 
         desc = CaptionLabel(

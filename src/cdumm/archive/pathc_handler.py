@@ -159,7 +159,15 @@ def serialize_pathc(pathc: PathcFile) -> bytes:
         out.write(row)
 
     out.write(collision_blob)
-    return out.getvalue()
+
+    # Recompute PATHC self-hash at offset 4.
+    # The hash covers everything from offset 8 onwards (after the two header words).
+    # This is the same pattern as PAPGT: hash = hashlittle(data[8:], 0).
+    result = out.getvalue()
+    from cdumm.archive.hashlittle import hashlittle as _hl
+    content_hash = _hl(result[8:], 0)
+    result = result[:4] + struct.pack("<I", content_hash) + result[8:]
+    return result
 
 
 def normalize_path(path_str: str) -> str:

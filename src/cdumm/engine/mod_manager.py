@@ -20,7 +20,7 @@ class ModManager:
         query = (
             "SELECT id, name, mod_type, enabled, priority, import_date, "
             "game_version_hash, source_path, author, version, description, configurable, "
-            "force_inplace, notes, group_id "
+            "force_inplace, notes, group_id, drop_name, conflict_mode, target_language "
             "FROM mods"
         )
         if mod_type:
@@ -38,6 +38,9 @@ class ModManager:
                 "force_inplace": bool(row[12]) if len(row) > 12 else False,
                 "notes": row[13] if len(row) > 13 else None,
                 "group_id": row[14] if len(row) > 14 else None,
+                "drop_name": row[15] if len(row) > 15 else None,
+                "conflict_mode": row[16] if len(row) > 16 else "normal",
+                "target_language": row[17] if len(row) > 17 else None,
             }
             for row in cursor.fetchall()
         ]
@@ -65,6 +68,31 @@ class ModManager:
         )
         self._db.connection.commit()
         logger.info("Mod %d disabled patches: %s", mod_id, indices)
+
+    def get_custom_values(self, mod_id: int) -> dict:
+        """Get custom editable values for a mod, or empty dict."""
+        import json
+        row = self._db.connection.execute(
+            "SELECT custom_values FROM mod_config WHERE mod_id = ?", (mod_id,)
+        ).fetchone()
+        if row and row[0]:
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {}
+
+    def set_custom_values(self, mod_id: int, values: dict) -> None:
+        """Save custom editable values for a mod."""
+        import json
+        val_json = json.dumps(values) if values else None
+        self._db.connection.execute(
+            "INSERT INTO mod_config (mod_id, custom_values) VALUES (?, ?) "
+            "ON CONFLICT(mod_id) DO UPDATE SET custom_values = excluded.custom_values",
+            (mod_id, val_json),
+        )
+        self._db.connection.commit()
+        logger.info("Mod %d custom values: %s", mod_id, values)
 
     def get_json_source(self, mod_id: int) -> str | None:
         """Get the json_source path for a mount-time JSON mod, or None."""
@@ -444,10 +472,13 @@ class ModManager:
                     shutil.rmtree(entry, ignore_errors=True)
                     logger.info("Cleaned up orphaned source folder: %s", entry.name)
 
-        # Remove zombie mods (0 deltas, disabled — from failed imports)
+        # Remove zombie mods (0 deltas, disabled, no json_source — from failed imports)
+        # Exclude JSON mods which use mount-time patching (json_source) instead of deltas
         zombies = self._db.connection.execute(
             "SELECT m.id, m.name FROM mods m "
-            "WHERE m.enabled = 0 AND NOT EXISTS "
+            "WHERE m.enabled = 0 "
+            "AND (m.json_source IS NULL OR m.json_source = '') "
+            "AND NOT EXISTS "
             "(SELECT 1 FROM mod_deltas md WHERE md.mod_id = m.id)"
         ).fetchall()
         for mod_id, name in zombies:

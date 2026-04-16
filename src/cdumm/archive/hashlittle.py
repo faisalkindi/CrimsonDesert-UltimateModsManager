@@ -4,13 +4,21 @@ This is the Bob Jenkins hashlittle hash used by Crimson Desert for:
 - PAMT hash: hashlittle(pamt[12:], 0xC5EDE)
 - PAPGT hash: hashlittle(papgt[12:], 0xC5EDE)
 
-Port of the C implementation used by the existing PAZ toolchain.
+Uses Rust cdumm_native.compute_hashlittle when available (260x faster),
+falls back to pure Python.
 """
 import struct
+
+try:
+    from cdumm_native import compute_hashlittle as _native_hashlittle
+except ImportError:
+    _native_hashlittle = None
 
 
 def hashlittle(data: bytes, initval: int = 0) -> int:
     """Bob Jenkins hashlittle hash function."""
+    if _native_hashlittle is not None:
+        return _native_hashlittle(data, initval)
     length = len(data)
     a = b = c = (0xDEADBEEF + length + initval) & 0xFFFFFFFF
 

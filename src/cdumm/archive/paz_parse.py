@@ -126,6 +126,8 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
     # File record section
     file_count = struct.unpack_from('<I', data, off)[0]; off += 4
     entries = []
+    import time as _time
+    _entry_count = 0
     while off + 20 <= len(data):
         node_ref, paz_offset, comp_size, orig_size, flags = \
             struct.unpack_from('<IIIII', data, off)
@@ -147,6 +149,11 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
             flags=flags,
             paz_index=paz_index,
         ))
+
+        # Yield GIL every 200 entries so the GUI thread can paint
+        _entry_count += 1
+        if _entry_count % 200 == 0:
+            _time.sleep(0)
 
     return entries
 

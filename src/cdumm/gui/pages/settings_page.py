@@ -219,8 +219,10 @@ class SettingsPage(SmoothScrollArea):
         game_dir = self._config.get("game_directory") or ""
         if game_dir:
             self._game_dir_card.setContent(game_dir)
+            self._game_dir_card.setToolTip(game_dir)
         elif self._game_dir:
             self._game_dir_card.setContent(str(self._game_dir))
+            self._game_dir_card.setToolTip(str(self._game_dir))
 
     def _populate_languages(self) -> None:
         """Fill the language combo from available translation files."""
@@ -331,6 +333,7 @@ class SettingsPage(SmoothScrollArea):
 
         self._game_dir = new_path
         self._game_dir_card.setContent(str(new_path))
+        self._game_dir_card.setToolTip(str(new_path))
 
         # Notify parent
         self.game_dir_changed.emit(new_path)

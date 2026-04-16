@@ -57,6 +57,68 @@ from cdumm.archive.paz_repack import repack_entry_bytes, _save_timestamps
 logger = logging.getLogger(__name__)
 
 
+def _prettify(name: str) -> str:
+    """Wrapper to avoid circular import with import_handler."""
+    from cdumm.engine.import_handler import prettify_mod_name
+    return prettify_mod_name(name)
+
+
+# ── Inline value editing helpers ──────────────────────────────────────
+
+_VALUE_FORMATS = {
+    "int32_le": ("<i", 4),
+    "float32_le": ("<f", 4),
+    "int16_le": ("<h", 2),
+    "uint8": ("<B", 1),
+}
+
+
+def encode_value(value: int | float, type_str: str) -> str:
+    """Convert a Python number to a hex byte string for a PAZ patch.
+
+    >>> encode_value(5, "int32_le")
+    '05000000'
+    """
+    fmt, _ = _VALUE_FORMATS.get(type_str, (None, None))
+    if fmt is None:
+        raise ValueError(f"Unknown editable_value type: {type_str}")
+    return struct.pack(fmt, value).hex()
+
+
+def decode_value(hex_str: str, type_str: str) -> int | float:
+    """Convert a hex byte string back to a Python number.
+
+    >>> decode_value('05000000', 'int32_le')
+    5
+    """
+    fmt, size = _VALUE_FORMATS.get(type_str, (None, None))
+    if fmt is None:
+        raise ValueError(f"Unknown editable_value type: {type_str}")
+    raw = bytes.fromhex(hex_str[:size * 2])
+    return struct.unpack(fmt, raw)[0]
+
+
+def apply_custom_values(changes: list[dict], custom_values: dict) -> list[dict]:
+    """Return a copy of changes with 'patched' fields updated for custom values.
+
+    custom_values maps change index (as string) to the user's chosen value.
+    """
+    if not custom_values:
+        return changes
+    result = []
+    for i, change in enumerate(changes):
+        idx_key = str(i)
+        if idx_key in custom_values and "editable_value" in change:
+            ev = change["editable_value"]
+            try:
+                new_hex = encode_value(custom_values[idx_key], ev["type"])
+                change = {**change, "patched": new_hex}
+            except (ValueError, KeyError, struct.error) as e:
+                logger.warning("Failed to encode custom value for change %d: %s", i, e)
+        result.append(change)
+    return result
+
+
 def detect_json_patch(path: Path) -> dict | None:
     """Check if path contains a JSON byte-patch mod.
 
@@ -73,10 +135,11 @@ def detect_json_patch(path: Path) -> dict | None:
         if not candidates:
             candidates = list(path.glob("*/*.json"))
 
+    from cdumm.engine.json_repair import load_json_tolerant
+
     for candidate in candidates:
         try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = load_json_tolerant(candidate)
             if (isinstance(data, dict)
                     and "patches" in data
                     and isinstance(data["patches"], list)
@@ -278,7 +341,8 @@ def _pattern_scan(
 
 def _apply_byte_patches(data: bytearray, changes: list[dict],
                         signature: str | None = None,
-                        vanilla_data: bytes | None = None) -> tuple[int, int, int]:
+                        vanilla_data: bytes | None = None,
+                        record_offsets: dict[int, int] | None = None) -> tuple[int, int, int]:
     """Apply byte patches to decompressed file data.
 
     If signature is provided, find it in data and treat change offsets
@@ -288,6 +352,10 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     If vanilla_data is provided, enables contextual pattern scan for
     patches whose original bytes don't match at the expected offset
     (game update shifted the data).
+
+    If record_offsets is provided (from pabgh index), changes with
+    "record_key" + "relative_offset" resolve their offset via the
+    record index instead of using the absolute "offset" field.
 
     Returns (applied_count, mismatched_count, relocated_count).
     """
@@ -301,17 +369,29 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             logger.error("Signature %s not found in data (%d bytes)",
                          signature[:40] + "..." if len(signature) > 40 else signature,
                          len(data))
-            return 0, 0
+            return 0, 0, 0
         base_offset = idx + len(sig_bytes)
         logger.info("Signature found at offset %d, patches relative to %d",
                      idx, base_offset)
 
     applied = 0
 
-    # Separate inserts from replaces. Apply replaces first (position-stable),
-    # then inserts in reverse offset order (highest first) so each insert
-    # doesn't shift the positions of subsequent inserts.
+    # Parse and sort all changes by offset (ascending) for single-pass
+    # with cumulative delta tracking. This correctly handles interleaved
+    # insert+replace ops where inserts shift subsequent offsets.
     def _parse_offset(change):
+        # Record-relative offset: resolve via pabgh index
+        record_key = change.get("record_key")
+        if record_key is not None and record_offsets:
+            key = int(record_key)
+            if key in record_offsets:
+                rel = change.get("relative_offset", 0)
+                rel = int(rel, 0) if isinstance(rel, str) else int(rel)
+                return record_offsets[key] + rel
+            else:
+                logger.warning("record_key %d not found in pabgh index", key)
+                return None
+
         raw = change.get("offset", 0)
         try:
             return base_offset + (int(raw, 0) if isinstance(raw, str) else int(raw))
@@ -321,79 +401,79 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             except (ValueError, TypeError):
                 return None
 
-    inserts = []
-    replaces = []
+    all_changes = []
     for change in changes:
         offset = _parse_offset(change)
         if offset is None:
             logger.warning("Invalid offset '%s', skipping", change.get("offset"))
             continue
+        all_changes.append((offset, change))
+    all_changes.sort(key=lambda x: x[0])
+
+    cumulative_delta = 0
+
+    for original_offset, change in all_changes:
+        offset = original_offset + cumulative_delta
         ct = change.get("type", "replace")
+
         if ct == "insert":
-            inserts.append((offset, change))
+            insert_hex = change.get("bytes", "")
+            if not insert_hex:
+                continue
+            try:
+                insert_bytes = bytes.fromhex(insert_hex)
+            except ValueError:
+                continue
+            if offset <= len(data):
+                data[offset:offset] = insert_bytes
+                cumulative_delta += len(insert_bytes)
+                applied += 1
         else:
-            replaces.append((offset, change))
+            # Replace
+            patched_hex = change.get("patched")
+            if not patched_hex:
+                logger.warning("Change at offset %d has no 'patched' field, skipping", offset)
+                continue
+            patched_bytes = bytes.fromhex(patched_hex)
 
-    # Phase 1: Apply replaces (in-place, don't change data size)
-    for offset, change in replaces:
-        patched_hex = change.get("patched")
-        if not patched_hex:
-            logger.warning("Change at offset %d has no 'patched' field, skipping", offset)
-            continue
-        patched_bytes = bytes.fromhex(patched_hex)
-
-        if offset + len(patched_bytes) > len(data):
-            logger.warning("Patch at offset %d exceeds file size %d, skipping",
-                           offset, len(data))
-            continue
-
-        # Verify original bytes match — skip patch if they don't.
-        # This prevents silent corruption when an older CDUMM version
-        # ignores the "signature" field and treats offsets as absolute.
-        # Exception: if the patched bytes already match, the mod is already
-        # applied (e.g. reimporting on modded game files). Count it as applied.
-        if "original" in change:
-            original_bytes = bytes.fromhex(change["original"])
-            actual = data[offset:offset + len(original_bytes)]
-            if actual != original_bytes:
-                # Check if already patched
-                actual_at_patch = data[offset:offset + len(patched_bytes)]
-                if actual_at_patch == patched_bytes:
-                    logger.debug("Already patched at %d, keeping as-is", offset)
-                    applied += 1
-                    continue
-
-                # Pattern scan: try to find where the original bytes moved to
-                new_offset = _pattern_scan(data, offset, original_bytes,
-                                           vanilla_data=vanilla_data)
-                if new_offset is not None:
-                    # Verify the new location has the expected original bytes
-                    if data[new_offset:new_offset + len(original_bytes)] == original_bytes:
-                        data[new_offset:new_offset + len(patched_bytes)] = patched_bytes
-                        applied += 1
-                        relocated += 1
-                        continue
-
-                logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
-                               offset, change["original"], actual.hex())
-                mismatched += 1
+            if offset + len(patched_bytes) > len(data):
+                logger.warning("Patch at offset %d exceeds file size %d, skipping",
+                               offset, len(data))
                 continue
 
-        data[offset:offset + len(patched_bytes)] = patched_bytes
-        applied += 1
+            if "original" in change:
+                original_bytes = bytes.fromhex(change["original"])
+                size_delta = len(patched_bytes) - len(original_bytes)
+                actual = data[offset:offset + len(original_bytes)]
+                if actual != original_bytes:
+                    # Check if already patched
+                    actual_at_patch = data[offset:offset + len(patched_bytes)]
+                    if actual_at_patch == patched_bytes:
+                        logger.debug("Already patched at %d, keeping as-is", offset)
+                        cumulative_delta += size_delta
+                        applied += 1
+                        continue
 
-    # Phase 2: Apply inserts in reverse offset order (highest first)
-    # so each insert doesn't shift the positions of subsequent inserts
-    for offset, change in sorted(inserts, key=lambda x: x[0], reverse=True):
-        insert_hex = change.get("bytes", "")
-        if not insert_hex:
-            continue
-        try:
-            insert_bytes = bytes.fromhex(insert_hex)
-        except ValueError:
-            continue
-        if offset <= len(data):
-            data[offset:offset] = insert_bytes
+                    # Pattern scan: try to find where the original bytes moved to
+                    new_offset = _pattern_scan(data, offset, original_bytes,
+                                               vanilla_data=vanilla_data)
+                    if new_offset is not None:
+                        if data[new_offset:new_offset + len(original_bytes)] == original_bytes:
+                            data[new_offset:new_offset + len(patched_bytes)] = patched_bytes
+                            cumulative_delta += size_delta
+                            applied += 1
+                            relocated += 1
+                            continue
+
+                    logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
+                                   offset, change["original"], actual.hex())
+                    mismatched += 1
+                    continue
+
+            # Track size delta for replace ops that change size
+            old_len = len(bytes.fromhex(change["original"])) if "original" in change else len(patched_bytes)
+            data[offset:offset + old_len] = patched_bytes
+            cumulative_delta += len(patched_bytes) - old_len
             applied += 1
 
     return applied, mismatched, relocated
@@ -481,11 +561,34 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
                 logger.error("Failed to extract %s: %s", game_file, e, exc_info=True)
                 raise RuntimeError(f"Failed to extract {game_file}: {e}") from e
 
+        # Resolve pabgh record offsets if any change uses record_key
+        record_offsets = None
+        if any(c.get("record_key") is not None for c in changes):
+            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_entry = entry_cache.get(pabgh_file.lower())
+            if pabgh_entry is None:
+                pabgh_entry = _find_pamt_entry(pabgh_file, vanilla_dir)
+                if pabgh_entry is None:
+                    pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
+                if pabgh_entry:
+                    entry_cache[pabgh_file.lower()] = pabgh_entry
+            if pabgh_entry:
+                try:
+                    pabgh_plain = _extract_from_paz(pabgh_entry)
+                    table_name = os.path.basename(game_file).rsplit(".", 1)[0]
+                    from cdumm.semantic.parser import parse_pabgh_index
+                    _key_size, record_offsets = parse_pabgh_index(pabgh_plain, table_name)
+                    logger.info("Loaded pabgh index for %s: %d records",
+                                pabgh_file, len(record_offsets))
+                except Exception as e_pabgh:
+                    logger.warning("Failed to parse pabgh for %s: %s", pabgh_file, e_pabgh)
+
         # Apply byte patches
         modified = bytearray(plaintext)
         signature = patch.get("signature")
         applied, mismatched, relocated_count = _apply_byte_patches(
-            modified, changes, signature=signature, vanilla_data=bytes(plaintext))
+            modified, changes, signature=signature, vanilla_data=bytes(plaintext),
+            record_offsets=record_offsets)
         if relocated_count:
             logger.info("Applied %d/%d patches to %s (mismatched=%d, relocated=%d)",
                          applied, len(changes), game_file, mismatched, relocated_count)
@@ -621,17 +724,58 @@ def _update_pamt_record(pamt_path: Path, entry: PazEntry,
     pamt_path.write_bytes(bytes(data))
 
 
-def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
-    """Search all PAMT indices for a specific game file path.
+# Global PAMT index cache: {game_dir_str: {path_lower: PazEntry, basename_lower: PazEntry}}
+_pamt_index_cache: dict[str, dict[str, PazEntry]] = {}
 
-    Tries exact match, suffix match, and basename match (PAMT flattens
-    directory structure, so mod paths may be deeper than PAMT paths).
+
+def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
+    """Build or retrieve a cached index of all PAMT entries for a game directory.
+
+    Uses a disk cache (pickle) to avoid rebuilding on every subprocess.
+    Cache is self-generated data (not user input), safe to unpickle.
     """
-    game_file_lower = game_file.lower().replace("\\", "/")
-    game_basename = game_file_lower.rsplit("/", 1)[-1]
+    key = str(game_dir)
+    if key in _pamt_index_cache:
+        return _pamt_index_cache[key]
 
-    basename_match = None
+    # Try loading from disk cache (self-generated, safe to unpickle)
+    import pickle as _pickle
+    import time as _time
+    # Cache lives in CDMods if it exists, otherwise next to the PAMTs
+    cdmods = game_dir / "CDMods"
+    if not cdmods.exists():
+        cdmods = game_dir.parent / "CDMods" if game_dir.name == "vanilla" else game_dir
+    cdmods.mkdir(parents=True, exist_ok=True)
+    cache_path = cdmods / ".pamt_index.cache"
+    if cache_path.exists():
+        try:
+            cache_mtime = cache_path.stat().st_mtime
+            # Only check vanilla PAMTs (< 0036) for staleness — mod PAMTs
+            # change on every Apply and would always invalidate the cache
+            stale = False
+            for d in game_dir.iterdir():
+                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
+                    continue
+                if int(d.name) >= 36:
+                    continue  # skip mod directories
+                pamt = d / "0.pamt"
+                if pamt.exists() and pamt.stat().st_mtime > cache_mtime:
+                    stale = True
+                    break
+            if not stale:
+                t0 = _time.perf_counter()
+                with open(cache_path, "rb") as f:
+                    index = _pickle.load(f)  # noqa: S301 — self-generated cache
+                dt = _time.perf_counter() - t0
+                logger.info("Loaded PAMT index from cache: %d keys in %.2fs", len(index), dt)
+                _pamt_index_cache[key] = index
+                return index
+        except Exception as e:
+            logger.debug("PAMT cache load failed: %s", e)
 
+    # Build fresh index
+    t0 = _time.perf_counter()
+    index: dict[str, PazEntry] = {}
     for d in sorted(game_dir.iterdir()):
         if not d.is_dir() or not d.name.isdigit():
             continue
@@ -642,24 +786,46 @@ def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
             entries = parse_pamt(str(pamt), paz_dir=str(d))
             for e in entries:
                 ep = e.path.lower().replace("\\", "/")
-                # Exact match
-                if ep == game_file_lower:
-                    return e
-                # PAMT path is suffix of game_file (mod uses deeper path)
-                if game_file_lower.endswith("/" + ep) or game_file_lower.endswith(ep):
-                    return e
-                # game_file is suffix of PAMT path
-                if ep.endswith("/" + game_file_lower):
-                    return e
-                # Basename match — keep the last one (highest offset = newest)
-                if ep.rsplit("/", 1)[-1] == game_basename:
-                    basename_match = e
+                index[ep] = e
+                bname = ep.rsplit("/", 1)[-1]
+                index[bname] = e
         except Exception:
             continue
 
-    if basename_match:
-        logger.info("Matched '%s' to '%s' by basename", game_file, basename_match.path)
-        return basename_match
+    dt = _time.perf_counter() - t0
+    logger.info("Built PAMT index for %s: %d keys in %.2fs", game_dir, len(index), dt)
+
+    # Persist to disk for next subprocess invocation
+    try:
+        with open(cache_path, "wb") as f:
+            _pickle.dump(index, f, protocol=5)
+    except Exception:
+        pass
+
+    _pamt_index_cache[key] = index
+    return index
+
+
+def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
+    """Search all PAMT indices for a specific game file path.
+
+    Uses a cached global index for O(1) lookup instead of scanning
+    all directories on every call.
+    """
+    index = _get_pamt_index(game_dir)
+    game_file_lower = game_file.lower().replace("\\", "/")
+
+    # Exact match
+    e = index.get(game_file_lower)
+    if e:
+        return e
+
+    # Basename match
+    game_basename = game_file_lower.rsplit("/", 1)[-1]
+    e = index.get(game_basename)
+    if e:
+        logger.info("Matched '%s' to '%s' by basename", game_file, e.path)
+        return e
     return None
 
 
@@ -714,7 +880,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         cursor = db.connection.execute(
             "INSERT INTO mods (name, mod_type, priority, author, version, description, game_version_hash) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (mod_name, "paz", priority, author, version, description, game_ver_hash))
+            (_prettify(mod_name), "paz", priority, author, version, description, game_ver_hash))
         mod_id = cursor.lastrowid
 
     changed_files = []
@@ -992,7 +1158,7 @@ def import_json_fast(
             "INSERT INTO mods (name, mod_type, priority, author, version, "
             "description, game_version_hash, json_source) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (mod_name, "paz", priority, author, version,
+            (_prettify(mod_name), "paz", priority, author, version,
              description, game_ver_hash, str(json_dest)))
         mod_id = cursor.lastrowid
 
@@ -1047,6 +1213,7 @@ def import_json_fast(
 def process_json_patches_for_overlay(
     mod_id: int, json_source: str, game_dir: Path,
     disabled_indices: list[int] | None = None,
+    custom_values: dict | None = None,
 ) -> list[tuple[bytes, dict]]:
     """Process a JSON mod's patches at Apply time (mount-time patching).
 
@@ -1094,6 +1261,10 @@ def process_json_patches_for_overlay(
         else:
             changes = all_changes
             flat_idx += len(all_changes)
+
+        # Apply custom values (inline editing) to patched bytes
+        if custom_values:
+            changes = apply_custom_values(changes, custom_values)
 
         if not changes:
             continue

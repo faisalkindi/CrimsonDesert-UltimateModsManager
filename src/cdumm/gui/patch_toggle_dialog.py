@@ -19,6 +19,7 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from cdumm.i18n import tr
 from cdumm.engine.mod_manager import ModManager
 
 logger = logging.getLogger(__name__)
@@ -48,12 +49,8 @@ class PatchToggleDialog(MessageBoxBase):
         # Load JSON source
         json_source = self._load_json_source(mod["id"])
         if json_source is None:
-            self.viewLayout.addWidget(BodyLabel(
-                "This mod does not use mount-time patching.\n"
-                "Per-patch toggle is only available for JSON mods imported with v2.5+.\n"
-                "Reimport the mod to enable this feature."
-            ))
-            self.yesButton.setText("Close")
+            self.viewLayout.addWidget(BodyLabel(tr("patch.no_mount_time")))
+            self.yesButton.setText(tr("main.close"))
             self.cancelButton.hide()
             self.widget.setMinimumWidth(650)
             return
@@ -62,10 +59,19 @@ class PatchToggleDialog(MessageBoxBase):
         disabled = set(mod_manager.get_disabled_patches(mod["id"]))
 
         # Scroll area for patches
+        from qfluentwidgets import isDarkTheme
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(300)
         container = QWidget()
+        if isDarkTheme():
+            container.setStyleSheet("QWidget { background: #1C2028; } "
+                "QCheckBox { color: #E2E8F0; padding: 6px; }"
+                "QFrame { border-color: #2D3340; }")
+        else:
+            container.setStyleSheet("QWidget { background: #FAFBFC; } "
+                "QCheckBox { color: #1A202C; padding: 6px; }"
+                "QFrame { border-color: #E2E8F0; }")
         patch_layout = QVBoxLayout(container)
         patch_layout.setSpacing(2)
 
@@ -127,21 +133,21 @@ class PatchToggleDialog(MessageBoxBase):
 
         # Bulk buttons
         bulk_row = QHBoxLayout()
-        enable_all = PushButton("Enable All")
+        enable_all = PushButton(tr("patch.enable_all"))
         enable_all.clicked.connect(self._enable_all)
         bulk_row.addWidget(enable_all)
 
-        disable_all = PushButton("Disable All")
+        disable_all = PushButton(tr("patch.disable_all"))
         disable_all.clicked.connect(self._disable_all)
         bulk_row.addWidget(disable_all)
         bulk_row.addStretch()
         self.viewLayout.addLayout(bulk_row)
 
         # Override default buttons
-        self.yesButton.setText("Save && Close")
+        self.yesButton.setText(tr("patch.save_close"))
         self.yesButton.clicked.disconnect()
         self.yesButton.clicked.connect(self._save_and_close)
-        self.cancelButton.setText("Cancel")
+        self.cancelButton.setText(tr("main.cancel"))
 
         self.widget.setMinimumWidth(650)
 
@@ -187,12 +193,12 @@ class PatchToggleDialog(MessageBoxBase):
         """Override reject to warn about unsaved changes."""
         if self._changed:
             w = MessageBox(
-                "Unsaved Changes",
-                "You have unsaved patch toggle changes. Save before closing?",
+                tr("patch.unsaved"),
+                tr("patch.unsaved_msg"),
                 self,
             )
-            w.yesButton.setText("Save")
-            w.cancelButton.setText("Discard")
+            w.yesButton.setText(tr("patch.save"))
+            w.cancelButton.setText(tr("patch.discard"))
             if w.exec():
                 self._save_and_close()
                 return

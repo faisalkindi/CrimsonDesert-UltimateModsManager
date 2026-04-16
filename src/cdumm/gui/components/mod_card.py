@@ -25,14 +25,24 @@ from qfluentwidgets import (
 from cdumm.i18n import tr
 
 
+def _is_draggable_card(widget) -> bool:
+    """Check if a widget is a draggable card (ModCard or AsiCard)."""
+    return isinstance(widget, ModCard) or (hasattr(widget, 'mod_id') and hasattr(widget, 'plugin_name'))
+
+
 # ── Color tables ────────────────────────────────────────────────────────────
 
 _STATUS_COLORS = {
-    "installed": {
+    "active": {
         "light": {"bg": "#E8F5E9", "text": "#2E7D32", "border": "#A5D6A7"},
         "dark":  {"bg": "#1A2E1A", "text": "#81C784", "border": "#2E5E2E"},
     },
-    "active": {  # legacy alias
+    "inactive": {
+        "light": {"bg": "#F5F5F5", "text": "#757575", "border": "#E0E0E0"},
+        "dark":  {"bg": "#252830", "text": "#6B7280", "border": "#3A3E48"},
+    },
+    # Legacy aliases
+    "installed": {
         "light": {"bg": "#E8F5E9", "text": "#2E7D32", "border": "#A5D6A7"},
         "dark":  {"bg": "#1A2E1A", "text": "#81C784", "border": "#2E5E2E"},
     },
@@ -44,7 +54,6 @@ _STATUS_COLORS = {
         "light": {"bg": "#F5F5F5", "text": "#757575", "border": "#E0E0E0"},
         "dark":  {"bg": "#252830", "text": "#6B7280", "border": "#3A3E48"},
     },
-    # Legacy aliases
     "not applied": {
         "light": {"bg": "#FFF3E0", "text": "#E65100", "border": "#FFCC80"},
         "dark":  {"bg": "#3E2A10", "text": "#FFB74D", "border": "#6E4A1A"},
@@ -52,6 +61,17 @@ _STATUS_COLORS = {
     "disabled": {
         "light": {"bg": "#F5F5F5", "text": "#757575", "border": "#E0E0E0"},
         "dark":  {"bg": "#252830", "text": "#6B7280", "border": "#3A3E48"},
+    },
+}
+
+_PENDING_COLORS = {
+    "apply to activate": {
+        "light": {"bg": "#FFF3E0", "text": "#E65100", "border": "#FFCC80"},
+        "dark":  {"bg": "#3E2A10", "text": "#FFB74D", "border": "#6E4A1A"},
+    },
+    "apply to deactivate": {
+        "light": {"bg": "#FFEBEE", "text": "#C62828", "border": "#EF9A9A"},
+        "dark":  {"bg": "#2E1A1A", "text": "#EF5350", "border": "#5E2E2E"},
     },
 }
 
@@ -65,9 +85,14 @@ _FILES_COLORS = {
     "dark":  {"bg": "#1A2040", "text": "#9FA8DA", "border": "#2D3A6E"},
 }
 
+_NEW_COLORS = {
+    "light": {"bg": "#BBDEFB", "text": "#0D47A1", "border": "#64B5F6"},
+    "dark":  {"bg": "#1A2744", "text": "#64B5F6", "border": "#1E3A5F"},
+}
+
 _CARD_COLORS = {
     "light": {"bg": "#FFFFFF", "border": "#E5E7EB", "hover": "#F9FAFB"},
-    "dark":  {"bg": "#1C2028", "border": "#2D3340", "hover": "#242A34"},
+    "dark":  {"bg": "#1C2028", "border": "#3A4250", "hover": "#2D3340"},
 }
 
 
@@ -196,6 +221,10 @@ class ModCard(CardWidget):
         file_count: int,
         has_config: bool = False,
         has_notes: bool = False,
+        is_new: bool = False,
+        enabled: bool = True,
+        target_language: str | None = None,
+        conflict_mode: str = "normal",
         parent=None,
     ):
         super().__init__(parent)
@@ -215,7 +244,7 @@ class ModCard(CardWidget):
         self._checkbox = QCheckBox()
         self._checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._checkbox.setFixedWidth(26)
-        self._checkbox.setChecked(status not in ("unloaded", "disabled"))
+        self._checkbox.setChecked(enabled)
         self._apply_checkbox_style()
         self._checkbox.toggled.connect(self._on_toggled)
         root.addWidget(self._checkbox)
@@ -264,18 +293,65 @@ class ModCard(CardWidget):
         name_row.addStretch()
         info.addLayout(name_row)
 
-        self._author_label = CaptionLabel(f"by {author}")
+        self._author_label = CaptionLabel(f"by {author}" if author else "")
+        if not author:
+            self._author_label.hide()
         info.addWidget(self._author_label)
         root.addLayout(info, 1)
         root.addSpacing(12)
 
-        # Col 3: Status badge (fixed width)
+        # Language badge (shown for language mods)
+        if target_language:
+            lang_badge = QLabel(target_language.upper())
+            lang_badge.setFixedHeight(26)
+            lang_badge.setMinimumWidth(45)
+            lang_badge.setMaximumWidth(55)
+            lang_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _lang_colors = {"bg": "#6366F1", "fg": "#FFFFFF"} if isDarkTheme() else {"bg": "#818CF8", "fg": "#FFFFFF"}
+            lang_badge.setStyleSheet(_pill_qss(_lang_colors))
+            root.addWidget(lang_badge)
+            root.addSpacing(6)
+
+        # Override badge (shown for mods with conflict_mode: override)
+        if conflict_mode == "override":
+            ovr_badge = QLabel(tr("mod_card.override"))
+            ovr_badge.setFixedHeight(26)
+            ovr_badge.setMinimumWidth(75)
+            ovr_badge.setMaximumWidth(75)
+            ovr_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _ovr_colors = {"bg": "#DC2626", "fg": "#FFFFFF"} if isDarkTheme() else {"bg": "#EF4444", "fg": "#FFFFFF"}
+            ovr_badge.setStyleSheet(_pill_qss(_ovr_colors))
+            root.addWidget(ovr_badge)
+            root.addSpacing(6)
+
+        # "NEW" bubble (shown for recently imported mods, before status)
+        if is_new:
+            new_badge = QLabel(tr("mod_card.new"))
+            new_badge.setFixedHeight(26)
+            new_badge.setMinimumWidth(55)
+            new_badge.setMaximumWidth(55)
+            new_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            new_badge.setStyleSheet(_pill_qss(_NEW_COLORS[_theme_key()]))
+            root.addWidget(new_badge)
+            root.addSpacing(6)
+
+        # Col 3: Status badge — game state (fixed width)
         self._status_badge = StatusBadge(status)
-        self._status_badge.setMinimumWidth(95)
-        self._status_badge.setMaximumWidth(95)
+        self._status_badge.setMinimumWidth(105)
+        self._status_badge.setMaximumWidth(105)
         self._status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._status_badge)
-        root.addSpacing(10)
+        root.addSpacing(4)
+
+        # Col 3b: Pending action badge (hidden when no pending change)
+        self._pending_badge = QLabel("")
+        self._pending_badge.setFixedHeight(26)
+        self._pending_badge.setMinimumWidth(140)
+        self._pending_badge.setMaximumWidth(140)
+        self._pending_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pending_badge.setVisible(False)
+        root.addWidget(self._pending_badge)
+        root.addSpacing(6)
 
         # Col 4: Version pill (fixed width)
         self._version_pill = QLabel(version)
@@ -294,6 +370,18 @@ class ModCard(CardWidget):
 
     def set_status(self, status: str) -> None:
         self._status_badge.set_status(status)
+
+    def set_pending(self, pending: str | None) -> None:
+        """Set the pending action badge. None or empty hides it."""
+        if not pending:
+            self._pending_badge.setVisible(False)
+            self._pending_badge.setText("")
+            return
+        key = pending.lower()
+        colors = _PENDING_COLORS.get(key, _PENDING_COLORS.get("apply needed"))
+        self._pending_badge.setText(pending)
+        self._pending_badge.setStyleSheet(_pill_qss(colors[_theme_key()]))
+        self._pending_badge.setVisible(True)
 
     def set_has_notes(self, has_notes: bool, note_text: str = "") -> None:
         self._note_icon.setVisible(has_notes)
@@ -469,9 +557,15 @@ class ModCard(CardWidget):
         mime.setData("application/x-cdumm-mod-id", str(self._mod_id).encode())
         drag.setMimeData(mime)
 
+        # Clear any entrance-animation opacity effect before rendering
+        # so the drag preview is crisp, not hazy
+        if self.graphicsEffect() is not None:
+            self.setGraphicsEffect(None)
+
         # Render a pixmap of this card as drag preview
         pixmap = QPixmap(self.size())
-        pixmap.fill(Qt.GlobalColor.transparent)
+        bg = QColor(_CARD_COLORS[_theme_key()]["bg"])
+        pixmap.fill(bg)
         self.render(pixmap)
         drag.setPixmap(pixmap)
         drag.setHotSpot(event.pos())
@@ -527,6 +621,7 @@ class FolderGroup(QWidget):
     header_context_menu = Signal(str, object)  # group_name, QPoint
     select_all_in_group = Signal(object)  # group_id
     mod_moved_to_group = Signal(int, object)  # mod_id, target_group_id
+    folder_dropped = Signal(int, int)  # dragged_group_id, target_group_id
 
     def __init__(self, name: str, group_id: int | None = None, parent=None):
         super().__init__(parent)
@@ -566,16 +661,18 @@ class FolderGroup(QWidget):
         self._count_label.setFont(cf)
         header_layout.addWidget(self._count_label)
 
-        # Select all button for this group
-        self._select_all_btn = CaptionLabel("Select All")
+        # Select all button for this group (hidden — top-level Select All is sufficient)
+        self._select_all_btn = CaptionLabel(tr("mod_card.select_all"))
         self._select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._select_all_btn.mousePressEvent = lambda _e: self._on_select_all_clicked()
         self._apply_select_all_style()
+        self._select_all_btn.setVisible(False)
         header_layout.addWidget(self._select_all_btn)
 
         header_layout.addStretch()
 
         self._header.mousePressEvent = self._on_header_click
+        self._header.mouseMoveEvent = self._on_header_move
         root.addWidget(self._header)
 
         # ── Content container (accepts drops) ───────────────────────────
@@ -584,10 +681,11 @@ class FolderGroup(QWidget):
         self._content_layout.setContentsMargins(8, 0, 0, 0)
         self._content_layout.setSpacing(4)
 
-        # Drag indicator
+        # Drag indicator — positioned absolutely over content, NOT in layout
         self._drag_indicator = DragTargetIndicator(self._content)
-        self._content_layout.addWidget(self._drag_indicator)
         self._drag_indicator.setVisible(False)
+        self._drag_indicator.raise_()  # always on top
+        self._drop_slot = -1  # logical slot index for drop
 
         root.addWidget(self._content)
 
@@ -629,7 +727,7 @@ class FolderGroup(QWidget):
     def group_name(self) -> str:
         return self._group_name
 
-    def add_mod_card(self, card: ModCard) -> None:
+    def add_mod_card(self, card) -> None:
         self._content_layout.addWidget(card)
 
     def set_count(self, n: int) -> None:
@@ -643,7 +741,7 @@ class FolderGroup(QWidget):
         ids = []
         for i in range(self._content_layout.count()):
             widget = self._content_layout.itemAt(i).widget()
-            if isinstance(widget, ModCard):
+            if _is_draggable_card(widget):
                 ids.append(widget.mod_id)
         return ids
 
@@ -675,33 +773,68 @@ class FolderGroup(QWidget):
     # ── Drag-reorder helpers (called by _DroppableContainer) ────────────
 
     def _find_drop_index(self, pos_y: int) -> int:
-        """Find the layout index to insert at based on vertical position."""
+        """Find the logical drop slot based on vertical position.
+
+        Returns a slot number: 0 = before first card, 1 = between card 0
+        and card 1, etc. The indicator is NOT in the layout, so card
+        positions are stable and don't cause feedback loops.
+        """
+        cards = []
         for i in range(self._content_layout.count()):
             widget = self._content_layout.itemAt(i).widget()
-            if widget is None or isinstance(widget, DragTargetIndicator):
-                continue
-            widget_mid = widget.y() + widget.height() // 2
-            if pos_y < widget_mid:
-                return i
-        return self._content_layout.count()
+            if _is_draggable_card(widget):
+                cards.append(widget)
 
-    def _show_indicator(self, index: int) -> None:
-        """Move the drag indicator to the given layout index."""
-        # Remove from current position
-        self._content_layout.removeWidget(self._drag_indicator)
-        # Insert at new position
-        self._content_layout.insertWidget(index, self._drag_indicator)
+        for slot, card in enumerate(cards):
+            card_mid = card.y() + card.height() // 2
+            if pos_y < card_mid:
+                return slot
+        return len(cards)
+
+    def _show_indicator(self, slot: int) -> None:
+        """Position the indicator line at the given slot using absolute coords."""
+        if slot == self._drop_slot and self._drag_indicator.isVisible():
+            return
+
+        self._drop_slot = slot
+
+        # Find the y position for this slot
+        cards = []
+        for i in range(self._content_layout.count()):
+            widget = self._content_layout.itemAt(i).widget()
+            if _is_draggable_card(widget):
+                cards.append(widget)
+
+        if not cards:
+            self._drag_indicator.setVisible(False)
+            return
+
+        if slot <= 0:
+            y = cards[0].y() - 2
+        elif slot >= len(cards):
+            last = cards[-1]
+            y = last.y() + last.height() + 1
+        else:
+            y = cards[slot].y() - 2
+
+        margins = self._content_layout.contentsMargins()
+        self._drag_indicator.setGeometry(
+            margins.left(), y,
+            self._content.width() - margins.left() - margins.right(), 3,
+        )
         self._drag_indicator.setVisible(True)
+        self._drag_indicator.raise_()
 
     def _hide_indicator(self) -> None:
         self._drag_indicator.setVisible(False)
+        self._drop_slot = -1
 
-    def _find_card_anywhere(self, mod_id: int) -> ModCard | None:
-        """Find a ModCard by mod_id in this group or any sibling group."""
+    def _find_card_anywhere(self, mod_id: int):
+        """Find a card by mod_id in this group or any sibling group."""
         # Check this group first
         for i in range(self._content_layout.count()):
             w = self._content_layout.itemAt(i).widget()
-            if isinstance(w, ModCard) and w.mod_id == mod_id:
+            if _is_draggable_card(w) and w.mod_id == mod_id:
                 return w
         # Check sibling groups
         parent = self.parent()
@@ -711,17 +844,31 @@ class FolderGroup(QWidget):
                     continue
                 for i in range(child._content_layout.count()):
                     w = child._content_layout.itemAt(i).widget()
-                    if isinstance(w, ModCard) and w.mod_id == mod_id:
+                    if _is_draggable_card(w) and w.mod_id == mod_id:
                         return w
         return None
 
     def _handle_drop_batch(self, mod_ids: list[int]) -> None:
-        """Move one or more cards to the indicator position. Single atomic operation."""
-        indicator_index = self._content_layout.indexOf(self._drag_indicator)
+        """Move one or more cards to the drop slot. Single atomic operation."""
         self._drag_indicator.setVisible(False)
 
+        # Convert logical slot to layout index
+        cards_in_layout = []
+        for i in range(self._content_layout.count()):
+            w = self._content_layout.itemAt(i).widget()
+            if _is_draggable_card(w):
+                cards_in_layout.append(i)
+
+        slot = max(0, self._drop_slot)
+        if slot < len(cards_in_layout):
+            indicator_index = cards_in_layout[slot]
+        elif cards_in_layout:
+            indicator_index = cards_in_layout[-1] + 1
+        else:
+            indicator_index = self._content_layout.count()
+
         # Collect all cards and remove them from their current groups
-        cards: list[ModCard] = []
+        cards = []
         source_groups: set[FolderGroup] = set()
         for mid in mod_ids:
             card = self._find_card_anywhere(mid)
@@ -758,21 +905,64 @@ class FolderGroup(QWidget):
     def _on_header_click(self, event) -> None:
         if event.button() == Qt.MouseButton.RightButton:
             self.header_context_menu.emit(self._group_name, event.globalPosition().toPoint())
-        else:
+        elif event.button() == Qt.MouseButton.LeftButton:
+            self._folder_drag_start = event.pos()
+            self._folder_drag_started = False
             self.toggle()
+
+    def _on_header_move(self, event) -> None:
+        """Start a folder drag if the header is dragged far enough."""
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._group_id is None:
+            return  # Can't drag the Ungrouped folder
+        if not hasattr(self, '_folder_drag_start'):
+            return
+        distance = (event.pos() - self._folder_drag_start).manhattanLength()
+        if distance < 20:
+            return
+
+        self._folder_drag_started = True
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData("application/x-cdumm-folder-id", str(self._group_id).encode())
+        drag.setMimeData(mime)
+
+        # Render header as drag pixmap
+        pixmap = QPixmap(self._header.size())
+        bg = QColor(_CARD_COLORS[_theme_key()]["bg"])
+        pixmap.fill(bg)
+        self._header.render(pixmap)
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(event.pos())
+
+        drag.exec(Qt.DropAction.MoveAction)
 
     # ── Drag-drop onto group header ────────────────────────────────────
 
     def dragEnterEvent(self, event):  # noqa: N802
         if event.mimeData().hasFormat("application/x-cdumm-mod-id"):
             event.acceptProposedAction()
+        elif event.mimeData().hasFormat("application/x-cdumm-folder-id"):
+            event.acceptProposedAction()
 
     def dragMoveEvent(self, event):  # noqa: N802
         if event.mimeData().hasFormat("application/x-cdumm-mod-id"):
             event.acceptProposedAction()
+        elif event.mimeData().hasFormat("application/x-cdumm-folder-id"):
+            event.acceptProposedAction()
 
     def dropEvent(self, event):  # noqa: N802
-        """Accept drops on the group header — appends cards to end of group."""
+        """Accept drops on the group header — mod cards or folder reorder."""
+        # Folder reorder: a folder was dropped onto this folder's header
+        if event.mimeData().hasFormat("application/x-cdumm-folder-id"):
+            dragged_id = int(event.mimeData().data("application/x-cdumm-folder-id").data().decode())
+            if self._group_id is not None and dragged_id != self._group_id:
+                self.folder_dropped.emit(dragged_id, self._group_id)
+            event.acceptProposedAction()
+            return
+
+        # Mod card drop
         if not event.mimeData().hasFormat("application/x-cdumm-mod-id"):
             return
         if event.mimeData().hasFormat("application/x-cdumm-mod-ids"):
@@ -781,8 +971,10 @@ class FolderGroup(QWidget):
         else:
             mod_id_bytes = event.mimeData().data("application/x-cdumm-mod-id").data()
             mod_ids = [int(mod_id_bytes.decode())]
-        # Show indicator at the end, then do the batch drop
-        self._show_indicator(self._content_layout.count())
+        # Drop at end of group
+        card_count = sum(1 for i in range(self._content_layout.count())
+                         if _is_draggable_card(self._content_layout.itemAt(i).widget()))
+        self._drop_slot = card_count
         self._handle_drop_batch(mod_ids)
         event.acceptProposedAction()
 

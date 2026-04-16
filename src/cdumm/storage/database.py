@@ -231,6 +231,40 @@ class Database:
             """)
             logger.info("Created mod_groups table")
 
+        # Create asi_plugin_state table for ASI plugin folder/ordering state
+        if not self.table_exists("asi_plugin_state"):
+            self._connection.execute("""
+                CREATE TABLE asi_plugin_state (
+                    name TEXT PRIMARY KEY,
+                    group_id INTEGER,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    install_date TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+                )
+            """)
+            logger.info("Created asi_plugin_state table")
+
+        # Add version column to asi_plugin_state if missing
+        if self.table_exists("asi_plugin_state"):
+            cursor = self._connection.execute("PRAGMA table_info(asi_plugin_state)")
+            asi_cols = {row[1] for row in cursor.fetchall()}
+            if "version" not in asi_cols:
+                self._connection.execute(
+                    "ALTER TABLE asi_plugin_state ADD COLUMN version TEXT"
+                )
+                logger.info("Migrated: added version column to asi_plugin_state")
+
+        # Create asi_groups table — separate from mod_groups so PAZ and ASI
+        # have independent folder structures
+        if not self.table_exists("asi_groups"):
+            self._connection.execute("""
+                CREATE TABLE asi_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    sort_order INTEGER DEFAULT 0
+                )
+            """)
+            logger.info("Created asi_groups table")
+
         # Add disabled_patches column to mods for per-patch toggle
         if "disabled_patches" not in columns:
             self._connection.execute(
@@ -244,6 +278,52 @@ class Database:
                 "ALTER TABLE mods ADD COLUMN json_source TEXT"
             )
             logger.info("Migrated: added json_source column to mods")
+
+        # Store original drop folder/file name for version extraction
+        if "drop_name" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN drop_name TEXT"
+            )
+            logger.info("Migrated: added drop_name column to mods")
+
+        # Add NexusMods tracking columns
+        if "nexus_mod_id" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN nexus_mod_id INTEGER"
+            )
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN nexus_file_id TEXT"
+            )
+            logger.info("Migrated: added nexus_mod_id, nexus_file_id columns to mods")
+
+        if "applied" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN applied INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migrated: added applied column to mods")
+
+        # Add conflict_mode column to mods for per-mod override declaration
+        if "conflict_mode" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN conflict_mode TEXT NOT NULL DEFAULT 'normal'"
+            )
+            logger.info("Migrated: added conflict_mode column to mods")
+
+        # Add target_language column to mods for language mod detection
+        if "target_language" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN target_language TEXT"
+            )
+            logger.info("Migrated: added target_language column to mods")
+
+        # Add custom_values column to mod_config for inline value editing
+        cursor_mc = self._connection.execute("PRAGMA table_info(mod_config)")
+        mc_cols = {row[1] for row in cursor_mc.fetchall()}
+        if "custom_values" not in mc_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_config ADD COLUMN custom_values TEXT"
+            )
+            logger.info("Migrated: added custom_values column to mod_config")
 
         # Create crash_registry table for mod health tracking
         if not self.table_exists("crash_registry"):

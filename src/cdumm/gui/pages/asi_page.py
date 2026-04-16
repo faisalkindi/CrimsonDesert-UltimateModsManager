@@ -11,8 +11,8 @@ import logging
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QEasingCurve, QMimeData, Qt, Signal
+from PySide6.QtGui import QColor, QDrag, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -69,7 +69,7 @@ _SIZE_COLORS = {
 
 _CARD_COLORS = {
     "light": {"bg": "#FFFFFF", "border": "#E5E7EB", "hover": "#F9FAFB"},
-    "dark":  {"bg": "#1C2028", "border": "#2D3340", "hover": "#242A34"},
+    "dark":  {"bg": "#1C2028", "border": "#3A4250", "hover": "#2D3340"},
 }
 
 
@@ -155,11 +155,14 @@ class AsiCard(CardWidget):
         self,
         plugin: AsiPlugin,
         order: int,
+        is_new: bool = False,
+        version: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self._plugin = plugin
         self._selected = False
+        self._drag_started = False
 
         self._apply_flat_style()
 
@@ -192,7 +195,8 @@ class AsiCard(CardWidget):
 
         name_row = QHBoxLayout()
         name_row.setSpacing(6)
-        self._name_label = StrongBodyLabel(plugin.name)
+        from cdumm.engine.import_handler import prettify_mod_name
+        self._name_label = StrongBodyLabel(prettify_mod_name(plugin.name))
         name_row.addWidget(self._name_label)
         # Inline rename editor (hidden by default)
         self._name_edit = QLineEdit(plugin.name)
@@ -224,6 +228,17 @@ class AsiCard(CardWidget):
         root.addLayout(info, 1)
         root.addSpacing(12)
 
+        # NEW badge (always reserves space, visible only when new)
+        from cdumm.gui.components.mod_card import _NEW_COLORS, _pill_qss as _mc_pill_qss, _theme_key as _mc_theme_key
+        self._new_badge = QLabel(tr("mod_card.new"))
+        self._new_badge.setFixedHeight(26)
+        self._new_badge.setFixedWidth(55)
+        self._new_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._new_badge.setStyleSheet(_mc_pill_qss(_NEW_COLORS[_mc_theme_key()]))
+        self._new_badge.setVisible(is_new)
+        root.addWidget(self._new_badge)
+        root.addSpacing(6)
+
         # Col 3: Status badge (fixed width)
         status_str = "enabled" if plugin.enabled else "disabled"
         self._status_badge = _AsiStatusBadge(status_str)
@@ -233,21 +248,50 @@ class AsiCard(CardWidget):
         root.addWidget(self._status_badge)
         root.addSpacing(8)
 
-        # Col 4: File size pill (fixed width)
-        try:
-            size = plugin.path.stat().st_size
-            size_text = _humanize_size(size)
-        except OSError:
-            size_text = "?"
-        self._size_pill = QLabel(size_text)
-        self._size_pill.setFixedHeight(22)
-        self._size_pill.setMinimumWidth(70)
-        self._size_pill.setMaximumWidth(70)
-        self._size_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._apply_size_style()
-        root.addWidget(self._size_pill)
+        # Col 4: Version pill
+        # Priority: .version sidecar → NexusMods filename → vN.N.N in filename → ?
+        import re
+        from cdumm.gui.fluent_window import _parse_nexus_filename
+        # Use version from DB if provided
+        if not version:
+            version = "\u2014"
+        # Check .version sidecar file (written during ASI install from drop path)
+        if plugin.path:
+            ver_file = plugin.path.with_suffix('.version')
+            if ver_file.exists():
+                try:
+                    version = ver_file.read_text(encoding='utf-8').strip()
+                except Exception:
+                    pass
+        # Fallback: parse from .asi filename
+        if version == "\u2014" and plugin.path:
+            fname = plugin.path.stem
+            nid, nver = _parse_nexus_filename(fname)
+            if nid and nver:
+                version = nver
+            else:
+                m = re.search(r'[vV](\d+(?:\.\d+)*)', fname)
+                if m:
+                    version = m.group(1)
+        # Truncate long versions to fit the fixed pill
+        if len(version) > 7:
+            version = version[:6] + "\u2026"
+        self._version_pill = QLabel(version)
+        self._version_pill.setFixedHeight(26)
+        self._version_pill.setFixedWidth(65)
+        self._version_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._apply_version_style()
+        root.addWidget(self._version_pill)
+
+        # Dim disabled plugins on creation
+        if not plugin.enabled:
+            self._apply_disabled_dimming(True)
 
     # -- Public API --
+
+    @property
+    def mod_id(self) -> int:
+        return hash(self._plugin.name) & 0x7FFFFFFF
 
     @property
     def plugin_name(self) -> str:
@@ -277,6 +321,7 @@ class AsiCard(CardWidget):
 
     def set_status(self, status: str) -> None:
         self._status_badge.set_status(status)
+        self._apply_disabled_dimming(status == "disabled")
 
     def start_rename(self) -> None:
         """Switch to inline edit mode for the name."""
@@ -322,8 +367,9 @@ class AsiCard(CardWidget):
             self._apply_flat_style()
             self._apply_checkbox_style()
             self._apply_order_style()
-            self._apply_size_style()
             self._status_badge._apply_style()
+            if hasattr(self, '_version_pill'):
+                self._apply_version_style()
 
     # -- Internal styles --
 
@@ -363,9 +409,20 @@ class AsiCard(CardWidget):
             return QColor("#1E3048") if isDarkTheme() else QColor("#C5DEFA")
         return super()._hoverBackgroundColor()
 
-    def _apply_size_style(self) -> None:
+    def _apply_version_style(self) -> None:
         key = _theme_key()
-        self._size_pill.setStyleSheet(_pill_qss(_SIZE_COLORS[key]))
+        from cdumm.gui.components.mod_card import _VERSION_COLORS, _pill_qss
+        self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
+
+    def _apply_disabled_dimming(self, disabled: bool) -> None:
+        """Dim the card when the plugin is disabled for visual distinction."""
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        if disabled:
+            effect = QGraphicsOpacityEffect(self)
+            effect.setOpacity(0.6)
+            self.setGraphicsEffect(effect)
+        else:
+            self.setGraphicsEffect(None)
 
     # -- Signal handlers --
 
@@ -378,12 +435,57 @@ class AsiCard(CardWidget):
     def mousePressEvent(self, event):  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos = event.pos()
+            self._drag_started = False
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):  # noqa: N802
         super().mouseReleaseEvent(event)
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and not getattr(self, '_drag_started', False):
             self.card_clicked.emit(self._plugin.name, event)
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if not hasattr(self, '_drag_start_pos'):
+            return
+        distance = (event.pos() - self._drag_start_pos).manhattanLength()
+        if distance < 20:
+            return
+
+        self._drag_started = True
+        drag = QDrag(self)
+        mime = QMimeData()
+
+        # If this card is selected, drag ALL selected cards
+        drag_ids = [self.mod_id]
+        if self._selected:
+            p = self.parent()
+            while p:
+                if hasattr(p, '_get_selected_asi_ids'):
+                    sel = p._get_selected_asi_ids()
+                    if sel and self.mod_id in sel:
+                        drag_ids = sel
+                    break
+                p = p.parent()
+
+        mime.setData("application/x-cdumm-mod-ids", ",".join(str(i) for i in drag_ids).encode())
+        mime.setData("application/x-cdumm-mod-id", str(self.mod_id).encode())
+        drag.setMimeData(mime)
+
+        # Clear any entrance-animation opacity effect before rendering
+        if self.graphicsEffect() is not None:
+            self.setGraphicsEffect(None)
+
+        # Render a pixmap of this card as drag preview
+        from cdumm.gui.components.mod_card import _CARD_COLORS, _theme_key as _mc_theme_key
+        pixmap = QPixmap(self.size())
+        bg = QColor(_CARD_COLORS[_mc_theme_key()]["bg"])
+        pixmap.fill(bg)
+        self.render(pixmap)
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(event.pos())
+
+        drag.exec(Qt.DropAction.MoveAction)
 
     def contextMenuEvent(self, event):  # noqa: N802
         self.context_menu_requested.emit(self._plugin.name, event.globalPos())
@@ -454,7 +556,7 @@ class _AsiSummaryBar(QWidget):
             "background: #9CA3AF; border-radius: 4px; border: none;"
         )
 
-        self._loader_label = CaptionLabel("ASI Loader: Unknown")
+        self._loader_label = CaptionLabel(tr("asi.loader_unknown"))
 
         loader_item = QHBoxLayout()
         loader_item.setSpacing(6)
@@ -550,12 +652,15 @@ class AsiPluginsPage(QWidget):
         # Engine references
         self._asi_manager: AsiManager | None = None
         self._game_dir: Path | None = None
+        self._db = None
 
         # Card tracking
         self._cards: list[AsiCard] = []
         self._initial_load_done = False
         self._plugins: list[AsiPlugin] = []
         self._last_clicked_index: int | None = None
+        self._id_to_name: dict[int, str] = {}
+        self._folder_groups: dict[int | None, 'FolderGroup'] = {}
 
         self._build_ui()
 
@@ -599,10 +704,27 @@ class AsiPluginsPage(QWidget):
         select_row = QHBoxLayout()
         select_row.setContentsMargins(14, 0, 0, 0)
         self._select_all_cb = CheckBox(tr("asi.select_all"))
-        self._select_all_cb.setTristate(True)
+        self._select_all_cb.setTristate(False)
         self._select_all_cb.clicked.connect(self._on_select_all)
         select_row.addWidget(self._select_all_cb)
         select_row.addStretch()
+
+        from PySide6.QtGui import QFont as _QFont
+        self._new_folder_btn = PushButton(FluentIcon.ADD, tr("asi.new_folder"))
+        self._new_folder_btn.setFixedHeight(32)
+        _nbf = self._new_folder_btn.font()
+        _nbf.setPixelSize(13)
+        _nbf.setWeight(_QFont.Weight.Bold)
+        self._new_folder_btn.setFont(_nbf)
+        self._new_folder_btn.clicked.connect(self._on_new_folder)
+        setCustomStyleSheet(self._new_folder_btn,
+            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #E0ECFF; }"
+            "PushButton:pressed { background: #D0E0F8; }",
+            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #223450; }"
+            "PushButton:pressed { background: #2A3C58; }")
+        select_row.addWidget(self._new_folder_btn)
         body.addLayout(select_row)
 
         # Scrollable card list
@@ -620,7 +742,7 @@ class AsiPluginsPage(QWidget):
 
         # Empty state label
         self._empty_label = BodyLabel(
-            "No ASI plugins found. Drop .asi files into the game's bin64 directory."
+            tr("asi.no_plugins")
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.hide()
@@ -638,11 +760,257 @@ class AsiPluginsPage(QWidget):
     # Engine wiring
     # ------------------------------------------------------------------
 
-    def set_managers(self, game_dir: Path | None = None, **kwargs) -> None:
+    def set_managers(self, game_dir: Path | None = None, db=None, **kwargs) -> None:
         """Receive engine references from CdummWindow."""
         self._game_dir = game_dir
+        if db is not None:
+            self._db = db
         if game_dir:
             self._asi_manager = AsiManager(game_dir / "bin64")
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # ASI state sync (DB)
+    # ------------------------------------------------------------------
+
+    def _get_plugin_state(self, name: str) -> dict | None:
+        if not self._db:
+            return None
+        try:
+            row = self._db.connection.execute(
+                "SELECT name, group_id, priority, install_date, version FROM asi_plugin_state WHERE name = ?",
+                (name,)).fetchone()
+            if row:
+                return {"name": row[0], "group_id": row[1], "priority": row[2], "install_date": row[3], "version": row[4] or ""}
+        except Exception:
+            pass
+        return None
+
+    def _ensure_plugin_state(self, name: str) -> None:
+        if not self._db:
+            return
+        try:
+            self._db.connection.execute(
+                "INSERT OR IGNORE INTO asi_plugin_state (name) VALUES (?)", (name,))
+            self._db.connection.commit()
+        except Exception:
+            pass
+
+    def _cleanup_stale_state(self, current_names: set[str]) -> None:
+        if not self._db:
+            return
+        try:
+            rows = self._db.connection.execute("SELECT name FROM asi_plugin_state").fetchall()
+            for (name,) in rows:
+                if name not in current_names:
+                    self._db.connection.execute(
+                        "DELETE FROM asi_plugin_state WHERE name = ?", (name,))
+            self._db.connection.commit()
+        except Exception:
+            pass
+
+    def _get_selected_asi_ids(self) -> list[int]:
+        return [c.mod_id for c in self._cards if c.is_selected]
+
+    # ------------------------------------------------------------------
+    # Folder group management
+    # ------------------------------------------------------------------
+
+    def _load_folder_groups(self) -> list[dict]:
+        """Load folder groups from the database."""
+        if not self._db:
+            return []
+        try:
+            cursor = self._db.connection.execute(
+                "SELECT id, name, sort_order FROM asi_groups ORDER BY sort_order"
+            )
+            return [{"id": row[0], "name": row[1], "sort_order": row[2]} for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def _on_new_folder(self) -> None:
+        """Create a new folder group via dialog."""
+        if not self._db:
+            return
+
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, LineEdit
+
+        class NewFolderBox(MessageBoxBase):
+            def __init__(self_box, parent):
+                super().__init__(parent)
+                self_box.titleLabel = SubtitleLabel(tr("asi.new_folder"))
+                self_box.input = LineEdit()
+                self_box.input.setPlaceholderText(tr("asi.folder_name_placeholder"))
+                self_box.viewLayout.addWidget(self_box.titleLabel)
+                self_box.viewLayout.addWidget(self_box.input)
+
+        box = NewFolderBox(self.window())
+        if box.exec():
+            name = box.input.text().strip()
+            if not name:
+                return
+            cursor = self._db.connection.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM asi_groups"
+            )
+            next_order = cursor.fetchone()[0]
+            self._db.connection.execute(
+                "INSERT INTO asi_groups (name, sort_order) VALUES (?, ?)",
+                (name, next_order),
+            )
+            self._db.connection.commit()
+            self.refresh()
+
+    def _on_group_header_menu(self, group_name: str, global_pos) -> None:
+        """Show context menu for a folder group header."""
+        if group_name == tr("asi.ungrouped"):
+            return
+
+        group_id = None
+        for gid, fg in self._folder_groups.items():
+            if fg.group_name == group_name and gid is not None:
+                group_id = gid
+                break
+        if group_id is None:
+            return
+
+        menu = RoundMenu(parent=self)
+        menu.addAction(Action(FluentIcon.EDIT, tr("asi.rename_folder"), triggered=lambda: self._rename_folder(group_id, group_name)))
+        menu.addSeparator()
+        menu.addAction(Action(FluentIcon.DELETE, tr("asi.delete_folder"), triggered=lambda: self._delete_folder(group_id)))
+        menu.exec(global_pos)
+
+    def _rename_folder(self, group_id: int, current_name: str) -> None:
+        """Rename a folder group."""
+        if not self._db:
+            return
+
+        from qfluentwidgets import MessageBoxBase, SubtitleLabel, LineEdit
+
+        class RenameFolderBox(MessageBoxBase):
+            def __init__(self_box, name, parent):
+                super().__init__(parent)
+                self_box.titleLabel = SubtitleLabel(tr("asi.rename_folder"))
+                self_box.input = LineEdit()
+                self_box.input.setText(name)
+                self_box.input.selectAll()
+                self_box.viewLayout.addWidget(self_box.titleLabel)
+                self_box.viewLayout.addWidget(self_box.input)
+
+        box = RenameFolderBox(current_name, self.window())
+        if box.exec():
+            new_name = box.input.text().strip()
+            if new_name and new_name != current_name:
+                self._db.connection.execute(
+                    "UPDATE asi_groups SET name = ? WHERE id = ?",
+                    (new_name, group_id),
+                )
+                self._db.connection.commit()
+                self.refresh()
+
+    def _delete_folder(self, group_id: int) -> None:
+        """Delete a folder group and move its ASI plugins back to Ungrouped."""
+        if not self._db:
+            return
+
+        from qfluentwidgets import MessageBox
+
+        box = MessageBox(
+            tr("asi.delete_folder"),
+            tr("asi.delete_folder_confirm"),
+            self.window(),
+        )
+        if box.exec():
+            self._db.connection.execute(
+                "UPDATE asi_plugin_state SET group_id = NULL WHERE group_id = ?",
+                (group_id,),
+            )
+            self._db.connection.execute(
+                "DELETE FROM asi_groups WHERE id = ?",
+                (group_id,),
+            )
+            self._db.connection.commit()
+            self.refresh()
+
+    def _on_folder_reorder(self, dragged_id: int, target_id: int) -> None:
+        """Reorder folders: place dragged folder before the target folder."""
+        if not self._db:
+            return
+        groups = self._load_folder_groups()
+        ids = [g["id"] for g in groups]
+        if dragged_id not in ids or target_id not in ids:
+            return
+        ids.remove(dragged_id)
+        target_pos = ids.index(target_id)
+        ids.insert(target_pos, dragged_id)
+        for order, gid in enumerate(ids):
+            self._db.connection.execute(
+                "UPDATE asi_groups SET sort_order = ? WHERE id = ?",
+                (order, gid),
+            )
+        self._db.connection.commit()
+        self.refresh()
+
+    def _on_asi_moved_to_group(self, mod_id: int, group_id) -> None:
+        """Persist group change when an ASI card is dragged to a different group."""
+        name = self._id_to_name.get(mod_id)
+        if not name or not self._db:
+            return
+        try:
+            self._db.connection.execute(
+                "UPDATE asi_plugin_state SET group_id = ? WHERE name = ?",
+                (group_id, name),
+            )
+            self._db.connection.commit()
+        except Exception:
+            pass
+
+    def _on_order_changed(self, mod_ids: list[int]) -> None:
+        """Persist the new plugin order after a drag-reorder."""
+        if not self._db:
+            return
+        from cdumm.gui.components.mod_card import FolderGroup, _is_draggable_card
+        global_order: list[int] = []
+        for i in range(self._scroll_layout.count()):
+            item = self._scroll_layout.itemAt(i)
+            widget = item.widget() if item else None
+            if isinstance(widget, FolderGroup):
+                for j in range(widget._content_layout.count()):
+                    card_item = widget._content_layout.itemAt(j)
+                    card = card_item.widget() if card_item else None
+                    if _is_draggable_card(card):
+                        global_order.append(card.mod_id)
+
+        for priority, mid in enumerate(global_order):
+            name = self._id_to_name.get(mid)
+            if name:
+                try:
+                    self._db.connection.execute(
+                        "UPDATE asi_plugin_state SET priority = ? WHERE name = ?",
+                        (priority, name),
+                    )
+                except Exception:
+                    pass
+        try:
+            self._db.connection.commit()
+        except Exception:
+            pass
+
+        # Update order labels
+        for i, mid in enumerate(global_order, start=1):
+            for card in self._cards:
+                if card.mod_id == mid:
+                    card._order_label.setText(f"#{i}")
+                    break
+
+    def _move_asi_to_group(self, name: str, group_id: int | None) -> None:
+        """Move an ASI plugin to a different folder group."""
+        if not self._db:
+            return
+        self._db.connection.execute(
+            "UPDATE asi_plugin_state SET group_id = ? WHERE name = ?",
+            (group_id, name),
+        )
+        self._db.connection.commit()
         self.refresh()
 
     # ------------------------------------------------------------------
@@ -650,23 +1018,31 @@ class AsiPluginsPage(QWidget):
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Rescan ASI plugins and rebuild the card list."""
+        """Rescan ASI plugins and rebuild the card list with folder groups."""
+        from cdumm.gui.components.mod_card import FolderGroup
+
         # Clear existing cards
         for card in self._cards:
             card.setParent(None)
             card.deleteLater()
         self._cards.clear()
         self._plugins.clear()
+        self._id_to_name.clear()
+
+        # Clear old folder groups
+        for group in self._folder_groups.values():
+            group.setParent(None)
+            group.deleteLater()
+        self._folder_groups.clear()
 
         # Remove all widgets from scroll layout except empty_label and stretch
         while self._scroll_layout.count() > 2:
             item = self._scroll_layout.takeAt(0)
-            # already cleaned up above
 
         if not self._asi_manager:
             self._summary_bar.set_loader_status(False)
             self._summary_bar.update_stats(0, 0, 0)
-            self._empty_label.setText("Game directory not configured.")
+            self._empty_label.setText(tr("asi.game_dir_not_set"))
             self._empty_label.show()
             return
 
@@ -683,29 +1059,90 @@ class AsiPluginsPage(QWidget):
         if not self._plugins:
             self._empty_label.show()
             self._summary_bar.update_stats(0, 0, 0)
-            self._sync_select_all()
             return
 
         self._empty_label.hide()
 
-        for order, plugin in enumerate(self._plugins, start=1):
-            card = AsiCard(plugin, order, parent=self._scroll_content)
+        # Ensure DB state for all plugins, cleanup stale entries
+        current_names = {p.name for p in self._plugins}
+        for p in self._plugins:
+            self._ensure_plugin_state(p.name)
+        self._cleanup_stale_state(current_names)
+
+        # Load folder groups from DB
+        groups_from_db = self._load_folder_groups()
+
+        # Create FolderGroup widgets: user groups first, then Ungrouped
+        for g in groups_from_db:
+            fg = FolderGroup(g["name"], group_id=g["id"], parent=self._scroll_content)
+            fg.order_changed.connect(self._on_order_changed)
+            fg.mod_moved_to_group.connect(self._on_asi_moved_to_group)
+            fg.header_context_menu.connect(self._on_group_header_menu)
+            fg.folder_dropped.connect(self._on_folder_reorder)
+            self._folder_groups[g["id"]] = fg
+            self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, fg)
+
+        # Always create "Ungrouped" group (group_id=None)
+        ungrouped = FolderGroup(tr("asi.ungrouped"), group_id=None, parent=self._scroll_content)
+        ungrouped.order_changed.connect(self._on_order_changed)
+        ungrouped.mod_moved_to_group.connect(self._on_asi_moved_to_group)
+        self._folder_groups[None] = ungrouped
+        self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, ungrouped)
+
+        # Sort plugins by priority from DB
+        def _plugin_priority(p):
+            state = self._get_plugin_state(p.name)
+            return state["priority"] if state else 0
+        sorted_plugins = sorted(self._plugins, key=_plugin_priority)
+
+        # Track counts per group
+        group_counts: dict[int | None, int] = {gid: 0 for gid in self._folder_groups}
+        from datetime import datetime, timedelta
+        _now = datetime.now()
+
+        for order, plugin in enumerate(sorted_plugins, start=1):
+            # Check if recently installed (< 2 hours)
+            is_new = False
+            state = self._get_plugin_state(plugin.name)
+            if state and state.get("install_date"):
+                try:
+                    install_dt = datetime.strptime(state["install_date"], "%Y-%m-%d %H:%M:%S")
+                    is_new = (_now - install_dt) < timedelta(hours=2)
+                except ValueError:
+                    pass
+
+            db_version = state.get("version", "") if state else ""
+            card = AsiCard(plugin, order, is_new=is_new, version=db_version, parent=self._scroll_content)
             card.toggled.connect(self._on_card_toggled)
             card.config_clicked.connect(self._on_config_clicked)
             card.context_menu_requested.connect(self._show_context_menu)
             card.renamed.connect(self._on_asi_renamed)
             card.card_clicked.connect(self._on_card_clicked)
             self._cards.append(card)
-            # Insert before the stretch
-            self._scroll_layout.insertWidget(
-                self._scroll_layout.count() - 1, card
-            )
+
+            # Build id-to-name mapping
+            self._id_to_name[card.mod_id] = plugin.name
+
+            # Place card in the correct folder group
+            gid = state["group_id"] if state else None
+            if gid not in self._folder_groups:
+                gid = None  # fallback to Ungrouped
+            self._folder_groups[gid].add_mod_card(card)
+            group_counts[gid] = group_counts.get(gid, 0) + 1
+
+        # Update counts
+        for gid, fg in self._folder_groups.items():
+            fg.set_count(group_counts.get(gid, 0))
 
         self._update_stats()
-        self._sync_select_all()
+        # Sync select-all to match actual card state
+        all_checked = bool(self._cards) and all(c._checkbox.isChecked() for c in self._cards)
+        self._select_all_cb.blockSignals(True)
+        self._select_all_cb.setChecked(bool(all_checked))
+        self._select_all_cb.blockSignals(False)
 
         # Staggered entrance animation only on first load
-        if not self._initial_load_done:
+        if not self._initial_load_done and self._cards:
             from cdumm.gui.components.card_animations import staggered_fade_in
             self._entrance_anim = staggered_fade_in(self._cards)
             self._initial_load_done = True
@@ -715,6 +1152,7 @@ class AsiPluginsPage(QWidget):
         self._section_title.setText(tr("asi.title"))
         self._search_edit.setPlaceholderText(tr("asi.search_placeholder"))
         self._select_all_cb.setText(tr("asi.select_all"))
+        self._new_folder_btn.setText(tr("asi.new_folder"))
         self._summary_bar.retranslate_ui()
 
     # ------------------------------------------------------------------
@@ -738,7 +1176,6 @@ class AsiPluginsPage(QWidget):
                 card.setVisible(True)
             else:
                 card.setVisible(needle in card._name_label.text().lower())
-        self._sync_select_all()
 
     # ------------------------------------------------------------------
     # Select all
@@ -754,21 +1191,11 @@ class AsiPluginsPage(QWidget):
         self._update_stats()
 
     def _sync_select_all(self) -> None:
+        """Update select-all checkbox to match current card states. Two states only."""
         visible = [c for c in self._cards if c.isVisible()]
-        if not visible:
-            self._select_all_cb.blockSignals(True)
-            self._select_all_cb.setCheckState(Qt.CheckState.Unchecked)
-            self._select_all_cb.blockSignals(False)
-            return
-
-        checked_count = sum(1 for c in visible if c._checkbox.isChecked())
+        all_checked = bool(visible) and all(c._checkbox.isChecked() for c in visible)
         self._select_all_cb.blockSignals(True)
-        if checked_count == 0:
-            self._select_all_cb.setCheckState(Qt.CheckState.Unchecked)
-        elif checked_count == len(visible):
-            self._select_all_cb.setCheckState(Qt.CheckState.Checked)
-        else:
-            self._select_all_cb.setCheckState(Qt.CheckState.PartiallyChecked)
+        self._select_all_cb.setChecked(bool(all_checked))
         self._select_all_cb.blockSignals(False)
 
     # ------------------------------------------------------------------
@@ -783,7 +1210,6 @@ class AsiPluginsPage(QWidget):
                 if card.plugin_name == plugin_name:
                     card.set_status("enabled" if enabled else "disabled")
                     break
-        self._sync_select_all()
         self._update_stats()
 
     def _toggle_plugin(self, plugin: AsiPlugin, enable: bool) -> None:
@@ -886,11 +1312,11 @@ class AsiPluginsPage(QWidget):
 
         if multi:
             menu.addAction(Action(
-                FluentIcon.ACCEPT, f"Enable {len(selected_names)} plugins",
+                FluentIcon.ACCEPT, tr("asi.enable_plugins", count=len(selected_names)),
                 triggered=lambda: self._ctx_batch_toggle(selected_names, True),
             ))
             menu.addAction(Action(
-                FluentIcon.REMOVE, f"Disable {len(selected_names)} plugins",
+                FluentIcon.REMOVE, tr("asi.disable_plugins", count=len(selected_names)),
                 triggered=lambda: self._ctx_batch_toggle(selected_names, False),
             ))
             menu.addSeparator()
@@ -902,12 +1328,12 @@ class AsiPluginsPage(QWidget):
             # Single select
             if plugin.enabled:
                 menu.addAction(Action(
-                    FluentIcon.REMOVE, "Disable",
+                    FluentIcon.REMOVE, tr("asi.disable"),
                     triggered=lambda: self._ctx_toggle(plugin_name, False),
                 ))
             else:
                 menu.addAction(Action(
-                    FluentIcon.ACCEPT, "Enable",
+                    FluentIcon.ACCEPT, tr("asi.enable"),
                     triggered=lambda: self._ctx_toggle(plugin_name, True),
                 ))
 
@@ -916,21 +1342,43 @@ class AsiPluginsPage(QWidget):
             # Open config (if INI exists)
             if plugin.ini_path and plugin.ini_path.exists():
                 menu.addAction(Action(
-                    FluentIcon.EDIT, "Edit Config",
+                    FluentIcon.EDIT, tr("asi.edit_config"),
                     triggered=lambda: self._on_config_clicked(plugin_name),
                 ))
 
             # Rename
             menu.addAction(Action(
-                FluentIcon.EDIT, "Rename",
+                FluentIcon.EDIT, tr("asi.rename"),
                 triggered=lambda: self._ctx_rename(plugin_name),
             ))
 
             # Open folder
             menu.addAction(Action(
-                FluentIcon.FOLDER, "Open Folder",
+                FluentIcon.FOLDER, tr("asi.open_folder"),
                 triggered=lambda: self._ctx_open_folder(plugin),
             ))
+
+            menu.addSeparator()
+
+            # Move to Folder submenu
+            if self._db and self._folder_groups:
+                move_menu = RoundMenu(tr("asi.move_to_folder"), parent=menu)
+                for gid, fg in self._folder_groups.items():
+                    if gid is None:
+                        continue
+                    _gid = gid
+                    _name = plugin_name
+                    move_menu.addAction(Action(
+                        FluentIcon.FOLDER, fg.group_name,
+                        triggered=lambda checked=False, g=_gid, n=_name: self._move_asi_to_group(n, g),
+                    ))
+                move_menu.addSeparator()
+                _name2 = plugin_name
+                move_menu.addAction(Action(
+                    FluentIcon.REMOVE, tr("asi.ungrouped"),
+                    triggered=lambda checked=False, n=_name2: self._move_asi_to_group(n, None),
+                ))
+                menu.addMenu(move_menu)
 
             menu.addSeparator()
 
@@ -952,7 +1400,6 @@ class AsiPluginsPage(QWidget):
                 card.set_checked(enabled)
                 card.set_status("enabled" if enabled else "disabled")
                 break
-        self._sync_select_all()
         self._update_stats()
 
     def _ctx_batch_toggle(self, names: list[str], enabled: bool) -> None:
@@ -966,7 +1413,6 @@ class AsiPluginsPage(QWidget):
                     card.set_checked(enabled)
                     card.set_status("enabled" if enabled else "disabled")
                     break
-        self._sync_select_all()
         self._update_stats()
 
     def _ctx_rename(self, plugin_name: str) -> None:
@@ -977,7 +1423,7 @@ class AsiPluginsPage(QWidget):
                 break
 
     def _on_asi_renamed(self, old_name: str, new_name: str) -> None:
-        """Persist the ASI plugin rename on disk."""
+        """Persist the ASI plugin rename on disk and update DB state."""
         plugin = self._find_plugin(old_name)
         if not plugin:
             return
@@ -995,6 +1441,15 @@ class AsiPluginsPage(QWidget):
                 plugin.ini_path.rename(new_ini)
         except OSError as e:
             logger.warning("Failed to rename plugin INI: %s", e)
+        # Update DB state to track the new name
+        if self._db:
+            try:
+                self._db.connection.execute(
+                    "UPDATE asi_plugin_state SET name = ? WHERE name = ?",
+                    (new_name, old_name))
+                self._db.connection.commit()
+            except Exception:
+                pass
         self.refresh()
 
     def _ctx_open_folder(self, plugin: AsiPlugin) -> None:
@@ -1009,7 +1464,7 @@ class AsiPluginsPage(QWidget):
             return
 
         box = MessageBox(
-            "Uninstall Plugin",
+            tr("asi.uninstall_plugin"),
             f'Remove "{plugin.name}"? This cannot be undone.',
             self.window(),
         )
@@ -1024,8 +1479,8 @@ class AsiPluginsPage(QWidget):
             return
 
         box = MessageBox(
-            "Uninstall Plugins",
-            f"Remove {len(names)} selected plugins? This cannot be undone.",
+            tr("asi.uninstall_plugins"),
+            tr("asi.uninstall_confirm", count=len(names)),
             self.window(),
         )
         if box.exec():

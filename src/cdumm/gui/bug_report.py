@@ -27,6 +27,7 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from cdumm.i18n import tr
 from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ class BugReportDialog(MessageBoxBase):
         super().__init__(parent)
         self._base_report = report_text
 
-        self.titleLabel = SubtitleLabel("Bug Report")
+        self.titleLabel = SubtitleLabel(tr("bug.title"))
         self.viewLayout.addWidget(self.titleLabel)
 
         if is_crash:
@@ -168,11 +169,11 @@ class BugReportDialog(MessageBoxBase):
 
         # Severity
         sev_row = QHBoxLayout()
-        sev_row.addWidget(CaptionLabel("Severity:"))
+        sev_row.addWidget(CaptionLabel(tr("bug.severity")))
         self._severity = ComboBox()
         self._severity.addItems([
-            "Crash (app closed/froze)", "Bug (wrong behavior)",
-            "Visual (UI issue)", "Other",
+            tr("bug.crash"), tr("bug.wrong"),
+            tr("bug.visual"), tr("bug.other"),
         ])
         if is_crash:
             self._severity.setCurrentIndex(0)
@@ -181,21 +182,31 @@ class BugReportDialog(MessageBoxBase):
         sev_row.addStretch()
         self.viewLayout.addLayout(sev_row)
 
+        # Theme-aware QTextEdit styling (plain Qt, not qfluentwidgets)
+        from qfluentwidgets import isDarkTheme
+        if isDarkTheme():
+            _te_style = ("QTextEdit { background: #1C2028; color: #E2E8F0; "
+                         "border: 1px solid #2D3340; border-radius: 6px; padding: 8px; }")
+        else:
+            _te_style = ("QTextEdit { background: #FAFBFC; color: #1A202C; "
+                         "border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; }")
+
         # User description field
-        self.viewLayout.addWidget(CaptionLabel("What happened? (steps to reproduce):"))
+        self.viewLayout.addWidget(CaptionLabel(tr("bug.what_happened")))
         self._desc_edit = QTextEdit()
         self._desc_edit.setMaximumHeight(80)
-        self._desc_edit.setPlaceholderText(
-            "Example: I dropped a zip file, the progress bar reached 68%, then the app froze...")
+        self._desc_edit.setPlaceholderText(tr("bug.placeholder"))
+        self._desc_edit.setStyleSheet(_te_style)
         self.viewLayout.addWidget(self._desc_edit)
 
         # Report preview
-        self.viewLayout.addWidget(CaptionLabel("Report preview:"))
+        self.viewLayout.addWidget(CaptionLabel(tr("bug.preview")))
         self._text_edit = QTextEdit()
         self._text_edit.setReadOnly(True)
         self._text_edit.setPlainText(report_text)
         self._text_edit.setFontFamily("Consolas")
         self._text_edit.setMinimumHeight(250)
+        self._text_edit.setStyleSheet(_te_style)
         self.viewLayout.addWidget(self._text_edit)
 
         # Update preview when user types or changes severity
@@ -205,11 +216,11 @@ class BugReportDialog(MessageBoxBase):
         # Action buttons
         btn_row = QHBoxLayout()
 
-        copy_btn = PrimaryPushButton("Copy to Clipboard")
+        copy_btn = PrimaryPushButton(tr("bug.copy"))
         copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(copy_btn)
 
-        save_btn = PushButton("Save as File")
+        save_btn = PushButton(tr("bug.save"))
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
 
@@ -217,7 +228,7 @@ class BugReportDialog(MessageBoxBase):
         self.viewLayout.addLayout(btn_row)
 
         # Override default buttons
-        self.yesButton.setText("Close")
+        self.yesButton.setText(tr("main.close"))
         self.cancelButton.hide()
 
         self.widget.setMinimumWidth(700)
@@ -238,8 +249,8 @@ class BugReportDialog(MessageBoxBase):
         clipboard = QApplication.clipboard()
         clipboard.setText(self._get_full_report())
         InfoBar.success(
-            title="Copied",
-            content="Bug report copied to clipboard.",
+            title=tr("main.copied"),
+            content=tr("bug.copied"),
             duration=3000, position=InfoBarPosition.TOP, parent=self,
         )
 
@@ -252,7 +263,7 @@ class BugReportDialog(MessageBoxBase):
         if path:
             Path(path).write_text(self._get_full_report(), encoding="utf-8")
             InfoBar.success(
-                title="Saved",
-                content=f"Bug report saved to:\n{path}",
+                title=tr("main.saved"),
+                content=tr("bug.saved", path=path),
                 duration=4000, position=InfoBarPosition.TOP, parent=self,
             )

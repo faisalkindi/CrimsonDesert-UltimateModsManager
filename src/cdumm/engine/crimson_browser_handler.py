@@ -17,6 +17,7 @@ The handler:
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
 
 import struct
@@ -25,6 +26,27 @@ from cdumm.archive.paz_parse import parse_pamt, PazEntry
 from cdumm.archive.paz_repack import repack_entry_bytes, _save_timestamps
 
 logger = logging.getLogger(__name__)
+
+
+def fix_xml_format(data: bytes) -> bytes:
+    """Fix XML for Crimson Desert's parser: UTF-8 BOM, no XML declaration, CRLF.
+
+    The game requires: UTF-8 BOM prefix, no <?xml ...?> declaration, CRLF line
+    endings. Mod tools often export with LF, no BOM, and an XML declaration that
+    crashes the game's parser.
+    """
+    fixed = data
+    # Remove XML declaration if present
+    if fixed.startswith(b'<?xml'):
+        nl = fixed.find(b'\n')
+        if nl >= 0:
+            fixed = fixed[nl + 1:]
+    # Add UTF-8 BOM
+    if not fixed.startswith(b'\xef\xbb\xbf'):
+        fixed = b'\xef\xbb\xbf' + fixed
+    # Normalize line endings to CRLF
+    fixed = fixed.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    return fixed
 
 
 def detect_crimson_browser(path: Path) -> dict | None:
@@ -36,18 +58,21 @@ def detect_crimson_browser(path: Path) -> dict | None:
     Returns:
         Parsed manifest dict if CB format, None otherwise.
     """
-    # Check root and one level deep for manifest.json or modinfo.json
+    # Search up to 3 levels deep for manifest.json or modinfo.json
+    # (handles double-nested folders from zip extraction artifacts)
     candidates = []
     for name in ("manifest.json", "modinfo.json"):
         candidates.append(path / name)
         candidates.extend(path.glob(f"*/{name}"))
+        candidates.extend(path.glob(f"*/*/{name}"))
+
+    from cdumm.engine.json_repair import load_json_tolerant
 
     for candidate in candidates:
         if not candidate.exists():
             continue
         try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
+            manifest = load_json_tolerant(candidate)
             if isinstance(manifest, dict):
                 fmt = manifest.get("format", "")
                 # Accept crimson_browser_mod_v1 and crimson_sharp_mod_v1
@@ -55,14 +80,16 @@ def detect_crimson_browser(path: Path) -> dict | None:
                     manifest["_manifest_path"] = candidate
                     manifest["_base_dir"] = candidate.parent
                     return manifest
-                # Accept modinfo.json with a files/ directory (CrimsonSaveEditor format)
-                if candidate.name == "modinfo.json":
-                    files_dir = candidate.parent / "files"
-                    if files_dir.exists() and any(files_dir.rglob("*")):
-                        manifest.setdefault("files_dir", "files")
-                        manifest["_manifest_path"] = candidate
-                        manifest["_base_dir"] = candidate.parent
-                        return manifest
+                # Accept manifest.json or modinfo.json with a files_dir
+                # pointing to an existing directory (community CB mods
+                # often omit the format field)
+                files_dir_name = manifest.get("files_dir", "files")
+                files_dir = candidate.parent / files_dir_name
+                if files_dir.exists() and files_dir.is_dir() and any(files_dir.rglob("*")):
+                    manifest.setdefault("files_dir", files_dir_name)
+                    manifest["_manifest_path"] = candidate
+                    manifest["_base_dir"] = candidate.parent
+                    return manifest
         except Exception:
             continue
     return None
@@ -246,22 +273,8 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             plaintext = source_file.read_bytes()
 
             # Fix XML files that mod tools export with wrong formatting.
-            # The game's XML parser requires: UTF-8 BOM, no XML declaration,
-            # CRLF line endings. Mod tools (Python xml.etree, etc.) often
-            # export with LF, no BOM, and an XML declaration that crashes
-            # the game's parser.
             if entry.path.lower().endswith('.xml') and plaintext[:1] != b'\xef':
-                fixed = plaintext
-                # Remove XML declaration if present
-                if fixed.startswith(b'<?xml'):
-                    nl = fixed.find(b'\n')
-                    if nl >= 0:
-                        fixed = fixed[nl + 1:]
-                # Add UTF-8 BOM
-                if not fixed.startswith(b'\xef\xbb\xbf'):
-                    fixed = b'\xef\xbb\xbf' + fixed
-                # Normalize line endings to CRLF
-                fixed = fixed.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+                fixed = fix_xml_format(plaintext)
                 if fixed != plaintext:
                     plaintext = fixed
                     logger.info("Fixed XML formatting for %s (BOM/line endings/declaration)",
@@ -280,6 +293,12 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                     # Decompress failed → file is encrypted
                     entry._encrypted_override = True
                     logger.info("Detected encryption for %s (flag was False)", entry.path)
+
+            # BNK soundbanks must be stored raw (no compression, no encryption)
+            # Clear compression type bits (16-19) in flags so repack treats as raw
+            if entry.path.lower().endswith(".bnk"):
+                entry._encrypted_override = False
+                entry.flags = entry.flags & ~(0x0F << 16)
 
             # Repack into the PAZ copy (allow size change for larger/smaller files)
             try:
@@ -377,6 +396,7 @@ def _resolve_files_to_directories(
                             (d.name, inner_path, source))
         except Exception:
             continue
+        time.sleep(0)  # yield GIL between PAMT parses
 
     # For each basename, pick the highest-numbered directory
     for bname, candidates in all_matches.items():

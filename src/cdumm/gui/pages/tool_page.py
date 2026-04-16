@@ -519,7 +519,10 @@ class ToolPageBase(SmoothScrollArea):
             self._progress_bar.hide()
             self._indeterminate_bar.show()  # start with indeterminate
             self._progress_detail.setText(tr("tools.starting"))
-            self._progress_detail.setStyleSheet("font-size: 15px;")
+            pf = self._progress_detail.font()
+            pf.setPixelSize(15)
+            self._progress_detail.setFont(pf)
+            self._progress_detail.setStyleSheet("")  # clear any stale QSS
             self._progress_detail.show()
             self._set_status(tr("tools.running"))
         else:
@@ -645,57 +648,44 @@ class VerifyStatePage(ToolPageBase):
         self._clear_results()
         self._set_running(True)
 
-        # Run inline (not threaded) so progress updates paint immediately
-        from cdumm.storage.database import Database
-        import os
+        # Run in a separate process via QProcess (no GIL contention)
+        import sys
+        import json as _json
+        from PySide6.QtCore import QProcess
 
-        try:
-            db = Database(self._db.db_path)
-            db.initialize()
-            cursor = db.connection.execute(
-                "SELECT file_path, file_hash, file_size FROM snapshots")
-            snap_entries = cursor.fetchall()
+        proc = QProcess(self)
+        self._verify_proc = proc
+        exe = sys.executable
+        args = ["--worker", "verify", str(self._game_dir), str(self._db.db_path)]
+        _buf = [""]
 
-            if not snap_entries:
-                self._set_running(False)
-                self._set_status(tr("tools.verify.no_snapshot"), "#BF616A")
-                db.close()
-                return
-
-            results = {"vanilla": [], "modded": [], "missing": [], "extra_dirs": [], "total": len(snap_entries)}
-
-            for i, (file_path, snap_hash, snap_size) in enumerate(snap_entries):
-                pct = int((i / len(snap_entries)) * 100)
-                self._set_progress(pct, tr("tools.progress.checking", name=file_path))
-                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-
-                game_file = self._game_dir / file_path.replace("/", os.sep)
-                if not game_file.exists():
-                    results["missing"].append(file_path)
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
                     continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "progress":
+                    self._set_progress(msg.get("pct", 0), msg.get("msg", ""))
+                elif msg.get("type") == "done":
+                    self._set_progress(100, tr("tools.progress.done"))
+                    self._on_verify_done(msg.get("results", {}))
+                elif msg.get("type") == "error":
+                    self._on_verify_error(msg.get("msg", "Unknown error"))
 
-                actual_size = game_file.stat().st_size
-                if actual_size != snap_size:
-                    results["modded"].append(f"{file_path} — size {actual_size} != vanilla {snap_size}")
-                else:
-                    from cdumm.engine.snapshot_manager import hash_file
-                    actual_hash, _ = hash_file(game_file)
-                    if actual_hash != snap_hash:
-                        results["modded"].append(f"{file_path} — content differs (same size)")
-                    else:
-                        results["vanilla"].append(file_path)
+        def _on_finished(exit_code, exit_status):
+            proc.deleteLater()
+            self._verify_proc = None
 
-            # Check for extra directories (>= 0036)
-            for item in sorted(self._game_dir.iterdir()):
-                if item.is_dir() and item.name.isdigit() and int(item.name) >= 36:
-                    results["extra_dirs"].append(item.name)
-
-            self._set_progress(100, tr("tools.progress.done"))
-            db.close()
-            self._on_verify_done(results)
-
-        except Exception as e:
-            self._on_verify_error(str(e))
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
 
     def _on_verify_done(self, results: dict) -> None:
         self._set_running(False)
@@ -858,63 +848,44 @@ class CheckModsPage(ToolPageBase):
         self._clear_results()
         self._set_running(True)
 
-        from cdumm.storage.database import Database
-        import os
+        import sys
+        import json as _json
+        from PySide6.QtCore import QProcess
 
-        try:
-            db = Database(self._db.db_path)
-            db.initialize()
-            issues = []
+        proc = QProcess(self)
+        self._check_proc = proc
+        exe = sys.executable
+        args = ["--worker", "check_mods", str(self._game_dir), str(self._db.db_path)]
+        _buf = [""]
 
-            # 1. Check vanilla file sizes
-            self._set_progress(10, tr("tools.check.checking_sizes"))
-            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            try:
-                size_rows = db.connection.execute(
-                    "SELECT m.name, vs.file_path, vs.vanilla_size "
-                    "FROM mod_vanilla_sizes vs JOIN mods m ON vs.mod_id = m.id "
-                    "WHERE m.enabled = 1"
-                ).fetchall()
-                for i, (mod_name, fp, expected_size) in enumerate(size_rows):
-                    if i % 10 == 0:
-                        pct = 10 + int((i / max(len(size_rows), 1)) * 70)
-                        self._set_progress(pct, tr("tools.progress.checking", name=fp))
-                        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-                    vanilla_path = self._game_dir / "CDMods" / "vanilla" / fp.replace("/", os.sep)
-                    game_path = self._game_dir / fp.replace("/", os.sep)
-                    src = vanilla_path if vanilla_path.exists() else game_path
-                    if src.exists():
-                        actual_size = src.stat().st_size
-                        if actual_size != expected_size:
-                            issues.append((mod_name,
-                                f"{fp} size changed ({expected_size} -> {actual_size}) — "
-                                f"game updated, mod needs re-importing"))
-            except Exception:
-                pass
-
-            # 2. Check delta files exist
-            self._set_progress(85, tr("tools.check.checking_deltas"))
-            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            delta_rows = db.connection.execute(
-                "SELECT m.name, md.delta_path, md.file_path "
-                "FROM mod_deltas md JOIN mods m ON md.mod_id = m.id "
-                "WHERE m.enabled = 1"
-            ).fetchall()
-            checked_paths = set()
-            for mod_name, dp, fp in delta_rows:
-                if dp in checked_paths:
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
                     continue
-                checked_paths.add(dp)
-                if not Path(dp).exists():
-                    issues.append((mod_name, f"Missing delta file for {fp}"))
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "progress":
+                    self._set_progress(msg.get("pct", 0), msg.get("msg", ""))
+                elif msg.get("type") == "done":
+                    self._set_progress(100, tr("tools.progress.done"))
+                    issues = [tuple(i) for i in msg.get("issues", [])]
+                    self._on_check_done(issues)
+                elif msg.get("type") == "error":
+                    self._on_check_error(msg.get("msg", "Unknown error"))
 
-            self._set_progress(100, tr("tools.progress.done"))
-            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            db.close()
-            self._on_check_done(issues)
+        def _on_finished(exit_code, exit_status):
+            proc.deleteLater()
+            self._check_proc = None
 
-        except Exception as e:
-            self._on_check_error(str(e))
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
 
     def _on_check_done(self, issues: list) -> None:
         self._set_running(False)
@@ -1009,12 +980,40 @@ class FindCulpritPage(ToolPageBase):
             "--", tr("tools.culprit.enabled_mods"), "#2878D0",
             label_key="tools.culprit.enabled_mods")
         self._stat_rounds = self._add_stat_card(
-            "--", tr("tools.culprit.estimated_rounds"), "#BF616A",
+            "--", tr("tools.culprit.estimated_rounds"), "#9CA3AF",
             label_key="tools.culprit.estimated_rounds")
 
         self._auto_running = False
         self._bisect_worker = None
         self._generation = 0  # incremented on each start, used to ignore stale workers
+
+        # Note about Press Play (colored to stand out)
+        from qfluentwidgets import setCustomStyleSheet
+        self._pp_note = BodyLabel(
+            "Want to go fully hands-free? Install the Press Play mod — "
+            "it skips the title screen automatically so each test round "
+            "starts on its own.", self._container)
+        self._pp_note.setWordWrap(True)
+        nf = self._pp_note.font()
+        nf.setPixelSize(16)
+        nf.setWeight(QFont.Weight.DemiBold)
+        self._pp_note.setFont(nf)
+        setCustomStyleSheet(self._pp_note,
+            "BodyLabel { color: #1565C0; }",
+            "BodyLabel { color: #64B5F6; }")
+
+        # "Press Play" recommendation card
+        self._press_play_card = self._build_press_play_card()
+        # Insert above the action row (after stats)
+        root = self._container.layout()
+        for i in range(root.count()):
+            item = root.itemAt(i)
+            if item.layout() is self._action_row:
+                root.insertWidget(i, self._pp_note)
+                root.insertSpacing(i + 1, 12)
+                root.insertWidget(i + 2, self._press_play_card)
+                root.insertSpacing(i + 3, 16)
+                break
 
         # Stop and Pause/Resume buttons (hidden until running)
         from qfluentwidgets import setCustomStyleSheet as _scs
@@ -1047,6 +1046,119 @@ class FindCulpritPage(ToolPageBase):
     def set_managers(self, **kwargs) -> None:
         super().set_managers(**kwargs)
         self._refresh_stats()
+        self._refresh_press_play_status()
+
+    def _build_press_play_card(self) -> CardWidget:
+        """Build the Press Play recommendation card."""
+        from qfluentwidgets import setCustomStyleSheet, FluentIcon, IconWidget
+
+        card = CardWidget(self._container)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(14)
+
+        # Icon
+        icon = IconWidget(FluentIcon.GAME, card)
+        icon.setFixedSize(28, 28)
+        layout.addWidget(icon)
+
+        # Text column
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+
+        title = StrongBodyLabel(tr("tool.auto_mode"), card)
+        tf = title.font()
+        tf.setPixelSize(14)
+        tf.setWeight(QFont.Weight.DemiBold)
+        title.setFont(tf)
+        text_col.addWidget(title)
+
+        self._pp_status = CaptionLabel(tr("tool.checking"), card)
+        sf = self._pp_status.font()
+        sf.setPixelSize(13)
+        sf.setWeight(QFont.Weight.DemiBold)
+        self._pp_status.setFont(sf)
+        text_col.addWidget(self._pp_status)
+
+        self._pp_desc = CaptionLabel("", card)
+        df = self._pp_desc.font()
+        df.setPixelSize(13)
+        self._pp_desc.setFont(df)
+        self._pp_desc.setWordWrap(True)
+        text_col.addWidget(self._pp_desc)
+
+        layout.addLayout(text_col, 1)
+
+
+        # Download link — hidden when installed
+        self._pp_download = PushButton(tr("tool.download"), card)
+        self._pp_download.setFixedHeight(32)
+        self._pp_download.setFixedWidth(110)
+        self._pp_download.clicked.connect(self._on_press_play_click)
+        layout.addWidget(self._pp_download)
+
+        setCustomStyleSheet(card,
+            "CardWidget { border: 1px solid #B8D4F0; border-radius: 10px; background: #F6FAFF; }",
+            "CardWidget { border: 1px solid #2A4060; border-radius: 10px; background: #151C28; }")
+
+        return card
+
+    def showEvent(self, event):  # noqa: N802
+        """Re-check Press Play status every time the page becomes visible."""
+        super().showEvent(event)
+        self._refresh_press_play_status()
+
+    def _refresh_press_play_status(self) -> None:
+        """Detect if Press Play ASI is installed and enabled."""
+        from qfluentwidgets import setCustomStyleSheet
+        if not self._game_dir:
+            return
+
+        # Check via ASI manager for proper enabled/disabled detection
+        from cdumm.asi.asi_manager import AsiManager
+        bin64 = self._game_dir / "bin64"
+        found = False
+        enabled = False
+        if bin64.exists():
+            try:
+                mgr = AsiManager(bin64)
+                for plugin in mgr.scan():
+                    if "pressplay" in plugin.name.lower().replace("-", "").replace("_", "").replace(" ", ""):
+                        found = True
+                        enabled = plugin.enabled
+                        break
+            except Exception:
+                pass
+        if found and enabled:
+            self._pp_status.setText(tr("tool.installed_enabled"))
+            self._pp_status.setStyleSheet("color: #2E7D32;")
+            self._pp_desc.setText(
+                "Fully automated — the game will auto-press Play at the title screen "
+                "during each test round. No babysitting needed.")
+            self._pp_download.hide()
+            self._pp_note.hide()
+        elif found and not enabled:
+            self._pp_status.setText(tr("tool.installed_disabled"))
+            self._pp_status.setStyleSheet("color: #E65100;")
+            self._pp_desc.setText(
+                "Press Play is installed but currently disabled. "
+                "Go to ASI Plugins and enable it to unlock fully automated mode.")
+            self._pp_download.hide()
+            self._pp_note.show()
+        else:
+            self._pp_status.setText(tr("tool.not_installed"))
+            self._pp_status.setStyleSheet("color: #9E9E9E;")
+            self._pp_desc.setText(
+                "To fully automate crash testing, install the Press Play ASI mod. "
+                "It auto-presses Play at the title screen so each test round runs hands-free.")
+            self._pp_download.show()
+            self._pp_note.show()
+
+    def _on_press_play_click(self) -> None:
+        """Open the Press Play NexusMods page."""
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl("https://www.nexusmods.com/crimsondesert/mods/834"))
 
     def _refresh_stats(self) -> None:
         if self._mod_manager:
@@ -1330,21 +1442,32 @@ class InspectModPage(ToolPageBase):
             desc_key="tools.inspect.desc",
             run_key="tools.inspect.run",
         )
-        # Drag-drop hint card
+        # Drop hint card
         hint = CardWidget(self._container)
         hint_layout = QVBoxLayout(hint)
         hint_layout.setContentsMargins(24, 32, 24, 32)
         hint_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint_title = StrongBodyLabel(".zip", hint)
-        hint_title.setStyleSheet("font-size: 28px;")
+
+        hint_title = StrongBodyLabel(tr("tool.drop_inspect"), hint)
+        htf = hint_title.font()
+        htf.setPixelSize(18)
+        htf.setWeight(QFont.Weight.Bold)
+        hint_title.setFont(htf)
         hint_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint_layout.addWidget(hint_title)
-        hint_text = CaptionLabel(
-            tr("tools.inspect.drop_hint"), hint)
+
+        hint_text = CaptionLabel(tr("tool.or_select"), hint)
+        hxf = hint_text.font()
+        hxf.setPixelSize(13)
+        hint_text.setFont(hxf)
         hint_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint_layout.addWidget(hint_text)
+
         hint.setMinimumHeight(120)
-        # Insert into stats row (stretch=1 to fill equally like stat cards)
+        from qfluentwidgets import setCustomStyleSheet
+        setCustomStyleSheet(hint,
+            "CardWidget { border: 2px dashed #CBD5E0; }",
+            "CardWidget { border: 2px dashed #4A5568; }")
         self._stats_row.addWidget(hint, 1)
 
     def _on_run_clicked(self) -> None:
@@ -1363,21 +1486,157 @@ class InspectModPage(ToolPageBase):
 
         self._clear_results()
         self._set_running(True)
-        self._set_status(tr("tools.inspect.analyzing", name=Path(path).name))
+        filename = Path(path).name
+        self._set_status(tr("tools.inspect.analyzing", name=filename))
 
-        # test_mod is fast enough to run on the main thread
-        # (it's a read-only analysis, no heavy I/O)
-        try:
-            from cdumm.engine.test_mod_checker import (
-                test_mod, generate_compatibility_report,
-            )
-            result = test_mod(
-                Path(path), self._game_dir, self._db, self._snapshot)
-            self._on_inspect_done(result, Path(path).name)
-        except Exception as e:
-            self._set_running(False)
-            self._set_status(tr("tools.error", detail=str(e)), "#BF616A")
-            self._add_result_card(tr("tools.inspect.failed"), str(e), color="#BF616A")
+        import sys
+        import json as _json
+        from PySide6.QtCore import QProcess
+
+        proc = QProcess(self)
+        self._inspect_proc = proc
+        exe = sys.executable
+        args = ["--worker", "inspect", path, str(self._game_dir), str(self._db.db_path)]
+        _buf = [""]
+
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "progress":
+                    self._set_progress(msg.get("pct", 0), msg.get("msg", ""))
+                elif msg.get("type") == "done":
+                    self._on_inspect_done_from_process(msg, filename)
+
+        def _on_finished(exit_code, exit_status):
+            proc.deleteLater()
+            self._inspect_proc = None
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
+
+    def _on_inspect_done_from_process(self, msg: dict, filename: str) -> None:
+        """Handle inspect results from QProcess JSON."""
+        self._set_running(False)
+
+        error = msg.get("error")
+        diag = msg.get("diagnostic_report", "")
+
+        if error:
+            self._set_status(tr("tools.inspect.error_analyzing", name=filename), "#BF616A")
+            self._add_result_card(tr("tools.inspect.error"), error, color="#BF616A")
+            # Show diagnostic report with issues
+            if diag:
+                self._add_diagnostic_card(diag, filename)
+            return
+
+        mod_name = msg.get("mod_name", filename)
+        changed = msg.get("changed_files", [])
+        conflicts = msg.get("conflicts", [])
+        compatible = msg.get("compatible_mods", [])
+
+        self._set_status(tr("tools.inspect.analysis_complete", name=filename), "#A3BE8C")
+
+        self._add_result_card(
+            tr("tools.inspect.mod_name", name=mod_name),
+            tr("tools.inspect.files_modified", count=len(changed)) + "\n"
+            + tr("tools.inspect.compatible_count", count=len(compatible)) + "\n"
+            + tr("tools.inspect.conflict_count", count=len(conflicts)),
+            color="#A3BE8C" if not conflicts else "#EBCB8B",
+        )
+
+        if changed:
+            files_text = "\n".join(changed[:20])
+            if len(changed) > 20:
+                files_text += "\n" + tr("tools.inspect.and_more", count=len(changed) - 20)
+            self._add_result_card(
+                tr("tools.inspect.modified_files", count=len(changed)), files_text)
+
+        for c in conflicts[:10]:
+            self._add_result_card(tr("tools.inspect.conflict"), c, color="#BF616A")
+
+        if compatible:
+            self._add_result_card(
+                tr("tools.inspect.compatible_with", count=len(compatible)),
+                ", ".join(compatible[:20]), color="#A3BE8C")
+
+        # Always show diagnostic report — useful info for mod authors
+        if diag:
+            self._add_diagnostic_card(diag, filename)
+
+    def _add_diagnostic_card(self, report: str, filename: str) -> None:
+        """Parse diagnostic report into individual result cards."""
+        from PySide6.QtWidgets import QApplication, QHBoxLayout
+        from qfluentwidgets import PushButton, InfoBar, InfoBarPosition
+
+        # Parse the report into sections and show as individual cards
+        current_section = ""
+        current_lines = []
+
+        def _flush_section():
+            if not current_section and not current_lines:
+                return
+            title = current_section or "Analysis"
+            detail = "\n".join(current_lines).strip()
+            if not detail:
+                return
+            # Pick color based on content
+            color = ""
+            text_lower = detail.lower()
+            if "issue:" in text_lower or "not found" in text_lower or "mismatch" in text_lower:
+                color = "#BF616A"  # red
+            elif "warning" in text_lower:
+                color = "#EBCB8B"  # yellow
+            elif "found" in text_lower and "not found" not in text_lower:
+                color = "#A3BE8C"  # green
+            elif "detected:" in text_lower or "status:" in text_lower:
+                color = "#81A1C1"  # blue
+
+            self._add_result_card(title, detail, color=color)
+
+        for line in report.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("---") and stripped.endswith("---"):
+                # Section header like "--- File Structure ---"
+                _flush_section()
+                current_section = stripped.strip("- ").strip()
+                current_lines = []
+            elif stripped.startswith("==="):
+                continue  # skip banner lines
+            elif stripped.startswith("DIAGNOSTIC REPORT:"):
+                continue  # skip title
+            elif stripped.startswith("Import error:"):
+                continue  # already shown in error card
+            elif stripped.startswith("Mod:") or stripped.startswith("Type:") or stripped.startswith("Size:"):
+                _flush_section()
+                current_section = "Mod Info"
+                current_lines.append(stripped)
+            else:
+                current_lines.append(stripped)
+
+        _flush_section()
+
+        # Copy full report button as its own card
+        copy_card = _ResultCard("Full Report", "Click 'Copy Report' to share with the mod author.",
+                                color="#5E81AC", parent=self._container)
+        from PySide6.QtWidgets import QApplication as _QA
+        copy_btn = PushButton(tr("tool.copy_report"), copy_card)
+        copy_btn.clicked.connect(lambda: (
+            _QA.clipboard().setText(report),
+            InfoBar.success(title=tr("main.copied"), content=tr("main.report_copied"),
+                            duration=2000, position=InfoBarPosition.TOP, parent=self),
+        ))
+        copy_card.layout().addWidget(copy_btn)
+        self._results_layout.addWidget(copy_card)
 
     def _on_inspect_done(self, result, filename: str) -> None:
         self._set_running(False)
@@ -1493,7 +1752,7 @@ class FixEverythingPage(ToolPageBase):
         quick_layout.setContentsMargins(24, 20, 24, 20)
         quick_layout.setSpacing(10)
 
-        quick_title = StrongBodyLabel("Quick Fix", quick_card)
+        quick_title = StrongBodyLabel(tr("tool.quick_fix"), quick_card)
         qtf = quick_title.font()
         qtf.setPixelSize(16)
         qtf.setWeight(QFont.Weight.Bold)
@@ -1512,7 +1771,7 @@ class FixEverythingPage(ToolPageBase):
 
         quick_layout.addStretch()
 
-        self._quick_btn = PrimaryPushButton("Run Quick Fix", quick_card)
+        self._quick_btn = PrimaryPushButton(tr("tool.run_quick_fix"), quick_card)
         self._quick_btn.setFixedHeight(44)
         qbf = self._quick_btn.font()
         qbf.setPixelSize(14)
@@ -1538,7 +1797,7 @@ class FixEverythingPage(ToolPageBase):
 
         # Title row with checkbox on the right
         full_header = QHBoxLayout()
-        full_title = StrongBodyLabel("Full Reset + Rescan", full_card)
+        full_title = StrongBodyLabel(tr("tool.full_reset"), full_card)
         ftf = full_title.font()
         ftf.setPixelSize(16)
         ftf.setWeight(QFont.Weight.Bold)
@@ -1570,7 +1829,7 @@ class FixEverythingPage(ToolPageBase):
 
         full_layout.addStretch()
 
-        self._full_btn = PrimaryPushButton("Run Full Reset", full_card)
+        self._full_btn = PrimaryPushButton(tr("tool.run_full_reset"), full_card)
         self._full_btn.setFixedHeight(44)
         fbf = self._full_btn.font()
         fbf.setPixelSize(14)
@@ -1579,10 +1838,12 @@ class FixEverythingPage(ToolPageBase):
         setCustomStyleSheet(self._full_btn,
             "PrimaryPushButton { background: #2878D0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
             "PrimaryPushButton:hover { background: #3388E0; }"
-            "PrimaryPushButton:pressed { background: #2060B0; }",
+            "PrimaryPushButton:pressed { background: #2060B0; }"
+            "PrimaryPushButton:disabled { color: #4A5568; border: 1px solid #CBD5E0; border-radius: 12px; background: transparent; }",
             "PrimaryPushButton { background: #3A8FE0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
             "PrimaryPushButton:hover { background: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background: #2878D0; }")
+            "PrimaryPushButton:pressed { background: #2878D0; }"
+            "PrimaryPushButton:disabled { color: #9CA3AF; border: 1px solid #4A5568; border-radius: 12px; background: transparent; }")
         self._full_btn.clicked.connect(self._on_full_fix)
         self._full_btn.setEnabled(False)
         full_layout.addWidget(self._full_btn)
@@ -1656,8 +1917,6 @@ class FixEverythingPage(ToolPageBase):
     def _on_run_clicked(self) -> None:
         if not self._can_run():
             return
-        import shutil
-
         if not self._db or not self._game_dir:
             self._set_status(tr("tools.fix.not_configured"),
                              "#BF616A")
@@ -1665,86 +1924,63 @@ class FixEverythingPage(ToolPageBase):
 
         self._clear_results()
         self._set_running(True)
-        self._set_progress(5, tr("tools.fix.step1"))
-        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
-        # Step 1: Revert
-        try:
-            from cdumm.engine.apply_engine import RevertWorker
-            from cdumm.storage.database import Database as _DB
-            revert_db = _DB(self._db.db_path)
-            revert_db.initialize()
-            rw = RevertWorker.__new__(RevertWorker)
-            rw._game_dir = self._game_dir
-            rw._vanilla_dir = self._vanilla_dir
-            rw._db = revert_db
-            rw._revert()
-            revert_db.close()
-            self._add_result_card(
-                tr("tools.fix.revert_complete"), tr("tools.fix.revert_complete_desc"),
-                color="#A3BE8C")
-        except Exception as e:
-            logger.warning("Fix: revert failed: %s", e)
-            self._add_result_card(
-                tr("tools.fix.revert_warning"), f"{tr('tools.fix.revert_issue')}: {e}",
-                color="#EBCB8B")
+        import sys
+        import json as _json
+        from PySide6.QtCore import QProcess
 
-        # Step 2: Clean orphan directories
-        self._set_progress(40, tr("tools.fix.step2"))
-        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-        cleaned = 0
-        try:
-            for d in sorted(self._game_dir.iterdir()):
-                if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
-                        and int(d.name) >= 36):
-                    snap_check = self._db.connection.execute(
-                        "SELECT COUNT(*) FROM snapshots WHERE file_path LIKE ?",
-                        (d.name + "/%",)).fetchone()[0]
-                    if snap_check == 0:
-                        shutil.rmtree(d, ignore_errors=True)
-                        cleaned += 1
-            if cleaned:
-                self._add_result_card(
-                    tr("tools.fix.cleaned_orphans", count=cleaned),
-                    color="#A3BE8C")
-        except Exception as e:
-            self._add_result_card(
-                tr("tools.fix.cleanup_warning"), str(e), color="#EBCB8B")
+        proc = QProcess(self)
+        self._fix_proc = proc
+        exe = sys.executable
+        steam_flag = "1" if self._steam_verified else "0"
+        args = ["--worker", "fix", str(self._game_dir), str(self._vanilla_dir),
+                str(self._db.db_path), steam_flag]
+        _buf = [""]
 
-        # Step 3: Steam-verified extras
-        if self._steam_verified:
-            self._set_progress(70, tr("tools.fix.step3"))
-            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            try:
-                if self._vanilla_dir and self._vanilla_dir.exists():
-                    shutil.rmtree(self._vanilla_dir, ignore_errors=True)
-                    self._vanilla_dir.mkdir(parents=True, exist_ok=True)
-                self._add_result_card(
-                    tr("tools.fix.backups_cleared"),
-                    tr("tools.fix.backups_cleared_desc"),
-                    color="#A3BE8C")
-            except Exception as e:
-                self._add_result_card(
-                    tr("tools.fix.backup_cleanup_warning"), str(e), color="#EBCB8B")
+        def _on_stdout():
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+            _buf[0] += data
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("type") == "progress":
+                    self._set_progress(msg.get("pct", 0), msg.get("msg", ""))
+                elif msg.get("type") == "done":
+                    self._set_progress(100, tr("tools.fix.complete"))
+                    for r in msg.get("results", []):
+                        self._add_result_card(r.get("title", ""), r.get("desc", ""),
+                                              color=r.get("color", "#A3BE8C"))
+                    steam = msg.get("steam_verified", False)
+                    self._set_running(False)
+                    if steam:
+                        self._log_activity("fix",
+                            "Fix Everything: reverted, cleared backups, rescanning")
+                        self._set_status(tr("tools.fix.complete_rescan"), "#A3BE8C")
+                        self.rescan_requested.emit(True)
+                    else:
+                        self._log_activity("fix",
+                            "Fix Everything: reverted and cleaned up (no rescan)")
+                        self._set_status(tr("tools.fix.complete"), "#A3BE8C")
+                        window = self.window()
+                        if hasattr(window, '_refresh_all'):
+                            window._refresh_all()
+                elif msg.get("type") == "error":
+                    self._set_running(False)
+                    self._set_status(msg.get("msg", "Error"), "#BF616A")
 
-            self._log_activity("fix",
-                "Fix Everything: reverted, cleared backups, rescanning")
-            self._set_progress(100, tr("tools.fix.complete_rescan"))
-            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            self._set_running(False)
-            self._set_status(tr("tools.fix.complete_rescan"), "#A3BE8C")
-            self.rescan_requested.emit(True)
-        else:
-            self._log_activity("fix",
-                "Fix Everything: reverted and cleaned up (no rescan)")
-            self._set_progress(100, tr("tools.fix.complete"))
-            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-            self._set_running(False)
-            self._set_status(tr("tools.fix.complete"), "#A3BE8C")
-            # Refresh mods page so reverted state is visible
-            window = self.window()
-            if hasattr(window, '_refresh_all'):
-                window._refresh_all()
+        def _on_finished(exit_code, exit_status):
+            proc.deleteLater()
+            self._fix_proc = None
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        proc.start(exe, args)
 
 
 # ======================================================================
@@ -1812,8 +2048,10 @@ class RescanPage(ToolPageBase):
         vf.setPixelSize(15)
         vf.setWeight(QFont.Weight.DemiBold)
         self._verify_check.setFont(vf)
-        self._verify_check.toggled.connect(
-            lambda checked: self._run_btn.setEnabled(checked))
+        def _on_verify_toggled(checked):
+            self._run_btn.setEnabled(checked)
+            self._run_btn.setToolTip("" if checked else tr("tools.rescan.enable_hint"))
+        self._verify_check.toggled.connect(_on_verify_toggled)
 
         # Insert centered above the Run button
         parent_layout = self._container.layout()
@@ -1825,6 +2063,7 @@ class RescanPage(ToolPageBase):
                 break
 
         self._run_btn.setEnabled(False)
+        self._run_btn.setToolTip(tr("tools.rescan.enable_hint"))
 
     def set_managers(self, **kwargs) -> None:
         super().set_managers(**kwargs)

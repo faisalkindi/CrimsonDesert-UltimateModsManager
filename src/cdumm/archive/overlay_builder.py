@@ -24,6 +24,24 @@ PAMT_CONSTANT = 0x610E0232  # from JSON MM: 1628308018u
 # Cache for full path maps (per pamt_dir)
 _path_map_cache: dict[str, dict[str, str]] = {}
 
+# Extension → compression type mapping (from CRIMSON_DESERT_MODDING_BIBLE.md §4)
+_EXT_COMP_TYPE: dict[str, int] = {
+    ".dds": 1,   # DDS texture: 128-byte header + LZ4 body
+    ".bnk": 0,   # Wwise soundbank: raw uncompressed
+}
+
+
+def _infer_comp_type_from_extension(filename: str) -> int:
+    """Infer PAZ compression type from file extension.
+
+    Returns 1 for DDS textures, 0 for BNK soundbanks, 2 (LZ4) for everything else.
+    """
+    dot = filename.rfind(".")
+    if dot >= 0:
+        ext = filename[dot:].lower()
+        return _EXT_COMP_TYPE.get(ext, 2)
+    return 2
+
 
 @dataclass
 class OverlayEntry:
@@ -134,17 +152,20 @@ def _build_full_path_map(pamt_dir: str, game_dir) -> dict[str, str]:
                     root_folder = n
                     break
 
+            # Build file_index → folder_path lookup (O(1) per file instead of O(folders))
+            file_to_folder: dict[int, str] = {}
+            for fp, fi, fc in folder_recs:
+                for idx in range(fi, fi + fc):
+                    file_to_folder[idx] = fp
+
             for i in range(file_count):
                 nr = struct.unpack_from('<I', data, off)[0]
                 off += 20
                 filename = build_node_path(nr)
-                # Find which folder this file belongs to
-                for fp, fi, fc in folder_recs:
-                    if fi <= i < fi + fc:
-                        # Build flattened key: root_folder/filename
-                        flattened = f"{root_folder}/{filename}" if root_folder else filename
-                        result[flattened] = fp
-                        break
+                fp = file_to_folder.get(i)
+                if fp is not None:
+                    flattened = f"{root_folder}/{filename}" if root_folder else filename
+                    result[flattened] = fp
 
             return result
         except Exception as e:
@@ -290,7 +311,10 @@ def build_overlay(
             ename = metadata.get("entry_path", "").rsplit("/", 1)[-1] if metadata.get("entry_path") else ""
             progress_cb(entry_idx, total_entries, ename)
         entry_path = metadata["entry_path"]
-        comp_type = metadata.get("compression_type", 2)
+        comp_type = metadata.get("compression_type")
+        if comp_type is None:
+            comp_type = _infer_comp_type_from_extension(
+                entry_path.rsplit("/", 1)[-1] if "/" in entry_path else entry_path)
         pamt_dir = metadata.get("pamt_dir", "")
 
         # Resolve full folder path from vanilla PAMT.

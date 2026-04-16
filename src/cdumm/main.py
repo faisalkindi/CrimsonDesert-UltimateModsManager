@@ -1,4 +1,5 @@
 import atexit
+import faulthandler
 import os
 import sys
 import logging
@@ -7,6 +8,11 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
+
+# Enable faulthandler to dump C-level stack trace on segfault
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_fault_log = open(APP_DATA_DIR / "crash_trace.txt", "w")
+faulthandler.enable(file=_fault_log)
 
 _lock_fh = None
 
@@ -111,6 +117,10 @@ def main() -> int:
     except Exception:
         pass
 
+    # Reduce GIL switch interval from 5ms to 0.5ms so the GUI thread
+    # gets more frequent time slices during worker Python execution.
+    sys.setswitchinterval(0.0005)
+
     # Minimal import for QApplication — everything else is lazy
     from PySide6.QtWidgets import QApplication
     app = QApplication(sys.argv)
@@ -142,10 +152,32 @@ def main() -> int:
                 from qfluentwidgets import setFontFamilies
                 setFontFamilies([families[0], "Segoe UI"])
 
-    # Set Fluent theme
+    # Set Fluent theme (default light, may be overridden by welcome wizard or saved pref)
     from qfluentwidgets import setTheme, Theme, setThemeColor
     setTheme(Theme.LIGHT)
     setThemeColor("#2878D0")
+
+    # First-time welcome wizard: language, theme, and game folder
+    # Uses its own marker file — independent of game_dir.txt which auto-detect writes
+    _wizard_done_file = APP_DATA_DIR / ".wizard_done"
+    _first_launch = not _wizard_done_file.exists()
+    _wizard_lang = "en"
+    _wizard_theme = "light"
+    _wizard_game_dir = None
+    if _first_launch:
+        from cdumm.gui.welcome_wizard import WelcomeWizard
+        wizard = WelcomeWizard()
+        wizard.exec()  # Cannot be closed without completing (ALT+F4 blocked)
+        _wizard_lang = wizard.chosen_language
+        _wizard_theme = wizard.chosen_theme
+        _wizard_game_dir = wizard.game_directory
+        if _wizard_theme == "dark":
+            setTheme(Theme.DARK)
+        load_i18n(_wizard_lang)
+        # Mark wizard as completed so it doesn't show again
+        _wizard_done_file.write_text("done", encoding="utf-8")
+        logger.info("Welcome wizard: lang=%s, theme=%s, game=%s",
+                     _wizard_lang, _wizard_theme, _wizard_game_dir)
 
     # Show splash immediately before heavy imports
     from cdumm.gui.splash import show_splash
@@ -169,9 +201,14 @@ def main() -> int:
     old_appdata_db = APP_DATA_DIR / "cdumm.db"
     old_cdmm_db = Path.home() / "AppData" / "Local" / "cdmm" / "cdumm.db"
 
-    # Try to find game_dir: pointer file first, then old DBs, then auto-detect
+    # Try to find game_dir: wizard result first, then pointer file, then old DBs, then auto-detect
     from cdumm.storage.game_finder import find_game_directories, validate_game_directory
     game_dir = None
+
+    # Method 0: Use wizard result (first launch)
+    if _wizard_game_dir and validate_game_directory(Path(_wizard_game_dir)):
+        game_dir = _wizard_game_dir
+        logger.info("Game directory from wizard: %s", game_dir)
 
     # Method 1: Read from persistent pointer file
     if _game_dir_file.exists():
@@ -246,19 +283,26 @@ def main() -> int:
 
     config = Config(db)
 
-    # Reload i18n with user's language preference
+    # Save welcome wizard choices (first launch only)
+    if _first_launch and _wizard_lang != "en":
+        config.set("language", _wizard_lang)
+    if _first_launch and _wizard_theme != "light":
+        config.set("theme", _wizard_theme)
+
+    # Reload i18n with user's language preference (skip if wizard already set it)
     user_lang = config.get("language") or "en"
-    if user_lang != "en":
+    if user_lang != "en" and not _first_launch:
         load_i18n(user_lang)
 
-    # Apply saved theme preference
-    saved_theme = config.get("theme") or "light"
-    if saved_theme == "auto":
-        from qfluentwidgets import setTheme, Theme
-        setTheme(Theme.AUTO)
-    elif saved_theme == "dark":
-        from qfluentwidgets import setTheme, Theme
-        setTheme(Theme.DARK)
+    # Apply saved theme preference (skip if wizard already set it)
+    if not _first_launch:
+        saved_theme = config.get("theme") or "light"
+        if saved_theme == "auto":
+            from qfluentwidgets import setTheme, Theme
+            setTheme(Theme.AUTO)
+        elif saved_theme == "dark":
+            from qfluentwidgets import setTheme, Theme
+            setTheme(Theme.DARK)
 
     # Set RTL layout direction for Arabic/Hebrew/etc.
     from cdumm.i18n import is_rtl
@@ -316,13 +360,42 @@ def main() -> int:
     window.show()
     splash.finish(window)
 
+    # ── Frame stall profiler ─────────────────────────────────────────
+    # Fires a 16ms timer and logs whenever the main thread stalls > 50ms.
+    # Writes to frame_stalls.log so we can see EXACTLY what blocks the UI.
+    import time as _time
+    from PySide6.QtCore import QTimer as _QT
+
+    _stall_log_path = APP_DATA_DIR / "frame_stalls.log"
+    _stall_fh = open(_stall_log_path, "w")
+    _stall_fh.write("Frame stall profiler started\n")
+    _last_tick = [_time.perf_counter()]
+    _stall_count = [0]
+
+    def _frame_tick():
+        now = _time.perf_counter()
+        dt_ms = (now - _last_tick[0]) * 1000
+        _last_tick[0] = now
+        if dt_ms > 50:  # >50ms = dropped frames
+            _stall_count[0] += 1
+            _stall_fh.write(f"STALL {_stall_count[0]}: {dt_ms:.0f}ms at {_time.strftime('%H:%M:%S')}\n")
+            _stall_fh.flush()
+
+    _frame_timer = _QT()
+    _frame_timer.setInterval(16)
+    _frame_timer.timeout.connect(_frame_tick)
+    _frame_timer.start()
+
     return app.exec()
 
 
 if __name__ == "__main__":
+    # Worker subprocess mode: headless, no GUI, JSON output on stdout
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        from cdumm.worker_process import worker_main
+        worker_main(sys.argv[2:])
     # CLI mode: if first arg is a known subcommand, skip GUI entirely
-    _cli_commands = {"list-mods", "set-enabled", "apply", "bisect"}
-    if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:
+    elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect"}:
         from cdumm.cli import main as cli_main
         cli_main()
     else:

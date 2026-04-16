@@ -12,11 +12,14 @@ def show_splash() -> QSplashScreen:
     """Create and show a transparent splash screen with the CDUMM logo."""
     from cdumm import __version__
 
-    # Find logo
+    # Find logo (use light variant for splash)
     if getattr(sys, "frozen", False):
-        logo_path = Path(sys._MEIPASS) / "assets" / "cdumm-logo.png"
+        _assets = Path(sys._MEIPASS) / "assets"
     else:
-        logo_path = Path(__file__).resolve().parents[2] / "assets" / "cdumm-logo.png"
+        _assets = Path(__file__).resolve().parents[2] / "assets"
+    logo_path = _assets / "cdumm-logo-light.png"
+    if not logo_path.exists():
+        logo_path = _assets / "cdumm-logo.png"
 
     # Canvas size
     W, H = 500, 420

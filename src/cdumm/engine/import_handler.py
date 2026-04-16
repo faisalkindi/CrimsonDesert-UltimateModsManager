@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 SCRIPT_TIMEOUT = 60  # seconds
 
+import time
+
 # Thread-local progress callback for import operations.
 # Set by ImportWorker before calling import functions.
 import threading
@@ -33,16 +35,89 @@ def _next_priority(db: Database) -> int:
     return cursor.fetchone()[0]
 
 
+def prettify_mod_name(raw: str) -> str:
+    """Clean up a raw mod name for display.
+
+    - Strip NexusMods IDs and timestamps (e.g. '-934-2-1775958271')
+    - Strip version suffixes (e.g. 'v1.2', 'v0.3.1', '1.03.00')
+    - Split CamelCase (e.g. 'CDLootMultiplier' -> 'CD Loot Multiplier')
+    - Replace underscores, hyphens, dots with spaces
+    - Title case
+    - Collapse whitespace
+    """
+    import re
+    name = raw.strip()
+
+    # Strip file extensions
+    for ext in ('.zip', '.7z', '.rar', '.json', '.bsdiff'):
+        if name.lower().endswith(ext):
+            name = name[:-len(ext)]
+
+    # Strip NexusMods suffix: -{digits}-{version}-{10-digit timestamp}
+    name = re.sub(r'-\d+-[\w.-]+-\d{10,}$', '', name)
+
+    # Strip embedded version attached to word: 'Flightv2.5' -> 'Flight', 'Mod_v2' -> 'Mod_'
+    name = re.sub(r'[_\s.-]*v\d+[\.\d]*(?=[\s_.\-]|$)', '', name, flags=re.IGNORECASE)
+    # Strip '.v.N' patterns: 'Ragdoll.v.2' -> 'Ragdoll'
+    name = re.sub(r'\.v\.\d+', '', name)
+
+    # Strip trailing version patterns: v1.2, v1.2.3, (1.03.00), _v2
+    name = re.sub(r'[\s_.\-]*[(\[]?v?\d+\.\d+[\.\d]*[)\]]?\s*$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'[\s_.\-]*\(\d+[\.\d]*\)\s*$', '', name)
+    # Strip trailing 'vN.N.N' or 'vN': 'Wing v4' -> 'Wing', 'Rush v0.2.2' -> 'Rush'
+    name = re.sub(r'\s+v\d+[\.\d]*\s*$', '', name, flags=re.IGNORECASE)
+    # Strip trailing pure numbers: 'MEGA STACKS 999999' -> 'MEGA STACKS'
+    name = re.sub(r'\s+\d{3,}\s*$', '', name)
+    # Strip trailing single/double digit glued to word: 'Wing4' -> 'Wing', 'ModV2' -> 'Mod'
+    name = re.sub(r'(?<=[a-zA-Z])\d+\s*$', '', name)
+    # Strip trailing multiplier suffixes: '20x', 'x10', '10x'
+    name = re.sub(r'\s+\d+x\s*$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s+x\d+\s*$', '', name, flags=re.IGNORECASE)
+
+    # Strip middle version-like segments: '1.03.00' in 'glider-stamina-1.03.00-100pct'
+    name = re.sub(r'[\s_-]+\d+\.\d+\.\d+[\s_-]*', ' ', name)
+    # Strip trailing version segment: 'Trimmer 1.03.00' -> 'Trimmer'
+    name = re.sub(r'\s+\d+\.\d+[\.\d]*\s*$', '', name)
+
+    # Split CamelCase: 'CDLootMultiplier' -> 'CD Loot Multiplier'
+    name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
+    name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', name)
+
+    # Replace separators with spaces
+    name = name.replace('_', ' ').replace('-', ' ')
+    # Replace dots with spaces only if not between digits
+    name = re.sub(r'\.(?!\d)', ' ', name)
+    name = re.sub(r'(?<!\d)\.', ' ', name)
+
+    # Collapse whitespace
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    # Title case everything. Only keep 2-3 letter acronyms uppercase (CD, UI, QTE, NPC, LOD)
+    _ACRONYMS = {'cd', 'ui', 'qte', 'npc', 'lod', 'hud', 'dds', 'asi', 'dll', 'fps', 'fov', 'dps'}
+    words = []
+    for word in name.split():
+        wl = word.lower()
+        if wl in _ACRONYMS:
+            words.append(word.upper())
+        elif wl in ('x2', 'x3', 'x5', 'x10', 'x20', 'x50', 'x100'):
+            words.append(wl)
+        else:
+            words.append(word.capitalize())
+
+    return ' '.join(words)
+
+
 class ModImportResult:
     """Result of importing a mod."""
 
     def __init__(self, name: str, mod_type: str = "paz") -> None:
-        self.name = name
+        self.name = prettify_mod_name(name)
         self.mod_type = mod_type
         self.changed_files: list[dict] = []  # [{file_path, delta_path, byte_start, byte_end}]
         self.error: str | None = None
         self.health_issues: list = []  # list[HealthIssue] from mod_health_check
         self.mod_id: int | None = None
+        self.asi_staged: list[str] = []  # ASI file paths staged for GUI-side install
 
 
 def detect_format(path: Path) -> str:
@@ -68,9 +143,9 @@ def detect_format(path: Path) -> str:
                 return "zip"
         except zipfile.BadZipFile:
             pass
-    # Check if it's a rar
+    # RAR archives — extracted via 7-Zip
     if suffix == ".rar":
-        return "unknown"  # TODO: add rar support
+        return "rar"
     return "unknown"
 
 
@@ -110,12 +185,13 @@ def _read_modinfo(extracted_dir: Path) -> dict | None:
     Searches the root and one level deep (for nested zips).
     Returns dict with keys: name, version, author, description (all optional).
     """
+    from cdumm.engine.json_repair import load_json_tolerant
+
     for candidate in [extracted_dir / "modinfo.json",
                       *extracted_dir.glob("*/modinfo.json")]:
         if candidate.exists():
             try:
-                with open(candidate, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = load_json_tolerant(candidate)
                 if isinstance(data, dict):
                     logger.info("Found modinfo.json: %s", {k: data.get(k) for k in ("name", "version", "author")})
                     return data
@@ -143,6 +219,29 @@ def _try_convert_crimson_browser(
     else:
         logger.error("CB mod conversion failed for %s", mod_id)
     return converted
+
+
+def _detect_xml_replacements(extracted_dir: Path) -> list[dict]:
+    """Detect OG_<name>__<suffix>.xml replacement files.
+
+    Returns list of dicts with keys: source_path, target_name.
+    The OG_ naming convention means: replace <name>.xml with this file's content.
+    """
+    results = []
+    for f in extracted_dir.rglob("*.xml"):
+        stem = f.stem  # e.g. "OG_inventory__mymod"
+        if not stem.startswith("OG_"):
+            continue
+        # Split on __ (double underscore) to separate target name from suffix
+        rest = stem[3:]  # remove "OG_" prefix
+        parts = rest.rsplit("__", 1)
+        if len(parts) < 2:
+            logger.warning("OG_ XML file missing __suffix: %s", f.name)
+            continue
+        target_name = parts[0] + ".xml"
+        results.append({"source_path": f, "target_name": target_name})
+        logger.info("Detected OG_ XML replacement: %s -> %s", f.name, target_name)
+    return results
 
 
 def _try_paz_entry_import(
@@ -678,8 +777,57 @@ def import_from_7z(
                                       mod_name, existing_mod_id)
 
 
+def _find_7z() -> str | None:
+    """Locate the 7-Zip executable on Windows."""
+    for candidate in [
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ]:
+        if Path(candidate).exists():
+            return candidate
+    return shutil.which("7z")
+
+
+def import_from_rar(
+    archive_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Import a mod from a RAR archive by extracting via 7-Zip."""
+    mod_name = archive_path.stem
+    result = ModImportResult(mod_name)
+
+    seven_z = _find_7z()
+    if not seven_z:
+        result.error = (
+            "RAR import requires 7-Zip.\n"
+            "Install from https://7-zip.org or extract manually and drop the folder."
+        )
+        return result
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        try:
+            proc = subprocess.run(
+                [seven_z, "x", str(archive_path), f"-o{tmp_path}", "-y"],
+                capture_output=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                stderr_msg = proc.stderr.decode(errors="replace").strip()
+                result.error = (
+                    f"7-Zip extraction failed (code {proc.returncode})"
+                    + (f"\n{stderr_msg}" if stderr_msg else "")
+                )
+                return result
+        except Exception as e:
+            result.error = f"Failed to extract RAR: {e}"
+            return result
+
+        return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
+                                      mod_name, existing_mod_id)
+
+
 _LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".css", ".html", ".thtml",
-                          ".dds", ".ttf", ".otf", ".wem", ".mp4"}
+                          ".dds", ".ttf", ".otf", ".wem", ".bnk", ".mp4"}
 _SKIP_LOOSE_FILES = {"mod.json", "manifest.json", "modinfo.json"}
 
 
@@ -907,6 +1055,46 @@ def import_from_zip(
             logger.error("Zip extraction failed: %s", e, exc_info=True)
             return result
 
+        # Stage ASI files separately for GUI-side install (mixed ZIP support)
+        asi_staging = tmp_path / "_asi_staging"
+        for f in list(tmp_path.rglob("*")):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() in (".asi", ".ini"):
+                # Skip files inside staging dir itself
+                if "_asi_staging" in f.parts:
+                    continue
+                asi_staging.mkdir(exist_ok=True)
+                import shutil
+                shutil.move(str(f), str(asi_staging / f.name))
+                result.asi_staged.append(str(asi_staging / f.name))
+                logger.info("Staged ASI file for GUI install: %s", f.name)
+
+        # Check for OG_ XML replacement files and convert to standard deltas
+        og_xml = _detect_xml_replacements(tmp_path)
+        if og_xml:
+            from cdumm.engine.json_patch_handler import _find_pamt_entry
+            from cdumm.engine.crimson_browser_handler import fix_xml_format
+            og_work = Path(tmp) / "_og_xml_converted"
+            og_work.mkdir(exist_ok=True)
+            for og in og_xml:
+                entry = _find_pamt_entry(og["target_name"], game_dir)
+                if entry is None:
+                    logger.warning("OG_ XML target not found in game: %s", og["target_name"])
+                    continue
+                xml_bytes = og["source_path"].read_bytes()
+                # Apply BOM/CRLF fixup for game compatibility
+                try:
+                    xml_bytes = fix_xml_format(xml_bytes)
+                except Exception:
+                    pass  # use raw bytes if fixup fails
+                # Save as full-file ENTR delta
+                safe_name = og["target_name"].replace("/", "_") + ".entr"
+                delta_path = deltas_dir / safe_name
+                delta_path.parent.mkdir(parents=True, exist_ok=True)
+                delta_path.write_bytes(xml_bytes)
+                logger.info("OG_ XML replacement delta created: %s -> %s", og["source_path"].name, og["target_name"])
+
         # Check for Crimson Browser format and convert if needed
         cb_manifest = detect_crimson_browser(tmp_path)
         if cb_manifest is not None:
@@ -953,6 +1141,15 @@ def import_from_zip(
             entr_result = import_json_as_entr(
                 jp_data, game_dir, db, deltas_dir, jp_name,
                 existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
+            if entr_result is None:
+                # JSON patch detected but failed — don't fall through to slow PAZ scan
+                result = ModImportResult(jp_name)
+                target_files = [p.get("game_file", "?") for p in jp_data.get("patches", [])]
+                result.error = (
+                    f"JSON patch mod detected but failed to process. "
+                    f"Target game file(s) not found: {', '.join(target_files)}. "
+                    f"Use Inspect Mod for a detailed diagnostic report.")
+                return result
             if entr_result is not None:
                 if entr_result.get("version_mismatch"):
                     result = ModImportResult(jp_name)
@@ -1343,7 +1540,7 @@ def import_from_bsdiff(
     priority = _next_priority(db)
     cursor = db.connection.execute(
         "INSERT INTO mods (name, mod_type, priority, source_path) VALUES (?, ?, ?, ?)",
-        (mod_name, "paz", priority, str(patch_path)),
+        (prettify_mod_name(mod_name), "paz", priority, str(patch_path)),
     )
     mod_id = cursor.lastrowid
 
@@ -1579,6 +1776,16 @@ def _process_extracted_files(
         logger.warning("Health check failed (non-fatal): %s", e)
 
     force_inplace = 1 if (modinfo and modinfo.get("force_inplace")) else 0
+    # Use prettified name for DB storage
+    mod_name = result.name
+    # Override with modinfo name if provided
+    if modinfo and modinfo.get("name"):
+        mod_name = prettify_mod_name(modinfo["name"])
+
+    conflict_mode = modinfo.get("conflict_mode", "normal") if modinfo else "normal"
+    if conflict_mode not in ("normal", "override"):
+        conflict_mode = "normal"
+    target_language = modinfo.get("target_language") if modinfo else None
 
     # Stamp with current game version so we can detect outdated mods later
     game_ver_hash = None
@@ -1594,9 +1801,9 @@ def _process_extracted_files(
         if modinfo:
             db.connection.execute(
                 "UPDATE mods SET author=?, version=?, description=?, force_inplace=?, "
-                "game_version_hash=? WHERE id=?",
+                "game_version_hash=?, conflict_mode=?, target_language=? WHERE id=?",
                 (modinfo.get("author"), modinfo.get("version"), modinfo.get("description"),
-                 force_inplace, game_ver_hash, mod_id),
+                 force_inplace, game_ver_hash, conflict_mode, target_language, mod_id),
             )
         elif game_ver_hash:
             db.connection.execute(
@@ -1610,9 +1817,10 @@ def _process_extracted_files(
         description = modinfo.get("description") if modinfo else None
         cursor = db.connection.execute(
             "INSERT INTO mods (name, mod_type, priority, author, version, description, "
-            "force_inplace, game_version_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (mod_name, "paz", priority, author, version, description, force_inplace, game_ver_hash),
+            "force_inplace, game_version_hash, conflict_mode, target_language) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mod_name, "paz", priority, author, version, description, force_inplace,
+             game_ver_hash, conflict_mode, target_language),
         )
         mod_id = cursor.lastrowid
 
@@ -1642,6 +1850,7 @@ def _process_extracted_files(
         pct = int((match_idx / max(total_matches, 1)) * 90) + 5
         size_mb = extracted_path.stat().st_size / 1048576
         _emit_progress(pct, f"Processing {rel_path} ({size_mb:.0f} MB)...")
+        time.sleep(0)  # yield GIL so GUI stays responsive
         try:
             # Skip files already handled by entry-level PAZ decomposition
             if rel_path in _paz_entr_handled:
@@ -1926,7 +2135,7 @@ def _process_sandbox_diff(
     priority = _next_priority(db)
     cursor = db.connection.execute(
         "INSERT INTO mods (name, mod_type, priority) VALUES (?, ?, ?)",
-        (mod_name, "paz", priority),
+        (prettify_mod_name(mod_name), "paz", priority),
     )
     mod_id = cursor.lastrowid
 
@@ -2070,7 +2279,7 @@ def import_script_live(
     priority = _next_priority(db)
     cursor = db.connection.execute(
         "INSERT INTO mods (name, mod_type, priority) VALUES (?, ?, ?)",
-        (mod_name, "paz", priority))
+        (prettify_mod_name(mod_name), "paz", priority))
     mod_id = cursor.lastrowid
 
     for rel_path in changed_files:
@@ -2204,7 +2413,7 @@ def import_from_game_scan(
     priority = _next_priority(db)
     cursor = db.connection.execute(
         "INSERT INTO mods (name, mod_type, priority) VALUES (?, ?, ?)",
-        (mod_name, "paz", priority),
+        (prettify_mod_name(mod_name), "paz", priority),
     )
     mod_id = cursor.lastrowid
 

@@ -5,9 +5,10 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QVBoxLayout, QListWidget, QListWidgetItem,
-    QHBoxLayout, QCheckBox, QScrollArea, QWidget,
+    QButtonGroup, QVBoxLayout, QListWidget, QListWidgetItem,
+    QHBoxLayout, QCheckBox, QRadioButton, QScrollArea, QWidget,
     QFrame,
 )
 
@@ -19,6 +20,8 @@ from qfluentwidgets import (
     PushButton,
     SubtitleLabel,
 )
+
+from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,92 @@ def find_json_presets(path: Path) -> list[tuple[Path, dict]]:
     return presets
 
 
+def find_folder_variants(path: Path) -> list[Path]:
+    """Find folder-based mod variants (subdirectories that each contain a mod).
+
+    Detects patterns like:
+        ModName/
+            VariantA/   (contains .paz, .pamt, .json, or numbered dirs)
+            VariantB/
+
+    Returns list of variant folder paths, or empty if not a variant mod.
+    Ignores numbered PAZ directories (0001/, 0036/) — those are game data, not variants.
+    """
+    if not path.is_dir():
+        return []
+
+    subdirs = sorted([
+        d for d in path.iterdir()
+        if d.is_dir() and not d.name.startswith('.') and not d.name.startswith('_')
+    ])
+
+    if len(subdirs) < 2:
+        return []
+
+    # Check if ALL subdirs are numbered PAZ dirs (like 0002/, 0012/) — not variants
+    import re
+    if all(re.match(r'^\d{4}$', d.name) for d in subdirs):
+        return []
+
+    # Check if subdirs look like mod variants (contain game files)
+    variants = []
+    for d in subdirs:
+        has_content = False
+        for f in d.rglob("*"):
+            if f.is_file() and f.suffix.lower() in ('.paz', '.pamt', '.json', '.bsdiff'):
+                has_content = True
+                break
+            if f.is_dir() and re.match(r'^\d{4}$', f.name):
+                has_content = True
+                break
+        if has_content:
+            variants.append(d)
+
+    return variants if len(variants) >= 2 else []
+
+
+class FolderVariantDialog(MessageBoxBase):
+    """Dialog for choosing which folder variant to import."""
+
+    def __init__(self, variants: list[Path], parent=None):
+        super().__init__(parent)
+        self._variants = variants
+        self.selected_path: Path | None = None
+
+        title = SubtitleLabel(tr("preset.choose"))
+        tf = title.font()
+        tf.setPixelSize(20)
+        tf.setWeight(QFont.Weight.Bold)
+        title.setFont(tf)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(
+            CaptionLabel(tr("preset.choose_desc")))
+        self.viewLayout.addSpacing(12)
+
+        from cdumm.engine.import_handler import prettify_mod_name
+
+        self._group = QButtonGroup(self)
+        for i, v in enumerate(variants):
+            radio = QRadioButton(prettify_mod_name(v.name))
+            rf = radio.font()
+            rf.setPixelSize(14)
+            radio.setFont(rf)
+            if i == 0:
+                radio.setChecked(True)
+            self._group.addButton(radio, i)
+            self.viewLayout.addWidget(radio)
+
+        self.yesButton.setText(tr("main.install"))
+        self.cancelButton.setText(tr("main.cancel"))
+        self.widget.setMinimumWidth(400)
+
+    def _on_yesButton_clicked(self):
+        idx = self._group.checkedId()
+        if 0 <= idx < len(self._variants):
+            self.selected_path = self._variants[idx]
+        self.accept()
+
+
 class PresetPickerDialog(MessageBoxBase):
     """Dialog for choosing which JSON preset to import."""
 
@@ -64,55 +153,83 @@ class PresetPickerDialog(MessageBoxBase):
         self.selected_path: Path | None = None
         self.selected_data: dict | None = None
 
-        self.titleLabel = SubtitleLabel("Choose Mod Preset")
-        self.viewLayout.addWidget(self.titleLabel)
+        title = SubtitleLabel(tr("preset.choose"))
+        tf = title.font()
+        tf.setPixelSize(20)
+        tf.setWeight(QFont.Weight.Bold)
+        title.setFont(tf)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addSpacing(4)
 
-        header = BodyLabel("This mod has multiple presets.\nChoose which one to install:")
+        header = CaptionLabel(tr("preset.choose_desc"))
+        hf = header.font()
+        hf.setPixelSize(13)
+        header.setFont(hf)
         header.setWordWrap(True)
         self.viewLayout.addWidget(header)
+        self.viewLayout.addSpacing(8)
 
-        self._list = QListWidget()
-        self._list.setMinimumHeight(200)
+        # Radio button list inside a scroll area
+        from qfluentwidgets import isDarkTheme
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(200)
+        scroll.setMaximumHeight(350)
 
-        for file_path, data in presets:
+        container = QWidget()
+        if isDarkTheme():
+            container.setStyleSheet("QWidget { background: #1C2028; } "
+                "QRadioButton { color: #E2E8F0; padding: 10px; spacing: 8px; }"
+                "QRadioButton::indicator { width: 16px; height: 16px; }")
+        else:
+            container.setStyleSheet("QWidget { background: #FAFBFC; } "
+                "QRadioButton { color: #1A202C; padding: 10px; spacing: 8px; }"
+                "QRadioButton::indicator { width: 16px; height: 16px; }")
+        radio_layout = QVBoxLayout(container)
+        radio_layout.setContentsMargins(8, 8, 8, 8)
+        radio_layout.setSpacing(4)
+
+        self._radios: list[QRadioButton] = []
+        for i, (file_path, data) in enumerate(presets):
             name = data.get("name", file_path.stem)
             desc = data.get("description", "")
             patch_count = sum(len(p.get("changes", [])) for p in data.get("patches", []))
 
             label = name
             if desc:
-                label += f"  --  {desc[:60]}"
-            label += f"  ({patch_count} changes)"
+                label += f"\n{desc[:80]}"
+            label += f"\n{patch_count} changes"
 
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, file_path)
-            self._list.addItem(item)
+            radio = QRadioButton(label)
+            rf = radio.font()
+            rf.setPixelSize(13)
+            radio.setFont(rf)
+            if i == 0:
+                radio.setChecked(True)
+            self._radios.append(radio)
+            radio_layout.addWidget(radio)
 
-        self._list.setCurrentRow(0)
-        self._list.itemDoubleClicked.connect(self._on_double_click)
-        self.viewLayout.addWidget(self._list)
+        radio_layout.addStretch()
+        scroll.setWidget(container)
+        self.viewLayout.addWidget(scroll)
 
         # Override default buttons
-        self.yesButton.setText("Install")
+        self.yesButton.setText(tr("main.install"))
         self.yesButton.clicked.disconnect()
         self.yesButton.clicked.connect(self._on_accept)
-        self.cancelButton.setText("Cancel")
+        self.cancelButton.setText(tr("main.cancel"))
 
-        self.widget.setMinimumWidth(460)
+        self.widget.setMinimumWidth(500)
 
     def _on_accept(self) -> None:
-        item = self._list.currentItem()
-        if item:
-            path = item.data(Qt.ItemDataRole.UserRole)
-            for fp, data in self._presets:
-                if fp == path:
-                    self.selected_path = fp
-                    self.selected_data = data
-                    break
+        for i, radio in enumerate(self._radios):
+            if radio.isChecked() and i < len(self._presets):
+                fp, data = self._presets[i]
+                self.selected_path = fp
+                self.selected_data = data
+                break
         self.accept()
-
-    def _on_double_click(self, item: QListWidgetItem) -> None:
-        self._on_accept()
 
 
 def has_labeled_changes(data: dict) -> bool:
@@ -229,7 +346,7 @@ class TogglePickerDialog(MessageBoxBase):
         self._previous = set(previous_labels) if previous_labels else None
         self.selected_data: dict | None = None
 
-        self.titleLabel = SubtitleLabel("Choose What to Apply")
+        self.titleLabel = SubtitleLabel(tr("preset.choose_apply"))
         self.viewLayout.addWidget(self.titleLabel)
 
         name = data.get("name", "Mod")
@@ -259,10 +376,10 @@ class TogglePickerDialog(MessageBoxBase):
             self._build_toggle_mode()
 
         # Override default buttons
-        self.yesButton.setText("Apply Selected")
+        self.yesButton.setText(tr("preset.apply_selected"))
         self.yesButton.clicked.disconnect()
         self.yesButton.clicked.connect(self._on_accept)
-        self.cancelButton.setText("Cancel")
+        self.cancelButton.setText(tr("main.cancel"))
 
         self.widget.setMinimumWidth(500)
 
@@ -270,13 +387,20 @@ class TogglePickerDialog(MessageBoxBase):
         """Mutually exclusive presets — radio buttons."""
         from PySide6.QtWidgets import QRadioButton
 
-        hint = BodyLabel("Choose a preset:")
+        hint = BodyLabel(tr("preset.choose_preset"))
         self.viewLayout.addWidget(hint)
 
+        from qfluentwidgets import isDarkTheme
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(250)
         scroll_widget = QWidget()
+        if isDarkTheme():
+            scroll_widget.setStyleSheet("QWidget { background: #1C2028; } "
+                "QRadioButton { color: #E2E8F0; padding: 10px; }")
+        else:
+            scroll_widget.setStyleSheet("QWidget { background: #FAFBFC; } "
+                "QRadioButton { color: #1A202C; padding: 10px; }")
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setContentsMargins(12, 12, 12, 12)
         scroll_layout.setSpacing(8)
@@ -329,25 +453,32 @@ class TogglePickerDialog(MessageBoxBase):
 
     def _build_toggle_mode(self):
         """Independent toggles — checkboxes."""
-        hint = BodyLabel("Check the items you want to apply:")
+        hint = BodyLabel(tr("preset.check_items"))
         self.viewLayout.addWidget(hint)
 
         sel_row = QHBoxLayout()
-        sel_all = PushButton("Select All")
+        sel_all = PushButton(tr("preset.select_all"))
         sel_all.setFixedWidth(90)
         sel_all.clicked.connect(self._select_all)
         sel_row.addWidget(sel_all)
-        desel_all = PushButton("Deselect All")
+        desel_all = PushButton(tr("preset.deselect_all"))
         desel_all.setFixedWidth(100)
         desel_all.clicked.connect(self._deselect_all)
         sel_row.addWidget(desel_all)
         sel_row.addStretch()
         self.viewLayout.addLayout(sel_row)
 
+        from qfluentwidgets import isDarkTheme
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(250)
         scroll_widget = QWidget()
+        if isDarkTheme():
+            scroll_widget.setStyleSheet("QWidget { background: #1C2028; } "
+                "QCheckBox { color: #E2E8F0; padding: 8px; }")
+        else:
+            scroll_widget.setStyleSheet("QWidget { background: #FAFBFC; } "
+                "QCheckBox { color: #1A202C; padding: 8px; }")
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setContentsMargins(8, 8, 8, 8)
         scroll_layout.setSpacing(4)

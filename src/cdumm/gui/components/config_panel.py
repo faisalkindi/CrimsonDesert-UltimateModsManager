@@ -8,11 +8,13 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -70,7 +72,7 @@ class ConfigPanel(QWidget):
     panel_closed = Signal()
     apply_clicked = Signal(int, list)  # mod_id, [{"label": str, "enabled": bool}]
 
-    _PANEL_WIDTH = 310
+    _PANEL_WIDTH = 400
     _ANIM_DURATION = 250
 
     def __init__(self, parent=None) -> None:
@@ -83,6 +85,8 @@ class ConfigPanel(QWidget):
         self._initial_states: dict[int, bool] = {}
         self._toggles: dict[int, QCheckBox] = {}
         self._labels: dict[int, str] = {}
+        self._value_inputs: dict[int, QSpinBox | QDoubleSpinBox] = {}
+        self._initial_values: dict[int, int | float] = {}
 
         self._anim = QPropertyAnimation(self, b"maximumWidth")
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
@@ -163,6 +167,8 @@ class ConfigPanel(QWidget):
         self._initial_states.clear()
         self._toggles.clear()
         self._labels.clear()
+        self._value_inputs.clear()
+        self._initial_values.clear()
         self._apply_btn.setVisible(False)
 
         # Header
@@ -184,7 +190,13 @@ class ConfigPanel(QWidget):
         if patches:
             self._add_section_header(tr("config_panel.section_config"))
             for i, p in enumerate(patches):
-                self._add_config_row(i, p["label"], p.get("description", ""), p["enabled"])
+                ev = p.get("editable_value")
+                if ev and isinstance(ev, dict) and "type" in ev:
+                    self._add_editable_row(
+                        i, p["label"], p.get("description", ""),
+                        ev, p.get("custom_value"))
+                else:
+                    self._add_config_row(i, p["label"], p.get("description", ""), p["enabled"])
 
         # CONFLICTS section
         if conflicts:
@@ -306,12 +318,19 @@ class ConfigPanel(QWidget):
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
         name_lbl = CaptionLabel(label)
-        name_lbl.setStyleSheet("font-weight: 600; font-size: 13px;")
+        name_lbl.setWordWrap(True)
+        nf = name_lbl.font()
+        nf.setPixelSize(13)
+        from PySide6.QtGui import QFont
+        nf.setWeight(QFont.Weight.DemiBold)
+        name_lbl.setFont(nf)
         text_col.addWidget(name_lbl)
         if description:
             desc_lbl = CaptionLabel(description)
             desc_lbl.setWordWrap(True)
-            desc_lbl.setStyleSheet("color: #8B95A5; font-size: 11px;")
+            df = desc_lbl.font()
+            df.setPixelSize(11)
+            desc_lbl.setFont(df)
             text_col.addWidget(desc_lbl)
         row.addLayout(text_col, 1)
 
@@ -339,17 +358,103 @@ class ConfigPanel(QWidget):
         )
         self._body_layout.addWidget(container)
 
+    def _add_editable_row(
+        self, index: int, label: str, description: str,
+        editable_meta: dict, current_value: int | float | None,
+    ) -> None:
+        """Add a row with a numeric input for inline value editing."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 8, 0, 8)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        name_lbl = CaptionLabel(label)
+        name_lbl.setWordWrap(True)
+        nf = name_lbl.font()
+        nf.setPixelSize(13)
+        from PySide6.QtGui import QFont
+        nf.setWeight(QFont.Weight.DemiBold)
+        name_lbl.setFont(nf)
+        text_col.addWidget(name_lbl)
+        if description:
+            desc_lbl = CaptionLabel(description)
+            desc_lbl.setWordWrap(True)
+            df = desc_lbl.font()
+            df.setPixelSize(11)
+            desc_lbl.setFont(df)
+            text_col.addWidget(desc_lbl)
+        # Show value range
+        val_min = editable_meta.get("min", 0)
+        val_max = editable_meta.get("max", 999999)
+        # Validate min <= max
+        if val_min > val_max:
+            val_min, val_max = val_max, val_min
+        range_lbl = CaptionLabel(f"Range: {val_min} – {val_max}")
+        rf = range_lbl.font()
+        rf.setPixelSize(10)
+        range_lbl.setFont(rf)
+        range_lbl.setStyleSheet(f"color: {_section_color()}; opacity: 0.7;")
+        text_col.addWidget(range_lbl)
+        row.addLayout(text_col, 1)
+
+        # Value input
+        val_type = editable_meta.get("type", "int32_le")
+        default_val = editable_meta.get("default", val_min)
+        if current_value is not None:
+            default_val = current_value
+
+        if val_type == "float32_le":
+            spinbox = QDoubleSpinBox()
+            spinbox.setDecimals(3)
+            spinbox.setMinimum(float(val_min))
+            spinbox.setMaximum(float(val_max))
+            spinbox.setValue(float(default_val))
+        else:
+            spinbox = QSpinBox()
+            spinbox.setMinimum(int(val_min))
+            spinbox.setMaximum(int(val_max))
+            spinbox.setValue(int(default_val))
+
+        spinbox.setFixedWidth(90)
+        spinbox.valueChanged.connect(self._on_value_changed)
+        row.addWidget(spinbox, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self._value_inputs[index] = spinbox
+        self._labels[index] = label
+        self._initial_values[index] = default_val
+
+        container = QWidget()
+        container.setLayout(row)
+        container.setStyleSheet(
+            f"border-bottom: 1px solid {_row_border()}; background: transparent;"
+        )
+        self._body_layout.addWidget(container)
+
+    def _on_value_changed(self) -> None:
+        """Show Apply when any value input differs from initial."""
+        self._check_any_changed()
+
     def _on_toggle_changed(self) -> None:
         """Show the Apply button when any toggle differs from its initial state."""
+        self._check_any_changed()
+
+    def _check_any_changed(self) -> None:
+        """Show Apply when any toggle or value input differs from initial."""
         changed = any(
             cb.isChecked() != self._initial_states[idx]
             for idx, cb in self._toggles.items()
         )
+        if not changed:
+            changed = any(
+                sb.value() != self._initial_values[idx]
+                for idx, sb in self._value_inputs.items()
+            )
         self._apply_btn.setVisible(changed)
 
     def _on_apply(self) -> None:
-        result = [
-            {"label": self._labels[idx], "enabled": cb.isChecked()}
-            for idx, cb in sorted(self._toggles.items())
-        ]
+        result = []
+        for idx, cb in sorted(self._toggles.items()):
+            result.append({"label": self._labels[idx], "enabled": cb.isChecked()})
+        for idx, sb in sorted(self._value_inputs.items()):
+            result.append({"label": self._labels[idx], "enabled": True, "value": sb.value()})
         self.apply_clicked.emit(self._mod_id, result)

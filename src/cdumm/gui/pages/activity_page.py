@@ -42,7 +42,7 @@ class _ActivityEntryCard(CardWidget):
 
         # Category badge
         category = entry.get("category", "info")
-        color = CATEGORY_COLORS.get(category, "#88C0D0")
+        color = CATEGORY_COLORS.get(category, "#6B7280")
         badge = CaptionLabel(category.upper(), self)
         badge.setFixedWidth(80)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -277,37 +277,49 @@ class ActivityPage(SmoothScrollArea):
 
         self.refresh()
 
-    # Clean chip colors — monochrome blue-gray palette, not category colors
-    _CHIP_LIGHT = (
-        "PushButton { background: #F0F4F8; color: #4A5568; "
-        "border: 1px solid #E2E8F0; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
-        "PushButton:hover { background: #E2E8F0; }"
-    )
-    _CHIP_DARK = (
-        "PushButton { background: #2D3748; color: #A0AEC0; "
-        "border: 1px solid #4A5568; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
-        "PushButton:hover { background: #3A4A5C; }"
-    )
-    _CHIP_ACTIVE_LIGHT = (
-        "PushButton { background: #2878D0; color: white; "
-        "border: none; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
-        "PushButton:hover { background: #2060B0; }"
-    )
-    _CHIP_ACTIVE_DARK = (
-        "PushButton { background: #3A8FE0; color: white; "
-        "border: none; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
-        "PushButton:hover { background: #2878D0; }"
-    )
+    # Per-category chip colors: (light_text, dark_text, light_border, dark_border)
+    _CHIP_CATEGORY_COLORS = {
+        "apply":    ("#2E7D32", "#81C784", "#A5D6A7", "#2E7D32"),
+        "revert":   ("#E65100", "#FFB74D", "#FFCC80", "#E65100"),
+        "import":   ("#1565C0", "#64B5F6", "#90CAF9", "#1565C0"),
+        "remove":   ("#C62828", "#EF5350", "#EF9A9A", "#C62828"),
+        "verify":   ("#00796B", "#4DB6AC", "#80CBC4", "#00796B"),
+        "error":    ("#C62828", "#EF5350", "#EF9A9A", "#C62828"),
+    }
+    # Fallback for categories not in the map above
+    _CHIP_DEFAULT_COLORS = ("#4A5568", "#A0AEC0", "#E2E8F0", "#4A5568")
 
     @staticmethod
     def _apply_chip_style(btn: PushButton, color: str, active: bool) -> None:
         from qfluentwidgets import setCustomStyleSheet
         if active:
-            setCustomStyleSheet(btn,
-                ActivityPage._CHIP_ACTIVE_LIGHT, ActivityPage._CHIP_ACTIVE_DARK)
+            light = (
+                f"PushButton {{ background: {color}; color: white; "
+                "border: none; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
+                f"PushButton:hover {{ background: {color}; opacity: 0.85; }}"
+            )
+            dark = (
+                f"PushButton {{ background: {color}; color: white; "
+                "border: none; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
+                f"PushButton:hover {{ background: {color}; opacity: 0.85; }}"
+            )
+            setCustomStyleSheet(btn, light, dark)
         else:
-            setCustomStyleSheet(btn,
-                ActivityPage._CHIP_LIGHT, ActivityPage._CHIP_DARK)
+            # Look up per-category color, fall back to grey
+            cat_key = btn.text().lower()
+            lt, dt, lb, db = ActivityPage._CHIP_CATEGORY_COLORS.get(
+                cat_key, ActivityPage._CHIP_DEFAULT_COLORS)
+            light = (
+                f"PushButton {{ background: {lt}14; color: {lt}; "
+                f"border: 1px solid {lb}; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }}"
+                f"PushButton:hover {{ background: {lt}28; }}"
+            )
+            dark = (
+                f"PushButton {{ background: {dt}14; color: {dt}; "
+                f"border: 1px solid {db}; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }}"
+                f"PushButton:hover {{ background: {dt}28; }}"
+            )
+            setCustomStyleSheet(btn, light, dark)
 
     def _populate_cards(self, entries: list[dict], search_query: str = "") -> None:
         """Build cards from a list of log entries."""

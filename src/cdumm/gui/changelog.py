@@ -8,8 +8,31 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from cdumm.i18n import tr
+
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
+    {
+        "version": "3.0.0",
+        "date": "2026-04-16",
+        "notes": [
+            "New look: completely redesigned interface with card-based mod list, folder groups, and side panel.",
+            "First-time welcome wizard: pick your language, theme, and game folder in a guided setup.",
+            "Batch import: drop many mods at once and they all import in a single fast pass.",
+            "ASI mods auto-detected when dropped alongside PAZ mods and installed to the right place.",
+            "Configurable mods with multiple presets now show a picker dialog.",
+            "Folder variant mods now prompt you to choose which variant to install.",
+            "Mod names are automatically cleaned up for readability.",
+            "ASI plugins now show version numbers from folder names and modinfo.",
+            "Smaller app size: removed unused libraries, optimized build.",
+            "More mods just work out of the box: better handling of sound mods, XML replacements, and hand-edited files.",
+            "Override mode: mod authors can declare conflict winners in modinfo.json.",
+            "Correct compression type for new files added by mods (DDS textures, soundbanks).",
+            "Full app translation: all UI text can now be translated, not just the main pages.",
+            "Steam, Xbox, and Epic Games auto-detection with store logos in setup.",
+            "8 new languages: Italian, Polish, Russian, Turkish, Japanese, Simplified Chinese, Ukrainian, Indonesian.",
+        ],
+    },
     {
         "version": "2.5.0",
         "date": "2026-04-13",
@@ -545,22 +568,31 @@ class PatchNotesDialog(MessageBoxBase):
         version = CHANGELOG[0]["version"] if CHANGELOG else "?"
 
         if latest_only:
-            self.titleLabel = SubtitleLabel(f"What's New in v{version}")
+            self.titleLabel = SubtitleLabel(tr("changelog.whats_new", version=version))
         else:
-            self.titleLabel = SubtitleLabel("CDUMM Patch Notes")
+            self.titleLabel = SubtitleLabel(tr("changelog.patch_notes"))
         self.viewLayout.addWidget(self.titleLabel)
 
         if latest_only:
-            header = BodyLabel(f"CDUMM has been updated to v{version}")
+            header = BodyLabel(tr("changelog.updated", version=version))
             font = header.font()
             font.setPixelSize(15)
             font.setBold(True)
             header.setFont(font)
             self.viewLayout.addWidget(header)
 
+        from qfluentwidgets import isDarkTheme
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
         browser.setMinimumHeight(350)
+        if isDarkTheme():
+            browser.setStyleSheet(
+                "QTextBrowser { background: #1C2028; color: #E2E8F0; "
+                "border: 1px solid #2D3340; border-radius: 6px; padding: 8px; }")
+        else:
+            browser.setStyleSheet(
+                "QTextBrowser { background: #FAFBFC; color: #1A202C; "
+                "border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; }")
         if latest_only:
             browser.setHtml(get_latest_notes_html())
         else:
@@ -568,7 +600,7 @@ class PatchNotesDialog(MessageBoxBase):
         self.viewLayout.addWidget(browser)
 
         # Override default buttons
-        self.yesButton.setText("Close")
+        self.yesButton.setText(tr("main.close"))
         self.cancelButton.hide()
 
         self.widget.setMinimumWidth(560)

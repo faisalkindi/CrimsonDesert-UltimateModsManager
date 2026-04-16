@@ -1,5 +1,6 @@
 """QObject workers for background operations."""
 import logging
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -10,6 +11,7 @@ from cdumm.engine.import_handler import (
     import_from_bsdiff,
     import_from_folder,
     import_from_json_patch,
+    import_from_rar,
     import_from_script,
     import_from_zip,
 )
@@ -72,16 +74,15 @@ class ImportWorker(QObject):
             elif fmt == "bsdiff":
                 result = import_from_bsdiff(
                     self._mod_path, self._game_dir, db, snapshot, self._deltas_dir)
+            elif fmt == "rar":
+                result = import_from_rar(
+                    self._mod_path, self._game_dir, db, snapshot, self._deltas_dir,
+                    existing_mod_id=self._existing_mod_id)
             else:
                 suffix = self._mod_path.suffix.lower()
-                if suffix == '.rar':
-                    self.error_occurred.emit(
-                        "RAR files are not supported. Please extract the .rar "
-                        "and drop the folder or re-compress as .zip")
-                else:
-                    self.error_occurred.emit(
-                        f"Unsupported file format: {suffix or 'unknown'}\n"
-                        "Supported: .zip, .7z, .json, folder, .bat, .py")
+                self.error_occurred.emit(
+                    f"Unsupported file format: {suffix or 'unknown'}\n"
+                    "Supported: .zip, .7z, .rar, .json, folder, .bat, .py")
                 db.close()
                 return
 
@@ -134,6 +135,7 @@ class PreHashWorker(QObject):
                 if (i + 1) % 5 == 0 or (i + 1) == total:
                     pct = int((i + 1) / total * 100)
                     self.progress_updated.emit(pct, f"Hashed {i + 1}/{total} files...")
+                time.sleep(0)  # yield GIL
 
             logger.info("PreHashWorker: done, %d files hashed", len(pre_hashes))
             self.finished.emit(pre_hashes)
@@ -320,6 +322,7 @@ class ScriptCaptureWorker(QObject):
                     pct = int((file_idx / max(total_files, 1)) * 18)
                     self.progress_updated.emit(
                         pct, f"Checking {file_idx + 1}/{total_files}...")
+                    time.sleep(0)  # yield GIL
 
                 game_file = self._game_dir / rel_path.replace("/", "\\")
                 if not game_file.exists():
@@ -714,6 +717,7 @@ class ScanChangesWorker(QObject):
                 if (i + 1) % 10 == 0 or (i + 1) == total:
                     pct = int((i + 1) / total * 50)
                     self.progress_updated.emit(pct, f"Scanned {i + 1}/{total} files...")
+                time.sleep(0)  # yield GIL
 
             if not changed:
                 result = ModImportResult(self._mod_name)
@@ -846,6 +850,7 @@ class BackupVerifyWorker(QObject):
                 pct = int((i / total) * 100)
                 rel = str(full.relative_to(self._vanilla_dir)).replace("\\", "/")
                 self.progress_updated.emit(pct, f"Verifying {rel}...")
+                time.sleep(0)  # yield GIL
 
                 snap = db.connection.execute(
                     "SELECT file_hash FROM snapshots WHERE file_path = ?", (rel,)

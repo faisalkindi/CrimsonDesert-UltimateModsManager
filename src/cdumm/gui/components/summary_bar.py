@@ -71,9 +71,9 @@ class SummaryBar(QWidget):
     # (tr_key, dot color)
     _STAT_DEFS = [
         ("stats.total", "#2878D0"),
-        ("stats.installed", "#22C55E"),
-        ("stats.loaded", "#E65100"),
-        ("stats.unloaded", "#9CA3AF"),
+        ("stats.active", "#22C55E"),
+        ("stats.pending", "#E65100"),
+        ("stats.inactive", "#9CA3AF"),
     ]
 
     def __init__(self, parent=None) -> None:
@@ -185,10 +185,10 @@ class SummaryBar(QWidget):
     # ------------------------------------------------------------------
 
     def update_stats(
-        self, total: int = 0, installed: int = 0, loaded: int = 0, unloaded: int = 0
+        self, total: int = 0, active: int = 0, pending: int = 0, inactive: int = 0
     ) -> None:
         """Animate stat numbers from current to new values."""
-        new_values = [total, installed, loaded, unloaded]
+        new_values = [total, active, pending, inactive]
 
         for i, (label, new_val) in enumerate(zip(self._number_labels, new_values)):
             old_val = self._current_values[i]
