@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
-    MessageBoxBase, SimpleCardWidget, SmoothScrollDelegate, SubtitleLabel,
-    getFont,
+    MessageBoxBase, SimpleCardWidget, SingleDirectionScrollArea,
+    SmoothScrollDelegate, SubtitleLabel, getFont,
 )
 
 from cdumm.gui.conflict_view import ACTIONABLE_LEVELS, ConflictView
@@ -52,10 +52,30 @@ class ConflictsDialog(MessageBoxBase):
         actionable = [c for c in conflicts if c.level in ACTIONABLE_LEVELS]
         auto = [c for c in conflicts if c.level not in ACTIONABLE_LEVELS]
 
-        # ── Title + total count + caption ─────────────────────────────
+        # ── Title + total count + caption (stay outside scroll area) ──
         self._build_title(len(conflicts))
         self._build_caption(bool(actionable), bool(auto))
         self.viewLayout.addSpacing(6)
+
+        # ── Scrollable content area ───────────────────────────────────
+        # MessageBoxBase.viewLayout is a plain QVBoxLayout with no scroll.
+        # If two trees + load-order card don't fit the window, Qt can't
+        # shrink below their minimums and they overlap. Wrap everything
+        # below the caption in a SingleDirectionScrollArea so overflow
+        # scrolls instead of clipping/overlapping.
+        self._scroll_area = SingleDirectionScrollArea(
+            orient=Qt.Orientation.Vertical)
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
+        self._scroll_area.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            " QScrollArea > QWidget > QWidget { background: transparent; }")
+        scroll_inner = QWidget()
+        self._content_layout = QVBoxLayout(scroll_inner)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        self._scroll_area.setWidget(scroll_inner)
+        self.viewLayout.addWidget(self._scroll_area, 1)
 
         if not conflicts:
             self._build_empty_state()
@@ -77,6 +97,7 @@ class ConflictsDialog(MessageBoxBase):
             # Load-order card — only shown when reordering actually matters
             if actionable:
                 self._build_load_order_card(actionable, mods_by_id)
+            self._content_layout.addStretch(1)
 
         # ── Footer: single Close button ───────────────────────────────
         self.yesButton.setText(self._close_label())
@@ -143,14 +164,14 @@ class ConflictsDialog(MessageBoxBase):
         ef.setPixelSize(14)
         empty.setFont(ef)
         empty.setContentsMargins(0, 40, 0, 40)
-        self.viewLayout.addWidget(empty)
+        self._content_layout.addWidget(empty)
 
     def _build_section(self, title_text: str, count: int,
                        items: "list[Conflict]",
                        icon: FluentIcon, level: InfoLevel,
                        caption: str) -> None:
         """One section with coloured badge header + explanation + tree."""
-        self.viewLayout.addSpacing(8)
+        self._content_layout.addSpacing(12)
 
         header_row = QHBoxLayout()
         header_row.setSpacing(10)
@@ -167,7 +188,7 @@ class ConflictsDialog(MessageBoxBase):
         count_badge.setFixedHeight(20)
         header_row.addWidget(count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         header_row.addStretch(1)
-        self.viewLayout.addLayout(header_row)
+        self._content_layout.addLayout(header_row)
 
         # Small descriptive caption under the section header
         desc = CaptionLabel(caption)
@@ -175,15 +196,18 @@ class ConflictsDialog(MessageBoxBase):
         df.setPixelSize(12)
         desc.setFont(df)
         desc.setWordWrap(True)
-        desc.setContentsMargins(30, 0, 0, 4)
-        self.viewLayout.addWidget(desc)
+        desc.setContentsMargins(30, 0, 0, 6)
+        self._content_layout.addWidget(desc)
 
         tree = ConflictView(self.widget)
         tree.update_conflicts(items)
-        # Minimum for readability; no max — let the tree stretch as the
-        # user drags the dialog bigger via the QSizeGrip handle.
-        tree.setMinimumHeight(220)
-        self.viewLayout.addWidget(tree, 1)
+        # Fixed natural height per tree — the outer SingleDirectionScrollArea
+        # handles overflow, so we don't need stretch or min-heights that
+        # would cause overlap when the window is small.
+        row_height = 32
+        visible_rows = min(max(len(items), 3), 8)
+        tree.setFixedHeight(row_height * visible_rows + 56)
+        self._content_layout.addWidget(tree)
 
     # ------------------------------------------------------------------
 
@@ -202,7 +226,7 @@ class ConflictsDialog(MessageBoxBase):
         if not priority_mods:
             return
 
-        self.viewLayout.addSpacing(6)
+        self._content_layout.addSpacing(12)
 
         card = SimpleCardWidget(self.widget)
         card.setBorderRadius(8)
@@ -248,7 +272,7 @@ class ConflictsDialog(MessageBoxBase):
             "QScrollArea { background: transparent; border: none; }"
             " QScrollArea > QWidget > QWidget { background: transparent; }")
         card_layout.addWidget(scroll)
-        self.viewLayout.addWidget(card)
+        self._content_layout.addWidget(card)
 
     # ------------------------------------------------------------------
 
