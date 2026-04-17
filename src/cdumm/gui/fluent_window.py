@@ -3,6 +3,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Property, QEasingCurve, QObject, QPropertyAnimation, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QPixmap
@@ -3355,7 +3356,7 @@ class CdummWindow(FluentWindow):
         return tip
 
     def _run_qprocess(self, worker_args: list[str], tip: StateToolTip,
-                       on_done: callable, on_msg: callable | None = None) -> None:
+                       on_done: Callable, on_msg: Callable | None = None) -> None:
         """Launch a worker subprocess via QProcess.
 
         Args:
