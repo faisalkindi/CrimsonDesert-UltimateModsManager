@@ -14,16 +14,22 @@ from cdumm.engine.conflict_detector import Conflict
 logger = logging.getLogger(__name__)
 
 LEVEL_COLORS = {
-    "papgt": QColor("#4CAF50"),     # green — auto-handled
-    "paz": QColor("#FFC107"),       # yellow — warning
-    "byte_range": QColor("#FF9800"),  # orange — resolved via load order
+    "papgt": QColor("#4CAF50"),       # green — auto-rebuilt
+    "paz": QColor("#4CAF50"),         # green — both apply (compatible)
+    "byte_range": QColor("#FF9800"),  # orange — priority decides winner
+    "semantic": QColor("#FF9800"),    # orange — priority decides winner
 }
 
 LEVEL_LABELS = {
-    "papgt": "Auto-handled (PAPGT)",
-    "paz": "Compatible (different byte ranges)",
-    "byte_range": "Resolved (load order)",
+    "papgt": "Auto-rebuilt (metadata)",
+    "paz": "Both apply (different parts)",
+    "byte_range": "Load order decides winner",
+    "semantic": "Field-level merge",
 }
+
+# Levels where load-order / priority actually changes the outcome.
+# Used by the conflicts dialog to split "needs attention" from "auto".
+ACTIONABLE_LEVELS = frozenset({"byte_range", "semantic"})
 
 # Data role for storing mod IDs on tree items
 MOD_A_ID_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -166,16 +172,15 @@ class ConflictView(QWidget):
             key = (min(c.mod_a_id, c.mod_b_id), max(c.mod_a_id, c.mod_b_id))
             pairs.setdefault(key, []).append(c)
 
+        # Severity ladder — higher index = more user-impact, so a pair
+        # with even a single actionable child is surfaced at its colour.
+        severity_rank = {"papgt": 0, "paz": 1, "semantic": 2, "byte_range": 3}
+
         for (_, _), pair_conflicts in pairs.items():
             first = pair_conflicts[0]
-            # Determine worst level for this pair
-            worst = "papgt"
-            for c in pair_conflicts:
-                if c.level == "byte_range":
-                    worst = "byte_range"
-                    break
-                if c.level == "paz":
-                    worst = "paz"
+            # Determine worst level for this pair (highest severity rank)
+            worst = max(pair_conflicts,
+                        key=lambda c: severity_rank.get(c.level, 0)).level
 
             pair_item = QStandardItem(f"{first.mod_a_name} ↔ {first.mod_b_name}")
             pair_item.setForeground(LEVEL_COLORS.get(worst, QColor("#999")))

@@ -1,11 +1,13 @@
-"""Fluent conflicts dialog — shows active pairs + load-order ranking.
+"""Fluent conflicts dialog — two sections: actionable vs auto-resolved.
 
-Built on ``MessageBoxBase`` so it picks up the same Fluent chrome, mask,
-shadow, and font that every other dialog in the app uses (preset picker,
-mod contents, profile editor, etc.). Rendering a raw ``QDialog`` here
-turns the window into an OS-default slab that looks nothing like the
-rest of CDUMM — the user called it out correctly the first time it
-shipped that way.
+Most "conflicts" the detector reports are informational (different
+byte ranges in the same archive, different PAMT directories, etc.) — they
+compose cleanly regardless of mod order. Only ``byte_range`` + ``semantic``
+conflicts actually care about load order.
+
+Hiding that distinction behind a flat tree of 84 "1 issue(s)" rows was
+misleading. This dialog splits them into two sections with count badges
+so the user sees at a glance which conflicts need their attention.
 """
 from __future__ import annotations
 
@@ -17,11 +19,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, InfoBadge, MessageBoxBase,
-    SimpleCardWidget, SmoothScrollDelegate, SubtitleLabel, isDarkTheme,
+    BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
+    MessageBoxBase, SimpleCardWidget, SmoothScrollDelegate, SubtitleLabel,
+    getFont,
 )
 
-from cdumm.gui.conflict_view import ConflictView
+from cdumm.gui.conflict_view import ACTIONABLE_LEVELS, ConflictView
 from cdumm.i18n import tr
 
 if TYPE_CHECKING:
@@ -40,72 +43,131 @@ _RANK_PILL_QSS = (
 
 
 class ConflictsDialog(MessageBoxBase):
-    """Fluent modal listing every active conflict in load-order."""
+    """Fluent modal — split by actionable vs auto-resolved."""
 
     def __init__(self, conflicts: "list[Conflict]",
                  mods_by_id: dict[int, dict], parent=None) -> None:
         super().__init__(parent=parent)
 
-        # ── Title row — subtitle label + attention badge for count ────
-        title_row = QHBoxLayout()
-        title_row.setSpacing(10)
+        actionable = [c for c in conflicts if c.level in ACTIONABLE_LEVELS]
+        auto = [c for c in conflicts if c.level not in ACTIONABLE_LEVELS]
+
+        # ── Title + total count + caption ─────────────────────────────
+        self._build_title(len(conflicts))
+        self._build_caption(bool(actionable), bool(auto))
+        self.viewLayout.addSpacing(6)
+
+        if not conflicts:
+            self._build_empty_state()
+        else:
+            # Section 1 — actionable (priority affects winner)
+            if actionable:
+                self._build_section(
+                    tr("conflicts.section_actionable"),
+                    len(actionable), actionable,
+                    FluentIcon.INFO, InfoLevel.ATTENTION,
+                    caption=tr("conflicts.section_actionable_desc"))
+            # Section 2 — auto-resolved (informational)
+            if auto:
+                self._build_section(
+                    tr("conflicts.section_auto"),
+                    len(auto), auto,
+                    FluentIcon.ACCEPT, InfoLevel.SUCCESS,
+                    caption=tr("conflicts.section_auto_desc"))
+            # Load-order card — only shown when reordering actually matters
+            if actionable:
+                self._build_load_order_card(actionable, mods_by_id)
+
+        # ── Footer: single Close button ───────────────────────────────
+        self.yesButton.setText(self._close_label())
+        self.cancelButton.hide()
+
+        self.widget.setMinimumWidth(820)
+        self.widget.setMinimumHeight(560 if conflicts else 220)
+
+    # ------------------------------------------------------------------
+    # Sub-builders
+    # ------------------------------------------------------------------
+
+    def _build_title(self, total: int) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(10)
         title = SubtitleLabel(tr("conflicts.title"))
         tf = title.font()
         tf.setPixelSize(22)
         tf.setWeight(QFont.Weight.Bold)
         title.setFont(tf)
-        title_row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
-        if conflicts:
-            badge = InfoBadge.attension(str(len(conflicts)), self.widget)
+        row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        if total:
+            badge = InfoBadge.attension(str(total), self.widget)
             badge.setFixedHeight(22)
-            title_row.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        title_row.addStretch(1)
-        self.viewLayout.addLayout(title_row)
+            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+        self.viewLayout.addLayout(row)
 
-        # Explanatory caption
-        caption_text = (
-            tr("conflicts.empty_body") if not conflicts
-            else tr("conflicts.hint"))
-        caption = CaptionLabel(caption_text)
+    def _build_caption(self, has_actionable: bool, has_auto: bool) -> None:
+        if has_actionable and has_auto:
+            text = tr("conflicts.caption_mixed")
+        elif has_actionable:
+            text = tr("conflicts.caption_actionable_only")
+        elif has_auto:
+            text = tr("conflicts.caption_auto_only")
+        else:
+            text = tr("conflicts.empty_body")
+        caption = CaptionLabel(text)
         cf = caption.font()
         cf.setPixelSize(13)
         caption.setFont(cf)
         caption.setWordWrap(True)
         self.viewLayout.addWidget(caption)
-        self.viewLayout.addSpacing(4)
 
-        if not conflicts:
-            # Empty state — one line, centred, same card surface
-            empty = BodyLabel(tr("conflicts.empty_title"))
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty_font = empty.font()
-            empty_font.setPixelSize(14)
-            empty.setFont(empty_font)
-            empty.setContentsMargins(0, 40, 0, 40)
-            self.viewLayout.addWidget(empty)
-        else:
-            # Conflict tree (with smooth-scroll delegate for Fluent bars)
-            self._tree_view = ConflictView(self.widget)
-            self._tree_view.update_conflicts(conflicts)
-            self.viewLayout.addWidget(self._tree_view, 1)
+    def _build_empty_state(self) -> None:
+        empty = BodyLabel(tr("conflicts.empty_title"))
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ef = empty.font()
+        ef.setPixelSize(14)
+        empty.setFont(ef)
+        empty.setContentsMargins(0, 40, 0, 40)
+        self.viewLayout.addWidget(empty)
 
-            # Load-order card
-            self._build_load_order_card(conflicts, mods_by_id)
+    def _build_section(self, title_text: str, count: int,
+                       items: "list[Conflict]",
+                       icon: FluentIcon, level: InfoLevel,
+                       caption: str) -> None:
+        """One section with coloured badge header + explanation + tree."""
+        self.viewLayout.addSpacing(8)
 
-        # ── Footer buttons — reuse yes/cancel for Close/None ─────────
-        self.yesButton.setText(
-            self._close_label())
-        self.cancelButton.hide()
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+        badge = IconInfoBadge.make(icon, self.widget, level=level)
+        badge.setFixedSize(20, 20)
+        header_row.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        label = BodyLabel(title_text)
+        lf = label.font()
+        lf.setPixelSize(15)
+        lf.setWeight(QFont.Weight.DemiBold)
+        label.setFont(lf)
+        header_row.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
+        count_badge = InfoBadge.make(str(count), self.widget, level=level)
+        count_badge.setFixedHeight(20)
+        header_row.addWidget(count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_row.addStretch(1)
+        self.viewLayout.addLayout(header_row)
 
-        self.widget.setMinimumWidth(780)
-        self.widget.setMinimumHeight(540 if conflicts else 220)
+        # Small descriptive caption under the section header
+        desc = CaptionLabel(caption)
+        df = desc.font()
+        df.setPixelSize(12)
+        desc.setFont(df)
+        desc.setWordWrap(True)
+        desc.setContentsMargins(30, 0, 0, 4)
+        self.viewLayout.addWidget(desc)
 
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _close_label() -> str:
-        label = tr("main.close")
-        return label if label != "main.close" else "Close"
+        tree = ConflictView(self.widget)
+        tree.update_conflicts(items)
+        # Cap tree height so two sections fit without monster dialog
+        tree.setMaximumHeight(260)
+        self.viewLayout.addWidget(tree)
 
     # ------------------------------------------------------------------
 
@@ -124,6 +186,8 @@ class ConflictsDialog(MessageBoxBase):
         if not priority_mods:
             return
 
+        self.viewLayout.addSpacing(6)
+
         card = SimpleCardWidget(self.widget)
         card.setBorderRadius(8)
         card_layout = QVBoxLayout(card)
@@ -131,9 +195,7 @@ class ConflictsDialog(MessageBoxBase):
         card_layout.setSpacing(6)
 
         header = BodyLabel(tr("conflicts.load_order"))
-        hf = header.font()
-        hf.setBold(True)
-        header.setFont(hf)
+        header.setFont(getFont(14, QFont.Weight.DemiBold))
         card_layout.addWidget(header)
 
         inner = QWidget()
@@ -149,9 +211,11 @@ class ConflictsDialog(MessageBoxBase):
             rank.setFixedHeight(24)
             rank.setFixedWidth(48)
             rank.setStyleSheet(_RANK_PILL_QSS)
+            rank.setFont(getFont(12, QFont.Weight.Bold))
             row.addWidget(rank, 0, Qt.AlignmentFlag.AlignVCenter)
             name = mods_by_id.get(mid, {}).get("name", f"(id {mid})")
             name_label = BodyLabel(name)
+            name_label.setFont(getFont(14))
             row.addWidget(name_label, 1, Qt.AlignmentFlag.AlignVCenter)
             wrap = QWidget()
             wrap.setLayout(row)
@@ -162,12 +226,17 @@ class ConflictsDialog(MessageBoxBase):
         scroll.setWidget(inner)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setMaximumHeight(150)
-        # Fluent smooth-scroll treatment for the load-order list
+        scroll.setMaximumHeight(140)
         self._order_scroll_delegate = SmoothScrollDelegate(scroll, useAni=True)
-        # Transparent inner so the SimpleCardWidget surface shows through
         scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
             " QScrollArea > QWidget > QWidget { background: transparent; }")
         card_layout.addWidget(scroll)
         self.viewLayout.addWidget(card)
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _close_label() -> str:
+        label = tr("main.close")
+        return label if label != "main.close" else "Close"
