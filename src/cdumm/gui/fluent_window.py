@@ -2828,6 +2828,15 @@ class CdummWindow(FluentWindow):
                 InfoBar.error(title=tr("main.apply_failed"), content=errors[-1],
                               duration=-1, position=InfoBarPosition.TOP, parent=self)
                 return
+            # Soft warnings (mount-time fallback, empty overlay) surface
+            # as InfoBar.warning so the user notices even when apply
+            # technically succeeds. Task 1.2 + 1.3.
+            warnings = [m["msg"] for m in msgs if m.get("type") == "warning"]
+            if warnings:
+                InfoBar.warning(
+                    title=tr("main.apply_warnings"),
+                    content="\n".join(warnings),
+                    duration=-1, position=InfoBarPosition.TOP, parent=self)
             self._sync_db()
             self._snapshot_applied_state()
             logger.info("on_apply_done: applied_state has %d entries, %d enabled",

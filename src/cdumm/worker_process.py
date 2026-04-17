@@ -230,6 +230,10 @@ def _run_apply(game_dir: str, vanilla_dir: str, db_path: str,
         lambda pct, msg: _emit({"type": "progress", "pct": pct, "msg": msg}))
     worker.error_occurred.connect(
         lambda err: _emit({"type": "error", "msg": err}))
+    # Non-fatal warnings (e.g. mount-time fallback used) surface to the
+    # GUI via InfoBar.warning in on_apply_done — same shape as Revert.
+    worker.warning.connect(
+        lambda msg: _emit({"type": "warning", "msg": msg}))
 
     worker.run()
     _emit({"type": "done"})

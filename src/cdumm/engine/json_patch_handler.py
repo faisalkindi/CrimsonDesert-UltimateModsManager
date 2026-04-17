@@ -1361,10 +1361,21 @@ def import_json_fast(
     return {"mod_id": mod_id, "changed_files": changed_files, "name": mod_name}
 
 
+class VanillaSourceUnavailable(Exception):
+    """Raised by a vanilla-source resolver when no safe source exists.
+
+    ``safe`` means either the vanilla backup is present, or the live
+    PAZ has been hash-verified against the snapshot fingerprint. When
+    neither holds, the patch must be skipped — applying against modded
+    bytes would produce a corrupt overlay.
+    """
+
+
 def process_json_patches_for_overlay(
     mod_id: int, json_source: str, game_dir: Path,
     disabled_indices: list[int] | None = None,
     custom_values: dict | None = None,
+    vanilla_source_resolver=None,
 ) -> list[tuple[bytes, dict]]:
     """Process a JSON mod's patches at Apply time (mount-time patching).
 
@@ -1373,6 +1384,15 @@ def process_json_patches_for_overlay(
 
     If disabled_indices is provided, individual changes at those flat
     indices are skipped (per-patch toggle feature).
+
+    ``vanilla_source_resolver`` is an optional callable that takes a
+    game-relative file path and returns a :class:`PazEntry` pointing at
+    a known-clean (vanilla or hash-verified live) PAZ. Raising
+    :class:`VanillaSourceUnavailable` causes the patch to be skipped
+    with a logged error. When not supplied, the legacy inline lookup
+    is used — the caller in apply_engine.py normally provides a
+    resolver so the live-PAZ fallback can self-heal after a missing
+    vanilla backup.
 
     Returns list of (decompressed_content, metadata) tuples ready for
     the overlay builder.
@@ -1420,34 +1440,56 @@ def process_json_patches_for_overlay(
         if not changes:
             continue
 
-        # Find entry in PAMT — prefer vanilla backup over game dir
-        from_vanilla = True
-        entry = _find_pamt_entry(game_file, vanilla_dir)
-        if entry is None:
-            entry = _find_pamt_entry(game_file, game_dir)
-            from_vanilla = False
-        if entry is None:
-            logger.error("mount-time: game file '%s' not found", game_file)
-            continue
-
-        # Extract from PAZ
-        try:
-            plaintext = _extract_from_paz(entry)
-        except Exception as e:
-            logger.error("mount-time: failed to extract '%s': %s", game_file, e)
-            continue
-
-        # For pattern scan: only use vanilla_data if we actually read from vanilla
-        # If we fell back to game_dir, the data may be modded — don't use it as reference
-        vanilla_ref = bytes(plaintext) if from_vanilla else None
+        # Find entry in PAMT — prefer vanilla backup over game dir.
+        # When the caller supplied a resolver, it's responsible for
+        # deciding vanilla vs live (with hash verification) so the
+        # bytes we get back are always safe to treat as vanilla.
+        if vanilla_source_resolver is not None:
+            try:
+                entry = vanilla_source_resolver(game_file)
+            except VanillaSourceUnavailable as e:
+                logger.error("mount-time: %s", e)
+                continue
+            try:
+                plaintext = _extract_from_paz(entry)
+            except Exception as e:
+                logger.error("mount-time: failed to extract '%s': %s",
+                             game_file, e)
+                continue
+            vanilla_ref = bytes(plaintext)
+        else:
+            from_vanilla = True
+            entry = _find_pamt_entry(game_file, vanilla_dir)
+            if entry is None:
+                entry = _find_pamt_entry(game_file, game_dir)
+                from_vanilla = False
+            if entry is None:
+                logger.error("mount-time: game file '%s' not found",
+                             game_file)
+                continue
+            try:
+                plaintext = _extract_from_paz(entry)
+            except Exception as e:
+                logger.error("mount-time: failed to extract '%s': %s",
+                             game_file, e)
+                continue
+            # For pattern scan: only trust as vanilla if actually vanilla
+            vanilla_ref = bytes(plaintext) if from_vanilla else None
 
         # v2 entry-anchored: build name→offset map when any change uses `entry`
         name_offsets = None
         if any(c.get("entry") for c in changes):
             pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
-            pabgh_entry = _find_pamt_entry(pabgh_file, vanilla_dir)
-            if pabgh_entry is None:
-                pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
+            pabgh_entry = None
+            if vanilla_source_resolver is not None:
+                try:
+                    pabgh_entry = vanilla_source_resolver(pabgh_file)
+                except VanillaSourceUnavailable:
+                    pabgh_entry = None
+            else:
+                pabgh_entry = _find_pamt_entry(pabgh_file, vanilla_dir)
+                if pabgh_entry is None:
+                    pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
             if pabgh_entry:
                 try:
                     pabgh_plain = _extract_from_paz(pabgh_entry)
@@ -1500,9 +1542,16 @@ def process_json_patches_for_overlay(
         # overlay entry so it overrides vanilla at load time.
         if inserts_out and game_file.lower().endswith(".pabgb"):
             pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
-            pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, vanilla_dir)
-            if pabgh_entry_for_fixup is None:
-                pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, game_dir)
+            pabgh_entry_for_fixup = None
+            if vanilla_source_resolver is not None:
+                try:
+                    pabgh_entry_for_fixup = vanilla_source_resolver(pabgh_file)
+                except VanillaSourceUnavailable:
+                    pabgh_entry_for_fixup = None
+            else:
+                pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, vanilla_dir)
+                if pabgh_entry_for_fixup is None:
+                    pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, game_dir)
             if pabgh_entry_for_fixup is None:
                 logger.warning(
                     "mount-time: inserts into %s but no companion .pabgh found — "

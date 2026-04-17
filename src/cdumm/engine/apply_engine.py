@@ -38,6 +38,74 @@ from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_vanilla_source(
+    game_file: str,
+    vanilla_dir: Path,
+    game_dir: Path,
+    snapshot_mgr,
+    warn_callback=None,
+):
+    """Return a :class:`PazEntry` pointing at a known-clean PAZ.
+
+    Resolution order:
+
+    1. ``vanilla_dir`` — returned as-is when the PAMT entry exists AND
+       its PAZ file is present on disk.
+    2. ``game_dir`` — returned only when the live PAZ's full-file hash
+       equals the snapshot fingerprint stored in the ``snapshots``
+       table. Passing ``warn_callback`` is the opportunity to surface
+       a one-time InfoBar so users see the self-heal happened and can
+       refresh their vanilla backups.
+    3. Raise :class:`cdumm.engine.json_patch_handler.VanillaSourceUnavailable`
+       with a descriptive reason. Callers should log and skip.
+
+    Extracted from :meth:`ApplyWorker._make_vanilla_source_resolver`
+    for unit-test access without needing a full Qt worker fixture.
+    """
+    from cdumm.engine.json_patch_handler import (
+        VanillaSourceUnavailable, _find_pamt_entry,
+    )
+    from cdumm.engine.snapshot_manager import hash_file
+
+    vanilla_entry = _find_pamt_entry(game_file, vanilla_dir)
+    if vanilla_entry is not None:
+        paz_path = Path(vanilla_entry.paz_file)
+        if paz_path.exists():
+            return vanilla_entry
+
+    live_entry = _find_pamt_entry(game_file, game_dir)
+    if live_entry is None:
+        raise VanillaSourceUnavailable(
+            f"no PAMT entry for '{game_file}' in vanilla or live")
+
+    paz_path = Path(live_entry.paz_file)
+    try:
+        paz_rel = str(paz_path.relative_to(game_dir)).replace("\\", "/")
+    except ValueError:
+        paz_rel = paz_path.name
+
+    snap_hash = snapshot_mgr.get_file_hash(paz_rel)
+    if snap_hash is None:
+        raise VanillaSourceUnavailable(
+            f"no snapshot hash for '{paz_rel}' "
+            "\u2014 run Settings \u2192 Fix Everything")
+
+    try:
+        live_hash, _size = hash_file(paz_path)
+    except FileNotFoundError:
+        raise VanillaSourceUnavailable(
+            f"live PAZ missing at '{paz_path}'") from None
+
+    if live_hash != snap_hash:
+        raise VanillaSourceUnavailable(
+            f"live PAZ '{paz_rel}' diverged from snapshot "
+            "\u2014 cannot safely patch (user has modded the base install)")
+
+    if warn_callback is not None:
+        warn_callback(paz_rel)
+    return live_entry
+
 RANGE_BACKUP_EXT = ".vranges"  # sparse range backup extension
 
 
@@ -316,6 +384,10 @@ class ApplyWorker(QObject):
     progress_updated = Signal(int, str)
     finished = Signal()
     error_occurred = Signal(str)
+    # Non-fatal messages surfaced to the GUI as InfoBar.warning so users
+    # learn about mount-time extraction fallbacks or silently-empty
+    # JSON mod overlays without needing to read the log.
+    warning = Signal(str)
 
     def __init__(self, game_dir: Path, vanilla_dir: Path, db_path: Path,
                  force_outdated: bool = False) -> None:
@@ -324,6 +396,7 @@ class ApplyWorker(QObject):
         self._vanilla_dir = vanilla_dir
         self._db_path = db_path
         self._force_outdated = force_outdated
+        self._soft_warnings: list[str] = []
 
     def run(self) -> None:
         try:
@@ -334,6 +407,35 @@ class ApplyWorker(QObject):
         except Exception as e:
             logger.error("Apply failed: %s", e, exc_info=True)
             self.error_occurred.emit(f"Apply failed: {e}")
+
+    def _make_vanilla_source_resolver(self):
+        """Wire :func:`resolve_vanilla_source` to this worker's state.
+
+        Emits :attr:`warning` once per distinct archive that falls back
+        to the hash-verified live PAZ, so users see the self-heal
+        instead of silently depending on it.
+        """
+        from cdumm.engine.snapshot_manager import SnapshotManager
+        snapshot_mgr = SnapshotManager(self._db)
+        warned_once: set[str] = set()
+
+        def _warn(paz_rel: str) -> None:
+            if paz_rel in warned_once:
+                return
+            warned_once.add(paz_rel)
+            msg = (f"Vanilla backup missing for {paz_rel}, "
+                   "using hash-verified live copy. "
+                   "Run Settings \u2192 Fix Everything to refresh backups.")
+            logger.warning("mount-time: %s", msg)
+            self._soft_warnings.append(msg)
+            self.warning.emit(msg)
+
+        def resolver(game_file: str):
+            return resolve_vanilla_source(
+                game_file, self._vanilla_dir, self._game_dir,
+                snapshot_mgr, warn_callback=_warn,
+            )
+        return resolver
 
     def _compute_apply_fingerprint(self) -> str:
         """Compute a hash of all inputs that affect Apply output.
@@ -542,6 +644,8 @@ class ApplyWorker(QObject):
             if json_mods:
                 from cdumm.engine.json_patch_handler import process_json_patches_for_overlay
                 import json as _json
+                resolver = self._make_vanilla_source_resolver()
+                overlay_count_before = len(self._overlay_entries)
                 for jm_idx, (mod_id, mod_name, json_source, disabled_raw) in enumerate(json_mods):
                     pct = 55 + int((jm_idx / len(json_mods)) * 5)
                     self.progress_updated.emit(
@@ -563,11 +667,23 @@ class ApplyWorker(QObject):
                     entries = process_json_patches_for_overlay(
                         mod_id, json_source, self._game_dir,
                         disabled_indices=disabled,
-                        custom_values=custom_vals)
+                        custom_values=custom_vals,
+                        vanilla_source_resolver=resolver)
                     self._overlay_entries.extend(entries)
                     if entries:
                         logger.info("Mount-time: %s produced %d overlay entries",
                                     mod_name, len(entries))
+                # Task 1.3: loud error when enabled JSON mods produced no
+                # overlay at all — the user thought their mods applied but
+                # mount-time extraction failed silently for every target.
+                if len(self._overlay_entries) == overlay_count_before:
+                    msg = (f"{len(json_mods)} JSON mod(s) were enabled but "
+                           "produced no game changes. Check the log for "
+                           "mount-time errors, then run "
+                           "Settings → Fix Everything to rebuild vanilla backups.")
+                    logger.error("APPLY_SILENT_FAILURE: %s", msg)
+                    self._soft_warnings.append(msg)
+                    self.warning.emit(msg)
 
             _phase("Phase 1a-xml: Mount-time XML patches")
             # Collect xml_patch / xml_merge deltas for all enabled mods and

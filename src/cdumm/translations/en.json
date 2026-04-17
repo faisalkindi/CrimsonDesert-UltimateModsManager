@@ -786,6 +786,7 @@
   "main.busy": "Busy",
   "main.busy_msg": "Another operation is in progress. Please wait.",
   "main.apply_failed": "Apply Failed",
+  "main.apply_warnings": "Apply Completed with Warnings",
   "main.revert_failed": "Revert Failed",
   "main.reverted": "All game files restored to their original state.",
   "main.busy_wait": "Please wait for the current operation to finish.",
