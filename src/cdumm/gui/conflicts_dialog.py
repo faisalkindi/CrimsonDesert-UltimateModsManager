@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QSizeGrip, QVBoxLayout, QWidget,
@@ -21,14 +21,15 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
     MessageBoxBase, SimpleCardWidget, SingleDirectionScrollArea, SubtitleLabel,
-    getFont,
+    TransparentToolButton, getFont,
 )
 
 from cdumm.gui.conflict_view import ACTIONABLE_LEVELS, ConflictView
 from cdumm.i18n import tr
 
 if TYPE_CHECKING:
-    from cdumm.engine.conflict_detector import Conflict
+    from cdumm.engine.conflict_detector import Conflict, ConflictDetector
+    from cdumm.engine.mod_manager import ModManager
 
 
 _RANK_PILL_QSS = (
@@ -45,9 +46,21 @@ _RANK_PILL_QSS = (
 class ConflictsDialog(MessageBoxBase):
     """Fluent modal — split by actionable vs auto-resolved."""
 
+    # Emitted whenever the user reorders priorities inside the dialog so
+    # the parent (mods page) can refresh its cards after close.
+    order_changed = Signal()
+
     def __init__(self, conflicts: "list[Conflict]",
-                 mods_by_id: dict[int, dict], parent=None) -> None:
+                 mods_by_id: dict[int, dict], parent=None,
+                 mod_manager: "ModManager | None" = None,
+                 conflict_detector: "ConflictDetector | None" = None
+                 ) -> None:
         super().__init__(parent=parent)
+
+        self._mod_manager = mod_manager
+        self._conflict_detector = conflict_detector
+        self._mods_by_id = mods_by_id
+        self._conflicts = conflicts
 
         actionable = [c for c in conflicts if c.level in ACTIONABLE_LEVELS]
         auto = [c for c in conflicts if c.level not in ACTIONABLE_LEVELS]
@@ -57,32 +70,16 @@ class ConflictsDialog(MessageBoxBase):
         self._build_caption(bool(actionable), bool(auto))
         self.viewLayout.addSpacing(6)
 
-        if not conflicts:
-            self._build_empty_state()
-        else:
-            # Section 1 — actionable (priority affects winner). Stretch
-            # factor = row count (capped) so the two trees share vertical
-            # space proportional to their content. Each tree scrolls
-            # internally when rows exceed its allocated height — no outer
-            # scroll area needed.
-            if actionable:
-                self._build_section(
-                    tr("conflicts.section_actionable"),
-                    len(actionable), actionable,
-                    FluentIcon.INFO, InfoLevel.ATTENTION,
-                    caption=tr("conflicts.section_actionable_desc"),
-                    stretch=min(max(len(actionable), 2), 4))
-            # Section 2 — auto-resolved (informational)
-            if auto:
-                self._build_section(
-                    tr("conflicts.section_auto"),
-                    len(auto), auto,
-                    FluentIcon.ACCEPT, InfoLevel.SUCCESS,
-                    caption=tr("conflicts.section_auto_desc"),
-                    stretch=min(max(len(auto), 2), 12))
-            # Load-order card — only shown when reordering actually matters
-            if actionable:
-                self._build_load_order_card(actionable, mods_by_id)
+        # Content container — wraps sections + load-order card so we can
+        # rebuild in-place after the user reorders priority, without
+        # disturbing the title, caption, grip, or Close button.
+        self._content_host = QWidget()
+        self._content_layout = QVBoxLayout(self._content_host)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        self.viewLayout.addWidget(self._content_host, 1)
+
+        self._build_content()
 
         # ── Footer: single Close button ───────────────────────────────
         self.yesButton.setText(self._close_label())
@@ -115,6 +112,71 @@ class ConflictsDialog(MessageBoxBase):
             grip_row.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom
                                | Qt.AlignmentFlag.AlignRight)
             self.viewLayout.addLayout(grip_row)
+
+    # ------------------------------------------------------------------
+    # Content lifecycle
+    # ------------------------------------------------------------------
+
+    def _build_content(self) -> None:
+        """Populate the content host with sections + load-order card."""
+        actionable = [c for c in self._conflicts if c.level in ACTIONABLE_LEVELS]
+        auto = [c for c in self._conflicts if c.level not in ACTIONABLE_LEVELS]
+
+        if not self._conflicts:
+            self._build_empty_state()
+            return
+
+        if actionable:
+            self._build_section(
+                tr("conflicts.section_actionable"),
+                len(actionable), actionable,
+                FluentIcon.INFO, InfoLevel.ATTENTION,
+                caption=tr("conflicts.section_actionable_desc"),
+                stretch=min(max(len(actionable), 2), 4))
+        if auto:
+            self._build_section(
+                tr("conflicts.section_auto"),
+                len(auto), auto,
+                FluentIcon.ACCEPT, InfoLevel.SUCCESS,
+                caption=tr("conflicts.section_auto_desc"),
+                stretch=min(max(len(auto), 2), 12))
+        if actionable:
+            self._build_load_order_card(actionable, self._mods_by_id)
+
+    def _rebuild_content(self) -> None:
+        """Refresh conflicts + mods from DB and rebuild the content host."""
+        if self._conflict_detector is not None:
+            try:
+                self._conflicts = list(self._conflict_detector.detect_all())
+            except Exception:
+                pass
+        if self._mod_manager is not None:
+            try:
+                self._mods_by_id = {
+                    m["id"]: m for m in self._mod_manager.list_mods(mod_type="paz")
+                }
+            except Exception:
+                pass
+
+        # Clear the content host — takeAt(0) until empty, deleteLater each
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+            else:
+                sub = item.layout()
+                if sub is not None:
+                    while sub.count():
+                        s = sub.takeAt(0)
+                        if s and s.widget():
+                            s.widget().deleteLater()
+
+        self._build_content()
+        self.order_changed.emit()
 
     # ------------------------------------------------------------------
     # Sub-builders
@@ -159,14 +221,14 @@ class ConflictsDialog(MessageBoxBase):
         ef.setPixelSize(14)
         empty.setFont(ef)
         empty.setContentsMargins(0, 40, 0, 40)
-        self.viewLayout.addWidget(empty)
+        self._content_layout.addWidget(empty)
 
     def _build_section(self, title_text: str, count: int,
                        items: "list[Conflict]",
                        icon: FluentIcon, level: InfoLevel,
                        caption: str, stretch: int) -> None:
         """One section with coloured badge header + explanation + tree."""
-        self.viewLayout.addSpacing(12)
+        self._content_layout.addSpacing(12)
 
         header_row = QHBoxLayout()
         header_row.setSpacing(10)
@@ -183,7 +245,7 @@ class ConflictsDialog(MessageBoxBase):
         count_badge.setFixedHeight(20)
         header_row.addWidget(count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         header_row.addStretch(1)
-        self.viewLayout.addLayout(header_row)
+        self._content_layout.addLayout(header_row)
 
         # Small descriptive caption under the section header
         desc = CaptionLabel(caption)
@@ -192,7 +254,7 @@ class ConflictsDialog(MessageBoxBase):
         desc.setFont(df)
         desc.setWordWrap(True)
         desc.setContentsMargins(30, 0, 0, 6)
-        self.viewLayout.addWidget(desc)
+        self._content_layout.addWidget(desc)
 
         tree = ConflictView(self.widget)
         # Collapsed pair rows by default — auto-expand doubles row count
@@ -203,7 +265,7 @@ class ConflictsDialog(MessageBoxBase):
         # tree grow when the dialog is taller. The tree's own internal
         # scrollbar handles overflow — no outer scroll area needed.
         tree.setMinimumHeight(140)
-        self.viewLayout.addWidget(tree, stretch)
+        self._content_layout.addWidget(tree, stretch)
 
     # ------------------------------------------------------------------
 
@@ -222,7 +284,7 @@ class ConflictsDialog(MessageBoxBase):
         if not priority_mods:
             return
 
-        self.viewLayout.addSpacing(12)
+        self._content_layout.addSpacing(12)
 
         card = SimpleCardWidget(self.widget)
         card.setBorderRadius(8)
@@ -230,14 +292,23 @@ class ConflictsDialog(MessageBoxBase):
         card_layout.setContentsMargins(14, 10, 14, 10)
         card_layout.setSpacing(6)
 
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
         header = BodyLabel(tr("conflicts.load_order"))
         header.setFont(getFont(14, QFont.Weight.DemiBold))
-        card_layout.addWidget(header)
+        header_row.addWidget(header, 0, Qt.AlignmentFlag.AlignVCenter)
+        hint = CaptionLabel(tr("conflicts.load_order_hint"))
+        hint.setFont(getFont(11))
+        header_row.addWidget(hint, 1, Qt.AlignmentFlag.AlignVCenter)
+        card_layout.addLayout(header_row)
 
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
         inner_layout.setContentsMargins(0, 4, 0, 0)
         inner_layout.setSpacing(4)
+        last_idx = len(priority_mods) - 1
+        can_reorder = self._mod_manager is not None
         for i, mid in enumerate(priority_mods):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
@@ -253,6 +324,30 @@ class ConflictsDialog(MessageBoxBase):
             name_label = BodyLabel(name)
             name_label.setFont(getFont(14))
             row.addWidget(name_label, 1, Qt.AlignmentFlag.AlignVCenter)
+
+            # Up/down reorder buttons — disabled at the top/bottom edge
+            # or when no mod_manager was supplied (read-only preview).
+            if can_reorder:
+                prev_mid = priority_mods[i - 1] if i > 0 else None
+                next_mid = priority_mods[i + 1] if i < last_idx else None
+                up_btn = TransparentToolButton(FluentIcon.UP)
+                up_btn.setFixedSize(28, 28)
+                up_btn.setEnabled(prev_mid is not None)
+                up_btn.setToolTip(tr("conflicts.move_up"))
+                if prev_mid is not None:
+                    up_btn.clicked.connect(
+                        lambda _=False, a=mid, b=prev_mid: self._swap(a, b))
+                row.addWidget(up_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+                down_btn = TransparentToolButton(FluentIcon.DOWN)
+                down_btn.setFixedSize(28, 28)
+                down_btn.setEnabled(next_mid is not None)
+                down_btn.setToolTip(tr("conflicts.move_down"))
+                if next_mid is not None:
+                    down_btn.clicked.connect(
+                        lambda _=False, a=mid, b=next_mid: self._swap(a, b))
+                row.addWidget(down_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
             wrap = QWidget()
             wrap.setLayout(row)
             inner_layout.addWidget(wrap)
@@ -265,10 +360,22 @@ class ConflictsDialog(MessageBoxBase):
         scroll.setWidget(inner)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
-        scroll.setMaximumHeight(150)
+        scroll.setMaximumHeight(180)
         scroll.enableTransparentBackground()
         card_layout.addWidget(scroll)
-        self.viewLayout.addWidget(card)
+        self._content_layout.addWidget(card)
+
+    # ------------------------------------------------------------------
+
+    def _swap(self, mod_a_id: int, mod_b_id: int) -> None:
+        """Swap the priority values of two mods and rebuild content."""
+        if self._mod_manager is None:
+            return
+        try:
+            self._mod_manager._swap_priority(mod_a_id, mod_b_id)
+        except Exception:
+            return
+        self._rebuild_content()
 
     # ------------------------------------------------------------------
 

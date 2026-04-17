@@ -1233,9 +1233,25 @@ class ModsPage(QWidget):
 
         mods_by_id = {m["id"]: m for m
                       in self._mod_manager.list_mods(mod_type="paz")}
-        dlg = ConflictsDialog(conflicts, mods_by_id, self.window())
+        dlg = ConflictsDialog(conflicts, mods_by_id, self.window(),
+                              mod_manager=self._mod_manager,
+                              conflict_detector=self._conflict_detector)
+        # When the user reorders inside the dialog, flag so we refresh the
+        # mods page cards after close — the priority numbers displayed on
+        # each card reflect stale data until the list is re-fetched.
+        self._conflicts_reordered = False
+        dlg.order_changed.connect(self._on_conflicts_order_changed)
         # Qt modal dialog — not shell exec. Use exec_ alias to dodge lint.
         dlg.exec_() if hasattr(dlg, "exec_") else dlg.show()
+        if self._conflicts_reordered:
+            from PySide6.QtCore import QTimer
+            window = self.window()
+            if hasattr(window, "_refresh_all"):
+                QTimer.singleShot(50, window._refresh_all)
+
+    def _on_conflicts_order_changed(self) -> None:
+        """Remember that the user reordered so we can refresh on close."""
+        self._conflicts_reordered = True
 
     def _on_mod_renamed(self, mod_id: int, new_name: str) -> None:
         """Persist the new mod name and refresh dependent views.
