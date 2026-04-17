@@ -4,8 +4,10 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
     QAction, QColor, QStandardItem, QStandardItemModel,
 )
-from PySide6.QtWidgets import QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget
-from qfluentwidgets import isDarkTheme
+from PySide6.QtWidgets import (
+    QApplication, QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget,
+)
+from qfluentwidgets import SmoothScrollDelegate, isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
 
@@ -95,6 +97,16 @@ class ConflictView(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._tree.setStyleSheet(self._tree_qss_for_theme())
+
+        # Inherit the application font (Oxanium) — QTreeView doesn't pick
+        # up qfluentwidgets' setFontFamilies() automatically the way the
+        # Fluent widgets do.
+        self._tree.setFont(QApplication.font())
+
+        # Fluent smooth-scroll + themed scrollbars on the tree's internal
+        # scroll area. Without this the tree falls back to raw Qt scroll
+        # chrome that clashes with the rest of the app.
+        self._tree_scroll_delegate = SmoothScrollDelegate(self._tree, useAni=True)
         self._model = QStandardItemModel()
         self._model.setHorizontalHeaderLabels(["Conflict", "Level", "Resolution"])
         self._tree.setModel(self._model)

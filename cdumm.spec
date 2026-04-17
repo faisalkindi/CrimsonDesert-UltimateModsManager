@@ -52,6 +52,7 @@ a = Analysis(
         'cdumm.gui.setup_dialog',
         'cdumm.gui.import_widget',
         'cdumm.gui.conflict_view',
+        'cdumm.gui.conflicts_dialog',
         'cdumm.gui.mod_list_model',
         'cdumm.gui.asi_panel',
         'cdumm.gui.test_mod_dialog',
