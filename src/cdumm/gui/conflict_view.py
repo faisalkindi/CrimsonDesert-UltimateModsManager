@@ -5,9 +5,9 @@ from PySide6.QtGui import (
     QAction, QColor, QFont, QStandardItem, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget,
+    QAbstractItemView, QHeaderView, QMenu, QVBoxLayout, QWidget,
 )
-from qfluentwidgets import SmoothScrollDelegate, getFont, isDarkTheme
+from qfluentwidgets import TreeView, getFont, isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
 
@@ -111,7 +111,11 @@ class ConflictView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._tree = QTreeView()
+        # qfluentwidgets' TreeView wraps QTreeView with Fluent branch
+        # indicators (visible in both themes), SmoothScrollDelegate, and
+        # header styling. Using it directly gives consistency with the
+        # rest of the app and fixes white-on-white expand arrows.
+        self._tree = TreeView()
         self._tree.setHeaderHidden(False)
         # Drop alternating bands — the custom QSS already gives rhythm
         # without banding that clashes with Fluent surfaces.
@@ -134,10 +138,8 @@ class ConflictView(QWidget):
         self._tree.setFont(getFont(14))
         self._tree.header().setFont(getFont(14, QFont.Weight.DemiBold))
 
-        # Fluent smooth-scroll + themed scrollbars — matches the rest of
-        # the app, which uses SmoothScrollArea / SmoothScrollDelegate on
-        # every scrollable per qfluentwidgets convention.
-        self._tree_scroll_delegate = SmoothScrollDelegate(self._tree, useAni=True)
+        # TreeView already installs a SmoothScrollDelegate internally —
+        # no manual scroll delegate needed.
         self._model = QStandardItemModel()
         self._model.setHorizontalHeaderLabels(["Conflict", "Level", "Resolution"])
         self._tree.setModel(self._model)
