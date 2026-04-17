@@ -1,13 +1,13 @@
 import logging
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import (
     QAction, QColor, QFont, QStandardItem, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QHeaderView, QMenu, QVBoxLayout, QWidget,
 )
-from qfluentwidgets import TreeView, getFont, isDarkTheme
+from qfluentwidgets import TreeItemDelegate, TreeView, getFont, isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
 from cdumm.i18n import tr
@@ -36,6 +36,23 @@ ACTIONABLE_LEVELS = frozenset({"byte_range", "semantic"})
 MOD_A_ID_ROLE = Qt.ItemDataRole.UserRole + 1
 MOD_B_ID_ROLE = Qt.ItemDataRole.UserRole + 2
 WINNER_ID_ROLE = Qt.ItemDataRole.UserRole + 3
+
+# Fixed pixel height for every conflict tree row. With ``uniformRowHeights``
+# plus a delegate that returns this size, Qt renders each row at exactly
+# this height — which lets the dialog compute a whole-row tree height
+# without needing to wait for the view to paint (sizeHintForRow returns
+# 0 before the first paint).
+_FIXED_ROW_H = 44
+
+
+class _FixedRowHeightDelegate(TreeItemDelegate):
+    """qfluentwidgets' ``TreeItemDelegate`` subclass that clamps rows to
+    a uniform pixel height. Preserves Fluent item painting (indicator,
+    hover/selected background, branch arrows) while pinning height.
+    """
+    def sizeHint(self, option, index):
+        sh = super().sizeHint(option, index)
+        return QSize(sh.width(), _FIXED_ROW_H)
 
 
 class ConflictView(QWidget):
@@ -139,6 +156,14 @@ class ConflictView(QWidget):
         self._tree.setFont(getFont(14))
         self._tree.header().setFont(getFont(14, QFont.Weight.DemiBold))
 
+        # Pin every row to ``_FIXED_ROW_H`` via a TreeItemDelegate
+        # subclass — the default Fluent delegate returns a sizeHint that
+        # depends on font + padding + platform DPI and isn't available
+        # until the view has painted. The conflicts dialog needs a
+        # deterministic row height at construction time to avoid
+        # clipping the last visible row.
+        self._tree.setItemDelegate(_FixedRowHeightDelegate(self._tree))
+
         # TreeView already installs a SmoothScrollDelegate internally —
         # no manual scroll delegate needed.
         self._model = QStandardItemModel()
@@ -162,17 +187,22 @@ class ConflictView(QWidget):
         layout.addWidget(self._tree)
 
     def row_pixel_height(self) -> int:
-        """Pixel height reported by the tree for a populated row.
+        """Fixed pixel height per row — set by the delegate above.
 
-        Used by the conflicts dialog to size section heights as whole
-        multiples of the actual row height so the last visible row is
-        never bisected. Returns 0 when the model is empty.
+        Returning a constant (rather than ``sizeHintForRow(0)``) means
+        the dialog can compute a whole-row tree height at construction
+        time, before Qt has painted anything.
         """
-        return max(0, self._tree.sizeHintForRow(0))
+        return _FIXED_ROW_H
 
     def header_pixel_height(self) -> int:
-        """Pixel height reported by the tree header widget."""
-        return max(0, self._tree.header().sizeHint().height())
+        """Pixel height reported by the tree header widget.
+
+        The Fluent QSS pins ``QHeaderView::section:horizontal`` to 33px;
+        we fall back to that when ``sizeHint`` isn't available yet.
+        """
+        h = self._tree.header().sizeHint().height()
+        return h if h > 0 else 33
 
     def update_conflicts(self, conflicts: list[Conflict],
                          auto_expand: bool = True) -> None:

@@ -66,10 +66,11 @@ class ConflictsDialog(MessageBoxBase):
                  ) -> None:
         super().__init__(parent=parent)
 
-        # Darker overlay than MessageBoxBase's default (black @30%). At 30%
-        # on a light mods page, the nav + list bleeds through around the
-        # dialog edges and breaks the modal contract. Bumping to ~55%.
-        self.setMaskColor(QColor(0, 0, 0, 140))
+        # Darker overlay than MessageBoxBase's default (black @30%). On
+        # a light mods page even 55% (alpha 140) still shows text + drag
+        # handles through the edges — 75% covers the parent reliably
+        # without going so dark that the dialog looks floating in space.
+        self.setMaskColor(QColor(0, 0, 0, 190))
 
         self._mod_manager = mod_manager
         self._conflict_detector = conflict_detector
