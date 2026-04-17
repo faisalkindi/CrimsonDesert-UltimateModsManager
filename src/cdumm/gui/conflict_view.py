@@ -1,8 +1,11 @@
 import logging
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QColor, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (
+    QAction, QColor, QStandardItem, QStandardItemModel,
+)
 from PySide6.QtWidgets import QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget
+from qfluentwidgets import isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
 
@@ -31,36 +34,50 @@ class ConflictView(QWidget):
 
     winner_changed = Signal(int)  # emits mod_id that was set as winner
 
-    _TREE_QSS = """
-    QTreeView {
-        background: transparent;
-        border: 1px solid rgba(128, 128, 128, 50);
-        border-radius: 8px;
-        outline: 0;
-        padding: 4px 0;
-    }
-    QTreeView::item {
-        min-height: 28px;
-        padding: 4px 6px;
-        border: none;
-    }
-    QTreeView::item:hover {
-        background: rgba(128, 128, 128, 28);
-        border-radius: 4px;
-    }
-    QTreeView::item:selected {
-        background: rgba(40, 120, 208, 48);
-        color: palette(text);
-        border-radius: 4px;
-    }
-    QHeaderView::section {
-        background: transparent;
-        padding: 8px 10px;
-        border: none;
-        border-bottom: 1px solid rgba(128, 128, 128, 60);
-        font-weight: 600;
-    }
-    """
+    @staticmethod
+    def _tree_qss_for_theme() -> str:
+        """Build the tree stylesheet with an explicit body colour per theme.
+
+        The Fluent palette can resolve ``palette(text)`` to a muted role on
+        QTreeView, washing cells out on the light surface. Baking a known
+        contrast pair in keeps the tree readable in both themes.
+        """
+        text = "#E8E8E8" if isDarkTheme() else "#1F1F1F"
+        # Note: colour is deliberately NOT set on ``QTreeView::item`` —
+        # QSS cell colour wins over ``QStandardItem.setForeground()`` via
+        # Qt's styling cascade, which would wipe out the semantic hue each
+        # conflict row carries (yellow for paz, orange for byte_range, etc).
+        # ``body_color`` in ``update_conflicts`` paints the default rows.
+        return f"""
+        QTreeView {{
+            background: transparent;
+            border: 1px solid rgba(128, 128, 128, 50);
+            border-radius: 8px;
+            outline: 0;
+            padding: 4px 0;
+        }}
+        QTreeView::item {{
+            min-height: 28px;
+            padding: 4px 6px;
+            border: none;
+        }}
+        QTreeView::item:hover {{
+            background: rgba(128, 128, 128, 28);
+            border-radius: 4px;
+        }}
+        QTreeView::item:selected {{
+            background: rgba(40, 120, 208, 48);
+            border-radius: 4px;
+        }}
+        QHeaderView::section {{
+            background: transparent;
+            color: {text};
+            padding: 8px 10px;
+            border: none;
+            border-bottom: 1px solid rgba(128, 128, 128, 60);
+            font-weight: 600;
+        }}
+        """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -77,7 +94,7 @@ class ConflictView(QWidget):
         self._tree.setUniformRowHeights(True)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
-        self._tree.setStyleSheet(self._TREE_QSS)
+        self._tree.setStyleSheet(self._tree_qss_for_theme())
         self._model = QStandardItemModel()
         self._model.setHorizontalHeaderLabels(["Conflict", "Level", "Resolution"])
         self._tree.setModel(self._model)
@@ -93,6 +110,12 @@ class ConflictView(QWidget):
         self._tree.setUpdatesEnabled(False)
         self._model.blockSignals(True)
         self._model.removeRows(0, self._model.rowCount())
+
+        # Theme-aware default for cells without a semantic colour.
+        # QPalette.Text on a Fluent-themed tree can resolve to a muted
+        # role that disappears against the light surface, so pick an
+        # explicit high-contrast colour per theme instead.
+        body_color = QColor("#E8E8E8") if isDarkTheme() else QColor("#1F1F1F")
 
         if not conflicts:
             empty = QStandardItem("No conflicts detected")
@@ -122,13 +145,14 @@ class ConflictView(QWidget):
             pair_item.setData(first.mod_a_id, MOD_A_ID_ROLE)
             pair_item.setData(first.mod_b_id, MOD_B_ID_ROLE)
             level_item = QStandardItem(LEVEL_LABELS.get(worst, worst))
+            level_item.setForeground(body_color)
 
             # Show winner in the detail column for byte_range conflicts
             winner = first.winner_name if worst == "byte_range" and first.winner_name else ""
             detail_text = f"Winner: {winner}" if winner else f"{len(pair_conflicts)} issue(s)"
             detail_item = QStandardItem(detail_text)
-            if winner:
-                detail_item.setForeground(QColor("#4CAF50"))
+            detail_item.setForeground(
+                QColor("#4CAF50") if winner else body_color)
 
             # Cap child items to prevent Qt crash on large conflict sets.
             # Show first 10 + summary if there are more.
@@ -136,17 +160,19 @@ class ConflictView(QWidget):
             shown = pair_conflicts[:MAX_CHILDREN]
             for c in shown:
                 file_item = QStandardItem(c.file_path)
+                file_item.setForeground(body_color)
                 file_item.setData(c.mod_a_id, MOD_A_ID_ROLE)
                 file_item.setData(c.mod_b_id, MOD_B_ID_ROLE)
                 file_item.setData(c.winner_id, WINNER_ID_ROLE)
                 file_level = QStandardItem(LEVEL_LABELS.get(c.level, c.level))
-                file_level.setForeground(LEVEL_COLORS.get(c.level, QColor("#999")))
+                file_level.setForeground(LEVEL_COLORS.get(c.level, body_color))
                 file_detail = QStandardItem(c.explanation)
+                file_detail.setForeground(body_color)
                 pair_item.appendRow([file_item, file_level, file_detail])
 
             if len(pair_conflicts) > MAX_CHILDREN:
                 more = QStandardItem(f"... and {len(pair_conflicts) - MAX_CHILDREN} more")
-                more.setForeground(QColor("#666"))
+                more.setForeground(body_color)
                 pair_item.appendRow([more, QStandardItem(""), QStandardItem("")])
 
             self._model.appendRow([pair_item, level_item, detail_item])

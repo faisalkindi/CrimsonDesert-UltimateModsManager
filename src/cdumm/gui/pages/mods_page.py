@@ -1229,11 +1229,11 @@ class ModsPage(QWidget):
           priority chain is scannable rather than a wall of text.
         """
         from PySide6.QtWidgets import (
-            QDialog, QVBoxLayout, QHBoxLayout, QScrollArea,
+            QDialog, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea,
         )
         from qfluentwidgets import (
-            BodyLabel, CaptionLabel, InfoBadge, PillPushButton,
-            PrimaryPushButton, SimpleCardWidget, SubtitleLabel, isDarkTheme,
+            BodyLabel, CaptionLabel, InfoBadge, PrimaryPushButton,
+            SimpleCardWidget, SubtitleLabel, isDarkTheme,
         )
         from cdumm.gui.conflict_view import ConflictView
 
@@ -1315,15 +1315,28 @@ class ModsPage(QWidget):
                 inner_layout = QVBoxLayout(inner)
                 inner_layout.setContentsMargins(0, 4, 0, 0)
                 inner_layout.setSpacing(4)
+                # Pill colour: brand-blue tint on both themes. The rank
+                # pill is decorative (not a button), so a QLabel avoids the
+                # greyed-out look ``setEnabled(False)`` gave the previous
+                # PillPushButton implementation.
+                pill_qss = (
+                    "QLabel {"
+                    "  background: rgba(40, 120, 208, 48);"
+                    "  color: #2878D0;"
+                    "  border-radius: 12px;"
+                    "  font-weight: 700;"
+                    "  padding: 0 6px;"
+                    "}"
+                )
                 for i, mid in enumerate(priority_mods):
                     row = QHBoxLayout()
                     row.setContentsMargins(0, 0, 0, 0)
                     row.setSpacing(10)
-                    rank_pill = PillPushButton(f"#{i + 1}")
-                    rank_pill.setCheckable(False)
-                    rank_pill.setEnabled(False)
+                    rank_pill = QLabel(f"#{i + 1}")
+                    rank_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     rank_pill.setFixedHeight(24)
                     rank_pill.setFixedWidth(48)
+                    rank_pill.setStyleSheet(pill_qss)
                     row.addWidget(rank_pill, 0, Qt.AlignmentFlag.AlignVCenter)
                     name = mods_by_id.get(mid, {}).get("name", f"(id {mid})")
                     name_label = BodyLabel(name)
