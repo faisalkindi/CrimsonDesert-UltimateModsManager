@@ -55,11 +55,29 @@ def _parse_library_folders(vdf_path: Path) -> list[Path]:
     return paths
 
 
+def _looks_like_game_root(path: Path) -> bool:
+    """True when ``path`` contains the numbered PAZ directory layout.
+
+    Used as a fallback for Xbox installs where ``bin64/CrimsonDesert.exe``
+    may not be present at the game-dir root (the Microsoft Store splits
+    executables into sibling package directories). The PAZ layout itself
+    is what the mod manager cares about: ``0008/0.paz``, ``meta/0.papgt``
+    etc. If those exist we can mod the game regardless of where the exe
+    lives on disk.
+    """
+    try:
+        return ((path / "0008" / "0.paz").exists()
+                and (path / "meta" / "0.papgt").exists())
+    except OSError:
+        return False
+
+
 def _find_xbox_game_pass() -> list[Path]:
     """Search for Crimson Desert installed via Xbox Game Pass / Microsoft Store.
 
     Xbox Game Pass games can be installed at:
     - {drive}:/XboxGames/<GameName>/Content/
+    - {drive}:/XboxGames/<GameName>/Content/packages/ (Tunsi82 workaround)
     - Custom paths set in Xbox app (detected via .GamingRoot files)
     - C:/Program Files/ModifiableWindowsApps/<GameName>/
     """
@@ -79,7 +97,10 @@ def _find_xbox_game_pass() -> list[Path]:
     search_letters = set(gaming_drives) | set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
     for letter in search_letters:
         for name in XBOX_GAME_NAMES:
-            for sub in ["Content", ""]:
+            # Check multiple candidate subpaths — Xbox layout differs per
+            # title (some use /Content, some /Content/packages where the
+            # actual PAZ dirs sit).
+            for sub in ["", "Content", "Content/packages"]:
                 xbox_path = Path(f"{letter}:/XboxGames/{name}")
                 if sub:
                     xbox_path = xbox_path / sub
@@ -87,6 +108,12 @@ def _find_xbox_game_pass() -> list[Path]:
                     if (xbox_path / GAME_EXE).exists():
                         candidates.append(xbox_path)
                         logger.info("Found Crimson Desert (Xbox) at %s", xbox_path)
+                    elif _looks_like_game_root(xbox_path):
+                        # Exe not at root but PAZ layout is — treat as game dir
+                        candidates.append(xbox_path)
+                        logger.info(
+                            "Found Crimson Desert (Xbox, exe-missing) at %s",
+                            xbox_path)
                 except OSError:
                     continue
 
@@ -216,8 +243,22 @@ def find_game_directories() -> list[Path]:
 
 
 def validate_game_directory(path: Path) -> bool:
-    """Check if path is a valid Crimson Desert install."""
-    return (path / GAME_EXE).exists()
+    """Check if ``path`` is a valid Crimson Desert install.
+
+    Steam/Epic ship ``bin64/CrimsonDesert.exe`` at the install root, so
+    that's the primary check. Xbox Game Pass installs can split the
+    executable off from the game data — the PAZ archives live under
+    ``Content/packages/`` while the exe is registered elsewhere by the
+    Microsoft Store. Accept either layout: if the exe is missing but
+    the PAZ archive layout is present, CDUMM has everything it needs
+    to mod the game. Tunsi82's workaround confirmed pointing at
+    ``C:/XboxGames/Crimson Desert/Content/packages`` works.
+    """
+    if (path / GAME_EXE).exists():
+        return True
+    if is_xbox_install(path) and _looks_like_game_root(path):
+        return True
+    return False
 
 
 def is_steam_install(game_dir: Path) -> bool:
