@@ -95,7 +95,8 @@ def test_import_from_zip(tmp_path: Path) -> None:
     result = import_from_zip(mod_zip, game_dir, db, snapshot, deltas_dir)
 
     assert result.error is None
-    assert result.name == "TestMod"
+    # Name is prettified — camelCase splits into spaced words.
+    assert result.name == "Test Mod"
     assert len(result.changed_files) == 1
     assert result.changed_files[0]["file_path"] == "0008/0.paz"
 
@@ -106,7 +107,7 @@ def test_import_from_zip(tmp_path: Path) -> None:
     # Verify mod stored
     cursor = db.connection.execute("SELECT name, mod_type FROM mods WHERE id = 1")
     row = cursor.fetchone()
-    assert row == ("TestMod", "paz")
+    assert row == ("Test Mod", "paz")
 
     db.close()
 
@@ -139,7 +140,7 @@ def test_import_from_folder(tmp_path: Path) -> None:
     result = import_from_folder(mod_folder, game_dir, db, snapshot, deltas_dir)
 
     assert result.error is None
-    assert result.name == "MyMod"
+    assert result.name == "My Mod"
     assert len(result.changed_files) == 1
     db.close()
 

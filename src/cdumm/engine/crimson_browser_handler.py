@@ -172,13 +172,21 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             inner_path = "/".join(parts)
             unresolved.append((inner_path, f))
 
-    # Resolve unresolved files by searching PAMTs for matching filenames
+    # Resolve unresolved files by searching PAMTs for matching filenames.
+    # Anything still unresolved after basename-lookup that's a .dds file is
+    # a NEW texture the mod is introducing — we'll build a texture overlay
+    # for those below (PAZ + PAMT + PATHC registration).
+    leftover_dds: list[tuple[str, Path]] = []
     if unresolved:
-        dir_map = _resolve_files_to_directories(unresolved, game_dir)
+        dir_map, still_unresolved = _resolve_files_to_directories(unresolved, game_dir)
         for dir_num, file_list in dir_map.items():
             files_by_dir.setdefault(dir_num, []).extend(file_list)
+        leftover_dds = [
+            (p, src) for p, src in still_unresolved
+            if p.lower().endswith(".dds")
+        ]
 
-    if not files_by_dir:
+    if not files_by_dir and not leftover_dds:
         logger.error("CB mod: no files found in %s", files_dir)
         return None
 
@@ -349,12 +357,42 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
         if pamt_updates:
             _update_pamt_entries(pamt_dst, pamt_updates)
 
+    # Route unresolved DDS files through the shared texture-overlay helper.
+    # This is what lets CB mods that ship BOTH known XMLs AND new DDS
+    # preview textures (e.g. Barber Unlocked, Character Creator) work:
+    # the known XMLs land in their vanilla PAZ dirs above, and the new
+    # DDSes get a fresh numbered PAZ + PAMT + PATHC registration here.
+    #
+    # A texture-overlay failure is fatal: partial imports (XML side
+    # landed but DDSes dropped) produce the "imported successfully but
+    # icons are blank" state that brought the fix request to begin with.
+    # Better to reject the import outright than ship half a mod.
+    if leftover_dds:
+        from cdumm.engine.texture_mod_handler import build_texture_overlay
+        overlay_result = build_texture_overlay(leftover_dds, game_dir, work_dir)
+        if overlay_result is None:
+            logger.error(
+                "CB mod: %d new DDS file(s) failed the texture overlay "
+                "build — aborting import to avoid a partial apply",
+                len(leftover_dds))
+            return None
+        target_dir, registered = overlay_result
+        if registered == 0:
+            logger.error(
+                "CB mod: texture overlay wrote PAZ/PAMT but registered "
+                "zero DDS entries in PATHC — aborting import")
+            return None
+        logger.info(
+            "CB mod: routed %d new DDS file(s) through texture overlay "
+            "-> %s/ (PATHC registered %d)",
+            len(leftover_dds), target_dir, registered)
+
     return work_dir
 
 
 def _resolve_files_to_directories(
     files: list[tuple[str, Path]], game_dir: Path
-) -> dict[str, list[tuple[str, Path]]]:
+) -> tuple[dict[str, list[tuple[str, Path]]], list[tuple[str, Path]]]:
     """Find which PAZ directory each file belongs to by searching all PAMTs.
 
     For CB mods that use virtual paths (character/hair.xml) without numbered
@@ -364,11 +402,16 @@ def _resolve_files_to_directories(
     we prefer the highest-numbered directory — game updates add new directories
     with correct slot sizes for the latest version.
 
-    Returns {dir_num: [(inner_path, source_file), ...]}
+    Returns:
+        Tuple of (resolved, unresolved):
+          - resolved: {dir_num: [(inner_path, source_file), ...]}
+          - unresolved: [(inner_path, source_file), ...] for files whose
+            basename didn't match any PAMT entry. Callers can route these
+            through an alternative pipeline (e.g. texture overlay).
     """
     result: dict[str, list[tuple[str, Path]]] = {}
     if not files:
-        return result
+        return result, []
 
     # Build a lookup: basename -> [(inner_path, source_file)]
     by_basename: dict[str, list[tuple[str, Path]]] = {}
@@ -411,11 +454,13 @@ def _resolve_files_to_directories(
                             sorted(set(c[0] for c in candidates)))
         del by_basename[bname]
 
+    unresolved: list[tuple[str, Path]] = []
     for bname, remaining in by_basename.items():
-        for inner_path, _ in remaining:
+        for inner_path, source in remaining:
             logger.warning("CB mod: could not resolve %s to any PAZ directory", inner_path)
+            unresolved.append((inner_path, source))
 
-    return result
+    return result, unresolved
 
 
 def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int, int | None, int]]) -> None:

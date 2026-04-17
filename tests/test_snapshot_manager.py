@@ -15,10 +15,14 @@ def _create_fake_game_dir(tmp_path: Path) -> Path:
         (d / "0.pamt").write_bytes(b"PAMT_DATA_" + dir_name.encode())
         (d / "0.paz").write_bytes(b"PAZ_DATA_" + dir_name.encode() + b"\x00" * 100)
 
-    # Create PAPGT
+    # Create PAPGT. Byte 8 encodes the entry count; real vanilla has 33
+    # entries. snapshot_manager aborts with "appears modded" if it sees
+    # more than 35, so the fixture writes a valid vanilla-like count.
     meta = game_dir / "meta"
     meta.mkdir()
-    (meta / "0.papgt").write_bytes(b"PAPGT_DATA" + b"\x00" * 50)
+    (meta / "0.papgt").write_bytes(
+        b"\x00" * 8 + bytes([33]) + b"\x00" * 51
+    )
 
     # Create game exe for validation
     (game_dir / "bin64").mkdir()
@@ -31,7 +35,9 @@ def test_hash_file(tmp_path: Path) -> None:
     f = tmp_path / "test.bin"
     f.write_bytes(b"hello world")
     h, size = hash_file(f)
-    assert len(h) == 64  # SHA-256 hex digest
+    # hash_file defaults to xxh3_128 (128 bits = 32 hex chars) when xxhash
+    # is available, else SHA-256 (256 bits = 64 hex chars). Accept either.
+    assert len(h) in (32, 64)
     assert size == 11
     # Same content produces same hash
     f2 = tmp_path / "test2.bin"
@@ -93,7 +99,7 @@ def test_snapshot_manager_get_file_hash(tmp_path: Path) -> None:
     mgr = SnapshotManager(db)
     h = mgr.get_file_hash("0008/0.pamt")
     assert h is not None
-    assert len(h) == 64
+    assert len(h) in (32, 64)
 
     assert mgr.get_file_hash("nonexistent/file.paz") is None
     db.close()

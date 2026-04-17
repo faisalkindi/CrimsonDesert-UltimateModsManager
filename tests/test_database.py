@@ -68,7 +68,8 @@ def test_mods_table_constraints(db: Database) -> None:
     db.connection.commit()
     cursor = db.connection.execute("SELECT name, mod_type, enabled FROM mods WHERE name = ?", ("TestMod",))
     row = cursor.fetchone()
-    assert row == ("TestMod", "paz", 1)
+    # Mods import disabled by default — user enables manually via the GUI.
+    assert row == ("TestMod", "paz", 0)
 
 
 def test_mods_table_rejects_invalid_type(db: Database) -> None:

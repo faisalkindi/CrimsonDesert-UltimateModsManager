@@ -169,11 +169,14 @@ class Database:
 
             nexus_id, _ = parse_nexus_filename(stem)
             if nexus_id:
-                self._connection.execute(
+                cur = self._connection.execute(
                     "UPDATE mods SET nexus_mod_id = ? "
                     "WHERE id = ? AND nexus_mod_id IS NULL",
                     (nexus_id, mod_id))
-                linked += 1
+                # Only count rows that actually changed; otherwise a
+                # mod that already has nexus_mod_id inflates the log.
+                if cur.rowcount:
+                    linked += 1
 
         self._connection.execute(
             "INSERT OR REPLACE INTO config (key, value) "
