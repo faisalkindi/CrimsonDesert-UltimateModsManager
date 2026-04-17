@@ -5,26 +5,19 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Qt, Signal, Slot
+from PySide6.QtCore import QEasingCurve, Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
-    BodyLabel,
     CaptionLabel,
     ComboBox,
     FluentIcon,
     GroupHeaderCardWidget,
-    HyperlinkButton,
-    IconInfoBadge,
-    InfoBadge,
     InfoBar,
     InfoBarPosition,
-    InfoLevel,
     LineEdit,
-    PasswordLineEdit,
-    PrimaryPushButton,
     PushButton,
     PushSettingCard,
     SettingCard,
@@ -140,64 +133,6 @@ class SettingsPage(SmoothScrollArea):
         self._profiles_group.addSettingCard(self._import_list_card)
 
         self._layout.addWidget(self._profiles_group)
-
-        # ── NexusMods API (testing only — personal key) ──────────
-        self._nexus_card = GroupHeaderCardWidget(self._container)
-        self._nexus_card.setTitle(tr("settings.nexus_title"))
-        self._nexus_card.setBorderRadius(8)
-
-        # Row 1 — API key input + inline save
-        key_widget = QWidget()
-        key_row = QHBoxLayout(key_widget)
-        key_row.setContentsMargins(0, 0, 0, 0)
-        key_row.setSpacing(8)
-        self._nexus_key_input = PasswordLineEdit()
-        self._nexus_key_input.setPlaceholderText(tr("settings.nexus_key_placeholder"))
-        self._nexus_key_input.setMinimumWidth(280)
-        self._nexus_key_input.setClearButtonEnabled(True)
-        key_row.addWidget(self._nexus_key_input, 1)
-        save_key_btn = PushButton(tr("settings.nexus_save"))
-        save_key_btn.setMinimumWidth(84)
-        save_key_btn.clicked.connect(self._on_save_nexus_key)
-        key_row.addWidget(save_key_btn)
-        self._nexus_card.addGroup(
-            FluentIcon.VPN,
-            tr("settings.nexus_key_row_title"),
-            tr("settings.nexus_key_row_desc"),
-            key_widget,
-        )
-
-        # Row 2 — primary check-for-updates action
-        self._nexus_check_btn = PrimaryPushButton(tr("settings.nexus_check"))
-        self._nexus_check_btn.setIcon(FluentIcon.SYNC)
-        self._nexus_check_btn.setMinimumWidth(200)
-        self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
-        self._nexus_card.addGroup(
-            FluentIcon.SYNC,
-            tr("settings.nexus_check_row_title"),
-            tr("settings.nexus_check_row_desc"),
-            self._nexus_check_btn,
-        )
-
-        self._layout.addWidget(self._nexus_card)
-
-        # Status strip (badge + text) — theme-aware, shown only when populated
-        status_row = QWidget()
-        status_layout = QHBoxLayout(status_row)
-        status_layout.setContentsMargins(6, 0, 6, 0)
-        status_layout.setSpacing(8)
-        self._nexus_status_badge = IconInfoBadge.info(FluentIcon.INFO, self._container)
-        self._nexus_status_badge.setFixedSize(18, 18)
-        self._nexus_status_badge.hide()
-        status_layout.addWidget(self._nexus_status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._nexus_status = BodyLabel("")
-        status_layout.addWidget(self._nexus_status, 1, Qt.AlignmentFlag.AlignVCenter)
-        nexus_help = HyperlinkButton(
-            "https://www.nexusmods.com/users/myaccount?tab=api",
-            tr("settings.nexus_get_key"))
-        nexus_help.setIcon(FluentIcon.LINK)
-        status_layout.addWidget(nexus_help, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._layout.addWidget(status_row)
 
         # ── Bug Report (PrivateBin) ───────────────────────────────
         self._privatebin_card = GroupHeaderCardWidget(self._container)
@@ -353,11 +288,6 @@ class SettingsPage(SmoothScrollArea):
             self._game_dir_card.setContent(str(self._game_dir))
             self._game_dir_card.setToolTip(str(self._game_dir))
 
-        # NexusMods API key
-        saved_key = self._config.get("nexus_api_key") or ""
-        if saved_key and hasattr(self, '_nexus_key_input'):
-            self._nexus_key_input.setText(saved_key)
-
         # PrivateBin
         if hasattr(self, '_privatebin_instance_input'):
             inst = self._config.get("privatebin_instance") or "https://privatebin.net"
@@ -489,26 +419,6 @@ class SettingsPage(SmoothScrollArea):
         )
         logger.info("Game directory changed to %s", new_path)
 
-    def _on_save_nexus_key(self) -> None:
-        key = self._nexus_key_input.text().strip()
-        if not self._db:
-            return
-        from cdumm.storage.config import Config
-        Config(self._db).set("nexus_api_key", key)
-        if key:
-            from cdumm.engine.nexus_api import validate_api_key
-            user = validate_api_key(key)
-            if user:
-                name = user.get("name", "Unknown")
-                self._set_nexus_status(
-                    tr("settings.nexus_logged_in", name=name), InfoLevel.SUCCESS)
-            else:
-                self._set_nexus_status(
-                    tr("settings.nexus_invalid_key"), InfoLevel.ERROR)
-        else:
-            self._set_nexus_status(
-                tr("settings.nexus_key_cleared"), InfoLevel.INFOAMTION)
-
     def _on_save_privatebin_settings(self) -> None:
         if not self._config:
             return
@@ -526,101 +436,3 @@ class SettingsPage(SmoothScrollArea):
             duration=2500, position=InfoBarPosition.TOP, parent=self.window(),
         )
 
-    def _on_check_nexus_updates(self) -> None:
-        if not self._db:
-            return
-        from cdumm.storage.config import Config
-        api_key = Config(self._db).get("nexus_api_key")
-        if not api_key:
-            self._set_nexus_status(
-                tr("settings.nexus_need_key"), InfoLevel.ERROR)
-            return
-        self._set_nexus_status(
-            tr("settings.nexus_checking"), InfoLevel.INFOAMTION)
-        self._nexus_check_btn.setEnabled(False)
-        # Read mods on main thread (SQLite connections can't cross threads)
-        try:
-            cursor = self._db.connection.execute(
-                "SELECT id, name, version, nexus_mod_id FROM mods WHERE mod_type = 'paz'")
-            mods = [{"id": r[0], "name": r[1], "version": r[2], "nexus_mod_id": r[3]}
-                    for r in cursor.fetchall()]
-        except Exception as e:
-            self._set_nexus_status(
-                tr("settings.nexus_db_error", error=str(e)), InfoLevel.ERROR)
-            self._nexus_check_btn.setEnabled(True)
-            return
-
-        import threading
-        def _check():
-            try:
-                from cdumm.engine.nexus_api import check_mod_updates
-                self._pending_updates = check_mod_updates(mods, api_key)
-                self._pending_error = None
-            except Exception as e:
-                self._pending_updates = []
-                self._pending_error = str(e)
-            from PySide6.QtCore import QMetaObject, Qt as _Qt
-            QMetaObject.invokeMethod(
-                self, "_show_nexus_results", _Qt.ConnectionType.QueuedConnection)
-        threading.Thread(target=_check, daemon=True).start()
-
-    @Slot()
-    def _show_nexus_results(self) -> None:
-        self._nexus_check_btn.setEnabled(True)
-        error = getattr(self, "_pending_error", None)
-        if error:
-            self._set_nexus_status(
-                tr("settings.nexus_error", error=error[:80]), InfoLevel.ERROR)
-            return
-        updates = getattr(self, "_pending_updates", [])
-        if not updates:
-            self._set_nexus_status(
-                tr("settings.nexus_all_up_to_date"), InfoLevel.SUCCESS)
-            return
-        lines = [f"{u.local_name}: {u.local_version} -> {u.latest_version}" for u in updates]
-        self._set_nexus_status(
-            tr("settings.nexus_updates_available", count=len(updates)),
-            InfoLevel.ATTENTION)
-        from PySide6.QtWidgets import QMessageBox
-        msg = QMessageBox(self.window())
-        msg.setWindowTitle(tr("settings.nexus_updates_title", count=len(updates)))
-        msg.setText("Newer versions on NexusMods:\n\n" + "\n".join(lines))
-        # Qt modal dialog — not shell exec. Use exec_ alias to dodge lint.
-        msg.exec_() if hasattr(msg, "exec_") else msg.show()
-
-    # ------------------------------------------------------------------
-    # Status helper — theme-aware badge swap
-    # ------------------------------------------------------------------
-
-    def _set_nexus_status(self, text: str, level: "InfoLevel") -> None:
-        """Update the inline status row with a theme-aware badge + message.
-
-        Replaces the previous hex-coded ``setStyleSheet`` approach — those
-        colours survived in light mode but crushed to unreadable in dark.
-        ``IconInfoBadge`` picks its palette from the current Fluent theme.
-        """
-        if not text:
-            self._nexus_status.setText("")
-            self._nexus_status_badge.hide()
-            return
-
-        icon_for_level = {
-            InfoLevel.SUCCESS: FluentIcon.ACCEPT,
-            InfoLevel.ERROR: FluentIcon.CLOSE,
-            InfoLevel.WARNING: FluentIcon.INFO,
-            InfoLevel.ATTENTION: FluentIcon.SYNC,
-            InfoLevel.INFOAMTION: FluentIcon.INFO,
-        }.get(level, FluentIcon.INFO)
-
-        old = self._nexus_status_badge
-        parent = old.parentWidget()
-        layout = parent.layout() if parent else None
-        index = layout.indexOf(old) if layout else -1
-        old.hide()
-        old.deleteLater()
-        new_badge = IconInfoBadge.make(icon_for_level, parent, level=level)
-        new_badge.setFixedSize(18, 18)
-        if layout is not None and index >= 0:
-            layout.insertWidget(index, new_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._nexus_status_badge = new_badge
-        self._nexus_status.setText(text)
