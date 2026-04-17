@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import TreeView, getFont, isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
+from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +142,37 @@ class ConflictView(QWidget):
         # TreeView already installs a SmoothScrollDelegate internally —
         # no manual scroll delegate needed.
         self._model = QStandardItemModel()
-        self._model.setHorizontalHeaderLabels(["Conflict", "Level", "Resolution"])
+        # Rename "Conflict" → "Mods" — the dialog title already says
+        # "Conflicts" so the column header was redundant; "Mods" names
+        # what's actually in the cell (the affected mod pair).
+        self._model.setHorizontalHeaderLabels([
+            tr("conflicts.col_mods"),
+            tr("conflicts.col_level"),
+            tr("conflicts.col_resolution"),
+        ])
         self._tree.setModel(self._model)
+        # Give column 0 most of the width (mod names are long), and keep
+        # Level + Resolution tight — their content is short and fixed.
         self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self._tree.setColumnWidth(1, 220)
-        self._tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self._tree.setColumnWidth(1, 240)
+        self._tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self._tree.setColumnWidth(2, 260)
 
         layout.addWidget(self._tree)
+
+    def row_pixel_height(self) -> int:
+        """Pixel height reported by the tree for a populated row.
+
+        Used by the conflicts dialog to size section heights as whole
+        multiples of the actual row height so the last visible row is
+        never bisected. Returns 0 when the model is empty.
+        """
+        return max(0, self._tree.sizeHintForRow(0))
+
+    def header_pixel_height(self) -> int:
+        """Pixel height reported by the tree header widget."""
+        return max(0, self._tree.header().sizeHint().height())
 
     def update_conflicts(self, conflicts: list[Conflict],
                          auto_expand: bool = True) -> None:
@@ -198,12 +222,21 @@ class ConflictView(QWidget):
             level_item = QStandardItem(LEVEL_LABELS.get(worst, worst))
             level_item.setForeground(body_color)
 
-            # Show winner in the detail column for byte_range conflicts
+            # Show winner in the detail column for byte_range conflicts.
+            # Auto-resolved pairs get a neutral "overlap" count — calling
+            # them "issues" contradicts the "no action needed" caption.
             winner = first.winner_name if worst == "byte_range" and first.winner_name else ""
-            detail_text = f"Winner: {winner}" if winner else f"{len(pair_conflicts)} issue(s)"
+            n = len(pair_conflicts)
+            if winner:
+                detail_text = tr("conflicts.winner_label", name=winner)
+            elif n == 1:
+                detail_text = tr("conflicts.one_overlap")
+            else:
+                detail_text = tr("conflicts.n_overlaps", n=n)
             detail_item = QStandardItem(detail_text)
-            detail_item.setForeground(
-                QColor("#4CAF50") if winner else body_color)
+            # Use body colour for both branches — "Winner" is a neutral
+            # decision, not a success state, so green read wrong.
+            detail_item.setForeground(body_color)
 
             # Cap child items to prevent Qt crash on large conflict sets.
             # Show first 10 + summary if there are more.

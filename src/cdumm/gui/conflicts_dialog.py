@@ -14,14 +14,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QSizeGrip, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
-    MessageBoxBase, SimpleCardWidget, SingleDirectionScrollArea, SubtitleLabel,
-    TransparentToolButton, getFont,
+    MessageBoxBase, PushButton, SimpleCardWidget, SingleDirectionScrollArea,
+    SubtitleLabel, TransparentToolButton, getFont,
 )
 
 from cdumm.gui.conflict_view import ACTIONABLE_LEVELS, ConflictView
@@ -36,11 +36,20 @@ _RANK_PILL_QSS = (
     "QLabel {"
     "  background: rgba(40, 120, 208, 48);"
     "  color: #2878D0;"
-    "  border-radius: 12px;"
+    "  border-radius: 10px;"
     "  font-weight: 700;"
-    "  padding: 0 6px;"
+    "  padding: 0 8px;"
     "}"
 )
+
+# Per-pair row height used by both tree sections and the load-order card.
+# Must match ``QTreeView::item { min-height: 28px; padding: 4px 6px; }``
+# from ``conflict_view.py`` — rounded up for the 1px cell border.
+_TREE_ROW_H = 34
+_TREE_HEADER_H = 40
+_TREE_BORDER_PAD = 4
+
+_RANK_ROW_H = 36
 
 
 class ConflictsDialog(MessageBoxBase):
@@ -57,6 +66,11 @@ class ConflictsDialog(MessageBoxBase):
                  ) -> None:
         super().__init__(parent=parent)
 
+        # Darker overlay than MessageBoxBase's default (black @30%). At 30%
+        # on a light mods page, the nav + list bleeds through around the
+        # dialog edges and breaks the modal contract. Bumping to ~55%.
+        self.setMaskColor(QColor(0, 0, 0, 140))
+
         self._mod_manager = mod_manager
         self._conflict_detector = conflict_detector
         self._mods_by_id = mods_by_id
@@ -72,18 +86,43 @@ class ConflictsDialog(MessageBoxBase):
 
         # Content container — wraps sections + load-order card so we can
         # rebuild in-place after the user reorders priority, without
-        # disturbing the title, caption, grip, or Close button.
+        # disturbing the title, caption, grip, or Close button. The host
+        # is wrapped in a SingleDirectionScrollArea so when the total
+        # content (two trees + load-order card) exceeds the available
+        # dialog height, the body scrolls cleanly instead of clipping.
         self._content_host = QWidget()
         self._content_layout = QVBoxLayout(self._content_host)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
         self._content_layout.setSpacing(0)
-        self.viewLayout.addWidget(self._content_host, 1)
+
+        self._content_scroll = SingleDirectionScrollArea(
+            orient=Qt.Orientation.Vertical)
+        self._content_scroll.setWidget(self._content_host)
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setFrameShape(
+            SingleDirectionScrollArea.Shape.NoFrame)
+        self._content_scroll.enableTransparentBackground()
+        self.viewLayout.addWidget(self._content_scroll, 1)
 
         self._build_content()
 
-        # ── Footer: single Close button ───────────────────────────────
-        self.yesButton.setText(self._close_label())
+        # ── Footer: compact Close button ──────────────────────────────
+        # MessageBoxBase stacks a full-width PrimaryPushButton which pulls
+        # the eye down and competes with the actionable content. For an
+        # informational dialog like this, a secondary PushButton sized to
+        # its label and right-aligned reads as "dismiss" without shouting.
+        self.buttonLayout.removeWidget(self.yesButton)
+        self.buttonLayout.removeWidget(self.cancelButton)
+        self.yesButton.hide()
         self.cancelButton.hide()
+        close_btn = PushButton(self._close_label(), self.buttonGroup)
+        close_btn.setFixedWidth(140)
+        close_btn.setMinimumHeight(32)
+        close_btn.clicked.connect(self.accept)
+        self.buttonLayout.addStretch(1)
+        self.buttonLayout.addWidget(
+            close_btn, 0,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
 
         # Size so Close is always visible on open. The centerWidget is
         # placed with Qt.AlignCenter in the mask's hBoxLayout, so it
@@ -126,20 +165,23 @@ class ConflictsDialog(MessageBoxBase):
             self._build_empty_state()
             return
 
+        # Tree sections are sized to a whole multiple of row height so
+        # the last visible row is never bisected. Actionable stays short
+        # (users act here); auto-resolved gets more vertical room.
         if actionable:
             self._build_section(
                 tr("conflicts.section_actionable"),
                 len(actionable), actionable,
                 FluentIcon.INFO, InfoLevel.ATTENTION,
                 caption=tr("conflicts.section_actionable_desc"),
-                stretch=min(max(len(actionable), 2), 4))
+                row_cap=5)
         if auto:
             self._build_section(
                 tr("conflicts.section_auto"),
                 len(auto), auto,
                 FluentIcon.ACCEPT, InfoLevel.SUCCESS,
                 caption=tr("conflicts.section_auto_desc"),
-                stretch=min(max(len(auto), 2), 12))
+                row_cap=5)
         if actionable:
             self._build_load_order_card(actionable, self._mods_by_id)
 
@@ -226,7 +268,7 @@ class ConflictsDialog(MessageBoxBase):
     def _build_section(self, title_text: str, count: int,
                        items: "list[Conflict]",
                        icon: FluentIcon, level: InfoLevel,
-                       caption: str, stretch: int) -> None:
+                       caption: str, row_cap: int) -> None:
         """One section with coloured badge header + explanation + tree."""
         self._content_layout.addSpacing(12)
 
@@ -261,11 +303,26 @@ class ConflictsDialog(MessageBoxBase):
         # (pair + child per conflict) and crowds the dialog. User can
         # click a pair to see its file-level children.
         tree.update_conflicts(items, auto_expand=False)
-        # Minimum keeps at least ~2 rows always visible; stretch lets the
-        # tree grow when the dialog is taller. The tree's own internal
-        # scrollbar handles overflow — no outer scroll area needed.
-        tree.setMinimumHeight(140)
-        self._content_layout.addWidget(tree, stretch)
+
+        # Count unique mod pairs — that's what the tree actually renders
+        # at the top level, not the raw conflict count.
+        pair_count = len({
+            (min(c.mod_a_id, c.mod_b_id), max(c.mod_a_id, c.mod_b_id))
+            for c in items
+        }) or 1
+        visible_rows = min(pair_count, row_cap)
+
+        # Measure actual row + header pixel height at runtime — QSS
+        # padding + border + platform DPI make hardcoded constants
+        # unreliable. The ConflictView helpers read sizeHintForRow and
+        # header().sizeHint() directly for the current theme + font.
+        row_h = tree.row_pixel_height() or _TREE_ROW_H
+        header_h = tree.header_pixel_height() or _TREE_HEADER_H
+        tree_h = header_h + visible_rows * row_h + _TREE_BORDER_PAD + 2
+        # Fixed height aligned to whole-row units — prevents Qt stretch
+        # from painting partial rows at the bottom edge.
+        tree.setFixedHeight(tree_h)
+        self._content_layout.addWidget(tree, 0)
 
     # ------------------------------------------------------------------
 
@@ -292,16 +349,34 @@ class ConflictsDialog(MessageBoxBase):
         card_layout.setContentsMargins(14, 10, 14, 10)
         card_layout.setSpacing(6)
 
+        # Card header — styled to match the two section headers above so
+        # hierarchy reads left-to-right as three equal peers instead of
+        # demoting the reorder surface (the actionable one) to a footer.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(8)
-        header = BodyLabel(tr("conflicts.load_order"))
-        header.setFont(getFont(14, QFont.Weight.DemiBold))
-        header_row.addWidget(header, 0, Qt.AlignmentFlag.AlignVCenter)
-        hint = CaptionLabel(tr("conflicts.load_order_hint"))
-        hint.setFont(getFont(11))
-        header_row.addWidget(hint, 1, Qt.AlignmentFlag.AlignVCenter)
+        header_row.setSpacing(10)
+        header_badge = IconInfoBadge.make(
+            FluentIcon.MENU, self.widget, level=InfoLevel.INFOAMTION)
+        header_badge.setFixedSize(20, 20)
+        header_row.addWidget(header_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_label = BodyLabel(tr("conflicts.load_order"))
+        hf = header_label.font()
+        hf.setPixelSize(15)
+        hf.setWeight(QFont.Weight.DemiBold)
+        header_label.setFont(hf)
+        header_row.addWidget(header_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_row.addStretch(1)
         card_layout.addLayout(header_row)
+
+        # Hint on its own line, matching the section caption treatment
+        # (indented under the badge column, muted font size).
+        hint = CaptionLabel(tr("conflicts.load_order_hint"))
+        hf2 = hint.font()
+        hf2.setPixelSize(12)
+        hint.setFont(hf2)
+        hint.setContentsMargins(30, 0, 0, 2)
+        hint.setWordWrap(True)
+        card_layout.addWidget(hint)
 
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
@@ -313,17 +388,37 @@ class ConflictsDialog(MessageBoxBase):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(10)
-            rank = QLabel(f"#{i + 1}")
+            # Rank pill — drop the '#' prefix (redundant with the card
+            # title "by load order") and tighten the pill width.
+            rank = QLabel(str(i + 1))
             rank.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            rank.setFixedHeight(24)
-            rank.setFixedWidth(48)
+            rank.setFixedHeight(22)
+            rank.setFixedWidth(32)
             rank.setStyleSheet(_RANK_PILL_QSS)
             rank.setFont(getFont(12, QFont.Weight.Bold))
             row.addWidget(rank, 0, Qt.AlignmentFlag.AlignVCenter)
-            name = mods_by_id.get(mid, {}).get("name", f"(id {mid})")
+            mod = mods_by_id.get(mid, {})
+            name = mod.get("name", f"(id {mid})")
             name_label = BodyLabel(name)
             name_label.setFont(getFont(14))
             row.addWidget(name_label, 1, Qt.AlignmentFlag.AlignVCenter)
+
+            # Priority context — users need to know this isn't "#1 of
+            # all mods" but "#1 among mods with conflicts". Showing the
+            # real priority number prevents that false equivalence.
+            pri = mod.get("priority")
+            if isinstance(pri, int):
+                pri_label = CaptionLabel(
+                    tr("conflicts.priority_context", p=pri))
+                pf = pri_label.font()
+                pf.setPixelSize(11)
+                pri_label.setFont(pf)
+                pri_label.setStyleSheet("color: rgba(128, 128, 128, 200);")
+                row.addWidget(pri_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            # Fixed gap before the arrow column — prevents long mod names
+            # from visually crashing into the up button.
+            row.addSpacing(12)
 
             # Up/down reorder buttons — disabled at the top/bottom edge
             # or when no mod_manager was supplied (read-only preview).
@@ -350,6 +445,7 @@ class ConflictsDialog(MessageBoxBase):
 
             wrap = QWidget()
             wrap.setLayout(row)
+            wrap.setFixedHeight(_RANK_ROW_H)
             inner_layout.addWidget(wrap)
         inner_layout.addStretch(1)
 
@@ -360,7 +456,11 @@ class ConflictsDialog(MessageBoxBase):
         scroll.setWidget(inner)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
-        scroll.setMaximumHeight(180)
+        # Snap visible area to a whole multiple of rank rows so the last
+        # visible row is never clipped. Cap at 5 rows — beyond that the
+        # scrollbar kicks in.
+        cap = min(len(priority_mods), 5)
+        scroll.setFixedHeight(cap * (_RANK_ROW_H + 4) + 4)
         scroll.enableTransparentBackground()
         card_layout.addWidget(scroll)
         self._content_layout.addWidget(card)
