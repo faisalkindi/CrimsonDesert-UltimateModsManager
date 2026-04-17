@@ -2065,7 +2065,7 @@ class CdummWindow(FluentWindow):
         if self._mod_manager:
             existing = self._find_existing_mod(path)
             if existing:
-                mid, mname = existing
+                mid, mname, _match_level = existing
                 # Get installed mod's version
                 installed_version = None
                 for m in self._mod_manager.list_mods():
@@ -2715,25 +2715,31 @@ class CdummWindow(FluentWindow):
             return match.group(1)
         return ""
 
-    def _find_existing_mod(self, path: Path) -> tuple[int, str] | None:
-        """Check if a dropped mod matches an already-installed mod by name."""
+    def _find_existing_mod(self, path: Path) -> tuple[int, str, str] | None:
+        """Check if a dropped mod matches an already-installed mod.
+
+        Returns ``(mod_id, mod_name, match_level)`` where ``match_level``
+        is ``"exact"`` (prettified names equal → default to Update) or
+        ``"near"`` (Jaccard token overlap ≥ 0.6 → show Update / Add as
+        new / Cancel). Returns ``None`` when no mod meets either bar.
+
+        Replaces the earlier substring match which false-matched short
+        names (e.g. ``"Infinite Stamina"``) against longer scoped names
+        (``"Infinite Stamina (All Skills Horse Spirit)"``).
+        """
         if not self._mod_manager:
             return None
 
-        def _normalize(s):
-            return s.lower().strip().replace("-", " ").replace("_", " ")
+        from cdumm.engine.mod_matching import is_same_mod, token_overlap_ratio
 
-        def _compact(s):
-            return _normalize(s).replace(" ", "")
-
-        drop_name = path.stem.lower()
+        drop_name = path.stem
         # Try to read mod name from modinfo.json or JSON patch
         try:
             from cdumm.engine.import_handler import _read_modinfo
             if path.is_dir():
                 modinfo = _read_modinfo(path)
                 if modinfo and modinfo.get("name"):
-                    drop_name = modinfo["name"].lower()
+                    drop_name = modinfo["name"]
         except Exception:
             pass
         try:
@@ -2741,23 +2747,18 @@ class CdummWindow(FluentWindow):
             if path.suffix.lower() == ".json":
                 jp = detect_json_patch(path)
                 if jp and jp.get("name"):
-                    drop_name = jp["name"].lower()
+                    drop_name = jp["name"]
         except Exception:
             pass
 
-        drop_norm = _normalize(drop_name)
-        drop_compact = _compact(drop_name)
-        for m in self._mod_manager.list_mods():
-            mod_norm = _normalize(m["name"])
-            mod_compact = _compact(m["name"])
-            if len(mod_norm) >= 4 and mod_norm in drop_norm:
-                return (m["id"], m["name"])
-            if len(drop_norm) >= 4 and drop_norm in mod_norm:
-                return (m["id"], m["name"])
-            if len(mod_compact) >= 4 and mod_compact in drop_compact:
-                return (m["id"], m["name"])
-            if len(drop_compact) >= 4 and drop_compact in mod_compact:
-                return (m["id"], m["name"])
+        mods = list(self._mod_manager.list_mods())
+        # Prefer exact matches over near matches
+        for m in mods:
+            if is_same_mod(drop_name, m["name"]):
+                return (m["id"], m["name"], "exact")
+        for m in mods:
+            if token_overlap_ratio(drop_name, m["name"]) >= 0.6:
+                return (m["id"], m["name"], "near")
         return None
 
     def _check_game_running(self) -> bool:
