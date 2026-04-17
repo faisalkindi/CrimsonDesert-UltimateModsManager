@@ -493,6 +493,23 @@ class CdummWindow(FluentWindow):
         from qfluentwidgets.common.config import qconfig
         qconfig.themeChanged.connect(self._on_theme_changed_global)
 
+        # ── System theme listener (Windows) ──────────────────────────
+        # qconfig.themeChanged fires when setTheme() is called in-app,
+        # but the signal never fires when Windows flips system theme
+        # (e.g. user enables dark mode, or wallpaper slideshow triggers
+        # a palette change). SystemThemeListener is a thread that
+        # watches the system and calls setTheme(AUTO) on change, which
+        # cascades into qconfig.themeChanged. Without it, CDUMM's
+        # content stays white-on-white after Windows flips — the
+        # ZAIAC001 bug.
+        try:
+            from qfluentwidgets import SystemThemeListener
+            self._theme_listener = SystemThemeListener(self)
+            self._theme_listener.start()
+        except Exception as e:
+            logger.warning("SystemThemeListener unavailable: %s", e)
+            self._theme_listener = None
+
         # ── Startup context ───────────────────────────────────────────
         self._startup_context = startup_context or {}
 
@@ -1334,12 +1351,34 @@ class CdummWindow(FluentWindow):
     # ------------------------------------------------------------------
 
     def _on_theme_changed_global(self, theme) -> None:
-        """Called by qconfig.themeChanged — reapply ALL custom styles everywhere."""
+        """Called by qconfig.themeChanged — reapply ALL custom styles everywhere.
+
+        Triggered by either in-app setTheme() or by SystemThemeListener
+        picking up a Windows theme flip (wallpaper slideshow, system
+        dark-mode toggle). The ZAIAC001 bug was caused by the listener
+        never running — without it, Windows-flip events never reached
+        this handler and the content stayed white-on-white.
+        """
         # Switch sidebar logo between light/dark variant
         from qfluentwidgets import isDarkTheme
         logo_w = self.navigationInterface.widget("logo")
         if isinstance(logo_w, CdummLogoWidget):
             logo_w.set_theme_variant(isDarkTheme())
+
+        # Force Qt to re-polish the main window and its chrome so the
+        # FluentStyleSheet surface colors pick up the new theme. Without
+        # this the background can lag one paint behind on some Windows
+        # DPI configurations.
+        try:
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
+            if hasattr(self, "titleBar"):
+                self.style().unpolish(self.titleBar)
+                self.style().polish(self.titleBar)
+                self.titleBar.update()
+        except Exception as _e:
+            logger.debug("Theme repolish failed: %s", _e)
 
         # Update banner theme
         self._apply_update_banner_style()
@@ -4010,6 +4049,15 @@ class CdummWindow(FluentWindow):
 
     def closeEvent(self, event) -> None:
         """Clean shutdown -- stop timers, quit threads, close DB, remove lock."""
+        # Stop the SystemThemeListener FIRST — it's a background thread
+        # that can hold references during Qt teardown if left running.
+        listener = getattr(self, "_theme_listener", None)
+        if listener is not None:
+            try:
+                listener.terminate()
+                listener.deleteLater()
+            except Exception as _e:
+                logger.debug("Theme listener teardown failed: %s", _e)
         # Stop timers
         for timer_name in ("_update_timer", "_db_poll_timer"):
             timer = getattr(self, timer_name, None)
