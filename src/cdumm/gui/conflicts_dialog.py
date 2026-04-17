@@ -103,10 +103,20 @@ class ConflictsDialog(MessageBoxBase):
         self.yesButton.setText(self._close_label())
         self.cancelButton.hide()
 
-        # Default size — roomy enough for ~8 rows per section without
-        # scrolling, with headroom for the load-order card.
-        self.widget.setMinimumWidth(1080)
-        self.widget.setMinimumHeight(780 if conflicts else 240)
+        # Size so Close is always visible on open. The centerWidget is
+        # placed with Qt.AlignCenter in the mask's hBoxLayout, so it
+        # renders at its minimumSize. Cap that size to the parent window
+        # minus a margin — a 780px minimum on a 720px-tall parent would
+        # overflow the mask and clip the Close button at the bottom.
+        desired_w = 1080
+        desired_h = 780 if conflicts else 280
+        floor_w = 720
+        floor_h = 420 if conflicts else 200
+        if parent is not None:
+            desired_w = min(desired_w, max(floor_w, parent.width() - 60))
+            desired_h = min(desired_h, max(floor_h, parent.height() - 60))
+        self.widget.setMinimumWidth(desired_w)
+        self.widget.setMinimumHeight(desired_h)
 
         # User can drag the bottom-right corner to enlarge the dialog.
         # Qt's QSizeGrip resizes the ``widget`` QFrame it's parented to,
