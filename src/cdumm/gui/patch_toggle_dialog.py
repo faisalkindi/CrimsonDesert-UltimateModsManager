@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QHBoxLayout,
-    QScrollArea, QVBoxLayout, QWidget, QFrame,
+    QVBoxLayout, QWidget, QFrame,
 )
 
 from qfluentwidgets import (
@@ -15,6 +15,7 @@ from qfluentwidgets import (
     MessageBox,
     MessageBoxBase,
     PushButton,
+    SingleDirectionScrollArea,
     StrongBodyLabel,
     SubtitleLabel,
 )
@@ -60,9 +61,10 @@ class PatchToggleDialog(MessageBoxBase):
 
         # Scroll area for patches
         from qfluentwidgets import isDarkTheme
-        scroll = QScrollArea()
+        scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(300)
+        scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         container = QWidget()
         if isDarkTheme():
             container.setStyleSheet("QWidget { background: #1C2028; } "

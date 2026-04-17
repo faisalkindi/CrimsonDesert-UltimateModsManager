@@ -2141,9 +2141,10 @@ class CdummWindow(FluentWindow):
                         variants.append(sub.name)
             if len(variants) > 1:
                 from qfluentwidgets import (
-                    MessageBoxBase, SubtitleLabel, CaptionLabel,
+                    MessageBoxBase, SingleDirectionScrollArea,
+                    SubtitleLabel, CaptionLabel,
                 )
-                from PySide6.QtWidgets import QRadioButton, QScrollArea, QFrame
+                from PySide6.QtWidgets import QRadioButton, QFrame
                 from PySide6.QtGui import QFont as _QF
 
                 class _VariantDialog(MessageBoxBase):
@@ -2168,9 +2169,11 @@ class CdummWindow(FluentWindow):
                         self.viewLayout.addSpacing(8)
 
                         from qfluentwidgets import isDarkTheme
-                        scroll = QScrollArea()
+                        scroll = SingleDirectionScrollArea(
+                            orient=Qt.Orientation.Vertical)
                         scroll.setWidgetResizable(True)
-                        scroll.setFrameShape(QFrame.Shape.NoFrame)
+                        scroll.setFrameShape(
+                            SingleDirectionScrollArea.Shape.NoFrame)
                         scroll.setMaximumHeight(300)
                         container = QWidget()
                         if isDarkTheme():

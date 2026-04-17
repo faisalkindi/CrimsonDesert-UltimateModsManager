@@ -16,11 +16,12 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QScrollArea, QSizeGrip, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QSizeGrip, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
-    MessageBoxBase, SimpleCardWidget, SubtitleLabel, getFont,
+    MessageBoxBase, SimpleCardWidget, SingleDirectionScrollArea, SubtitleLabel,
+    getFont,
 )
 
 from cdumm.gui.conflict_view import ACTIONABLE_LEVELS, ConflictView
@@ -257,27 +258,15 @@ class ConflictsDialog(MessageBoxBase):
             inner_layout.addWidget(wrap)
         inner_layout.addStretch(1)
 
-        scroll = QScrollArea()
+        # Use SingleDirectionScrollArea (not raw QScrollArea) so the
+        # scrollbar matches SmoothScrollArea used by every other page
+        # in the app — identical Fluent SmoothScrollBar widget.
+        scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidget(inner)
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMaximumHeight(150)
-        # Same QScrollBar QSS shape as the trees — keeps all three
-        # scrollbars in the dialog visually identical.
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-            " QScrollBar:vertical {"
-            "   background: transparent; width: 8px;"
-            "   margin: 4px 2px 4px 0; }"
-            " QScrollBar::handle:vertical {"
-            "   background: rgba(128, 128, 128, 140);"
-            "   border-radius: 4px; min-height: 24px; }"
-            " QScrollBar::handle:vertical:hover {"
-            "   background: rgba(128, 128, 128, 200); }"
-            " QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,"
-            " QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
-            "   background: transparent; height: 0; width: 0; }")
+        scroll.enableTransparentBackground()
         card_layout.addWidget(scroll)
         self.viewLayout.addWidget(card)
 

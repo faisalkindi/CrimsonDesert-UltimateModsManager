@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -24,6 +23,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     CaptionLabel,
     PrimaryPushButton,
+    SingleDirectionScrollArea,
     SubtitleLabel,
     isDarkTheme,
 )
@@ -137,9 +137,9 @@ class ConfigPanel(QWidget):
         root.addLayout(self._badge_row)
 
         # ── Scrollable body ───────────────────────────────────────────
-        scroll = QScrollArea()
+        scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         # No horizontal scrollbar — long labels wrap instead of overflowing.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { background: transparent; }")

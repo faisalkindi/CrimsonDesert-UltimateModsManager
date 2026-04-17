@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup, QVBoxLayout, QListWidget, QListWidgetItem,
-    QHBoxLayout, QCheckBox, QRadioButton, QScrollArea, QWidget,
+    QHBoxLayout, QCheckBox, QRadioButton, QWidget,
     QFrame,
 )
 
@@ -18,6 +18,7 @@ from qfluentwidgets import (
     MessageBoxBase,
     PrimaryPushButton,
     PushButton,
+    SingleDirectionScrollArea,
     SubtitleLabel,
 )
 
@@ -174,9 +175,9 @@ class PresetPickerDialog(MessageBoxBase):
 
         # Checkbox list inside a scroll area (multi-select)
         from qfluentwidgets import isDarkTheme
-        scroll = QScrollArea()
+        scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(200)
         scroll.setMaximumHeight(350)
 
@@ -396,8 +397,9 @@ class TogglePickerDialog(MessageBoxBase):
         self.viewLayout.addWidget(hint)
 
         from qfluentwidgets import isDarkTheme
-        scroll = QScrollArea()
+        scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(250)
         scroll_widget = QWidget()
         if isDarkTheme():
@@ -474,8 +476,9 @@ class TogglePickerDialog(MessageBoxBase):
         self.viewLayout.addLayout(sel_row)
 
         from qfluentwidgets import isDarkTheme
-        scroll = QScrollArea()
+        scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(250)
         scroll_widget = QWidget()
         if isDarkTheme():
