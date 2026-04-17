@@ -20,8 +20,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
-    MessageBoxBase, SimpleCardWidget, SmoothScrollDelegate, SubtitleLabel,
-    getFont,
+    MessageBoxBase, SimpleCardWidget, SubtitleLabel, getFont,
 )
 
 from cdumm.gui.conflict_view import ACTIONABLE_LEVELS, ConflictView
@@ -262,11 +261,23 @@ class ConflictsDialog(MessageBoxBase):
         scroll.setWidget(inner)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setMaximumHeight(100)
-        self._order_scroll_delegate = SmoothScrollDelegate(scroll, useAni=True)
+        scroll.setMaximumHeight(150)
+        # Same QScrollBar QSS shape as the trees — keeps all three
+        # scrollbars in the dialog visually identical.
         scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }")
+            " QScrollArea > QWidget > QWidget { background: transparent; }"
+            " QScrollBar:vertical {"
+            "   background: transparent; width: 8px;"
+            "   margin: 4px 2px 4px 0; }"
+            " QScrollBar::handle:vertical {"
+            "   background: rgba(128, 128, 128, 140);"
+            "   border-radius: 4px; min-height: 24px; }"
+            " QScrollBar::handle:vertical:hover {"
+            "   background: rgba(128, 128, 128, 200); }"
+            " QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,"
+            " QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            "   background: transparent; height: 0; width: 0; }")
         card_layout.addWidget(scroll)
         self.viewLayout.addWidget(card)
 

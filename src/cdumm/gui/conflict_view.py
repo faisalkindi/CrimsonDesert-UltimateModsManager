@@ -5,9 +5,9 @@ from PySide6.QtGui import (
     QAction, QColor, QFont, QStandardItem, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
-    QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget,
+    QAbstractItemView, QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget,
 )
-from qfluentwidgets import SmoothScrollDelegate, getFont, isDarkTheme
+from qfluentwidgets import getFont, isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
 
@@ -73,6 +73,27 @@ class ConflictView(QWidget):
             background: rgba(40, 120, 208, 48);
             border-radius: 4px;
         }
+        QScrollBar:vertical {
+            background: transparent;
+            width: 8px;
+            margin: 4px 2px 4px 0;
+        }
+        QScrollBar::handle:vertical {
+            background: rgba(128, 128, 128, 140);
+            border-radius: 4px;
+            min-height: 24px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: rgba(128, 128, 128, 200);
+        }
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical,
+        QScrollBar::add-page:vertical,
+        QScrollBar::sub-page:vertical {
+            background: transparent;
+            height: 0;
+            width: 0;
+        }
         """
 
     @staticmethod
@@ -134,10 +155,12 @@ class ConflictView(QWidget):
         self._tree.setFont(getFont(14))
         self._tree.header().setFont(getFont(14, QFont.Weight.DemiBold))
 
-        # Fluent smooth-scroll + themed scrollbars on the tree's internal
-        # scroll area. Without this the tree falls back to raw Qt scroll
-        # chrome that clashes with the rest of the app.
-        self._tree_scroll_delegate = SmoothScrollDelegate(self._tree, useAni=True)
+        # Pixel-level scroll gives smooth wheel movement. The native
+        # QScrollBar is styled via the tree QSS above to match the rest
+        # of the app — using SmoothScrollDelegate's Fluent overlay gave
+        # inconsistent widths across trees (hover expands 3px→12px).
+        self._tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._model = QStandardItemModel()
         self._model.setHorizontalHeaderLabels(["Conflict", "Level", "Resolution"])
         self._tree.setModel(self._model)
