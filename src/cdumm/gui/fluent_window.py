@@ -2065,57 +2065,74 @@ class CdummWindow(FluentWindow):
         if self._mod_manager:
             existing = self._find_existing_mod(path)
             if existing:
-                mid, mname, _match_level = existing
-                # Get installed mod's version
-                installed_version = None
-                for m in self._mod_manager.list_mods():
-                    if m["id"] == mid:
-                        installed_version = m.get("version") or ""
-                        break
-
-                # Get dropped mod's version
-                drop_version = self._get_drop_version(path)
-
-                # Compare versions
-                if installed_version and drop_version and installed_version == drop_version:
-                    # Same version — skip silently with toast
-                    InfoBar.info(
-                        title=tr("infobar.skipped"),
-                        content=tr("infobar.skipped_msg", name=mname, version=drop_version),
-                        duration=3000, position=InfoBarPosition.TOP, parent=self)
-                    logger.info("Skipped duplicate: %s v%s", mname, drop_version)
-                    self._process_next_import()
-                    return
-
-                # Different version — determine if update or downgrade
-                if installed_version and drop_version and drop_version < installed_version:
-                    # Downgrade
-                    box = MessageBox(
-                        "Downgrade Mod?",
-                        f"'{mname}' v{installed_version} is installed.\n\n"
-                        f"You're importing an older version (v{drop_version}).\n"
-                        f"Replace with the older version?",
+                mid, mname, match_level = existing
+                # Near matches (token overlap ≥ 0.6 but not exact) route
+                # through a pre-prompt so users never silently overwrite
+                # a mod that shares words with the new one. See plan 2.2.
+                treat_as_dup = True
+                if match_level == "near":
+                    near_box = MessageBox(
+                        "Similar Mod Detected",
+                        f"The mod you're importing looks similar to "
+                        f"'{mname}' which is already installed.\n\n"
+                        f"Is this an update to that mod, or a separate mod?",
                         self)
-                else:
-                    # Update (or unknown versions)
-                    old_ver = f" v{installed_version}" if installed_version else ""
-                    new_ver = f" v{drop_version}" if drop_version else ""
-                    box = MessageBox(
-                        "Update Mod?",
-                        f"'{mname}'{old_ver} is already installed.\n\n"
-                        f"Update to{new_ver}? (Old version will be removed)",
-                        self)
-
-                if box.exec():
+                    near_box.yesButton.setText("Update existing")
+                    near_box.cancelButton.setText("Import as new")
+                    if not near_box.exec():
+                        # 'Import as new' — bypass the dup flow entirely
+                        treat_as_dup = False
+                if treat_as_dup:
+                    # Get installed mod's version
+                    installed_version = None
                     for m in self._mod_manager.list_mods():
                         if m["id"] == mid:
-                            self._update_priority = m.get("priority")
-                            self._update_enabled = m.get("enabled")
+                            installed_version = m.get("version") or ""
                             break
-                    self._mod_manager.remove_mod(mid)
-                else:
-                    self._process_next_import()
-                    return
+
+                    # Get dropped mod's version
+                    drop_version = self._get_drop_version(path)
+
+                    # Compare versions
+                    if installed_version and drop_version and installed_version == drop_version:
+                        # Same version — skip silently with toast
+                        InfoBar.info(
+                            title=tr("infobar.skipped"),
+                            content=tr("infobar.skipped_msg", name=mname, version=drop_version),
+                            duration=3000, position=InfoBarPosition.TOP, parent=self)
+                        logger.info("Skipped duplicate: %s v%s", mname, drop_version)
+                        self._process_next_import()
+                        return
+
+                    # Different version — determine if update or downgrade
+                    if installed_version and drop_version and drop_version < installed_version:
+                        # Downgrade
+                        box = MessageBox(
+                            "Downgrade Mod?",
+                            f"'{mname}' v{installed_version} is installed.\n\n"
+                            f"You're importing an older version (v{drop_version}).\n"
+                            f"Replace with the older version?",
+                            self)
+                    else:
+                        # Update (or unknown versions)
+                        old_ver = f" v{installed_version}" if installed_version else ""
+                        new_ver = f" v{drop_version}" if drop_version else ""
+                        box = MessageBox(
+                            "Update Mod?",
+                            f"'{mname}'{old_ver} is already installed.\n\n"
+                            f"Update to{new_ver}? (Old version will be removed)",
+                            self)
+
+                    if box.exec():
+                        for m in self._mod_manager.list_mods():
+                            if m["id"] == mid:
+                                self._update_priority = m.get("priority")
+                                self._update_enabled = m.get("enabled")
+                                break
+                        self._mod_manager.remove_mod(mid)
+                    else:
+                        self._process_next_import()
+                        return
 
         # ── 4. Variant picker ─────────────────────────────────────────
         if path.is_dir():
