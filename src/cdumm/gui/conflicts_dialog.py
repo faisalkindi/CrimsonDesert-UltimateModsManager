@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QScrollArea, QSizeGrip, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, FluentIcon, IconInfoBadge, InfoBadge, InfoLevel,
@@ -82,8 +82,23 @@ class ConflictsDialog(MessageBoxBase):
         self.yesButton.setText(self._close_label())
         self.cancelButton.hide()
 
-        self.widget.setMinimumWidth(820)
-        self.widget.setMinimumHeight(560 if conflicts else 220)
+        # Default size — roomy enough for ~8 rows per section without
+        # scrolling, with headroom for the load-order card.
+        self.widget.setMinimumWidth(1080)
+        self.widget.setMinimumHeight(780 if conflicts else 240)
+
+        # User can drag the bottom-right corner to enlarge the dialog.
+        # Qt's QSizeGrip resizes the ``widget`` QFrame it's parented to,
+        # and MaskDialogBase's hBoxLayout re-centres on every change.
+        if conflicts:
+            grip_row = QHBoxLayout()
+            grip_row.setContentsMargins(0, 0, 0, 0)
+            grip_row.addStretch(1)
+            grip = QSizeGrip(self.widget)
+            grip.setFixedSize(16, 16)
+            grip_row.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom
+                               | Qt.AlignmentFlag.AlignRight)
+            self.viewLayout.addLayout(grip_row)
 
     # ------------------------------------------------------------------
     # Sub-builders
@@ -165,9 +180,10 @@ class ConflictsDialog(MessageBoxBase):
 
         tree = ConflictView(self.widget)
         tree.update_conflicts(items)
-        # Cap tree height so two sections fit without monster dialog
-        tree.setMaximumHeight(260)
-        self.viewLayout.addWidget(tree)
+        # Minimum for readability; no max — let the tree stretch as the
+        # user drags the dialog bigger via the QSizeGrip handle.
+        tree.setMinimumHeight(220)
+        self.viewLayout.addWidget(tree, 1)
 
     # ------------------------------------------------------------------
 
