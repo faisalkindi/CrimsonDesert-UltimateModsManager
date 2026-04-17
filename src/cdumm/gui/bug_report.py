@@ -957,9 +957,13 @@ class BugReportDialog(MessageBoxBase):
         )
 
     def _save(self) -> None:
+        from cdumm.storage.config import default_export_dir
+        default_name = (
+            f"cdumm_bug_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        default_path = default_export_dir(getattr(self, "_db", None)) / default_name
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Bug Report",
-            f"cdumm_bug_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            str(default_path),
             "Text Files (*.txt)",
         )
         if path:

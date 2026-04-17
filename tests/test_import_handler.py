@@ -122,7 +122,10 @@ def test_import_from_zip_no_game_files(tmp_path: Path) -> None:
 
     result = import_from_zip(mod_zip, game_dir, db, snapshot, deltas_dir)
     assert result.error is not None
-    assert "No recognized game files" in result.error
+    # Error message was improved to list what was actually found in
+    # the archive, so users can diagnose without re-submitting.
+    assert "CDUMM-supported mod" in result.error
+    assert ".txt" in result.error
     db.close()
 
 

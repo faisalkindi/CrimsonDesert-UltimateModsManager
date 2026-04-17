@@ -1059,10 +1059,28 @@ def _import_from_extracted(
                 converted, game_dir, db, snapshot, deltas_dir, tex_name,
                 existing_mod_id=existing_mod_id, modinfo=modinfo)
 
-    # Check for scripts
+    # Check for scripts: when the archive contains ONLY a .bat or .py
+    # and no PAZ/PAMT files, treat it as a script mod (e.g. Glider
+    # Stamina, which ships as glider-stamina.bat inside a zip). Copy
+    # the script out of tmp_path to a standalone file and run it
+    # through import_from_script, so users don't have to extract zips
+    # manually.
     scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
     if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
-        result.error = "This archive contains a script mod. It should be handled by the script mod flow."
+        if len(scripts) == 1:
+            # Single-script archive → route to the script-mod flow.
+            logger.info(
+                "Archive contains a single script mod (%s) — routing to "
+                "import_from_script", scripts[0].name)
+            return import_from_script(
+                scripts[0], game_dir, db, snapshot, deltas_dir)
+        # Multiple scripts are ambiguous; keep the explicit error so
+        # the user can pick one and drop it directly.
+        names = ", ".join(s.name for s in scripts)
+        result.error = (
+            f"Archive contains {len(scripts)} scripts ({names}). "
+            "Extract and drop the one you want to run as a script mod."
+        )
         return result
 
     # Detect multi-variant
@@ -1291,13 +1309,22 @@ def import_from_zip(
                     existing_mod_id=existing_mod_id, modinfo=modinfo)
                 return result
 
-        # Check if zip contains a script instead of game files
+        # Check if zip contains a script. When it's a single-script
+        # zip (like Glider Stamina's glider-stamina.bat), route it to
+        # the script-mod flow so the user doesn't have to unzip first.
         scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
         if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
+            if len(scripts) == 1:
+                logger.info(
+                    "Zip '%s' is a single-script mod (%s) — routing to "
+                    "import_from_script", archive_path.name, scripts[0].name)
+                return import_from_script(
+                    scripts[0], game_dir, db, snapshot, deltas_dir)
+            names = ", ".join(s.name for s in scripts)
             result.error = (
-                f"'{archive_path.name}' is a standalone script/tool, not a "
-                "CDUMM mod. Run it directly if you need the tool, or extract "
-                "the script and drop the .py/.bat file if it's a CDUMM script mod."
+                f"'{archive_path.name}' contains {len(scripts)} scripts "
+                f"({names}). Extract and drop the specific script you "
+                "want to run."
             )
             return result
 
@@ -1366,42 +1393,77 @@ def import_from_folder(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
                     existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
 
-    # Check for JSON byte-patch format in folder — use ENTR deltas
-    jp_data = detect_json_patch(folder_path)
-    if jp_data is not None:
-        from cdumm.engine.json_patch_handler import import_json_as_entr
-        jp_name = jp_data.get("name", mod_name)
-        jp_modinfo = {
-            "name": jp_data.get("name"), "version": jp_data.get("version"),
-            "author": jp_data.get("author"), "description": jp_data.get("description"),
-        }
-        if jp_modinfo.get("name"):
-            jp_name = jp_modinfo["name"]
-        entr_result = import_json_as_entr(
-            jp_data, game_dir, db, deltas_dir, jp_name,
-            existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
-        if entr_result is not None:
+    # Check for JSON byte-patch format in folder — use ENTR deltas.
+    # When the folder has MULTIPLE valid JSONs (Trust Me main + Pet
+    # Abyss Gear, bundled packs), import each as its own mod so the
+    # user can toggle them independently. Only the first is returned
+    # to the caller as the primary result; the rest are logged and
+    # appear in the mod list after this function returns.
+    from cdumm.engine.json_patch_handler import (
+        detect_json_patches_all, import_json_as_entr,
+    )
+    jp_list = detect_json_patches_all(folder_path)
+    if jp_list:
+        if len(jp_list) > 1:
+            logger.info(
+                "Folder '%s' contains %d JSON patches — importing each "
+                "as a separate mod", folder_path.name, len(jp_list))
+        # Import the first as the primary result we return
+        primary_result = None
+        for idx, jp_data in enumerate(jp_list):
+            jp_name = jp_data.get("name", jp_data["_json_path"].stem)
+            jp_modinfo = {
+                "name": jp_data.get("name"), "version": jp_data.get("version"),
+                "author": jp_data.get("author"), "description": jp_data.get("description"),
+            }
+            if jp_modinfo.get("name"):
+                jp_name = jp_modinfo["name"]
+            # Only the first JSON reuses the existing_mod_id (when
+            # re-importing). Extras always create new mod rows.
+            target_id = existing_mod_id if idx == 0 else None
+            entr_result = import_json_as_entr(
+                jp_data, game_dir, db, deltas_dir, jp_name,
+                existing_mod_id=target_id, modinfo=jp_modinfo)
+            if entr_result is None:
+                continue
             if entr_result.get("version_mismatch"):
-                result = ModImportResult(jp_name)
-                game_ver = entr_result.get("game_version", "unknown")
-                mismatched = entr_result.get("mismatched", 0)
-                result.error = (
-                    f"This mod is incompatible with the current game version. "
-                    f"{mismatched} byte patches don't match — the game data has "
-                    f"changed since this mod was created (mod targets version "
-                    f"{game_ver}). The mod author needs to update it.")
-                return result
+                if idx == 0:
+                    result = ModImportResult(jp_name)
+                    game_ver = entr_result.get("game_version", "unknown")
+                    mismatched = entr_result.get("mismatched", 0)
+                    result.error = (
+                        f"This mod is incompatible with the current game version. "
+                        f"{mismatched} byte patches don't match — the game data has "
+                        f"changed since this mod was created (mod targets version "
+                        f"{game_ver}). The mod author needs to update it.")
+                    primary_result = result
+                else:
+                    logger.warning(
+                        "Skipping bundled JSON '%s' — version mismatch",
+                        jp_data["_json_path"].name)
+                continue
             if not entr_result["changed_files"]:
-                result = ModImportResult(jp_name)
-                result.error = (
-                    "This mod's changes are already present in your game files. "
-                    "Nothing to apply.")
-                return result
+                if idx == 0:
+                    result = ModImportResult(jp_name)
+                    result.error = (
+                        "This mod's changes are already present in your game files. "
+                        "Nothing to apply.")
+                    primary_result = result
+                continue
             result = ModImportResult(jp_name)
             result.changed_files = entr_result["changed_files"]
             if jp_data.get("patches"):
                 _store_json_patches(db, result, jp_data, game_dir)
-            return result
+            if idx == 0:
+                primary_result = result
+            else:
+                logger.info(
+                    "Bundled JSON '%s' imported as separate mod '%s' "
+                    "(%d files changed)",
+                    jp_data["_json_path"].name, jp_name,
+                    len(result.changed_files))
+        if primary_result is not None:
+            return primary_result
 
     # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
     tex_info = detect_texture_mod(folder_path)
@@ -1918,7 +1980,30 @@ def _process_extracted_files(
     _emit_progress(2, f"Matching files for {mod_name}...")
     matches = _match_game_files(extracted_dir, game_dir, snapshot)
     if not matches:
-        result.error = "No recognized game files found in this mod."
+        # Build a short inventory of what we DID see so the user (and
+        # we, when they paste the error) can tell what's wrong. Most
+        # "unrecognized folder" reports have the mod in a non-standard
+        # layout CDUMM can't auto-detect — listing the extensions we
+        # found makes it obvious whether the drop was a readme, a
+        # loose DDS, a weird JSON schema, etc.
+        counts: dict[str, int] = {}
+        total = 0
+        for p in extracted_dir.rglob("*"):
+            if p.is_file():
+                total += 1
+                ext = p.suffix.lower() or "(no-ext)"
+                counts[ext] = counts.get(ext, 0) + 1
+                if total > 500:  # cap so huge folders don't stall
+                    break
+        summary = ", ".join(f"{n} {ext}" for ext, n in sorted(
+            counts.items(), key=lambda kv: -kv[1])[:6])
+        result.error = (
+            "This doesn't look like a CDUMM-supported mod. No PAZ/PAMT "
+            "files, no valid JSON patch, no recognised Crimson Browser "
+            f"manifest, and no DDS texture pack.\nFound {total} file(s): "
+            f"{summary}\nIf this is a new format, paste the mod's "
+            "Nexus page in the Bug Report card so we can add support."
+        )
         return result
 
     new_count = sum(1 for _, _, is_new in matches if is_new)

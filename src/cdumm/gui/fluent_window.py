@@ -3340,9 +3340,11 @@ class CdummWindow(FluentWindow):
         if not self._db:
             return
         from PySide6.QtWidgets import QFileDialog
+        from cdumm.storage.config import default_export_dir
 
+        default_path = default_export_dir(self._db) / "cdumm_modlist.json"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Mod List", "cdumm_modlist.json", "JSON Files (*.json)")
+            self, "Export Mod List", str(default_path), "JSON Files (*.json)")
         if not path:
             return
         from cdumm.engine.mod_list_io import export_mod_list

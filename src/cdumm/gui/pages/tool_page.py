@@ -1693,9 +1693,13 @@ class InspectModPage(ToolPageBase):
         from cdumm.engine.test_mod_checker import generate_compatibility_report
         report_text = generate_compatibility_report(self._inspect_result)
 
+        from cdumm.storage.config import default_export_dir
+        default_path = (
+            default_export_dir(getattr(self, "_db", None))
+            / f"{self._inspect_result.mod_name}_compatibility.md")
         path, _ = QFileDialog.getSaveFileName(
             self, tr("tools.inspect.save_report"),
-            f"{self._inspect_result.mod_name}_compatibility.md",
+            str(default_path),
             "Markdown (*.md)")
         if path:
             Path(path).write_text(report_text, encoding="utf-8")

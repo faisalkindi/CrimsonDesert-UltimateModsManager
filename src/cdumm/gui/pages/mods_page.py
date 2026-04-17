@@ -115,6 +115,10 @@ class ModsPage(QWidget):
         header_row.setSpacing(12)
         from qfluentwidgets import SubtitleLabel
         self._section_title = SubtitleLabel(tr("mod_list.section_title"))
+        # Clarify the load-order convention on hover — the #1 vs "bigger
+        # number" direction is a frequent source of user confusion. The
+        # mod at the top of the list wins conflicts against anything below.
+        self._section_title.setToolTip(tr("mod_list.title_tooltip"))
         header_row.addWidget(self._section_title)
         header_row.addStretch()
 

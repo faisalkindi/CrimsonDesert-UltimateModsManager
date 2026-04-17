@@ -529,22 +529,33 @@ class ModManager:
         return cursor.fetchone()[0]
 
     def move_up(self, mod_id: int) -> None:
-        """Move a mod higher in load order (lower priority number = loaded earlier = loses conflicts)."""
+        """Move a mod one row higher in the list (toward #1).
+
+        CDUMM convention: **lower priority number wins**. The mod
+        visually at the top of the mod list (#1) is the winner when
+        two mods touch the same file. ``apply_engine._get_file_deltas``
+        orders ``priority DESC`` so the mod with the lowest priority
+        number applies LAST and therefore overwrites the others.
+        """
         mods = self.list_mods()
         idx = next((i for i, m in enumerate(mods) if m["id"] == mod_id), None)
         if idx is None or idx == 0:
             return
         self._swap_priority(mods[idx]["id"], mods[idx - 1]["id"])
-        logger.info("Moved mod %d up in load order", mod_id)
+        logger.info("Moved mod %d up in load order (toward winner)", mod_id)
 
     def move_down(self, mod_id: int) -> None:
-        """Move a mod lower in load order (higher priority number = loaded later = wins conflicts)."""
+        """Move a mod one row lower in the list (away from #1).
+
+        CDUMM convention: the mod near the BOTTOM of the mod list
+        loses conflicts against mods above it. See :meth:`move_up`.
+        """
         mods = self.list_mods()
         idx = next((i for i, m in enumerate(mods) if m["id"] == mod_id), None)
         if idx is None or idx >= len(mods) - 1:
             return
         self._swap_priority(mods[idx]["id"], mods[idx + 1]["id"])
-        logger.info("Moved mod %d down in load order", mod_id)
+        logger.info("Moved mod %d down in load order (toward loser)", mod_id)
 
     def _swap_priority(self, mod_a_id: int, mod_b_id: int) -> None:
         """Swap priority values between two mods."""

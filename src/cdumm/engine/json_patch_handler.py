@@ -125,9 +125,26 @@ def detect_json_patch(path: Path) -> dict | None:
     Checks the path itself (if a .json file) or searches one level deep
     in a directory.
 
-    Returns parsed JSON dict if valid, None otherwise.
+    Returns parsed JSON dict if valid, None otherwise. For folders with
+    multiple valid JSONs (e.g. Trust Me + Pet Abyss Gear shipped as one
+    zip), returns the first — callers that want all of them should use
+    :func:`detect_json_patches_all` and import each separately.
     """
-    candidates = []
+    results = detect_json_patches_all(path)
+    return results[0] if results else None
+
+
+def detect_json_patches_all(path: Path) -> list[dict]:
+    """Return every valid JSON byte-patch under ``path``.
+
+    Folders that ship multi-part JSON mods (Trust Me's main + Pet Abyss
+    Gear, bundled texture packs, etc.) put several independent patch
+    files in the same zip. Previously CDUMM only imported the first and
+    silently dropped the rest. Callers now iterate this list to create
+    one mod row per JSON so the user ends up with everything enabled,
+    toggleable per-part, and properly version-tracked.
+    """
+    candidates: list[Path] = []
     if path.is_file() and path.suffix.lower() == ".json":
         candidates = [path]
     elif path.is_dir():
@@ -137,6 +154,7 @@ def detect_json_patch(path: Path) -> dict | None:
 
     from cdumm.engine.json_repair import load_json_tolerant
 
+    valid: list[dict] = []
     for candidate in candidates:
         try:
             data = load_json_tolerant(candidate)
@@ -147,10 +165,10 @@ def detect_json_patch(path: Path) -> dict | None:
                     and "game_file" in data["patches"][0]
                     and "changes" in data["patches"][0]):
                 data["_json_path"] = candidate
-                return data
+                valid.append(data)
         except Exception:
             continue
-    return None
+    return valid
 
 
 def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
