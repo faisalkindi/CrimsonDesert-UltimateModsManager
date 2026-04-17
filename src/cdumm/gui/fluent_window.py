@@ -3900,21 +3900,29 @@ class CdummWindow(FluentWindow):
     def _refresh_vanilla_backups(self) -> None:
         """Ensure critical vanilla backup files exist (PAMT, PAPGT, PATHC).
 
-        Only copies small files (<10MB) synchronously. Large PAZ files are
-        backed up lazily during Apply via _ensure_backups to avoid blocking
-        the main thread for minutes.
+        Small files (<10MB) always copy synchronously. Large PAZ files are
+        normally backed up lazily during Apply via _ensure_backups, EXCEPT
+        for archives that enabled JSON mods patch — those must have a
+        clean vanilla copy on disk so mount-time extraction can produce a
+        correct overlay. Without this, JSON mods targeting 0008/0.paz
+        (inventory/stamina/skill) silently no-op.
         """
         if not self._db or not self._game_dir or not self._vanilla_dir:
             return
         import shutil, os
+        from cdumm.engine.json_target_scanner import enabled_json_target_archives
         MAX_SYNC_SIZE = 10 * 1024 * 1024  # 10MB — PAMT/PAPGT/PATHC are all <14MB
         try:
+            critical = enabled_json_target_archives(self._db)
             rows = self._db.connection.execute(
                 "SELECT file_path, file_size FROM snapshots"
             ).fetchall()
             copied = 0
+            critical_copied = 0
             for rel_path, file_size in rows:
-                if file_size and file_size > MAX_SYNC_SIZE:
+                normalized = rel_path.replace("\\", "/")
+                is_critical = normalized in critical
+                if not is_critical and file_size and file_size > MAX_SYNC_SIZE:
                     continue  # Large PAZ files backed up lazily during Apply
                 game_file = self._game_dir / rel_path.replace("/", os.sep)
                 backup_file = self._vanilla_dir / rel_path.replace("/", os.sep)
@@ -3922,8 +3930,12 @@ class CdummWindow(FluentWindow):
                     backup_file.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(game_file, backup_file)
                     copied += 1
+                    if is_critical:
+                        critical_copied += 1
             if copied:
-                logger.info("Refreshed %d vanilla backups (small files only)", copied)
+                logger.info(
+                    "Refreshed %d vanilla backups (%d critical for JSON mods)",
+                    copied, critical_copied)
         except Exception as e:
             logger.warning("Vanilla backup refresh failed: %s", e)
 
