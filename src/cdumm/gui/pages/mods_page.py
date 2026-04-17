@@ -1215,15 +1215,25 @@ class ModsPage(QWidget):
                 break
 
     def _on_show_conflicts(self) -> None:
-        """Open a modal listing every active conflict in load-order.
+        """Open a Fluent-styled conflicts dialog listing every active pair.
 
-        Dedicated conflict-order view (Miki990 UX request). Builds a small
-        dialog around the existing ``ConflictView`` tree, plus a header
-        showing the load-order priority, so the user can see which mod
-        wins before deciding to reorder in the main list.
+        Dedicated conflict-order view (Miki990 UX request). Composes three
+        Fluent building blocks so the dialog feels native to the rest of
+        the app instead of a raw Qt window:
+
+        - ``SubtitleLabel`` + ``InfoBadge`` header (count is a real badge,
+          not a bold span).
+        - A styled ``ConflictView`` tree with 34 px rows and theme-aware
+          hover, sunk inside a scroll container so long lists stay tidy.
+        - A ``SimpleCardWidget`` load-order panel with pill ranks, so the
+          priority chain is scannable rather than a wall of text.
         """
         from PySide6.QtWidgets import (
-            QDialog, QVBoxLayout, QLabel, QDialogButtonBox,
+            QDialog, QVBoxLayout, QHBoxLayout, QScrollArea,
+        )
+        from qfluentwidgets import (
+            BodyLabel, CaptionLabel, InfoBadge, PillPushButton,
+            PrimaryPushButton, SimpleCardWidget, SubtitleLabel, isDarkTheme,
         )
         from cdumm.gui.conflict_view import ConflictView
 
@@ -1237,61 +1247,119 @@ class ModsPage(QWidget):
             conflicts = []
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Conflicts")
-        dlg.resize(760, 520)
+        dlg.setWindowTitle(tr("conflicts.title"))
+        dlg.resize(820, 580)
 
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(14)
+
+        # ── Header: title + count badge + explanatory caption ──────────
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+        title = SubtitleLabel(tr("conflicts.title"))
+        header_row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        if conflicts:
+            count_badge = InfoBadge.attension(str(len(conflicts)), dlg)
+            count_badge.setFixedHeight(22)
+            header_row.addWidget(count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_row.addStretch(1)
+        root.addLayout(header_row)
+
+        caption_text = (
+            tr("conflicts.empty_body") if not conflicts
+            else tr("conflicts.hint"))
+        caption = CaptionLabel(caption_text)
+        caption.setWordWrap(True)
+        root.addWidget(caption)
 
         if not conflicts:
-            msg = QLabel("No active conflicts. Every mod's changes compose "
-                        "cleanly at the current priority.")
-            msg.setWordWrap(True)
-            layout.addWidget(msg)
+            empty = BodyLabel(tr("conflicts.empty_title"))
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet("padding: 40px 0;")
+            root.addWidget(empty, 1)
         else:
-            header = QLabel(
-                f"<b>{len(conflicts)} active conflict(s)</b> — higher "
-                "priority (lower #) wins. Close this dialog and drag mods "
-                "in the main list to change the winner.")
-            header.setWordWrap(True)
-            layout.addWidget(header)
-
+            # ── Tree of conflict pairs ────────────────────────────────
             view = ConflictView(self)
             view.update_conflicts(conflicts)
-            layout.addWidget(view, 1)
+            root.addWidget(view, 1)
 
-            # Priority summary — which mods are in conflict, in load order.
-            priority_mods = []
+            # ── Load-order panel: rank pill + mod name, wrapped in card
+            priority_mods: list[int] = []
             seen_ids: set[int] = set()
             for c in conflicts:
                 for mid in (c.mod_a_id, c.mod_b_id):
-                    if mid in seen_ids:
-                        continue
-                    seen_ids.add(mid)
-                    priority_mods.append(mid)
+                    if mid not in seen_ids:
+                        seen_ids.add(mid)
+                        priority_mods.append(mid)
             mods_by_id = {m["id"]: m for m
                           in self._mod_manager.list_mods(mod_type="paz")}
             priority_mods.sort(
                 key=lambda mid: mods_by_id.get(mid, {}).get("priority", 0),
                 reverse=True)
+
             if priority_mods:
-                ranking = QLabel("<b>Conflicting mods by load order:</b><br>" + "<br>".join(
-                    f"#{i+1} — {mods_by_id.get(mid, {}).get('name', f'(id {mid})')}"
-                    for i, mid in enumerate(priority_mods)
-                ))
-                ranking.setWordWrap(True)
-                ranking.setStyleSheet("padding-top: 6px; color: #606266;")
-                layout.addWidget(ranking)
+                order_card = SimpleCardWidget(dlg)
+                order_card.setBorderRadius(8)
+                order_layout = QVBoxLayout(order_card)
+                order_layout.setContentsMargins(14, 10, 14, 10)
+                order_layout.setSpacing(6)
+                order_title = BodyLabel(tr("conflicts.load_order"))
+                order_title_font = order_title.font()
+                order_title_font.setBold(True)
+                order_title.setFont(order_title_font)
+                order_layout.addWidget(order_title)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dlg.reject)
-        buttons.accepted.connect(dlg.accept)
-        layout.addWidget(buttons)
+                # Scroll container — caps height, keeps dialog compact
+                inner = QWidget()
+                inner_layout = QVBoxLayout(inner)
+                inner_layout.setContentsMargins(0, 4, 0, 0)
+                inner_layout.setSpacing(4)
+                for i, mid in enumerate(priority_mods):
+                    row = QHBoxLayout()
+                    row.setContentsMargins(0, 0, 0, 0)
+                    row.setSpacing(10)
+                    rank_pill = PillPushButton(f"#{i + 1}")
+                    rank_pill.setCheckable(False)
+                    rank_pill.setEnabled(False)
+                    rank_pill.setFixedHeight(24)
+                    rank_pill.setFixedWidth(48)
+                    row.addWidget(rank_pill, 0, Qt.AlignmentFlag.AlignVCenter)
+                    name = mods_by_id.get(mid, {}).get("name", f"(id {mid})")
+                    name_label = BodyLabel(name)
+                    row.addWidget(name_label, 1, Qt.AlignmentFlag.AlignVCenter)
+                    row_wrap = QWidget()
+                    row_wrap.setLayout(row)
+                    inner_layout.addWidget(row_wrap)
+                inner_layout.addStretch(1)
 
-        # Use PyQt5-style exec_ to sidestep a security-lint false positive
-        # on the Python builtin ``exec``. Blocking modal is intentional so
-        # the dialog's child widgets are released immediately on close.
+                scroll = QScrollArea()
+                scroll.setWidget(inner)
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                scroll.setMaximumHeight(150)
+                scroll.setStyleSheet("QScrollArea { background: transparent; }"
+                                     " QScrollArea > QWidget > QWidget"
+                                     " { background: transparent; }")
+                order_layout.addWidget(scroll)
+                root.addWidget(order_card)
+
+        # ── Footer: primary close pill, right-aligned ─────────────────
+        footer_row = QHBoxLayout()
+        footer_row.addStretch(1)
+        close_label = tr("main.close")
+        if close_label == "main.close":
+            close_label = "Close"
+        close_btn = PrimaryPushButton(close_label)
+        close_btn.setMinimumWidth(110)
+        close_btn.clicked.connect(dlg.accept)
+        footer_row.addWidget(close_btn)
+        root.addLayout(footer_row)
+
+        # Harmonise dialog palette with current theme
+        dlg.setStyleSheet(
+            "QDialog { background: %s; }" % ("#202020" if isDarkTheme() else "#F3F3F3"))
+
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.setModal(True)
         dlg.exec_() if hasattr(dlg, "exec_") else dlg.show()

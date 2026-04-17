@@ -31,6 +31,37 @@ class ConflictView(QWidget):
 
     winner_changed = Signal(int)  # emits mod_id that was set as winner
 
+    _TREE_QSS = """
+    QTreeView {
+        background: transparent;
+        border: 1px solid rgba(128, 128, 128, 50);
+        border-radius: 8px;
+        outline: 0;
+        padding: 4px 0;
+    }
+    QTreeView::item {
+        min-height: 28px;
+        padding: 4px 6px;
+        border: none;
+    }
+    QTreeView::item:hover {
+        background: rgba(128, 128, 128, 28);
+        border-radius: 4px;
+    }
+    QTreeView::item:selected {
+        background: rgba(40, 120, 208, 48);
+        color: palette(text);
+        border-radius: 4px;
+    }
+    QHeaderView::section {
+        background: transparent;
+        padding: 8px 10px;
+        border: none;
+        border-bottom: 1px solid rgba(128, 128, 128, 60);
+        font-weight: 600;
+    }
+    """
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -38,9 +69,15 @@ class ConflictView(QWidget):
 
         self._tree = QTreeView()
         self._tree.setHeaderHidden(False)
-        self._tree.setAlternatingRowColors(True)
+        # Drop alternating bands — the custom QSS already gives rhythm
+        # without banding that clashes with Fluent surfaces.
+        self._tree.setAlternatingRowColors(False)
+        self._tree.setAnimated(True)
+        self._tree.setRootIsDecorated(True)
+        self._tree.setUniformRowHeights(True)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
+        self._tree.setStyleSheet(self._TREE_QSS)
         self._model = QStandardItemModel()
         self._model.setHorizontalHeaderLabels(["Conflict", "Level", "Resolution"])
         self._tree.setModel(self._model)

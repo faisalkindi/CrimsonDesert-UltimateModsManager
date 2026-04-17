@@ -13,6 +13,21 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.0.1",
+        "date": "2026-04-17",
+        "notes": [
+            "Settings page redesigned: Bug Report section now uses a proper Fluent card group with icons, titles, and inline descriptions — no more floating labels or empty vertical gaps.",
+            "Settings status messages use theme-aware icon badges instead of hardcoded hex colors — readable in both light and dark themes.",
+            "Conflicts dialog redesigned: Fluent header with count badge, cleaner tree rhythm, scannable load-order cards with rank pills.",
+            "Conflicts dialog: theme-aware surface colors, no more raw Qt chrome.",
+            "JMM V9.9.1 full parity: DDS partial payload, PATHC hierarchical paths, PABGH fixup-after-insert, XML patch/merge with identity keys, language redirect + PAMT .paloc rewrite, compiled-file byte-merge fallback, ChaCha20 overlay re-encryption.",
+            "Texture mods now render correctly (Enhanced Map Icons, Barber Unlocked, Kliff Wears Damiane hair).",
+            "Multi-variant JSON mods: one card per drop with cog switcher, conflict-group radio selection, title wraps correctly in dark theme.",
+            "Miki990 UX fixes: rename propagation, conflict re-detect on reorder, long-name wrap, multi-drop crash-guards, dedicated conflict-order dialog.",
+            "Linux startup crash fixed, Steam/Xbox launch fixed.",
+        ],
+    },
+    {
         "version": "3.0.0",
         "date": "2026-04-16",
         "notes": [

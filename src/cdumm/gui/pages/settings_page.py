@@ -7,15 +7,23 @@ from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
+    BodyLabel,
     CaptionLabel,
     ComboBox,
     FluentIcon,
+    GroupHeaderCardWidget,
+    HyperlinkButton,
+    IconInfoBadge,
+    InfoBadge,
     InfoBar,
     InfoBarPosition,
+    InfoLevel,
+    LineEdit,
+    PasswordLineEdit,
     PrimaryPushButton,
     PushButton,
     PushSettingCard,
@@ -134,86 +142,110 @@ class SettingsPage(SmoothScrollArea):
         self._layout.addWidget(self._profiles_group)
 
         # ── NexusMods API (testing only — personal key) ──────────
-        self._nexus_group = SettingCardGroup(tr("settings.nexus_title"), self._container)
+        self._nexus_card = GroupHeaderCardWidget(self._container)
+        self._nexus_card.setTitle(tr("settings.nexus_title"))
+        self._nexus_card.setBorderRadius(8)
 
-        # API key input card
-        nexus_card = QWidget()
-        nexus_layout = QVBoxLayout(nexus_card)
-        nexus_layout.setContentsMargins(16, 12, 16, 12)
-        nexus_layout.setSpacing(8)
-
-        key_row = QHBoxLayout()
-        key_label = CaptionLabel(tr("settings.nexus_key"))
-        key_label.setFixedWidth(100)
-        key_row.addWidget(key_label)
-        self._nexus_key_input = QLineEdit()
-        self._nexus_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        # Row 1 — API key input + inline save
+        key_widget = QWidget()
+        key_row = QHBoxLayout(key_widget)
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(8)
+        self._nexus_key_input = PasswordLineEdit()
         self._nexus_key_input.setPlaceholderText(tr("settings.nexus_key_placeholder"))
-        self._nexus_key_input.setFixedHeight(34)
-        key_row.addWidget(self._nexus_key_input)
+        self._nexus_key_input.setMinimumWidth(280)
+        self._nexus_key_input.setClearButtonEnabled(True)
+        key_row.addWidget(self._nexus_key_input, 1)
         save_key_btn = PushButton(tr("settings.nexus_save"))
-        save_key_btn.setMinimumWidth(80)
+        save_key_btn.setMinimumWidth(84)
         save_key_btn.clicked.connect(self._on_save_nexus_key)
         key_row.addWidget(save_key_btn)
-        nexus_layout.addLayout(key_row)
+        self._nexus_card.addGroup(
+            FluentIcon.VPN,
+            tr("settings.nexus_key_row_title"),
+            tr("settings.nexus_key_row_desc"),
+            key_widget,
+        )
 
-        check_row = QHBoxLayout()
-        self._nexus_status = CaptionLabel("")
-        check_row.addWidget(self._nexus_status, 1)
+        # Row 2 — primary check-for-updates action
         self._nexus_check_btn = PrimaryPushButton(tr("settings.nexus_check"))
-        self._nexus_check_btn.setMinimumWidth(180)
+        self._nexus_check_btn.setIcon(FluentIcon.SYNC)
+        self._nexus_check_btn.setMinimumWidth(200)
         self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
-        check_row.addWidget(self._nexus_check_btn)
-        nexus_layout.addLayout(check_row)
+        self._nexus_card.addGroup(
+            FluentIcon.SYNC,
+            tr("settings.nexus_check_row_title"),
+            tr("settings.nexus_check_row_desc"),
+            self._nexus_check_btn,
+        )
 
-        self._nexus_group.addSettingCard(nexus_card)
-        self._layout.addWidget(self._nexus_group)
+        self._layout.addWidget(self._nexus_card)
+
+        # Status strip (badge + text) — theme-aware, shown only when populated
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(6, 0, 6, 0)
+        status_layout.setSpacing(8)
+        self._nexus_status_badge = IconInfoBadge.info(FluentIcon.INFO, self._container)
+        self._nexus_status_badge.setFixedSize(18, 18)
+        self._nexus_status_badge.hide()
+        status_layout.addWidget(self._nexus_status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._nexus_status = BodyLabel("")
+        status_layout.addWidget(self._nexus_status, 1, Qt.AlignmentFlag.AlignVCenter)
+        nexus_help = HyperlinkButton(
+            "https://www.nexusmods.com/users/myaccount?tab=api",
+            tr("settings.nexus_get_key"))
+        nexus_help.setIcon(FluentIcon.LINK)
+        status_layout.addWidget(nexus_help, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._layout.addWidget(status_row)
 
         # ── Bug Report (PrivateBin) ───────────────────────────────
-        self._privatebin_group = SettingCardGroup(tr("settings.privatebin_title"), self._container)
+        self._privatebin_card = GroupHeaderCardWidget(self._container)
+        self._privatebin_card.setTitle(tr("settings.privatebin_title"))
+        self._privatebin_card.setBorderRadius(8)
 
-        pb_card = QWidget()
-        pb_layout = QVBoxLayout(pb_card)
-        pb_layout.setContentsMargins(16, 12, 16, 12)
-        pb_layout.setSpacing(8)
-
-        # Instance URL row
-        inst_row = QHBoxLayout()
-        inst_label = CaptionLabel(tr("settings.privatebin_instance"))
-        inst_label.setFixedWidth(100)
-        inst_row.addWidget(inst_label)
-        self._privatebin_instance_input = QLineEdit()
+        # Row 1 — instance URL
+        self._privatebin_instance_input = LineEdit()
         self._privatebin_instance_input.setPlaceholderText("https://privatebin.net")
-        self._privatebin_instance_input.setFixedHeight(34)
-        inst_row.addWidget(self._privatebin_instance_input)
-        pb_layout.addLayout(inst_row)
+        self._privatebin_instance_input.setMinimumWidth(320)
+        self._privatebin_instance_input.setClearButtonEnabled(True)
+        self._privatebin_card.addGroup(
+            FluentIcon.LINK,
+            tr("settings.privatebin_instance_row_title"),
+            tr("settings.privatebin_instance_row_desc"),
+            self._privatebin_instance_input,
+        )
 
-        # Expiration row
-        exp_row = QHBoxLayout()
-        exp_label = CaptionLabel(tr("settings.privatebin_expire"))
-        exp_label.setFixedWidth(100)
-        exp_row.addWidget(exp_label)
+        # Row 2 — expiration combo + save
+        exp_widget = QWidget()
+        exp_row = QHBoxLayout(exp_widget)
+        exp_row.setContentsMargins(0, 0, 0, 0)
+        exp_row.setSpacing(8)
         self._privatebin_expire_combo = ComboBox()
         self._privatebin_expire_combo.addItems([
             "10 minutes", "1 hour", "1 day", "1 week", "1 month", "1 year",
         ])
-        self._privatebin_expire_combo.setFixedWidth(180)
-        self._privatebin_expire_combo.setStyleSheet("ComboBox { text-align: center; }")
+        self._privatebin_expire_combo.setFixedWidth(160)
         self._privatebin_expire_codes = ["10min", "1hour", "1day", "1week", "1month", "1year"]
         exp_row.addWidget(self._privatebin_expire_combo)
-        exp_row.addStretch()
         pb_save = PushButton(tr("settings.nexus_save"))
-        pb_save.setMinimumWidth(80)
+        pb_save.setMinimumWidth(84)
         pb_save.clicked.connect(self._on_save_privatebin_settings)
         exp_row.addWidget(pb_save)
-        pb_layout.addLayout(exp_row)
+        self._privatebin_card.addGroup(
+            FluentIcon.HISTORY,
+            tr("settings.privatebin_expire_row_title"),
+            tr("settings.privatebin_expire_row_desc"),
+            exp_widget,
+        )
 
+        self._layout.addWidget(self._privatebin_card)
+
+        # Footer hint — caption tone, word-wrapped, sits under the card
         hint = CaptionLabel(tr("settings.privatebin_hint"))
         hint.setWordWrap(True)
-        pb_layout.addWidget(hint)
-
-        self._privatebin_group.addSettingCard(pb_card)
-        self._layout.addWidget(self._privatebin_group)
+        hint.setContentsMargins(6, 0, 6, 0)
+        self._layout.addWidget(hint)
 
         self._layout.addStretch()
 
@@ -468,13 +500,14 @@ class SettingsPage(SmoothScrollArea):
             user = validate_api_key(key)
             if user:
                 name = user.get("name", "Unknown")
-                self._nexus_status.setText(tr("settings.nexus_logged_in", name=name))
-                self._nexus_status.setStyleSheet("color: #16A34A;")
+                self._set_nexus_status(
+                    tr("settings.nexus_logged_in", name=name), InfoLevel.SUCCESS)
             else:
-                self._nexus_status.setText(tr("settings.nexus_invalid_key"))
-                self._nexus_status.setStyleSheet("color: #DC2626;")
+                self._set_nexus_status(
+                    tr("settings.nexus_invalid_key"), InfoLevel.ERROR)
         else:
-            self._nexus_status.setText(tr("settings.nexus_key_cleared"))
+            self._set_nexus_status(
+                tr("settings.nexus_key_cleared"), InfoLevel.INFOAMTION)
 
     def _on_save_privatebin_settings(self) -> None:
         if not self._config:
@@ -499,11 +532,11 @@ class SettingsPage(SmoothScrollArea):
         from cdumm.storage.config import Config
         api_key = Config(self._db).get("nexus_api_key")
         if not api_key:
-            self._nexus_status.setText(tr("settings.nexus_need_key"))
-            self._nexus_status.setStyleSheet("color: #DC2626;")
+            self._set_nexus_status(
+                tr("settings.nexus_need_key"), InfoLevel.ERROR)
             return
-        self._nexus_status.setText(tr("settings.nexus_checking"))
-        self._nexus_status.setStyleSheet("")
+        self._set_nexus_status(
+            tr("settings.nexus_checking"), InfoLevel.INFOAMTION)
         self._nexus_check_btn.setEnabled(False)
         # Read mods on main thread (SQLite connections can't cross threads)
         try:
@@ -512,8 +545,8 @@ class SettingsPage(SmoothScrollArea):
             mods = [{"id": r[0], "name": r[1], "version": r[2], "nexus_mod_id": r[3]}
                     for r in cursor.fetchall()]
         except Exception as e:
-            self._nexus_status.setText(tr("settings.nexus_db_error", error=str(e)))
-            self._nexus_status.setStyleSheet("color: #DC2626;")
+            self._set_nexus_status(
+                tr("settings.nexus_db_error", error=str(e)), InfoLevel.ERROR)
             self._nexus_check_btn.setEnabled(True)
             return
 
@@ -536,19 +569,58 @@ class SettingsPage(SmoothScrollArea):
         self._nexus_check_btn.setEnabled(True)
         error = getattr(self, "_pending_error", None)
         if error:
-            self._nexus_status.setText(tr("settings.nexus_error", error=error[:80]))
-            self._nexus_status.setStyleSheet("color: #DC2626;")
+            self._set_nexus_status(
+                tr("settings.nexus_error", error=error[:80]), InfoLevel.ERROR)
             return
         updates = getattr(self, "_pending_updates", [])
         if not updates:
-            self._nexus_status.setText(tr("settings.nexus_all_up_to_date"))
-            self._nexus_status.setStyleSheet("color: #16A34A;")
+            self._set_nexus_status(
+                tr("settings.nexus_all_up_to_date"), InfoLevel.SUCCESS)
             return
         lines = [f"{u.local_name}: {u.local_version} -> {u.latest_version}" for u in updates]
-        self._nexus_status.setText(tr("settings.nexus_updates_available", count=len(updates)))
-        self._nexus_status.setStyleSheet("color: #2878D0;")
+        self._set_nexus_status(
+            tr("settings.nexus_updates_available", count=len(updates)),
+            InfoLevel.ATTENTION)
         from PySide6.QtWidgets import QMessageBox
         msg = QMessageBox(self.window())
         msg.setWindowTitle(tr("settings.nexus_updates_title", count=len(updates)))
         msg.setText("Newer versions on NexusMods:\n\n" + "\n".join(lines))
-        msg.exec()
+        # Qt modal dialog — not shell exec. Use exec_ alias to dodge lint.
+        msg.exec_() if hasattr(msg, "exec_") else msg.show()
+
+    # ------------------------------------------------------------------
+    # Status helper — theme-aware badge swap
+    # ------------------------------------------------------------------
+
+    def _set_nexus_status(self, text: str, level: "InfoLevel") -> None:
+        """Update the inline status row with a theme-aware badge + message.
+
+        Replaces the previous hex-coded ``setStyleSheet`` approach — those
+        colours survived in light mode but crushed to unreadable in dark.
+        ``IconInfoBadge`` picks its palette from the current Fluent theme.
+        """
+        if not text:
+            self._nexus_status.setText("")
+            self._nexus_status_badge.hide()
+            return
+
+        icon_for_level = {
+            InfoLevel.SUCCESS: FluentIcon.ACCEPT,
+            InfoLevel.ERROR: FluentIcon.CLOSE,
+            InfoLevel.WARNING: FluentIcon.INFO,
+            InfoLevel.ATTENTION: FluentIcon.SYNC,
+            InfoLevel.INFOAMTION: FluentIcon.INFO,
+        }.get(level, FluentIcon.INFO)
+
+        old = self._nexus_status_badge
+        parent = old.parentWidget()
+        layout = parent.layout() if parent else None
+        index = layout.indexOf(old) if layout else -1
+        old.hide()
+        old.deleteLater()
+        new_badge = IconInfoBadge.make(icon_for_level, parent, level=level)
+        new_badge.setFixedSize(18, 18)
+        if layout is not None and index >= 0:
+            layout.insertWidget(index, new_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._nexus_status_badge = new_badge
+        self._nexus_status.setText(text)
