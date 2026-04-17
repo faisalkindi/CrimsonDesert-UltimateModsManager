@@ -173,8 +173,9 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
                     pass
                 # Store drop_name and extract version from folder name
                 try:
-                    import re as _re
-                    from cdumm.engine.nexus_filename import parse_nexus_filename
+                    from cdumm.engine.nexus_filename import (
+                        extract_version_from_filename, parse_nexus_filename,
+                    )
                     drop_name = mod_path.name
                     db.connection.execute(
                         "UPDATE mods SET drop_name = ? WHERE id = ? AND (drop_name IS NULL OR drop_name = '')",
@@ -182,14 +183,13 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
                     existing_ver = db.connection.execute(
                         "SELECT version FROM mods WHERE id = ?", (result.mod_id,)).fetchone()
                     if not (existing_ver and existing_ver[0]):
-                        # Prefer NexusMods filename format ({name}-{id}-{ver-parts}-{ts}).
+                        # Unified extractor: Nexus timestamp format first,
+                        # then v-prefix, then bare dotted version.
                         stem = mod_path.stem if mod_path.is_file() else mod_path.name
-                        nexus_id, nexus_ver = parse_nexus_filename(stem)
-                        version_val = nexus_ver or None
-                        if not version_val:
-                            m = _re.search(r'[vV](\d+[\.\d]*)', drop_name)
-                            if m:
-                                version_val = m.group(1)
+                        version_val = extract_version_from_filename(stem)
+                        # nexus_id still useful for update-check linking
+                        # (no-op on master where the client is a stub).
+                        nexus_id, _ = parse_nexus_filename(stem)
                         if version_val:
                             db.connection.execute(
                                 "UPDATE mods SET version = ? WHERE id = ?",

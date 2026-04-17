@@ -58,3 +58,46 @@ def parse_nexus_filename(name: str) -> tuple[int | None, str]:
     if mod_id < 1 or mod_id > 999999:
         return None, ''
     return mod_id, file_ver
+
+
+# ── Fallback patterns for non-Nexus-formatted filenames ──────────────
+
+# v-prefixed version attached to word boundary (most reliable):
+#   ``NSLWInventoryMod_v107_BagBoost`` -> "107"
+#   ``Better Trade Menu v2.1 Fix``     -> "2.1"
+#   ``stamina_v1.02.00_infinite``      -> "1.02.00"
+_V_PREFIXED = re.compile(r'(?:^|[_\s.\-])v(\d+(?:\.\d+)*)', re.IGNORECASE)
+
+# Bare dotted version (at least one dot to avoid swallowing random ints):
+#   ``Glider Stamina Unlimited (1.03.00)`` -> "1.03.00"
+#   ``Animations Trimmer 1.03.00``         -> "1.03.00"
+_DOTTED_VERSION = re.compile(
+    r'(?:^|[_\s\(\[\-])(\d+\.\d+(?:\.\d+)*)(?=[_\s\)\]\-\.]|$)')
+
+
+def extract_version_from_filename(name: str) -> str:
+    """Best-effort version extraction from a mod's filename.
+
+    Tries three sources, in order:
+
+    1. NexusMods timestamped format (``ModName-id-ver-ts``) via
+       :func:`parse_nexus_filename`.
+    2. ``v``-prefixed version anywhere in the name.
+    3. Bare dotted version number.
+
+    Returns an empty string when nothing matches. Safe to call on any
+    filename; never raises.
+    """
+    # 1. Nexus format
+    _id, ver = parse_nexus_filename(name)
+    if ver:
+        return ver
+    # 2. v-prefixed (e.g. 'Mod_v1.2', 'ModName v3')
+    m = _V_PREFIXED.search(name)
+    if m:
+        return m.group(1)
+    # 3. Bare dotted version (e.g. 'Mod 1.03.00')
+    m = _DOTTED_VERSION.search(name)
+    if m:
+        return m.group(1)
+    return ''

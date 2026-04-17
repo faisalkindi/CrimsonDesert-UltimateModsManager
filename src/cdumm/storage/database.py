@@ -119,6 +119,76 @@ class Database:
         self._connection.commit()
         logger.info("Database schema initialized")
 
+    def _backfill_mod_versions(self) -> None:
+        """Populate ``mods.version`` from ``drop_name`` for legacy imports.
+
+        Runs exactly once per DB (guarded by the ``version_backfill_done``
+        flag in the ``config`` table). Walks every ``mods`` row where
+        ``version`` is NULL or empty but ``drop_name`` is present, parses
+        the drop_name with the unified version extractor, and writes the
+        result back. Also extracts ``nexus_mod_id`` when available so
+        update-check linking works after switching to the API branch.
+        """
+        flag_row = self._connection.execute(
+            "SELECT value FROM config WHERE key = 'version_backfill_done'"
+        ).fetchone()
+        if flag_row and flag_row[0] == "1":
+            return
+
+        try:
+            from cdumm.engine.nexus_filename import (
+                extract_version_from_filename, parse_nexus_filename,
+            )
+        except Exception as e:
+            logger.warning("Version backfill: parser import failed (%s)", e)
+            return
+
+        rows = self._connection.execute(
+            "SELECT id, drop_name FROM mods "
+            "WHERE (version IS NULL OR version = '') "
+            "AND drop_name IS NOT NULL AND drop_name != ''"
+        ).fetchall()
+
+        updated = 0
+        linked = 0
+        for mod_id, drop_name in rows:
+            # drop_name is stored as the raw filename (with extension).
+            # Strip common archive extensions before parsing.
+            stem = drop_name
+            for ext in (".zip", ".7z", ".rar", ".json", ".bsdiff"):
+                if stem.lower().endswith(ext):
+                    stem = stem[: -len(ext)]
+                    break
+
+            version_val = extract_version_from_filename(stem)
+            if version_val:
+                self._connection.execute(
+                    "UPDATE mods SET version = ? WHERE id = ?",
+                    (version_val, mod_id))
+                updated += 1
+
+            nexus_id, _ = parse_nexus_filename(stem)
+            if nexus_id:
+                self._connection.execute(
+                    "UPDATE mods SET nexus_mod_id = ? "
+                    "WHERE id = ? AND nexus_mod_id IS NULL",
+                    (nexus_id, mod_id))
+                linked += 1
+
+        self._connection.execute(
+            "INSERT OR REPLACE INTO config (key, value) "
+            "VALUES ('version_backfill_done', '1')")
+        self._connection.commit()
+        if updated or linked:
+            logger.info(
+                "Version backfill: populated %d version(s), "
+                "linked %d Nexus id(s) across %d rows",
+                updated, linked, len(rows))
+        else:
+            logger.info(
+                "Version backfill: nothing to update (%d rows scanned)",
+                len(rows))
+
     def _migrate(self) -> None:
         """Run schema migrations for existing databases."""
         # Add priority column if missing (v0 → v1)
@@ -350,6 +420,13 @@ class Database:
                 "ALTER TABLE mod_config ADD COLUMN custom_values TEXT"
             )
             logger.info("Migrated: added custom_values column to mod_config")
+
+        # One-shot backfill: mods imported on master v3.0.1 or earlier have
+        # empty mods.version because parse_nexus_filename was a stub. Now
+        # that master ships the full parser, retroactively populate the
+        # version column for every mod whose drop_name can be parsed.
+        # Guarded by a config-table flag so it runs exactly once per DB.
+        self._backfill_mod_versions()
 
         # Create crash_registry table for mod health tracking
         if not self.table_exists("crash_registry"):

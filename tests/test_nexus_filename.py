@@ -7,7 +7,57 @@ whose display name ended with a year or other numeric marker
 """
 from __future__ import annotations
 
-from cdumm.engine.nexus_filename import parse_nexus_filename
+from cdumm.engine.nexus_filename import (
+    extract_version_from_filename, parse_nexus_filename,
+)
+
+
+# ── extract_version_from_filename (fallback chain) ───────────────────
+
+
+def test_extract_version_nexus_timestamped():
+    assert extract_version_from_filename(
+        "Better Radial Menus (RAW)-618-1-4-1775912922") == "1.4"
+
+
+def test_extract_version_v_prefixed_with_dots():
+    assert extract_version_from_filename("stamina_v1.02.00_infinite") == "1.02.00"
+
+
+def test_extract_version_v_prefixed_no_dots():
+    # Authors who ship 'v107' meaning 'v1.07' get the raw '107' back.
+    assert extract_version_from_filename("NSLWInventoryMod_v107_BagBoost") == "107"
+
+
+def test_extract_version_bare_dotted():
+    assert extract_version_from_filename(
+        "Even Faster Vanilla Animations Trimmer 1.03.00") == "1.03.00"
+
+
+def test_extract_version_parens_dotted():
+    assert extract_version_from_filename(
+        "Glider Stamina Unlimited (1.03.00)") == "1.03.00"
+
+
+def test_extract_version_space_v_prefixed():
+    assert extract_version_from_filename("Trust Me v2.1 Patched") == "2.1"
+
+
+def test_extract_version_single_digit_int_does_not_match():
+    # Bare single int with no decimal shouldn't be confused with version
+    assert extract_version_from_filename("SomeMod 7 Fix") == ""
+
+
+def test_extract_version_no_version_anywhere():
+    assert extract_version_from_filename("Faster Interactions All") == ""
+
+
+def test_extract_version_does_not_misfire_on_words_with_v():
+    # Words like 'Save', 'Cave', 'Over' embed 'v' but no digits follow
+    assert extract_version_from_filename("Cave Overhaul Mod") == ""
+
+
+# ── parse_nexus_filename (unchanged legacy contract) ─────────────────
 
 
 def test_standard_mod_with_single_digit_version():
