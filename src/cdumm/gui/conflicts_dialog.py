@@ -71,7 +71,7 @@ class ConflictsDialog(MessageBoxBase):
                     len(actionable), actionable,
                     FluentIcon.INFO, InfoLevel.ATTENTION,
                     caption=tr("conflicts.section_actionable_desc"),
-                    stretch=min(max(len(actionable), 2), 6))
+                    stretch=min(max(len(actionable), 2), 4))
             # Section 2 — auto-resolved (informational)
             if auto:
                 self._build_section(
@@ -79,7 +79,7 @@ class ConflictsDialog(MessageBoxBase):
                     len(auto), auto,
                     FluentIcon.ACCEPT, InfoLevel.SUCCESS,
                     caption=tr("conflicts.section_auto_desc"),
-                    stretch=min(max(len(auto), 2), 8))
+                    stretch=min(max(len(auto), 2), 12))
             # Load-order card — only shown when reordering actually matters
             if actionable:
                 self._build_load_order_card(actionable, mods_by_id)
@@ -94,7 +94,7 @@ class ConflictsDialog(MessageBoxBase):
         # minus a margin — a 780px minimum on a 720px-tall parent would
         # overflow the mask and clip the Close button at the bottom.
         desired_w = 1080
-        desired_h = 780 if conflicts else 280
+        desired_h = 920 if conflicts else 280
         floor_w = 720
         floor_h = 420 if conflicts else 200
         if parent is not None:
@@ -195,11 +195,14 @@ class ConflictsDialog(MessageBoxBase):
         self.viewLayout.addWidget(desc)
 
         tree = ConflictView(self.widget)
-        tree.update_conflicts(items)
+        # Collapsed pair rows by default — auto-expand doubles row count
+        # (pair + child per conflict) and crowds the dialog. User can
+        # click a pair to see its file-level children.
+        tree.update_conflicts(items, auto_expand=False)
         # Minimum keeps at least ~2 rows always visible; stretch lets the
         # tree grow when the dialog is taller. The tree's own internal
         # scrollbar handles overflow — no outer scroll area needed.
-        tree.setMinimumHeight(110)
+        tree.setMinimumHeight(140)
         self.viewLayout.addWidget(tree, stretch)
 
     # ------------------------------------------------------------------
@@ -259,7 +262,7 @@ class ConflictsDialog(MessageBoxBase):
         scroll.setWidget(inner)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setMaximumHeight(140)
+        scroll.setMaximumHeight(100)
         self._order_scroll_delegate = SmoothScrollDelegate(scroll, useAni=True)
         scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"

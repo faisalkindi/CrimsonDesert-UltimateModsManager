@@ -148,8 +148,15 @@ class ConflictView(QWidget):
 
         layout.addWidget(self._tree)
 
-    def update_conflicts(self, conflicts: list[Conflict]) -> None:
-        """Rebuild the tree with the current conflict list."""
+    def update_conflicts(self, conflicts: list[Conflict],
+                         auto_expand: bool = True) -> None:
+        """Rebuild the tree with the current conflict list.
+
+        ``auto_expand`` controls whether pair rows are expanded by default.
+        The conflicts dialog passes False so compact pair rows are shown;
+        the user opens the pair manually to see child file rows. Other
+        callers keep auto-expansion for quick scanning of short lists.
+        """
         self._tree.setUpdatesEnabled(False)
         self._model.blockSignals(True)
         self._model.removeRows(0, self._model.rowCount())
@@ -222,7 +229,7 @@ class ConflictView(QWidget):
         self._model.blockSignals(False)
         self._model.layoutChanged.emit()
         self._tree.setUpdatesEnabled(True)
-        if len(conflicts) <= 50:
+        if auto_expand and len(conflicts) <= 50:
             self._tree.expandAll()
 
     def _show_context_menu(self, pos) -> None:
