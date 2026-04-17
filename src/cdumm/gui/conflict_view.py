@@ -2,12 +2,12 @@ import logging
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QStandardItem, QStandardItemModel,
+    QAction, QColor, QFont, QStandardItem, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget,
+    QHeaderView, QMenu, QTreeView, QVBoxLayout, QWidget,
 )
-from qfluentwidgets import SmoothScrollDelegate, isDarkTheme
+from qfluentwidgets import SmoothScrollDelegate, getFont, isDarkTheme
 
 from cdumm.engine.conflict_detector import Conflict
 
@@ -38,45 +38,64 @@ class ConflictView(QWidget):
 
     @staticmethod
     def _tree_qss_for_theme() -> str:
-        """Build the tree stylesheet with an explicit body colour per theme.
+        """Body-of-tree stylesheet (frame, rows, hover, selection).
 
-        The Fluent palette can resolve ``palette(text)`` to a muted role on
-        QTreeView, washing cells out on the light surface. Baking a known
-        contrast pair in keeps the tree readable in both themes.
+        Deliberately NOT setting ``color:`` on ``QTreeView::item`` — QSS
+        cell colour beats ``QStandardItem.setForeground()`` via Qt's
+        styling cascade, which would wipe out the semantic hue each
+        conflict row carries (yellow for paz, orange for byte_range).
+        Per-item ``body_color`` in ``update_conflicts`` paints the rest.
         """
-        text = "#E8E8E8" if isDarkTheme() else "#1F1F1F"
-        # Note: colour is deliberately NOT set on ``QTreeView::item`` —
-        # QSS cell colour wins over ``QStandardItem.setForeground()`` via
-        # Qt's styling cascade, which would wipe out the semantic hue each
-        # conflict row carries (yellow for paz, orange for byte_range, etc).
-        # ``body_color`` in ``update_conflicts`` paints the default rows.
-        return f"""
-        QTreeView {{
+        return """
+        QTreeView {
             background: transparent;
             border: 1px solid rgba(128, 128, 128, 50);
             border-radius: 8px;
             outline: 0;
             padding: 4px 0;
-        }}
-        QTreeView::item {{
+        }
+        QTreeView::item {
             min-height: 28px;
             padding: 4px 6px;
             border: none;
-        }}
-        QTreeView::item:hover {{
+        }
+        QTreeView::item:hover {
             background: rgba(128, 128, 128, 28);
             border-radius: 4px;
-        }}
-        QTreeView::item:selected {{
+        }
+        QTreeView::item:selected {
             background: rgba(40, 120, 208, 48);
             border-radius: 4px;
+        }
+        """
+
+    @staticmethod
+    def _header_qss_for_theme() -> str:
+        """Header-only stylesheet, applied to the header widget itself.
+
+        The Fluent global stylesheet paints ``QHeaderView::section`` dark
+        via an ancestor rule. Widget-level stylesheets win over ancestor
+        stylesheets regardless of CSS specificity, so painting this at
+        ``self._tree.header()`` is the only reliable way to override it.
+        """
+        if isDarkTheme():
+            bg = "#2B2B2B"
+            text = "#E8E8E8"
+            bottom = "rgba(255, 255, 255, 30)"
+        else:
+            bg = "#FAFAFA"
+            text = "#1F1F1F"
+            bottom = "rgba(0, 0, 0, 30)"
+        return f"""
+        QHeaderView {{
+            background: {bg};
         }}
         QHeaderView::section {{
-            background: transparent;
+            background: {bg};
             color: {text};
             padding: 8px 10px;
             border: none;
-            border-bottom: 1px solid rgba(128, 128, 128, 60);
+            border-bottom: 1px solid {bottom};
             font-weight: 600;
         }}
         """
@@ -97,11 +116,17 @@ class ConflictView(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._tree.setStyleSheet(self._tree_qss_for_theme())
+        # Widget-level stylesheet on the header itself — beats the Fluent
+        # global ``QHeaderView::section`` rule that would otherwise paint
+        # the header dark on light theme (and vice versa).
+        self._tree.header().setStyleSheet(self._header_qss_for_theme())
 
-        # Inherit the application font (Oxanium) — QTreeView doesn't pick
-        # up qfluentwidgets' setFontFamilies() automatically the way the
-        # Fluent widgets do.
-        self._tree.setFont(QApplication.font())
+        # Force Oxanium via qfluentwidgets' ``getFont`` helper — plain
+        # ``QApplication.font()`` still returns the Qt default because
+        # ``setFontFamilies()`` stores the family list in qfluentwidgets
+        # qconfig without touching the application font.
+        self._tree.setFont(getFont(14))
+        self._tree.header().setFont(getFont(14, QFont.Weight.DemiBold))
 
         # Fluent smooth-scroll + themed scrollbars on the tree's internal
         # scroll area. Without this the tree falls back to raw Qt scroll
