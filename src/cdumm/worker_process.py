@@ -174,19 +174,31 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
                 # Store drop_name and extract version from folder name
                 try:
                     import re as _re
+                    from cdumm.engine.nexus_filename import parse_nexus_filename
                     drop_name = mod_path.name
                     db.connection.execute(
                         "UPDATE mods SET drop_name = ? WHERE id = ? AND (drop_name IS NULL OR drop_name = '')",
                         (drop_name, result.mod_id))
-                    # Extract version from folder/file name if not already set
                     existing_ver = db.connection.execute(
                         "SELECT version FROM mods WHERE id = ?", (result.mod_id,)).fetchone()
                     if not (existing_ver and existing_ver[0]):
-                        m = _re.search(r'[vV](\d+[\.\d]*)', drop_name)
-                        if m:
+                        # Prefer NexusMods filename format ({name}-{id}-{ver-parts}-{ts}).
+                        stem = mod_path.stem if mod_path.is_file() else mod_path.name
+                        nexus_id, nexus_ver = parse_nexus_filename(stem)
+                        version_val = nexus_ver or None
+                        if not version_val:
+                            m = _re.search(r'[vV](\d+[\.\d]*)', drop_name)
+                            if m:
+                                version_val = m.group(1)
+                        if version_val:
                             db.connection.execute(
                                 "UPDATE mods SET version = ? WHERE id = ?",
-                                (m.group(1), result.mod_id))
+                                (version_val, result.mod_id))
+                        if nexus_id:
+                            db.connection.execute(
+                                "UPDATE mods SET nexus_mod_id = ? "
+                                "WHERE id = ? AND nexus_mod_id IS NULL",
+                                (nexus_id, result.mod_id))
                     db.connection.commit()
                 except Exception:
                     pass

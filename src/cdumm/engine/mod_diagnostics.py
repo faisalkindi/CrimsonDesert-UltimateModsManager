@@ -441,26 +441,117 @@ def _verify_json_patch_bytes(data: dict, game_dir: Path,
             chunk = raw[entry.offset:entry.offset + entry.comp_size]
             content = decompress_entry(chunk, entry)
 
+            # Build name→offset map for v2 entry-anchored patches (characterinfo only).
+            name_offsets: dict[str, int] | None = None
+            needs_v2_index = any(c.get("entry") for c in changes)
+            if needs_v2_index:
+                try:
+                    from cdumm.engine.json_patch_handler import (
+                        _build_name_offsets_for_v2,
+                    )
+                    pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+                    pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
+                    if pabgh_entry is not None:
+                        pabgh_raw = open(pabgh_entry.paz_file, 'rb').read()
+                        pabgh_chunk = pabgh_raw[pabgh_entry.offset:pabgh_entry.offset + pabgh_entry.comp_size]
+                        pabgh_plain = decompress_entry(pabgh_chunk, pabgh_entry)
+                        name_offsets = _build_name_offsets_for_v2(
+                            game_file, bytes(content), pabgh_plain)
+                except Exception:
+                    name_offsets = None
+
+            unsupported_v2 = 0
+            v2_resolved = 0
+            v2_name_missing: list[str] = []
             for change in changes:
                 original = change.get("original")
-                offset = change.get("offset")
+                raw_offset = change.get("offset")
                 entry_name = change.get("entry", "")
+                record_key = change.get("record_key")
+                rel_offset = change.get("rel_offset", change.get("relative_offset"))
 
-                if original is not None and offset is not None:
-                    # Byte-level patch — verify original bytes
-                    if isinstance(original, list):
-                        actual = list(content[offset:offset + len(original)])
-                        if actual == original:
-                            verified += 1
+                # Normalise original bytes — accept list[int] OR hex string.
+                original_bytes: bytes | None = None
+                if isinstance(original, list):
+                    try:
+                        original_bytes = bytes(original)
+                    except (TypeError, ValueError):
+                        original_bytes = None
+                elif isinstance(original, str) and original:
+                    try:
+                        original_bytes = bytes.fromhex(original)
+                    except ValueError:
+                        original_bytes = None
+
+                # Normalise offset — accept int, decimal string, or hex string.
+                offset_int: int | None = None
+                if isinstance(raw_offset, int):
+                    offset_int = raw_offset
+                elif isinstance(raw_offset, str) and raw_offset:
+                    try:
+                        offset_int = int(raw_offset, 0)
+                    except ValueError:
+                        try:
+                            offset_int = int(raw_offset, 16)
+                        except ValueError:
+                            offset_int = None
+
+                # v2 entry-anchored format: `entry` name + `rel_offset`.
+                # Try to resolve through the name→offset map.
+                if (offset_int is None and record_key is None and entry_name
+                        and rel_offset is not None):
+                    if name_offsets is not None:
+                        body_off = name_offsets.get(str(entry_name))
+                        if body_off is not None:
+                            try:
+                                rel_int = (int(rel_offset, 0)
+                                           if isinstance(rel_offset, str)
+                                           else int(rel_offset))
+                            except (ValueError, TypeError):
+                                rel_int = None
+                            if rel_int is not None:
+                                offset_int = body_off + rel_int
+                                v2_resolved += 1
                         else:
-                            mismatched += 1
-                            _s(f"  MISMATCH in {game_file} at offset {offset}:")
-                            _s(f"    Expected: {original[:8]}{'...' if len(original) > 8 else ''}")
-                            _s(f"    Actual:   {actual[:8]}{'...' if len(actual) > 8 else ''}")
-                            _s(f"    Entry: {entry_name}")
-                            _s(f"    -> Game file has been updated. Mod needs new offsets.")
+                            v2_name_missing.append(str(entry_name))
+                            continue
+                    else:
+                        unsupported_v2 += 1
+                        continue
+
+                if original_bytes is not None and offset_int is not None:
+                    actual_bytes = bytes(content[offset_int:offset_int + len(original_bytes)])
+                    if actual_bytes == original_bytes:
+                        verified += 1
+                    else:
+                        mismatched += 1
+                        exp_hex = original_bytes[:8].hex()
+                        got_hex = actual_bytes[:8].hex()
+                        exp_suffix = "..." if len(original_bytes) > 8 else ""
+                        got_suffix = "..." if len(actual_bytes) > 8 else ""
+                        _s(f"  MISMATCH in {game_file} at offset {offset_int}:")
+                        _s(f"    Expected: {exp_hex}{exp_suffix}")
+                        _s(f"    Actual:   {got_hex}{got_suffix}")
+                        _s(f"    Entry: {entry_name}")
+                        _s(f"    -> Game file has been updated. Mod needs new offsets.")
                 else:
                     skipped += 1
+
+            if unsupported_v2:
+                _s(f"  {unsupported_v2} change(s) use v2 entry-anchored format for")
+                _s(f"  a file type CDUMM doesn't have a name-resolver for yet.")
+                _s(f"  (Currently: characterinfo.pabgb is supported; others TODO.)")
+            if v2_name_missing:
+                _s(f"  {len(v2_name_missing)} entry name(s) not found in the current")
+                _s(f"  game's {game_file} — these records don't exist in your install:")
+                for nm in v2_name_missing[:10]:
+                    _s(f"    - {nm!r}")
+                if len(v2_name_missing) > 10:
+                    _s(f"    ... and {len(v2_name_missing) - 10} more")
+                _s(f"  The mod targets a different game version OR uses fabricated")
+                _s(f"  entry names. Ask the author to regenerate it against your build.")
+            if v2_resolved:
+                _s(f"  {v2_resolved} v2 entry-anchored change(s) resolved via name index.")
         except Exception as e:
             _s(f"  {game_file}: verification error — {e}")
             skipped += 1

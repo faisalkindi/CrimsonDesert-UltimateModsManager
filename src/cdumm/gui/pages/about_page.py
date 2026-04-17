@@ -50,8 +50,14 @@ class _LinkCard(CardWidget):
         layout.addLayout(text_layout, stretch=1)
 
         # Link button
-        link_btn = HyperlinkButton(url, "Open", self, icon)
+        link_btn = HyperlinkButton(url, tr("about.link_open"), self, icon)
+        self._link_btn = link_btn
         layout.addWidget(link_btn)
+
+    def retranslate_open(self) -> None:
+        """Update the 'Open' button text after a language change."""
+        if hasattr(self, "_link_btn"):
+            self._link_btn.setText(tr("about.link_open"))
 
 
 class AboutPage(SmoothScrollArea):
@@ -221,15 +227,12 @@ class AboutPage(SmoothScrollArea):
         title.setFont(tf)
         text_col.addWidget(title)
 
-        desc = CaptionLabel(
-            "This project is free and open source. "
-            "If it saved you time, a small donation helps keep it going.",
-            card,
-        )
+        desc = CaptionLabel(tr("about.enjoying_desc"), card)
         desc.setWordWrap(True)
         df = desc.font()
         df.setPixelSize(13)
         desc.setFont(df)
+        self._enjoying_desc = desc
         text_col.addWidget(desc)
 
         layout.addLayout(text_col, 1)
@@ -237,7 +240,7 @@ class AboutPage(SmoothScrollArea):
         # Ko-fi button
         kofi_btn = PrimaryPushButton(tr("about.support_kofi"), card)
         kofi_btn.setFixedHeight(36)
-        kofi_btn.setFixedWidth(150)
+        kofi_btn.setMinimumWidth(150)
         bf = kofi_btn.font()
         bf.setPixelSize(13)
         bf.setWeight(QFont.Weight.DemiBold)
@@ -278,6 +281,11 @@ class AboutPage(SmoothScrollArea):
         self._credits_title.setText(tr("about.credits"))
         self._credits_dev.setText(tr("about.credits_dev"))
         self._credits_detail.setText(tr("about.credits_detail"))
+        if hasattr(self, "_enjoying_desc"):
+            self._enjoying_desc.setText(tr("about.enjoying_desc"))
+        # Refresh all LinkCard "Open" buttons
+        for card in self._container.findChildren(_LinkCard):
+            card.retranslate_open()
 
     def set_update_status(self, tag: str, url: str, body: str = "") -> None:
         """Update the about page to show an available update."""
@@ -315,7 +323,7 @@ class AboutPage(SmoothScrollArea):
 
         uc_layout.addLayout(info_col, stretch=1)
 
-        dl_btn = HyperlinkButton(url, "Download", update_card)
+        dl_btn = HyperlinkButton(url, tr("main.download"), update_card)
         df = dl_btn.font()
         df.setPixelSize(14)
         df.setWeight(QFont.Weight.DemiBold)

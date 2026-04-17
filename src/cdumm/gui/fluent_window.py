@@ -32,27 +32,7 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
-def _parse_nexus_filename(name: str) -> tuple[int | None, str]:
-    """Parse a NexusMods download filename to extract mod_id and file version.
-
-    Format: '{ModName}-{mod_id}-{file_version}-{unix_timestamp}'
-    Example: 'Legendary Bear Without Tack-934-2-1775958271' → (934, '2')
-             'EnhancedFlightv2.5-815-v2-5-1776107603' → (815, 'v2.5')
-
-    Returns (nexus_mod_id, file_version) or (None, '') if not a NexusMods filename.
-    """
-    import re
-    # Match: anything, then -{digits}-{version_parts}-{10-digit timestamp}
-    # The 10-digit timestamp (unix epoch ~2025-2030) anchors the end
-    m = re.match(r'^.+?-(\d+)-(.+)-(\d{10})$', name)
-    if not m:
-        return None, ''
-    mod_id = int(m.group(1))
-    file_ver = m.group(2).replace('-', '.')
-    # Sanity: mod_id should be reasonable (1-999999)
-    if mod_id < 1 or mod_id > 999999:
-        return None, ''
-    return mod_id, file_ver
+from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
 
 
 def _is_standalone_paz_mod(path: Path) -> bool:
@@ -77,6 +57,96 @@ def _is_standalone_paz_mod(path: Path) -> bool:
                 return has_paz and has_pamt
         except Exception:
             return False
+    return False
+
+
+_NON_PRESET_JSON = {"mod.json", "manifest.json", "modinfo.json"}
+
+
+def _archive_likely_needs_dialog(path: Path) -> bool:
+    """Lightweight namelist peek: does this archive have multiple JSON presets or variant folders?
+
+    Avoids full extraction during batch pre-scan. Returns True if the archive
+    appears to contain either:
+      - Multiple real preset .json files at the root (NexusMods variants like
+        ``friendly_gain_x2.json`` / ``_x5.json``) — not manifest/modinfo metadata
+      - Multiple top-level folders each containing game content (variant picker case)
+    """
+    import re
+    suffix = path.suffix.lower()
+    names: list[str] = []
+    try:
+        if suffix == ".zip":
+            import zipfile
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+        elif suffix == ".7z":
+            import py7zr
+            with py7zr.SevenZipFile(path, 'r') as zf:
+                names = zf.getnames()
+        elif suffix == ".rar":
+            # 7-Zip CLI listing — zero extraction cost. First "Path = " line is
+            # the archive itself; skip entries that don't look like relative paths.
+            import subprocess
+            _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            for tool in ("7z", "7z.exe", r"C:\Program Files\7-Zip\7z.exe"):
+                try:
+                    out = subprocess.run([tool, "l", "-slt", str(path)],
+                                         capture_output=True, text=True, timeout=8,
+                                         creationflags=_no_window)
+                    if out.returncode == 0:
+                        archive_abs = str(path)
+                        for ln in out.stdout.splitlines():
+                            ln = ln.strip()
+                            if ln.startswith("Path = "):
+                                val = ln[len("Path = "):]
+                                if val and val != archive_abs:
+                                    names.append(val)
+                        break
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+    except Exception:
+        return False
+    if not names:
+        return False
+
+    # Normalize Windows-style backslashes (RAR) to forward slashes.
+    names = [n.replace("\\", "/") for n in names]
+
+    # Count real preset .json files at root or one level deep. Manifest /
+    # modinfo / mod.json are CDUMM metadata, not preset variants.
+    root_level_presets = [
+        n for n in names
+        if n.lower().endswith(".json")
+        and n.count("/") <= 1
+        and n.rsplit("/", 1)[-1].lower() not in _NON_PRESET_JSON
+    ]
+    if len(root_level_presets) > 1:
+        return True
+
+    # Variant folders: 2+ top-level dirs each containing game files. NNNN/
+    # top-level entries are game data dirs (e.g., 0002/, 0012/), NOT variants,
+    # so exclude them from the variant candidate set.
+    tops = {
+        n.split("/", 1)[0] for n in names
+        if n and not n.startswith("/") and not re.match(r"^\d{4}$", n.split("/", 1)[0])
+    }
+    if len(tops) >= 2:
+        variants_with_content = 0
+        for t in tops:
+            prefix = t + "/"
+            has_content = any(
+                (m != t and m.startswith(prefix) and (
+                    m.lower().endswith((".paz", ".pamt", ".bsdiff"))
+                    or re.search(r"/\d{4}/", "/" + m)
+                ))
+                for m in names
+            )
+            if has_content:
+                variants_with_content += 1
+        if variants_with_content >= 2:
+            return True
+
     return False
 
 
@@ -132,13 +202,13 @@ def _has_game_content(path: Path) -> bool:
     try:
         with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
-            for n in names:
-                nl = n.lower()
+            lower = [n.lower() for n in names]
+            has_asi = any(nl.endswith(".asi") for nl in lower)
+            for n, nl in zip(names, lower):
                 if nl.endswith((".paz", ".pamt", ".bsdiff", ".xdelta")):
                     return True
-                if nl.endswith(".json") and "modinfo" not in nl:
-                    return True
-                if nl == "modinfo.json" or nl.endswith("/modinfo.json"):
+                # .json only counts if no .asi files (ASI mods bundle .json configs and modinfo.json)
+                if nl.endswith(".json") and not has_asi:
                     return True
                 # Numbered directory pattern (0008/, 0036/, etc.)
                 if re.match(r"^\d{4}/", n):
@@ -292,6 +362,7 @@ from cdumm.gui.pages.mods_page import ModsPage as PazModsPage  # noqa: E402
 from cdumm.gui.pages.asi_page import AsiPluginsPage  # noqa: E402
 from cdumm.gui.pages.activity_page import ActivityPage  # noqa: E402
 from cdumm.gui.pages.about_page import AboutPage  # noqa: E402
+from cdumm.gui.pages.bug_report_page import BugReportPage  # noqa: E402
 from cdumm.gui.pages.settings_page import SettingsPage  # noqa: E402
 from cdumm.gui.pages.tool_page import (  # noqa: E402
     VerifyStatePage, CheckModsPage, FindCulpritPage,
@@ -317,6 +388,20 @@ class CdummWindow(FluentWindow):
         self.setWindowTitle(tr("app.name_short") + " v" + __version__)
         self.setMinimumSize(1000, 700)
         self.resize(1100, 750)
+
+        # Restore saved window geometry (size/position) from the previous session.
+        # Stored as base64(QByteArray) in the config table so it survives DB copies.
+        if db is not None:
+            try:
+                from cdumm.storage.config import Config
+                from PySide6.QtCore import QByteArray
+                saved = Config(db).get("window_geometry")
+                if saved:
+                    geom = QByteArray.fromBase64(saved.encode("ascii"))
+                    if not geom.isEmpty():
+                        self.restoreGeometry(geom)
+            except Exception as _e:
+                logger.debug("Could not restore window geometry: %s", _e)
 
         # Hide the small icon in title bar, center title across full window width
         self.titleBar.iconLabel.hide()
@@ -541,6 +626,11 @@ class CdummWindow(FluentWindow):
         self.rescan_page.set_managers(**tool_kwargs)
         self.rescan_page.rescan_requested.connect(self._on_refresh_snapshot)
 
+        self.bug_report_page = BugReportPage(self)
+        self.bug_report_page.set_managers(
+            db=self._db, game_dir=self._game_dir,
+            app_data_dir=self._app_data_dir)
+
         # Sidebar: compact by default, hamburger opens MENU overlay (like Fluent Gallery)
         self.navigationInterface.setExpandWidth(220)
         self.navigationInterface.setMinimumExpandWidth(1400)
@@ -605,6 +695,10 @@ class CdummWindow(FluentWindow):
 
         # Bottom navigation
         self.addSubInterface(
+            self.bug_report_page, FluentIcon.FEEDBACK, tr("nav.bug_report"),
+            position=NavigationItemPosition.BOTTOM,
+        )
+        self.addSubInterface(
             self.settings_page, FluentIcon.SETTING, tr("nav.settings"),
             position=NavigationItemPosition.BOTTOM,
         )
@@ -612,6 +706,74 @@ class CdummWindow(FluentWindow):
             self.about_page, FluentIcon.INFO, tr("nav.about"),
             position=NavigationItemPosition.BOTTOM,
         )
+
+        # ── NexusMods update check (30 min timer + startup) ────────
+        self._nexus_updates: dict[int, object] = {}  # nexus_mod_id -> ModUpdateStatus
+        self._nexus_update_timer = QTimer(self)
+        self._nexus_update_timer.setInterval(30 * 60 * 1000)  # 30 minutes
+        self._nexus_update_timer.timeout.connect(self._run_nexus_update_check)
+        self._nexus_update_timer.start()
+        # Run first check 5 seconds after startup (let UI settle)
+        QTimer.singleShot(5000, self._run_nexus_update_check)
+
+    # ------------------------------------------------------------------
+    # NexusMods automatic update check
+    # ------------------------------------------------------------------
+
+    def _run_nexus_update_check(self) -> None:
+        """Check NexusMods for mod updates in background. Runs automatically."""
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        api_key = Config(self._db).get("nexus_api_key")
+        if not api_key:
+            return  # No API key configured — skip silently
+
+        # Read both PAZ mods and ASI plugins on main thread (SQLite thread safety).
+        # Both tables share a single NexusMods update-check pass so the API quota
+        # is spent once per cycle.
+        try:
+            cursor = self._db.connection.execute(
+                "SELECT id, name, version, nexus_mod_id FROM mods WHERE mod_type = 'paz'")
+            mods = [{"id": r[0], "name": r[1], "version": r[2], "nexus_mod_id": r[3]}
+                    for r in cursor.fetchall()]
+            cursor = self._db.connection.execute(
+                "SELECT name, version, nexus_mod_id FROM asi_plugin_state")
+            asi_mods = [{"id": r[0], "name": r[0], "version": r[1], "nexus_mod_id": r[2]}
+                        for r in cursor.fetchall()]
+        except Exception:
+            return
+
+        combined = mods + asi_mods
+        if not any(m.get("nexus_mod_id") for m in combined):
+            return  # No mods with NexusMods IDs in either table
+
+        import threading
+        def _check():
+            try:
+                from cdumm.engine.nexus_api import check_mod_updates
+                updates = check_mod_updates(combined, api_key)
+                self._pending_nexus_updates = {u.mod_id: u for u in updates}
+            except Exception as e:
+                logger.warning("NexusMods update check failed: %s", e)
+                self._pending_nexus_updates = {}
+            from PySide6.QtCore import QMetaObject, Qt as _Qt
+            QMetaObject.invokeMethod(
+                self, "_apply_nexus_update_colors", _Qt.ConnectionType.QueuedConnection)
+        threading.Thread(target=_check, daemon=True).start()
+
+    @Slot()
+    def _apply_nexus_update_colors(self) -> None:
+        """Propagate update results to both PAZ mods page and ASI plugins page."""
+        self._nexus_updates = getattr(self, "_pending_nexus_updates", {})
+        if hasattr(self, 'paz_mods_page'):
+            self.paz_mods_page.set_nexus_updates(self._nexus_updates)
+        if hasattr(self, 'asi_plugins_page'):
+            try:
+                self.asi_plugins_page.set_nexus_updates(self._nexus_updates)
+            except AttributeError:
+                pass  # ASI page may not implement it in older builds
+        logger.info("NexusMods update check: %d updates found", len(self._nexus_updates))
 
     # ------------------------------------------------------------------
     # Runtime retranslation
@@ -633,6 +795,7 @@ class CdummWindow(FluentWindow):
             "InspectModPage": tr("nav.inspect_mod"),
             "FixEverythingPage": tr("nav.fix_everything"),
             "RescanPage": tr("nav.rescan"),
+            "BugReportPage": tr("nav.bug_report"),
             "SettingsPage": tr("nav.settings"),
             "AboutPage": tr("nav.about"),
         }
@@ -653,6 +816,7 @@ class CdummWindow(FluentWindow):
             self.verify_state_page, self.check_mods_page,
             self.find_culprit_page, self.inspect_mod_page,
             self.fix_everything_page, self.rescan_page,
+            self.bug_report_page,
         ]:
             if hasattr(page, 'retranslate_ui'):
                 page.retranslate_ui()
@@ -713,6 +877,20 @@ class CdummWindow(FluentWindow):
 
     def _deferred_startup(self) -> None:
         """Run after window is visible. Heavy checks happen here."""
+        # Retroactive configurable-mod scan: covers imports that predate the
+        # configurable-detection logic. Cheap for mods whose source_path is
+        # already a directory; rescues old ZIP-backed entries by extracting
+        # to CDMods/sources/<mod_id>/ the first time they are encountered.
+        if self._db and self._cdmods_dir:
+            try:
+                from cdumm.engine.configurable_scanner import scan_configurable_mods
+                stats = scan_configurable_mods(
+                    self._db, self._cdmods_dir / "sources")
+                if stats["flagged_a"] or stats["flagged_b"] or stats["rescued"]:
+                    self._refresh_all()
+            except Exception as e:
+                logger.warning("Configurable scan failed (non-fatal): %s", e)
+
         if self._game_dir and self._db:
             if self._check_one_time_reset():
                 return
@@ -897,7 +1075,7 @@ class CdummWindow(FluentWindow):
                     shutil.copy2(vanilla_papgt, papgt_path)
                     logger.info("Health check: restored vanilla PAPGT")
 
-            self._log_activity("health", "Auto-fixed dirty game state on startup")
+            self._log_activity("health", tr("activity.msg_auto_fixed_dirty"))
         except Exception as e:
             logger.debug("Startup health check failed: %s", e)
 
@@ -1015,7 +1193,7 @@ class CdummWindow(FluentWindow):
         layout.addWidget(label)
         layout.addStretch()
 
-        btn = PushButton("Download", banner)
+        btn = PushButton(tr("main.download"), banner)
         bf = btn.font()
         bf.setPixelSize(12)
         btn.setFont(bf)
@@ -1542,7 +1720,9 @@ class CdummWindow(FluentWindow):
             return
 
         # If multiple items queued, use batch import (single process)
-        # But first, separate out multi-preset mods that need user interaction
+        # But first, separate out multi-preset / multi-variant mods that need
+        # user interaction. Archives are peeked via a lightweight namelist
+        # check to avoid extracting every zip up-front.
         if len(self._import_queue) > 1:
             from cdumm.gui.preset_picker import find_json_presets, find_folder_variants
             batch = []
@@ -1554,6 +1734,9 @@ class CdummWindow(FluentWindow):
                     if len(presets) > 1:
                         needs_dialog = True
                     elif len(find_folder_variants(p)) >= 2:
+                        needs_dialog = True
+                elif p.is_file() and p.suffix.lower() in (".zip", ".7z", ".rar"):
+                    if _archive_likely_needs_dialog(p):
                         needs_dialog = True
                 if needs_dialog:
                     deferred.append(p)
@@ -1588,20 +1771,45 @@ class CdummWindow(FluentWindow):
 
         # Separate ASI mods from PAZ mods — ASI installs are instant (file copy)
         from cdumm.asi.asi_manager import AsiManager
+        import tempfile as _tmpmod
+        import shutil as _shmod
         asi_mgr = AsiManager(self._game_dir / "bin64")
         paz_paths = []
         asi_count = 0
         for p in paths:
             if asi_mgr.contains_asi(p) and not _has_game_content(p):
+                # Extract ZIP/7z archives to a temp dir so asi_mgr.install() (which
+                # only handles single .asi files or directories) can find them.
+                extracted_tmp = None
+                install_src = p
                 try:
-                    installed = asi_mgr.install(p)
+                    if p.is_file() and p.suffix.lower() == ".zip":
+                        import zipfile as _zf
+                        extracted_tmp = _tmpmod.mkdtemp(prefix="cdumm_batch_asi_")
+                        with _zf.ZipFile(p) as zf:
+                            zf.extractall(extracted_tmp)
+                        install_src = Path(extracted_tmp)
+                    elif p.is_file() and p.suffix.lower() == ".7z":
+                        import py7zr as _p7
+                        extracted_tmp = _tmpmod.mkdtemp(prefix="cdumm_batch_asi_")
+                        with _p7.SevenZipFile(p, 'r') as zf:
+                            zf.extractall(extracted_tmp)
+                        install_src = Path(extracted_tmp)
+
+                    installed = asi_mgr.install(install_src)
                     if installed:
                         asi_count += len([f for f in installed if f.endswith('.asi')])
-                        # Store version from folder name or modinfo
+                        # Version lookup still uses the original drop path so
+                        # the NexusMods filename parser has the real name.
                         self._store_asi_version(p, installed)
                         logger.info("Batch: ASI installed directly: %s (%s)", p.name, installed)
+                    else:
+                        logger.warning("Batch: no ASI files extracted from %s", p.name)
                 except Exception as e:
                     logger.warning("Batch: ASI install failed for %s: %s", p.name, e)
+                finally:
+                    if extracted_tmp:
+                        _shmod.rmtree(extracted_tmp, ignore_errors=True)
             else:
                 paz_paths.append(p)
 
@@ -1694,23 +1902,35 @@ class CdummWindow(FluentWindow):
 
             self._sync_db()
 
-            # Install any staged ASI files from batch results
+            # Install any staged ASI files from batch results. The worker
+            # stages .asi + .ini + loader .dlls into a staging dir; hand the
+            # whole dir to asi_mgr.install() so companion files come along,
+            # then record the version via _store_asi_version.
             asi_total = 0
-            for item in _batch_results:
-                asi_staged = item.get("asi_staged", [])
-                if asi_staged:
-                    try:
-                        from cdumm.asi.asi_manager import AsiManager
-                        _asi_mgr = AsiManager(self._game_dir / "bin64")
-                        from pathlib import Path as _P
-                        for asp in asi_staged:
-                            p = _P(asp)
-                            if p.exists() and p.suffix.lower() == ".asi":
-                                import shutil
-                                shutil.copy2(str(p), str(_asi_mgr._bin64 / p.name))
-                                asi_total += 1
-                    except Exception:
-                        pass
+            try:
+                from cdumm.asi.asi_manager import AsiManager
+                _asi_mgr = AsiManager(self._game_dir / "bin64")
+                from pathlib import Path as _P
+                for item, bp in zip(_batch_results, self._batch_paths):
+                    asi_staged = item.get("asi_staged", [])
+                    if not asi_staged:
+                        continue
+                    # All staged paths share a parent (the staging dir).
+                    staging_dirs = {_P(asp).parent for asp in asi_staged if _P(asp).exists()}
+                    for sd in staging_dirs:
+                        try:
+                            installed = _asi_mgr.install(sd)
+                        except Exception as _e:
+                            logger.warning("Batch result: ASI install from %s failed: %s", sd, _e)
+                            installed = []
+                        if installed:
+                            asi_total += sum(1 for f in installed if f.endswith('.asi'))
+                            try:
+                                self._store_asi_version(bp, installed)
+                            except Exception:
+                                pass
+            except Exception as _e:
+                logger.warning("Batch result: ASI post-install block failed: %s", _e)
 
             # Post-batch: detect configurable mods and set source_path
             # Build a map of mod name -> (mod_id, source_path) from results + paths
@@ -1790,7 +2010,7 @@ class CdummWindow(FluentWindow):
                     content=f"{ok} imported, {fail} failed.",
                     duration=5000, position=InfoBarPosition.TOP, parent=self)
 
-            self._log_activity("import", f"Batch imported {ok} mods ({fail} errors)")
+            self._log_activity("import", tr("activity.msg_batch_imported", ok=ok, fail=fail))
             # Process any remaining items (shouldn't be any, but safety)
             QTimer.singleShot(100, self._process_next_import)
 
@@ -1859,8 +2079,8 @@ class CdummWindow(FluentWindow):
                 if installed_version and drop_version and installed_version == drop_version:
                     # Same version — skip silently with toast
                     InfoBar.info(
-                        title="Skipped",
-                        content=f"'{mname}' v{drop_version} is already installed.",
+                        title=tr("infobar.skipped"),
+                        content=tr("infobar.skipped_msg", name=mname, version=drop_version),
                         duration=3000, position=InfoBarPosition.TOP, parent=self)
                     logger.info("Skipped duplicate: %s v%s", mname, drop_version)
                     self._process_next_import()
@@ -2022,8 +2242,42 @@ class CdummWindow(FluentWindow):
                 # Mark as configurable so user can re-pick preset later
                 self._configurable_source = str(path)
                 dialog = PresetPickerDialog(presets, self)
-                if dialog.exec() and dialog.selected_path:
-                    path = dialog.selected_path
+                if dialog.exec() and dialog.selected_presets:
+                    selected = dialog.selected_presets
+                    if len(selected) > 1:
+                        # Multi-select → ONE mod row with ALL presets from
+                        # the archive stored under variants/. Ticked presets
+                        # start enabled; the rest are off but accessible via
+                        # the cog. Skip the normal import-worker path.
+                        from cdumm.engine.variant_handler import import_multi_variant
+                        try:
+                            game_dir = self._game_dir
+                            mods_dir = game_dir / "CDMods" / "mods"
+                            ticked_paths = {p for p, _d in selected}
+                            # Pass EVERY detected preset so the cog can
+                            # toggle the full set later.
+                            result = import_multi_variant(
+                                presets, path, game_dir, mods_dir, self._db,
+                                initial_selection=ticked_paths)
+                            if result and hasattr(self, "_activity_log") and self._activity_log:
+                                enabled_ct = sum(1 for v in result["variants"] if v["enabled"])
+                                self._activity_log.log(
+                                    "import",
+                                    f"Imported variant mod: {result['mod_name']}",
+                                    f"{len(result['variants'])} variants "
+                                    f"({enabled_ct} enabled)")
+                            if result:
+                                self._refresh_all()
+                        except Exception as e:
+                            logger.error(
+                                "multi-variant import failed: %s", e, exc_info=True)
+                        if tmp_extract:
+                            import shutil
+                            shutil.rmtree(tmp_extract, ignore_errors=True)
+                        self._process_next_import()
+                        return
+                    # Single-select → fall through the normal import worker
+                    path = selected[0][0]
                 else:
                     self._configurable_source = None
                     if tmp_extract:
@@ -2152,7 +2406,7 @@ class CdummWindow(FluentWindow):
                     self._import_result_error = msg.get("msg", "Unknown error")
 
         def _on_finished(exit_code, exit_status):
-            tip.setContent("Completed!")
+            tip.setContent(tr("progress.completed"))
             tip.setState(True)
             proc.deleteLater()
             self._active_worker = None
@@ -2300,7 +2554,7 @@ class CdummWindow(FluentWindow):
                     title=tr("main.import_complete"),
                     content=tr("main.import_success", name=name),
                     duration=4000, position=InfoBarPosition.TOP, parent=self)
-            self._log_activity("import", f"Imported mod: {name}")
+            self._log_activity("import", tr("activity.msg_imported_mod", name=name))
             QTimer.singleShot(100, self._process_next_import)
 
         def _on_stderr():
@@ -2323,7 +2577,7 @@ class CdummWindow(FluentWindow):
 
         if not asi_mgr.has_loader():
             InfoBar.warning(
-                title="ASI Loader Missing",
+                title=tr("infobar.asi_loader_missing"),
                 content=tr("main.no_asi_loader"),
                 duration=8000, position=InfoBarPosition.TOP, parent=self)
 
@@ -2366,8 +2620,8 @@ class CdummWindow(FluentWindow):
             self._store_asi_version(orig, installed)
 
             InfoBar.success(
-                title="ASI Mod Installed",
-                content=f"Installed: {', '.join(installed)} to bin64/",
+                title=tr("infobar.asi_installed"),
+                content=tr("infobar.asi_installed_msg", files=", ".join(installed)),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             logger.info("ASI install success: %s", installed)
             # Refresh ASI page
@@ -2379,24 +2633,42 @@ class CdummWindow(FluentWindow):
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     def _store_asi_version(self, source_path: Path, installed_files: list[str]) -> None:
-        """Extract version from source path and store in asi_plugin_state DB."""
+        """Extract version + NexusMods mod_id from the drop path and store them
+        on each installed ASI plugin row in asi_plugin_state."""
         if not self._db:
             return
         version = self._get_drop_version(source_path)
-        if not version:
+        # Parse NexusMods mod_id from the drop filename (used for update checks)
+        try:
+            stem = source_path.name if source_path.is_dir() else source_path.stem
+            nexus_id, _ = _parse_nexus_filename(stem)
+        except Exception:
+            nexus_id = None
+        if not version and not nexus_id:
             return
         for fname in installed_files:
-            if fname.endswith('.asi'):
-                stem = fname.replace('.asi', '')
-                try:
+            if not fname.endswith('.asi'):
+                continue
+            plugin_name = fname.replace('.asi', '')
+            try:
+                # Always INSERT OR IGNORE first so a row exists, then UPDATE
+                # the individual columns only when we have real values.
+                self._db.connection.execute(
+                    "INSERT OR IGNORE INTO asi_plugin_state (name) VALUES (?)",
+                    (plugin_name,))
+                if version:
                     self._db.connection.execute(
-                        "INSERT INTO asi_plugin_state (name, version) VALUES (?, ?) "
-                        "ON CONFLICT(name) DO UPDATE SET version = excluded.version",
-                        (stem, version))
-                    self._db.connection.commit()
-                    logger.info("Stored ASI version: %s = %s", stem, version)
-                except Exception as e:
-                    logger.warning("Failed to store ASI version: %s", e)
+                        "UPDATE asi_plugin_state SET version = ? WHERE name = ?",
+                        (version, plugin_name))
+                if nexus_id:
+                    self._db.connection.execute(
+                        "UPDATE asi_plugin_state SET nexus_mod_id = ? WHERE name = ?",
+                        (nexus_id, plugin_name))
+                self._db.connection.commit()
+                logger.info("Stored ASI metadata: %s version=%s nexus_mod_id=%s",
+                            plugin_name, version, nexus_id)
+            except Exception as e:
+                logger.warning("Failed to store ASI metadata: %s", e)
 
     @staticmethod
     def _get_drop_version(path: Path) -> str:
@@ -2558,7 +2830,7 @@ class CdummWindow(FluentWindow):
                         sum(1 for v in self._applied_state.values() if v))
             from cdumm.engine.import_handler import clear_assigned_dirs
             clear_assigned_dirs()
-            self._log_activity("apply", "Applied mod changes")
+            self._log_activity("apply", tr("activity.msg_applied"))
             # Handle pending removals from batch uninstall
             pending = getattr(self, '_pending_removals', [])
             if pending:
@@ -2568,7 +2840,7 @@ class CdummWindow(FluentWindow):
                     except Exception:
                         pass
                 self._pending_removals = []
-                self._log_activity("remove", f"Removed {len(pending)} mods after revert")
+                self._log_activity("remove", tr("activity.msg_removed_after_revert", count=len(pending)))
             self._refresh_all()
             self._post_apply_verify()
 
@@ -2619,7 +2891,7 @@ class CdummWindow(FluentWindow):
             tip, on_revert_done, on_msg=on_revert_msg)
 
     def _show_revert_warning(self, msg: str) -> None:
-        MessageBox("Revert Incomplete", msg, self).exec()
+        MessageBox(tr("dialog.revert_incomplete"), msg, self).exec()
 
     def _on_revert_finished(self) -> None:
         """Handle revert completion -- disable all mods to match vanilla state."""
@@ -2629,9 +2901,9 @@ class CdummWindow(FluentWindow):
                     self._mod_manager.set_enabled(mod["id"], False)
         self._refresh_all()
         self._snapshot_applied_state()
-        self._log_activity("revert", "Reverted all game files to vanilla")
+        self._log_activity("revert", tr("activity.msg_reverted_vanilla"))
         InfoBar.success(
-            title="Reverted to Vanilla",
+            title=tr("infobar.reverted_to_vanilla"),
             content=tr("main.reverted"),
             duration=5000, position=InfoBarPosition.TOP, parent=self)
         self._check_leftover_backups()
@@ -2673,8 +2945,8 @@ class CdummWindow(FluentWindow):
                 except Exception:
                     pass
             InfoBar.success(
-                title="Cleanup Complete",
-                content=f"Deleted {deleted} backup file(s) ({total_mb:.0f} MB).",
+                title=tr("infobar.cleanup_complete"),
+                content=tr("infobar.cleanup_complete_msg", count=deleted, size_mb=f"{total_mb:.0f}"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     def _on_uninstall_mod(self, mod_id: int) -> None:
@@ -2701,11 +2973,11 @@ class CdummWindow(FluentWindow):
                 except Exception:
                     name = str(mod_id)
                 self._mod_manager.remove_mod(mod_id)
-                self._log_activity("uninstall", f"Uninstalled mod: {name}")
+                self._log_activity("uninstall", tr("activity.msg_uninstalled_mod", name=name))
             self._snapshot_applied_state()
             self._refresh_all()
             InfoBar.success(
-                title="Mod Uninstalled",
+                title=tr("infobar.mod_uninstalled"),
                 content=tr("main.mod_removed"),
                 duration=4000, position=InfoBarPosition.TOP, parent=self)
 
@@ -2819,14 +3091,16 @@ class CdummWindow(FluentWindow):
             ).exec()
             logger.warning("Post-apply issues: %s", issues)
             self._log_activity("warning",
-                               f"Post-apply verification: {len(issues)} issue(s)",
+                               tr("activity.msg_post_apply_issues", count=len(issues)),
                                "; ".join(f"[{s}] {d}" for s, d in issues[:5]))
         else:
             InfoBar.success(
-                title="Apply Complete",
+                title=tr("infobar.apply_complete"),
                 content=tr("main.apply_success"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             logger.info("Post-apply verification passed")
+            # Recheck NexusMods for updates after apply
+            QTimer.singleShot(2000, self._run_nexus_update_check)
 
     def _on_launch_game(self) -> None:
         """Launch the game executable (tries alternate names, minimizes window)."""
@@ -2847,9 +3121,15 @@ class CdummWindow(FluentWindow):
         try:
             from cdumm.storage.game_finder import is_steam_install, is_xbox_install
             if is_steam_install(self._game_dir):
-                # Launch through Steam for proper overlay/DRM
+                # Launch through Steam for proper overlay/DRM.
+                # get_steam_app_id reads steam_appid.txt / appmanifest_*.acf
+                # and falls back to the verified Crimson Desert AppID (3321460).
+                # Previously this hard-coded the wrong AppID which caused Steam
+                # to show "Game configuration unavailable".
                 import os
-                os.startfile("steam://rungameid/2550430")
+                from cdumm.engine.game_monitor import get_steam_app_id
+                app_id = get_steam_app_id(self._game_dir)
+                os.startfile(f"steam://rungameid/{app_id}")
             elif is_xbox_install(self._game_dir):
                 # Xbox Game Pass — launch through the Xbox app
                 import os
@@ -2870,7 +3150,7 @@ class CdummWindow(FluentWindow):
                 self.showMinimized()
             except Exception as e2:
                 InfoBar.error(
-                    title="Launch Failed", content=str(e2),
+                    title=tr("infobar.launch_failed"), content=str(e2),
                     duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     # ------------------------------------------------------------------
@@ -2998,8 +3278,8 @@ class CdummWindow(FluentWindow):
         from cdumm.engine.mod_list_io import export_mod_list
         count = export_mod_list(self._db, Path(path))
         InfoBar.success(
-            title="Export Complete",
-            content=f"Exported {count} mods to {Path(path).name}",
+            title=tr("infobar.export_complete"),
+            content=tr("infobar.export_complete_msg", count=count, file=Path(path).name),
             duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     def _on_import_list(self) -> None:
@@ -3016,7 +3296,7 @@ class CdummWindow(FluentWindow):
         mods = import_mod_list(Path(path))
         if not mods:
             InfoBar.warning(
-                title="Import Empty",
+                title=tr("infobar.import_empty"),
                 content=tr("main.no_mods_in_file"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             return
@@ -3126,7 +3406,7 @@ class CdummWindow(FluentWindow):
                     on_msg(msg)
 
         def _on_finished(exit_code, exit_status):
-            tip.setContent("Completed!")
+            tip.setContent(tr("progress.completed"))
             tip.setState(True)
             proc.deleteLater()
             self._active_worker = None
@@ -3215,7 +3495,7 @@ class CdummWindow(FluentWindow):
             self._stamp_db_mtime()
 
     def _worker_done(self, thread, progress: StateToolTip, callback, *args) -> None:
-        progress.setContent("Completed!")
+        progress.setContent(tr("progress.completed"))
         progress.setState(True)
         # Disconnect all signals BEFORE quit — prevents lambda closures
         # (which capture Qt objects) from lingering on the worker thread
@@ -3245,7 +3525,7 @@ class CdummWindow(FluentWindow):
             logger.error("Completion callback crashed", exc_info=True)
 
     def _worker_error(self, thread, progress: StateToolTip, err) -> None:
-        progress.setContent("Failed!")
+        progress.setContent(tr("progress.failed_short"))
         progress.setState(True)
         worker = self._active_worker
         if worker is not None:
@@ -3269,7 +3549,7 @@ class CdummWindow(FluentWindow):
             QTimer.singleShot(100, self._process_next_import)
             return
         InfoBar.error(
-            title="Error", content=str(err),
+            title=tr("main.error"), content=str(err),
             duration=-1, position=InfoBarPosition.TOP, parent=self)
 
     # (Tool methods removed -- logic moved to individual tool pages)
@@ -3426,11 +3706,11 @@ class CdummWindow(FluentWindow):
                     elif target.is_file():
                         target.unlink(missing_ok=True)
                 InfoBar.success(
-                    title="Cleanup Complete",
-                    content=f"Cleaned up {size_mb:.0f} MB of old data.",
+                    title=tr("infobar.cleanup_complete"),
+                    content=tr("infobar.cleaned_old_data", size_mb=f"{size_mb:.0f}"),
                     duration=5000, position=InfoBarPosition.TOP, parent=self)
                 self._log_activity("cleanup",
-                                   f"Removed stale AppData ({size_mb:.0f} MB)")
+                                   tr("activity.msg_removed_stale_appdata", size_mb=f"{size_mb:.0f}"))
 
             config.set("stale_appdata_checked", "1")
         except Exception as e:
@@ -3608,10 +3888,10 @@ class CdummWindow(FluentWindow):
 
         self._refresh_all()
         InfoBar.success(
-            title="Snapshot Complete",
-            content=f"{count} game files indexed. You can now import mods.",
+            title=tr("infobar.snapshot_complete"),
+            content=tr("infobar.snapshot_complete_msg", count=count),
             duration=6000, position=InfoBarPosition.TOP, parent=self)
-        self._log_activity("snapshot", f"Game files scanned: {count} files indexed")
+        self._log_activity("snapshot", tr("activity.msg_snapshot_created", count=count))
 
     def _refresh_vanilla_backups(self) -> None:
         """Ensure critical vanilla backup files exist (PAMT, PAPGT, PATHC).
@@ -3698,6 +3978,15 @@ class CdummWindow(FluentWindow):
             if thread and thread.isRunning():
                 thread.quit()
                 thread.wait(2000)
+        # Persist window geometry so the next launch opens at the same size/position.
+        # Must happen BEFORE db.close(). Ignore errors — this is best-effort.
+        if self._db:
+            try:
+                from cdumm.storage.config import Config
+                geom = self.saveGeometry()
+                Config(self._db).set("window_geometry", bytes(geom.toBase64()).decode("ascii"))
+            except Exception as _e:
+                logger.debug("Could not save window geometry: %s", _e)
         # Close DB
         if self._db:
             try:

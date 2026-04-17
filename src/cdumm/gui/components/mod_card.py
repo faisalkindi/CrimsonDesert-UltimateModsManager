@@ -76,8 +76,8 @@ _PENDING_COLORS = {
 }
 
 _VERSION_COLORS = {
-    "light": {"bg": "#F3E8FF", "text": "#6A1B9A", "border": "#CE93D8"},
-    "dark":  {"bg": "#2A1F3D", "text": "#CE93D8", "border": "#4A2D6E"},
+    "light": {"bg": "#F3F4F6", "text": "#6B7280", "border": "#D1D5DB"},
+    "dark":  {"bg": "#1F2937", "text": "#9CA3AF", "border": "#374151"},
 }
 
 _FILES_COLORS = {
@@ -266,7 +266,11 @@ class ModCard(CardWidget):
         name_row = QHBoxLayout()
         name_row.setSpacing(6)
         self._name_label = StrongBodyLabel(name)
-        name_row.addWidget(self._name_label)
+        # Wrap long names across two lines instead of clipping. The card's
+        # QVBoxLayout will grow vertically to fit.
+        self._name_label.setWordWrap(True)
+        self._name_label.setMinimumWidth(1)
+        name_row.addWidget(self._name_label, 1)
         # Inline rename editor (hidden by default)
         self._name_edit = QLineEdit(name)
         self._name_edit.setVisible(False)
@@ -371,17 +375,39 @@ class ModCard(CardWidget):
     def set_status(self, status: str) -> None:
         self._status_badge.set_status(status)
 
+    # Map English color-lookup keys to translation keys for the badge text.
+    _PENDING_TR_KEYS = {
+        "apply to activate":   "mod_list.pending_activate",
+        "apply to deactivate": "mod_list.pending_deactivate",
+    }
+
     def set_pending(self, pending: str | None) -> None:
-        """Set the pending action badge. None or empty hides it."""
+        """Set the pending action badge. None/empty hides it.
+
+        Accepts the English color-lookup key (e.g. "apply to activate") for
+        colour selection and translates the display text via i18n. Passing any
+        other string falls back to showing it verbatim with the default colour.
+        """
         if not pending:
             self._pending_badge.setVisible(False)
             self._pending_badge.setText("")
+            # Remember the key so retranslation can restore the text
+            self._pending_key = None
             return
-        key = pending.lower()
-        colors = _PENDING_COLORS.get(key, _PENDING_COLORS.get("apply needed"))
-        self._pending_badge.setText(pending)
+        lookup = pending.lower()
+        self._pending_key = lookup
+        colors = _PENDING_COLORS.get(lookup, _PENDING_COLORS.get("apply needed"))
+        tr_key = ModCard._PENDING_TR_KEYS.get(lookup)
+        from cdumm.i18n import tr as _tr
+        display = _tr(tr_key) if tr_key else pending
+        self._pending_badge.setText(display)
         self._pending_badge.setStyleSheet(_pill_qss(colors[_theme_key()]))
         self._pending_badge.setVisible(True)
+
+    def retranslate_pending(self) -> None:
+        """Re-render the pending badge in the current language."""
+        if getattr(self, "_pending_key", None):
+            self.set_pending(self._pending_key)
 
     def set_has_notes(self, has_notes: bool, note_text: str = "") -> None:
         self._note_icon.setVisible(has_notes)
@@ -395,8 +421,9 @@ class ModCard(CardWidget):
         if not self._note_text:
             return
         from qfluentwidgets import Flyout, FlyoutAnimationType
+        from cdumm.i18n import tr as _tr
         Flyout.create(
-            title="Note",
+            title=_tr("flyout.note"),
             content=self._note_text,
             target=self._note_icon,
             parent=self.window(),
@@ -508,6 +535,27 @@ class ModCard(CardWidget):
     def _apply_version_style(self) -> None:
         key = _theme_key()
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
+
+    def set_update_available(self, has_update: bool, nexus_url: str = "") -> None:
+        """Color the version pill green (up to date) or red (update available)."""
+        self._nexus_url = nexus_url
+        if has_update:
+            c = {"bg": "#FEE2E2", "text": "#DC2626", "border": "#FCA5A5"} if _theme_key() == "light" else {"bg": "#3B1111", "text": "#FCA5A5", "border": "#7F1D1D"}
+            self._version_pill.setCursor(Qt.CursorShape.PointingHandCursor)
+            from cdumm.i18n import tr as _tr
+            self._version_pill.setToolTip(_tr("tooltip.update_available"))
+            self._version_pill.mousePressEvent = self._on_version_clicked
+        else:
+            c = {"bg": "#DCFCE7", "text": "#16A34A", "border": "#86EFAC"} if _theme_key() == "light" else {"bg": "#0A2E14", "text": "#86EFAC", "border": "#166534"}
+            from cdumm.i18n import tr as _tr
+            self._version_pill.setToolTip(_tr("tooltip.up_to_date"))
+        self._version_pill.setStyleSheet(_pill_qss(c))
+
+    def _on_version_clicked(self, event):
+        url = getattr(self, "_nexus_url", "")
+        if url:
+            import webbrowser
+            webbrowser.open(url)
 
     def _on_toggled(self, checked: bool) -> None:
         self.toggled.emit(self._mod_id, checked)
@@ -737,10 +785,18 @@ class FolderGroup(QWidget):
         return self._expanded
 
     def get_mod_ids(self) -> list[int]:
-        """Return the current mod_id order from the layout."""
+        """Return the current mod_id order from the layout.
+
+        Guards against Qt's ``itemAt(i)`` returning ``None`` while the
+        layout is in the middle of a reparent / re-add (seen during rapid
+        drag-drop reorders of many cards at once).
+        """
         ids = []
         for i in range(self._content_layout.count()):
-            widget = self._content_layout.itemAt(i).widget()
+            item = self._content_layout.itemAt(i)
+            if item is None:
+                continue
+            widget = item.widget()
             if _is_draggable_card(widget):
                 ids.append(widget.mod_id)
         return ids
@@ -772,6 +828,22 @@ class FolderGroup(QWidget):
 
     # ── Drag-reorder helpers (called by _DroppableContainer) ────────────
 
+    def _iter_cards(self):
+        """Yield every draggable card in the content layout, safely.
+
+        Null-guards ``itemAt(i)`` because Qt can return ``None`` briefly
+        while the layout is being rebuilt (reparent + re-add during a
+        batch drag). Used by every hot-path scan (drop-index, indicator,
+        drop-handler) to avoid None-deref crashes.
+        """
+        for i in range(self._content_layout.count()):
+            item = self._content_layout.itemAt(i)
+            if item is None:
+                continue
+            widget = item.widget()
+            if _is_draggable_card(widget):
+                yield widget
+
     def _find_drop_index(self, pos_y: int) -> int:
         """Find the logical drop slot based on vertical position.
 
@@ -779,11 +851,7 @@ class FolderGroup(QWidget):
         and card 1, etc. The indicator is NOT in the layout, so card
         positions are stable and don't cause feedback loops.
         """
-        cards = []
-        for i in range(self._content_layout.count()):
-            widget = self._content_layout.itemAt(i).widget()
-            if _is_draggable_card(widget):
-                cards.append(widget)
+        cards = list(self._iter_cards())
 
         for slot, card in enumerate(cards):
             card_mid = card.y() + card.height() // 2
@@ -799,11 +867,7 @@ class FolderGroup(QWidget):
         self._drop_slot = slot
 
         # Find the y position for this slot
-        cards = []
-        for i in range(self._content_layout.count()):
-            widget = self._content_layout.itemAt(i).widget()
-            if _is_draggable_card(widget):
-                cards.append(widget)
+        cards = list(self._iter_cards())
 
         if not cards:
             self._drag_indicator.setVisible(False)
@@ -830,10 +894,16 @@ class FolderGroup(QWidget):
         self._drop_slot = -1
 
     def _find_card_anywhere(self, mod_id: int):
-        """Find a card by mod_id in this group or any sibling group."""
+        """Find a card by mod_id in this group or any sibling group.
+
+        Null-item guards protect against layout-in-flight during multi-drop.
+        """
         # Check this group first
         for i in range(self._content_layout.count()):
-            w = self._content_layout.itemAt(i).widget()
+            item = self._content_layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
             if _is_draggable_card(w) and w.mod_id == mod_id:
                 return w
         # Check sibling groups
@@ -843,19 +913,31 @@ class FolderGroup(QWidget):
                 if child is self:
                     continue
                 for i in range(child._content_layout.count()):
-                    w = child._content_layout.itemAt(i).widget()
+                    item = child._content_layout.itemAt(i)
+                    if item is None:
+                        continue
+                    w = item.widget()
                     if _is_draggable_card(w) and w.mod_id == mod_id:
                         return w
         return None
 
     def _handle_drop_batch(self, mod_ids: list[int]) -> None:
-        """Move one or more cards to the drop slot. Single atomic operation."""
+        """Move one or more cards to the drop slot. Single atomic operation.
+
+        Defensive against layout-mutation-in-progress: every ``itemAt`` call
+        is null-checked before ``.widget()`` is invoked. This eliminates a
+        reported crash where dragging a batch of cards into a folder mid-
+        reparent would dereference a None layout item.
+        """
         self._drag_indicator.setVisible(False)
 
         # Convert logical slot to layout index
         cards_in_layout = []
         for i in range(self._content_layout.count()):
-            w = self._content_layout.itemAt(i).widget()
+            item = self._content_layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
             if _is_draggable_card(w):
                 cards_in_layout.append(i)
 
@@ -971,9 +1053,8 @@ class FolderGroup(QWidget):
         else:
             mod_id_bytes = event.mimeData().data("application/x-cdumm-mod-id").data()
             mod_ids = [int(mod_id_bytes.decode())]
-        # Drop at end of group
-        card_count = sum(1 for i in range(self._content_layout.count())
-                         if _is_draggable_card(self._content_layout.itemAt(i).widget()))
+        # Drop at end of group — null-safe via _iter_cards.
+        card_count = sum(1 for _ in self._iter_cards())
         self._drop_slot = card_count
         self._handle_drop_batch(mod_ids)
         event.acceptProposedAction()

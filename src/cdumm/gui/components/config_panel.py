@@ -7,12 +7,14 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QDoubleSpinBox,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QVBoxLayout,
@@ -71,6 +73,7 @@ class ConfigPanel(QWidget):
 
     panel_closed = Signal()
     apply_clicked = Signal(int, list)  # mod_id, [{"label": str, "enabled": bool}]
+    variants_apply_clicked = Signal(int, list)  # mod_id, [{label, filename, enabled, group}]
 
     _PANEL_WIDTH = 400
     _ANIM_DURATION = 250
@@ -87,6 +90,11 @@ class ConfigPanel(QWidget):
         self._labels: dict[int, str] = {}
         self._value_inputs: dict[int, QSpinBox | QDoubleSpinBox] = {}
         self._initial_values: dict[int, int | float] = {}
+        # Variant-mode bookkeeping (populated by show_variant_mod).
+        self._variant_mode: bool = False
+        self._variants_meta: list[dict] = []
+        self._variant_widgets: dict[int, QCheckBox | QRadioButton] = {}
+        self._variant_initial: dict[int, bool] = {}
 
         self._anim = QPropertyAnimation(self, b"maximumWidth")
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
@@ -132,6 +140,8 @@ class ConfigPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        # No horizontal scrollbar — long labels wrap instead of overflowing.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { background: transparent; }")
         self._body = QWidget()
         self._body.setStyleSheet("background: transparent;")
@@ -169,6 +179,7 @@ class ConfigPanel(QWidget):
         self._labels.clear()
         self._value_inputs.clear()
         self._initial_values.clear()
+        self._variant_mode = False
         self._apply_btn.setVisible(False)
 
         # Header
@@ -452,9 +463,244 @@ class ConfigPanel(QWidget):
         self._apply_btn.setVisible(changed)
 
     def _on_apply(self) -> None:
+        # Variant-mode apply — emit dedicated signal with variant metadata.
+        if getattr(self, "_variant_mode", False):
+            out: list[dict] = []
+            for idx, v in enumerate(self._variants_meta):
+                widget = self._variant_widgets.get(idx)
+                if widget is None:
+                    enabled = bool(v.get("enabled"))
+                else:
+                    enabled = widget.isChecked()
+                out.append({
+                    "label": v.get("label", ""),
+                    "filename": v.get("filename", ""),
+                    "enabled": enabled,
+                    "group": v.get("group", -1),
+                })
+            self.variants_apply_clicked.emit(self._mod_id, out)
+            return
+
         result = []
         for idx, cb in sorted(self._toggles.items()):
             result.append({"label": self._labels[idx], "enabled": cb.isChecked()})
         for idx, sb in sorted(self._value_inputs.items()):
             result.append({"label": self._labels[idx], "enabled": True, "value": sb.value()})
         self.apply_clicked.emit(self._mod_id, result)
+
+    # ------------------------------------------------------------------
+    # Variant-mode entry point
+    # ------------------------------------------------------------------
+
+    def show_variant_mod(
+        self,
+        mod_id: int,
+        name: str,
+        author: str,
+        version: str,
+        status: str,
+        variants: list[dict],
+        conflicts: list[str] | None = None,
+    ) -> None:
+        """Open the panel for a multi-variant JSON mod.
+
+        ``variants`` is the list stored in ``mods.variants``:
+        ``[{"label": str, "filename": str, "enabled": bool, "group": int}, ...]``.
+        Variants that share a positive ``group`` are rendered as a radio
+        group (only one may be enabled at a time); ``group == -1`` gets
+        an independent checkbox.
+        """
+        self._mod_id = mod_id
+        self._initial_states.clear()
+        self._toggles.clear()
+        self._labels.clear()
+        self._value_inputs.clear()
+        self._initial_values.clear()
+        self._apply_btn.setVisible(False)
+        self._variant_mode = True
+        self._variants_meta = [dict(v) for v in variants]
+        self._variant_widgets: dict[int, QCheckBox | QRadioButton] = {}
+        self._variant_initial: dict[int, bool] = {
+            i: bool(v.get("enabled")) for i, v in enumerate(self._variants_meta)
+        }
+
+        self._title_label.setText(name)
+        self._author_label.setText(f"by {author}" if author else "")
+
+        self._clear_badges()
+        self._badge_row.insertWidget(0, _make_badge(status))
+        if version:
+            self._badge_row.insertWidget(
+                1, _make_badge(f"v{version}", "#444C5C"))
+        n_enabled = sum(1 for v in self._variants_meta if v.get("enabled"))
+        self._badge_row.insertWidget(
+            2,
+            _make_badge(f"{n_enabled}/{len(self._variants_meta)} variants",
+                        "#444C5C"),
+        )
+
+        self._clear_body()
+        # Translation key may not exist in older locale files — fall back to
+        # the English literal if tr() returns the key unchanged.
+        variants_header = tr("config_panel.section_variants")
+        if variants_header == "config_panel.section_variants":
+            variants_header = "VARIANTS"
+        self._add_section_header(variants_header)
+
+        # Render radio groups (positive group ids, size ≥ 2) first, then
+        # independent checkboxes (group = -1). Each row uses the same
+        # label-column + indicator layout as ``_add_config_row`` so long
+        # labels wrap and text reads correctly on both light + dark themes.
+        groups: dict[int, list[int]] = {}
+        independents: list[int] = []
+        for i, v in enumerate(self._variants_meta):
+            g = v.get("group", -1)
+            if g >= 0:
+                groups.setdefault(g, []).append(i)
+            else:
+                independents.append(i)
+
+        for g_id, members in sorted(groups.items()):
+            button_group = QButtonGroup(self)
+            button_group.setExclusive(True)
+            for idx in members:
+                v = self._variants_meta[idx]
+                rb = QRadioButton()
+                rb.setChecked(bool(v.get("enabled")))
+                rb.toggled.connect(self._on_variant_changed)
+                button_group.addButton(rb, idx)
+                self._variant_widgets[idx] = rb
+                self._body_layout.addWidget(
+                    self._build_variant_row(rb, v))
+
+        for idx in independents:
+            v = self._variants_meta[idx]
+            cb = QCheckBox()
+            cb.setChecked(bool(v.get("enabled")))
+            cb.toggled.connect(self._on_variant_changed)
+            self._variant_widgets[idx] = cb
+            self._body_layout.addWidget(self._build_variant_row(cb, v))
+
+        if conflicts:
+            self._add_section_header(tr("config_panel.section_conflicts"))
+            for desc in conflicts:
+                lbl = CaptionLabel(desc)
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet("color: #D04848; padding: 4px 0;")
+                self._body_layout.addWidget(lbl)
+
+        self._body_layout.addStretch()
+        self._apply_theme()
+
+        self.setVisible(True)
+        self._anim.stop()
+        try:
+            self._anim.finished.disconnect(self._emit_closed)
+        except RuntimeError:
+            pass
+        self._anim.setStartValue(self.maximumWidth())
+        self._anim.setEndValue(self._PANEL_WIDTH)
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._opacity_effect.setOpacity(0.0)
+        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
+        self._fade_anim.setDuration(self._ANIM_DURATION)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade_anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        self._anim.start()
+        self._fade_anim.start()
+
+    def _build_variant_row(self, indicator, variant: dict) -> QWidget:
+        """Build a label-left / indicator-right row for a variant.
+
+        Matches the visual language of ``_add_config_row``. Label colors
+        come from the parent ``ConfigPanel`` stylesheet (via ``_apply_theme``)
+        rather than inline overrides — mirroring how the per-change toggle
+        rows work, so dark-theme and light-theme both render correctly
+        without us second-guessing ``isDarkTheme()`` at row-build time.
+        """
+        from PySide6.QtGui import QFont
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 10, 0, 10)
+        row.setSpacing(8)
+
+        # Label column (wraps)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+
+        # Title — plain QLabel inherits ConfigPanel's QLabel color.
+        title_lbl = QLabel(variant.get("label", ""))
+        title_lbl.setWordWrap(True)
+        title_lbl.setMinimumWidth(1)
+        tf = title_lbl.font()
+        tf.setPixelSize(14)
+        tf.setWeight(QFont.Weight.DemiBold)
+        title_lbl.setFont(tf)
+        text_col.addWidget(title_lbl)
+
+        # Meta — CaptionLabel has qfluentwidgets' built-in subtle caption
+        # color that follows the active theme automatically.
+        meta_bits: list[str] = []
+        if variant.get("version"):
+            meta_bits.append(f"v{variant['version']}")
+        if variant.get("author"):
+            meta_bits.append(f"by {variant['author']}")
+        if meta_bits:
+            meta_lbl = CaptionLabel(" · ".join(meta_bits))
+            meta_lbl.setWordWrap(True)
+            mf = meta_lbl.font()
+            mf.setPixelSize(11)
+            meta_lbl.setFont(mf)
+            text_col.addWidget(meta_lbl)
+
+        row.addLayout(text_col, 1)
+
+        # Indicator-only widget (no built-in text — the label column handles it).
+        # Suppress Qt's default focus frame / background so the widget shows
+        # JUST the round radio dot / square checkbox, no rectangular outline.
+        accent = "#2878D0"
+        # Medium gray reads as a subtle-but-visible outline on both themes.
+        unchecked_border = "#7B8595"
+        indicator.setStyleSheet(
+            "QCheckBox, QRadioButton { "
+            "  border: none; background: transparent; spacing: 0; "
+            "  padding: 0; margin: 0; outline: none; "
+            "}"
+            "QCheckBox:focus, QRadioButton:focus { outline: none; border: none; }"
+            "QCheckBox::indicator, QRadioButton::indicator { "
+            "  width: 18px; height: 18px; "
+            "}"
+            "QCheckBox::indicator { border-radius: 4px; }"
+            f"QCheckBox::indicator:unchecked {{ "
+            f"  background: transparent; border: 2px solid {unchecked_border}; "
+            f"}}"
+            f"QCheckBox::indicator:checked {{ "
+            f"  background: {accent}; border: 2px solid {accent}; "
+            f"}}"
+            "QRadioButton::indicator { border-radius: 10px; }"
+            f"QRadioButton::indicator:unchecked {{ "
+            f"  background: transparent; border: 2px solid {unchecked_border}; "
+            f"}}"
+            f"QRadioButton::indicator:checked {{ "
+            f"  background: {accent}; border: 2px solid {accent}; "
+            f"}}"
+        )
+        row.addWidget(indicator, 0,
+                      Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        container = QWidget()
+        container.setLayout(row)
+        container.setStyleSheet(
+            f"border-bottom: 1px solid {_row_border()}; background: transparent;")
+        return container
+
+    def _on_variant_changed(self, *_a) -> None:
+        changed = False
+        for idx, widget in self._variant_widgets.items():
+            if widget.isChecked() != self._variant_initial.get(idx, False):
+                changed = True
+                break
+        self._apply_btn.setVisible(changed)

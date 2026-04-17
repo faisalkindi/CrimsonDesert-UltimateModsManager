@@ -28,6 +28,30 @@ CATEGORY_COLORS = {
     "uninstall":"#DC2626",  # red — mod uninstalled
 }
 
+# Brighter variants that read well on a dark (near-black) background.
+# The light-theme colors above are chosen for WCAG contrast on white — on dark
+# surfaces they become muddy. These hues are the same but lightened ~30% in HSL.
+CATEGORY_COLORS_DARK = {
+    "apply":    "#4ADE80",  # green
+    "revert":   "#60A5FA",  # blue
+    "import":   "#A78BFA",  # purple
+    "remove":   "#F87171",  # red
+    "snapshot": "#60A5FA",  # blue
+    "verify":   "#22D3EE",  # teal
+    "cleanup":  "#FBBF24",  # amber
+    "warning":  "#FBBF24",  # amber
+    "error":    "#F87171",  # red
+    "health":   "#4ADE80",  # green
+    "fix":      "#60A5FA",  # blue
+    "uninstall":"#F87171",  # red
+}
+
+
+def category_color(category: str, *, dark: bool = False) -> str:
+    """Return the badge/text hex for a category, theme-aware."""
+    src = CATEGORY_COLORS_DARK if dark else CATEGORY_COLORS
+    return src.get(category, "#94A3B8" if dark else "#6B7280")
+
 
 class ActivityLog:
     """Records and retrieves activity log entries."""

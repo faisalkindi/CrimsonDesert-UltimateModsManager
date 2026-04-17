@@ -61,6 +61,9 @@ class _StatCard(CardWidget):
         super().__init__(parent)
         self._accent = accent_color
         self._label_key = label_key
+        # Translation key for the value text. When set, the value re-translates
+        # automatically on language change. Leave empty for raw numeric/date values.
+        self._value_key: str = ""
         self.setFixedHeight(140)
 
         layout = QVBoxLayout(self)
@@ -124,12 +127,22 @@ class _StatCard(CardWidget):
             self._apply_label_color()
 
     def set_value(self, value: str):
+        # Raw value (numeric, date, plain string). Clears the translation key
+        # so retranslate() no longer overrides it.
+        self._value_key = ""
         self._value.setText(value)
 
+    def set_value_key(self, key: str):
+        """Set the value from a translation key so it stays localized on language switch."""
+        self._value_key = key
+        self._value.setText(tr(key))
+
     def retranslate(self):
-        """Update the label text after a language change."""
+        """Update the label text (and the value, if it has a key) after a language change."""
         if self._label_key:
             self._label.setText(tr(self._label_key))
+        if self._value_key:
+            self._value.setText(tr(self._value_key))
 
     def changeEvent(self, event):  # noqa: N802
         super().changeEvent(event)
@@ -591,6 +604,7 @@ class VerifyStatePage(ToolPageBase):
         self._stat_state = self._add_stat_card(
             tr("tools.verify.unknown"), tr("tools.verify.game_state"), "#A3BE8C",
             label_key="tools.verify.game_state")
+        self._stat_state.set_value_key("tools.verify.unknown")
 
     def set_managers(self, **kwargs) -> None:
         super().set_managers(**kwargs)
@@ -618,23 +632,11 @@ class VerifyStatePage(ToolPageBase):
 
     def retranslate_ui(self) -> None:
         super().retranslate_ui()
-        # Re-translate the "Unknown" default value on the game state card
-        # (only if it hasn't been set to a result yet -- check for known keys)
-        current = self._stat_state._value.text()
-        state_values = {
-            tr("tools.verify.unknown"), tr("tools.verify.clean"),
-            tr("tools.verify.modded"), "Unknown", "Clean", "Modded",
-            "Unbekannt", "Sauber", "Gemoddet",
-        }
-        if current in state_values or current == "--":
+        # _StatCard.retranslate() auto-refreshes value when set via set_value_key,
+        # so nothing extra is needed here for the game-state card.
+        # "Never" for last-verified — re-derive from activity log if still a "never"-flavoured token.
+        if self._stat_last._value.text() == tr("tools.stat.never") or self._stat_last._value.text() == "--":
             self._refresh_stats()
-            # If still default, force unknown
-            if self._stat_state._value.text() in ("--", "Unknown", "Unbekannt"):
-                self._stat_state.set_value(tr("tools.verify.unknown"))
-        # Re-translate "Never" values
-        never_values = {"Never", "Nie", tr("tools.stat.never")}
-        if self._stat_last._value.text() in never_values:
-            self._stat_last.set_value(tr("tools.stat.never"))
 
     def _on_run_clicked(self) -> None:
         if not self._can_run():
@@ -702,7 +704,7 @@ class VerifyStatePage(ToolPageBase):
         self._stat_last.set_value(datetime.now().strftime("%Y-%m-%d"))
 
         if not modded and not extra and not missing:
-            self._stat_state.set_value(tr("tools.verify.clean"))
+            self._stat_state.set_value_key("tools.verify.clean")
             self._stat_state._value.setStyleSheet("font-size: 36px; color: #A3BE8C; background: transparent; border: none;")
             self._set_status(tr("tools.verify.all_clean"), "#A3BE8C")
             self._add_result_card(
@@ -711,9 +713,9 @@ class VerifyStatePage(ToolPageBase):
                 color="#A3BE8C",
             )
             self._log_activity("verify",
-                f"Game state verified: ALL CLEAN ({len(vanilla)} files vanilla)")
+                tr("activity.msg_verify_clean", count=len(vanilla)))
         else:
-            self._stat_state.set_value(tr("tools.verify.modded"))
+            self._stat_state.set_value_key("tools.verify.modded")
             self._stat_state._value.setStyleSheet("font-size: 36px; color: #BF616A; background: transparent; border: none;")
             self._set_status(tr("tools.verify.modded_status"), "#BF616A")
             self._add_result_card(
@@ -722,8 +724,8 @@ class VerifyStatePage(ToolPageBase):
                 color="#BF616A",
             )
             self._log_activity("verify",
-                f"Game state verified: {len(modded)} modded, "
-                f"{len(extra)} extra dirs, {len(vanilla)} vanilla")
+                tr("activity.msg_verify_modded",
+                   modded=len(modded), extra=len(extra), vanilla=len(vanilla)))
 
         # Modded files
         if modded:
@@ -898,7 +900,7 @@ class CheckModsPage(ToolPageBase):
                 tr("tools.check.all_passed"),
                 color="#A3BE8C",
             )
-            self._log_activity("verify", "Mod check passed -- no issues found")
+            self._log_activity("verify", tr("activity.msg_mod_check_passed"))
             return
 
         # Categorize issues
@@ -920,7 +922,7 @@ class CheckModsPage(ToolPageBase):
             )
 
         self._log_activity("warning",
-            f"Mod check: {len(issues)} issue(s)",
+            tr("activity.msg_mod_check_issues", count=len(issues)),
             "; ".join(f"[{s}] {d}" for s, d in issues[:5]))
 
         # Offer to disable broken mods
@@ -946,8 +948,8 @@ class CheckModsPage(ToolPageBase):
                 self._mod_manager.set_enabled(mod["id"], False)
                 disabled += 1
                 self._log_activity("warning",
-                    f"Auto-disabled: {mod['name']}",
-                    "Failed mod compatibility check")
+                    tr("activity.msg_auto_disabled", name=mod['name']),
+                    tr("activity.msg_failed_compat_check"))
         self._set_status(
             tr("tools.check.disabled_mods", count=disabled),
             "#A3BE8C")
@@ -1132,25 +1134,19 @@ class FindCulpritPage(ToolPageBase):
         if found and enabled:
             self._pp_status.setText(tr("tool.installed_enabled"))
             self._pp_status.setStyleSheet("color: #2E7D32;")
-            self._pp_desc.setText(
-                "Fully automated — the game will auto-press Play at the title screen "
-                "during each test round. No babysitting needed.")
+            self._pp_desc.setText(tr("tool.pp_desc_enabled"))
             self._pp_download.hide()
             self._pp_note.hide()
         elif found and not enabled:
             self._pp_status.setText(tr("tool.installed_disabled"))
             self._pp_status.setStyleSheet("color: #E65100;")
-            self._pp_desc.setText(
-                "Press Play is installed but currently disabled. "
-                "Go to ASI Plugins and enable it to unlock fully automated mode.")
+            self._pp_desc.setText(tr("tool.pp_desc_disabled"))
             self._pp_download.hide()
             self._pp_note.show()
         else:
             self._pp_status.setText(tr("tool.not_installed"))
             self._pp_status.setStyleSheet("color: #9E9E9E;")
-            self._pp_desc.setText(
-                "To fully automate crash testing, install the Press Play ASI mod. "
-                "It auto-presses Play at the title screen so each test round runs hands-free.")
+            self._pp_desc.setText(tr("tool.pp_desc_missing"))
             self._pp_download.show()
             self._pp_note.show()
 
@@ -1735,6 +1731,7 @@ class FixEverythingPage(ToolPageBase):
         self._stat_state = self._add_stat_card(
             tr("tools.verify.unknown"), tr("tools.verify.game_state"), "#A3BE8C",
             label_key="tools.verify.game_state")
+        self._stat_state.set_value_key("tools.verify.unknown")
 
         self._steam_verified = False
 
@@ -1759,10 +1756,8 @@ class FixEverythingPage(ToolPageBase):
         quick_title.setFont(qtf)
         quick_layout.addWidget(quick_title)
 
-        quick_desc = CaptionLabel(
-            "Revert game files to vanilla, clean orphan directories.\n"
-            "Use when mods are broken but game files haven't changed.",
-            quick_card)
+        quick_desc = CaptionLabel(tr("tool.quick_fix_desc"), quick_card)
+        self._quick_desc = quick_desc
         qdf = quick_desc.font()
         qdf.setPixelSize(13)
         quick_desc.setFont(qdf)
@@ -1816,11 +1811,8 @@ class FixEverythingPage(ToolPageBase):
 
         full_layout.addLayout(full_header)
 
-        full_desc = CaptionLabel(
-            "Revert files, clear all backups, remove orphans,\n"
-            "then take a fresh snapshot. Use after verifying\n"
-            "game files through Steam.",
-            full_card)
+        full_desc = CaptionLabel(tr("tool.full_reset_desc"), full_card)
+        self._full_desc = full_desc
         fdf = full_desc.font()
         fdf.setPixelSize(13)
         full_desc.setFont(fdf)
@@ -1888,31 +1880,24 @@ class FixEverythingPage(ToolPageBase):
                 if entries:
                     msg = entries[0]["message"]
                     if "ALL CLEAN" in msg:
-                        self._stat_state.set_value(tr("tools.verify.clean"))
+                        self._stat_state.set_value_key("tools.verify.clean")
                         self._stat_state._value.setStyleSheet(
                             "font-size: 36px; color: #A3BE8C; background: transparent; border: none;")
                     else:
-                        self._stat_state.set_value(tr("tools.verify.modded"))
+                        self._stat_state.set_value_key("tools.verify.modded")
                         self._stat_state._value.setStyleSheet(
                             "font-size: 36px; color: #BF616A; background: transparent; border: none;")
                 else:
-                    self._stat_state.set_value(tr("tools.verify.unknown"))
+                    self._stat_state.set_value_key("tools.verify.unknown")
             except Exception:
                 pass
 
     def retranslate_ui(self) -> None:
         super().retranslate_ui()
-        # Re-translate game state card value
-        current = self._stat_state._value.text()
-        state_values = {
-            tr("tools.verify.unknown"), tr("tools.verify.clean"),
-            tr("tools.verify.modded"), "Unknown", "Clean", "Modded",
-            "Unbekannt", "Sauber", "Gemoddet",
-        }
-        if current in state_values or current == "--":
+        # _StatCard re-translates its own value when a value_key is set. Just
+        # refresh from the activity log in case the key wasn't set yet.
+        if not self._stat_state._value_key:
             self._refresh_stats()
-            if self._stat_state._value.text() in ("--", "Unknown", "Unbekannt"):
-                self._stat_state.set_value(tr("tools.verify.unknown"))
 
     def _on_run_clicked(self) -> None:
         if not self._can_run():
@@ -1960,12 +1945,12 @@ class FixEverythingPage(ToolPageBase):
                     self._set_running(False)
                     if steam:
                         self._log_activity("fix",
-                            "Fix Everything: reverted, cleared backups, rescanning")
+                            tr("activity.msg_fix_everything_rescan"))
                         self._set_status(tr("tools.fix.complete_rescan"), "#A3BE8C")
                         self.rescan_requested.emit(True)
                     else:
                         self._log_activity("fix",
-                            "Fix Everything: reverted and cleaned up (no rescan)")
+                            tr("activity.msg_fix_everything"))
                         self._set_status(tr("tools.fix.complete"), "#A3BE8C")
                         window = self.window()
                         if hasattr(window, '_refresh_all'):

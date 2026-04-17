@@ -414,6 +414,34 @@ class AsiCard(CardWidget):
         from cdumm.gui.components.mod_card import _VERSION_COLORS, _pill_qss
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
 
+    def set_update_available(self, has_update: bool, nexus_url: str = "") -> None:
+        """Color the version pill green (up to date) or red (update available)."""
+        from cdumm.gui.components.mod_card import _pill_qss, _theme_key as _tkey
+        self._nexus_url = nexus_url
+        if has_update:
+            c = (
+                {"bg": "#FEE2E2", "text": "#DC2626", "border": "#FCA5A5"}
+                if _tkey() == "light"
+                else {"bg": "#3B1111", "text": "#FCA5A5", "border": "#7F1D1D"}
+            )
+            self._version_pill.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._version_pill.setToolTip(tr("tooltip.update_available"))
+            self._version_pill.mousePressEvent = self._on_version_clicked
+        else:
+            c = (
+                {"bg": "#DCFCE7", "text": "#16A34A", "border": "#86EFAC"}
+                if _tkey() == "light"
+                else {"bg": "#0A2E14", "text": "#86EFAC", "border": "#166534"}
+            )
+            self._version_pill.setToolTip(tr("tooltip.up_to_date"))
+        self._version_pill.setStyleSheet(_pill_qss(c))
+
+    def _on_version_clicked(self, event):
+        url = getattr(self, "_nexus_url", "")
+        if url:
+            import webbrowser
+            webbrowser.open(url)
+
     def _apply_disabled_dimming(self, disabled: bool) -> None:
         """Dim the card when the plugin is disabled for visual distinction."""
         from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -1147,6 +1175,42 @@ class AsiPluginsPage(QWidget):
             self._entrance_anim = staggered_fade_in(self._cards)
             self._initial_load_done = True
 
+        # Re-apply any cached NexusMods update colors after the rebuild.
+        # Without this, every refresh() wipes green/red pills back to grey.
+        cached = getattr(self, "_nexus_updates", None)
+        if cached:
+            self.set_nexus_updates(cached)
+
+    def set_nexus_updates(self, updates: dict) -> None:
+        """Apply NexusMods update status to version pills on ASI cards.
+
+        Args:
+            updates: {nexus_mod_id: ModUpdateStatus}
+        """
+        self._nexus_updates = updates
+        if not self._db:
+            return
+        # Build {plugin_name: nexus_mod_id} lookup from asi_plugin_state
+        nexus_map: dict[str, int] = {}
+        try:
+            cursor = self._db.connection.execute(
+                "SELECT name, nexus_mod_id FROM asi_plugin_state "
+                "WHERE nexus_mod_id IS NOT NULL")
+            nexus_map = {row[0]: row[1] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.warning("set_nexus_updates: asi lookup failed: %s", e)
+            return
+        logger.info("ASI set_nexus_updates: %d updates, %d plugins with nexus_id, %d cards",
+                     len(updates), len(nexus_map), len(self._cards))
+        for card in self._cards:
+            plugin_name = card.plugin_name
+            nexus_id = nexus_map.get(plugin_name)
+            if nexus_id and nexus_id in updates:
+                u = updates[nexus_id]
+                card.set_update_available(True, u.mod_url)
+            elif nexus_id:
+                card.set_update_available(False)
+
     def retranslate_ui(self) -> None:
         """Update text with current translations."""
         self._section_title.setText(tr("asi.title"))
@@ -1223,7 +1287,7 @@ class AsiPluginsPage(QWidget):
         except Exception as e:
             from qfluentwidgets import InfoBar, InfoBarPosition
             InfoBar.error(
-                title="Error",
+                title=tr("main.error"),
                 content=str(e),
                 duration=5000,
                 position=InfoBarPosition.TOP_RIGHT,
@@ -1358,6 +1422,23 @@ class AsiPluginsPage(QWidget):
                 triggered=lambda: self._ctx_open_folder(plugin),
             ))
 
+            # Link to NexusMods (mirrors PAZ context menu)
+            nexus_id = self._get_plugin_nexus_id(plugin_name)
+            if nexus_id:
+                menu.addAction(Action(
+                    FluentIcon.LINK, "Open on NexusMods",
+                    triggered=lambda: self._ctx_open_nexus(nexus_id),
+                ))
+                menu.addAction(Action(
+                    FluentIcon.EDIT, "Change NexusMods Link",
+                    triggered=lambda: self._ctx_link_nexus(plugin_name),
+                ))
+            else:
+                menu.addAction(Action(
+                    FluentIcon.LINK, "Link to NexusMods",
+                    triggered=lambda: self._ctx_link_nexus(plugin_name),
+                ))
+
             menu.addSeparator()
 
             # Move to Folder submenu
@@ -1389,6 +1470,68 @@ class AsiPluginsPage(QWidget):
             ))
 
         menu.exec(global_pos)
+
+    def _get_plugin_nexus_id(self, plugin_name: str) -> int | None:
+        """Return the nexus_mod_id stored for an ASI plugin, or None."""
+        if not self._db:
+            return None
+        try:
+            row = self._db.connection.execute(
+                "SELECT nexus_mod_id FROM asi_plugin_state WHERE name = ?",
+                (plugin_name,)).fetchone()
+            return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
+    def _ctx_open_nexus(self, nexus_id: int) -> None:
+        import webbrowser
+        webbrowser.open(f"https://www.nexusmods.com/crimsondesert/mods/{nexus_id}")
+
+    def _ctx_link_nexus(self, plugin_name: str) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        url, ok = QInputDialog.getText(
+            self, "Link to NexusMods",
+            "Paste the NexusMods mod URL:\n(e.g. nexusmods.com/crimsondesert/mods/125)")
+        if not ok or not url:
+            return
+        import re
+        match = re.search(r'/mods/(\d+)', url)
+        if match:
+            nexus_id = int(match.group(1))
+        else:
+            match = re.match(r'^\d+$', url.strip())
+            if match:
+                nexus_id = int(match.group(0))
+            else:
+                InfoBar.warning(
+                    title=tr("nexus.invalid_url"),
+                    content=tr("nexus.invalid_url_body"),
+                    duration=3000, position=InfoBarPosition.TOP,
+                    parent=self.window())
+                return
+        if not self._db:
+            return
+        try:
+            self._db.connection.execute(
+                "INSERT OR IGNORE INTO asi_plugin_state (name) VALUES (?)",
+                (plugin_name,))
+            self._db.connection.execute(
+                "UPDATE asi_plugin_state SET nexus_mod_id = ? WHERE name = ?",
+                (nexus_id, plugin_name))
+            self._db.connection.commit()
+            logger.info("Linked ASI '%s' to NexusMods ID %d", plugin_name, nexus_id)
+            InfoBar.success(
+                title=tr("nexus.linked"),
+                content=tr("nexus.linked_asi", name=plugin_name, nexus_id=nexus_id),
+                duration=3000, position=InfoBarPosition.TOP,
+                parent=self.window())
+            # Trigger a fresh update check so the pill colors immediately
+            win = self.window()
+            if hasattr(win, "_run_nexus_update_check"):
+                win._run_nexus_update_check()
+        except Exception as e:
+            logger.warning("Failed to link ASI: %s", e)
 
     def _ctx_toggle(self, plugin_name: str, enabled: bool) -> None:
         plugin = self._find_plugin(plugin_name)

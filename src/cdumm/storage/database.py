@@ -185,6 +185,16 @@ class Database:
             )
             logger.info("Migrated: added json_patches column to mod_deltas")
 
+        # Add kind column to mod_deltas to discriminate delta type.
+        # '' (empty/default) = byte-range delta (original behaviour).
+        # 'xml_patch' = XPath patch file stored at delta_path, target = file_path.
+        # 'xml_merge' = identity-key XML merge file stored at delta_path.
+        if "kind" not in delta_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_deltas ADD COLUMN kind TEXT NOT NULL DEFAULT ''"
+            )
+            logger.info("Migrated: added kind column to mod_deltas")
+
         # Add force_inplace column to mods for per-mod overlay bypass
         if "force_inplace" not in columns:
             self._connection.execute(
@@ -243,7 +253,7 @@ class Database:
             """)
             logger.info("Created asi_plugin_state table")
 
-        # Add version column to asi_plugin_state if missing
+        # Add version + nexus_mod_id columns to asi_plugin_state if missing
         if self.table_exists("asi_plugin_state"):
             cursor = self._connection.execute("PRAGMA table_info(asi_plugin_state)")
             asi_cols = {row[1] for row in cursor.fetchall()}
@@ -252,6 +262,11 @@ class Database:
                     "ALTER TABLE asi_plugin_state ADD COLUMN version TEXT"
                 )
                 logger.info("Migrated: added version column to asi_plugin_state")
+            if "nexus_mod_id" not in asi_cols:
+                self._connection.execute(
+                    "ALTER TABLE asi_plugin_state ADD COLUMN nexus_mod_id INTEGER"
+                )
+                logger.info("Migrated: added nexus_mod_id column to asi_plugin_state")
 
         # Create asi_groups table — separate from mod_groups so PAZ and ASI
         # have independent folder structures
@@ -271,6 +286,17 @@ class Database:
                 "ALTER TABLE mods ADD COLUMN disabled_patches TEXT"
             )
             logger.info("Migrated: added disabled_patches column to mods")
+
+        # Add variants column to mods for multi-variant JSON-patch mods.
+        # Stores a JSON array of {label, filename, enabled, group} dicts; the
+        # cog-opened config panel reads it to render radio groups (same group
+        # id) or independent checkboxes (group = -1). json_source points at a
+        # synthesized merged.json that reflects the currently-enabled subset.
+        if "variants" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN variants TEXT"
+            )
+            logger.info("Migrated: added variants column to mods")
 
         # Add json_source column to mods for mount-time patching
         if "json_source" not in columns:

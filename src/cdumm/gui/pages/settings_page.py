@@ -5,16 +5,19 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Qt, Signal
+from PySide6.QtCore import QEasingCurve, Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QFileDialog, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
+    CaptionLabel,
     ComboBox,
     FluentIcon,
     InfoBar,
     InfoBarPosition,
+    PrimaryPushButton,
+    PushButton,
     PushSettingCard,
     SettingCard,
     SettingCardGroup,
@@ -64,7 +67,9 @@ class SettingsPage(SmoothScrollArea):
             self._personal_group,
         )
         self._theme_combo = ComboBox()
-        self._theme_combo.addItems(["Light", "Dark", "Auto"])
+        self._theme_combo.addItems([
+            tr("settings.theme_light"), tr("settings.theme_dark"), tr("settings.theme_auto"),
+        ])
         self._theme_combo.setFixedWidth(140)
         self._theme_combo.setStyleSheet("ComboBox { text-align: center; }")
         self._theme_card.hBoxLayout.addWidget(self._theme_combo, 0, Qt.AlignmentFlag.AlignRight)
@@ -94,7 +99,7 @@ class SettingsPage(SmoothScrollArea):
             tr("settings.game_dir_not_configured"),
             self._game_group,
         )
-        self._game_dir_card.button.setFixedWidth(140)
+        self._game_dir_card.button.setMinimumWidth(140)
         self._game_group.addSettingCard(self._game_dir_card)
 
         self._layout.addWidget(self._game_group)
@@ -107,7 +112,7 @@ class SettingsPage(SmoothScrollArea):
             tr("settings.manage_profiles_desc"),
             self._profiles_group,
         )
-        self._manage_profiles_card.button.setFixedWidth(140)
+        self._manage_profiles_card.button.setMinimumWidth(140)
         self._profiles_group.addSettingCard(self._manage_profiles_card)
 
         self._export_list_card = PushSettingCard(
@@ -115,7 +120,7 @@ class SettingsPage(SmoothScrollArea):
             tr("settings.export_list_desc"),
             self._profiles_group,
         )
-        self._export_list_card.button.setFixedWidth(140)
+        self._export_list_card.button.setMinimumWidth(140)
         self._profiles_group.addSettingCard(self._export_list_card)
 
         self._import_list_card = PushSettingCard(
@@ -123,10 +128,92 @@ class SettingsPage(SmoothScrollArea):
             tr("settings.import_list_desc"),
             self._profiles_group,
         )
-        self._import_list_card.button.setFixedWidth(140)
+        self._import_list_card.button.setMinimumWidth(140)
         self._profiles_group.addSettingCard(self._import_list_card)
 
         self._layout.addWidget(self._profiles_group)
+
+        # ── NexusMods API (testing only — personal key) ──────────
+        self._nexus_group = SettingCardGroup(tr("settings.nexus_title"), self._container)
+
+        # API key input card
+        nexus_card = QWidget()
+        nexus_layout = QVBoxLayout(nexus_card)
+        nexus_layout.setContentsMargins(16, 12, 16, 12)
+        nexus_layout.setSpacing(8)
+
+        key_row = QHBoxLayout()
+        key_label = CaptionLabel(tr("settings.nexus_key"))
+        key_label.setFixedWidth(100)
+        key_row.addWidget(key_label)
+        self._nexus_key_input = QLineEdit()
+        self._nexus_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._nexus_key_input.setPlaceholderText(tr("settings.nexus_key_placeholder"))
+        self._nexus_key_input.setFixedHeight(34)
+        key_row.addWidget(self._nexus_key_input)
+        save_key_btn = PushButton(tr("settings.nexus_save"))
+        save_key_btn.setMinimumWidth(80)
+        save_key_btn.clicked.connect(self._on_save_nexus_key)
+        key_row.addWidget(save_key_btn)
+        nexus_layout.addLayout(key_row)
+
+        check_row = QHBoxLayout()
+        self._nexus_status = CaptionLabel("")
+        check_row.addWidget(self._nexus_status, 1)
+        self._nexus_check_btn = PrimaryPushButton(tr("settings.nexus_check"))
+        self._nexus_check_btn.setMinimumWidth(180)
+        self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
+        check_row.addWidget(self._nexus_check_btn)
+        nexus_layout.addLayout(check_row)
+
+        self._nexus_group.addSettingCard(nexus_card)
+        self._layout.addWidget(self._nexus_group)
+
+        # ── Bug Report (PrivateBin) ───────────────────────────────
+        self._privatebin_group = SettingCardGroup(tr("settings.privatebin_title"), self._container)
+
+        pb_card = QWidget()
+        pb_layout = QVBoxLayout(pb_card)
+        pb_layout.setContentsMargins(16, 12, 16, 12)
+        pb_layout.setSpacing(8)
+
+        # Instance URL row
+        inst_row = QHBoxLayout()
+        inst_label = CaptionLabel(tr("settings.privatebin_instance"))
+        inst_label.setFixedWidth(100)
+        inst_row.addWidget(inst_label)
+        self._privatebin_instance_input = QLineEdit()
+        self._privatebin_instance_input.setPlaceholderText("https://privatebin.net")
+        self._privatebin_instance_input.setFixedHeight(34)
+        inst_row.addWidget(self._privatebin_instance_input)
+        pb_layout.addLayout(inst_row)
+
+        # Expiration row
+        exp_row = QHBoxLayout()
+        exp_label = CaptionLabel(tr("settings.privatebin_expire"))
+        exp_label.setFixedWidth(100)
+        exp_row.addWidget(exp_label)
+        self._privatebin_expire_combo = ComboBox()
+        self._privatebin_expire_combo.addItems([
+            "10 minutes", "1 hour", "1 day", "1 week", "1 month", "1 year",
+        ])
+        self._privatebin_expire_combo.setFixedWidth(180)
+        self._privatebin_expire_combo.setStyleSheet("ComboBox { text-align: center; }")
+        self._privatebin_expire_codes = ["10min", "1hour", "1day", "1week", "1month", "1year"]
+        exp_row.addWidget(self._privatebin_expire_combo)
+        exp_row.addStretch()
+        pb_save = PushButton(tr("settings.nexus_save"))
+        pb_save.setMinimumWidth(80)
+        pb_save.clicked.connect(self._on_save_privatebin_settings)
+        exp_row.addWidget(pb_save)
+        pb_layout.addLayout(exp_row)
+
+        hint = CaptionLabel(tr("settings.privatebin_hint"))
+        hint.setWordWrap(True)
+        pb_layout.addWidget(hint)
+
+        self._privatebin_group.addSettingCard(pb_card)
+        self._layout.addWidget(self._privatebin_group)
 
         self._layout.addStretch()
 
@@ -175,6 +262,16 @@ class SettingsPage(SmoothScrollArea):
         self._personal_group.titleLabel.setText(tr("settings.personalization"))
         self._theme_card.setTitle(tr("settings.theme"))
         self._theme_card.setContent(tr("settings.theme_desc"))
+        # Re-label theme combo items
+        self._theme_combo.blockSignals(True)
+        idx = self._theme_combo.currentIndex()
+        self._theme_combo.clear()
+        self._theme_combo.addItems([
+            tr("settings.theme_light"), tr("settings.theme_dark"), tr("settings.theme_auto"),
+        ])
+        if 0 <= idx < self._theme_combo.count():
+            self._theme_combo.setCurrentIndex(idx)
+        self._theme_combo.blockSignals(False)
         self._lang_card.setTitle(tr("settings.language"))
         self._lang_card.setContent(tr("settings.language_desc"))
         self._game_group.titleLabel.setText(tr("settings.game"))
@@ -223,6 +320,22 @@ class SettingsPage(SmoothScrollArea):
         elif self._game_dir:
             self._game_dir_card.setContent(str(self._game_dir))
             self._game_dir_card.setToolTip(str(self._game_dir))
+
+        # NexusMods API key
+        saved_key = self._config.get("nexus_api_key") or ""
+        if saved_key and hasattr(self, '_nexus_key_input'):
+            self._nexus_key_input.setText(saved_key)
+
+        # PrivateBin
+        if hasattr(self, '_privatebin_instance_input'):
+            inst = self._config.get("privatebin_instance") or "https://privatebin.net"
+            self._privatebin_instance_input.setText(inst)
+            code = self._config.get("privatebin_expire") or "1week"
+            if code in self._privatebin_expire_codes:
+                self._privatebin_expire_combo.blockSignals(True)
+                self._privatebin_expire_combo.setCurrentIndex(
+                    self._privatebin_expire_codes.index(code))
+                self._privatebin_expire_combo.blockSignals(False)
 
     def _populate_languages(self) -> None:
         """Fill the language combo from available translation files."""
@@ -312,9 +425,8 @@ class SettingsPage(SmoothScrollArea):
         from cdumm.storage.game_finder import validate_game_directory
         if not validate_game_directory(new_path):
             InfoBar.warning(
-                title="Invalid Directory",
-                content="This doesn't look like a Crimson Desert installation.\n"
-                "Expected to find bin64/CrimsonDesert.exe in the selected folder.",
+                title=tr("settings.invalid_dir_title"),
+                content=tr("settings.invalid_dir_body"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self.window(),
             )
             return
@@ -339,9 +451,104 @@ class SettingsPage(SmoothScrollArea):
         self.game_dir_changed.emit(new_path)
 
         InfoBar.success(
-            title="Game Directory Changed",
-            content=f"Game directory set to:\n{new_path}\n\n"
-            "Use 'Rescan Game Files' from the sidebar to index the new installation.",
+            title=tr("settings.game_dir_changed_title"),
+            content=tr("settings.game_dir_changed_body", path=str(new_path)),
             duration=5000, position=InfoBarPosition.TOP, parent=self.window(),
         )
         logger.info("Game directory changed to %s", new_path)
+
+    def _on_save_nexus_key(self) -> None:
+        key = self._nexus_key_input.text().strip()
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        Config(self._db).set("nexus_api_key", key)
+        if key:
+            from cdumm.engine.nexus_api import validate_api_key
+            user = validate_api_key(key)
+            if user:
+                name = user.get("name", "Unknown")
+                self._nexus_status.setText(tr("settings.nexus_logged_in", name=name))
+                self._nexus_status.setStyleSheet("color: #16A34A;")
+            else:
+                self._nexus_status.setText(tr("settings.nexus_invalid_key"))
+                self._nexus_status.setStyleSheet("color: #DC2626;")
+        else:
+            self._nexus_status.setText(tr("settings.nexus_key_cleared"))
+
+    def _on_save_privatebin_settings(self) -> None:
+        if not self._config:
+            return
+        inst = self._privatebin_instance_input.text().strip() or "https://privatebin.net"
+        # Normalise: drop trailing slash is fine either way for httpx, but keep one.
+        if not inst.endswith("/"):
+            inst = inst + "/"
+        idx = self._privatebin_expire_combo.currentIndex()
+        code = self._privatebin_expire_codes[idx] if 0 <= idx < len(self._privatebin_expire_codes) else "1week"
+        self._config.set("privatebin_instance", inst)
+        self._config.set("privatebin_expire", code)
+        InfoBar.success(
+            title=tr("main.saved"),
+            content=tr("settings.privatebin_saved"),
+            duration=2500, position=InfoBarPosition.TOP, parent=self.window(),
+        )
+
+    def _on_check_nexus_updates(self) -> None:
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        api_key = Config(self._db).get("nexus_api_key")
+        if not api_key:
+            self._nexus_status.setText(tr("settings.nexus_need_key"))
+            self._nexus_status.setStyleSheet("color: #DC2626;")
+            return
+        self._nexus_status.setText(tr("settings.nexus_checking"))
+        self._nexus_status.setStyleSheet("")
+        self._nexus_check_btn.setEnabled(False)
+        # Read mods on main thread (SQLite connections can't cross threads)
+        try:
+            cursor = self._db.connection.execute(
+                "SELECT id, name, version, nexus_mod_id FROM mods WHERE mod_type = 'paz'")
+            mods = [{"id": r[0], "name": r[1], "version": r[2], "nexus_mod_id": r[3]}
+                    for r in cursor.fetchall()]
+        except Exception as e:
+            self._nexus_status.setText(tr("settings.nexus_db_error", error=str(e)))
+            self._nexus_status.setStyleSheet("color: #DC2626;")
+            self._nexus_check_btn.setEnabled(True)
+            return
+
+        import threading
+        def _check():
+            try:
+                from cdumm.engine.nexus_api import check_mod_updates
+                self._pending_updates = check_mod_updates(mods, api_key)
+                self._pending_error = None
+            except Exception as e:
+                self._pending_updates = []
+                self._pending_error = str(e)
+            from PySide6.QtCore import QMetaObject, Qt as _Qt
+            QMetaObject.invokeMethod(
+                self, "_show_nexus_results", _Qt.ConnectionType.QueuedConnection)
+        threading.Thread(target=_check, daemon=True).start()
+
+    @Slot()
+    def _show_nexus_results(self) -> None:
+        self._nexus_check_btn.setEnabled(True)
+        error = getattr(self, "_pending_error", None)
+        if error:
+            self._nexus_status.setText(tr("settings.nexus_error", error=error[:80]))
+            self._nexus_status.setStyleSheet("color: #DC2626;")
+            return
+        updates = getattr(self, "_pending_updates", [])
+        if not updates:
+            self._nexus_status.setText(tr("settings.nexus_all_up_to_date"))
+            self._nexus_status.setStyleSheet("color: #16A34A;")
+            return
+        lines = [f"{u.local_name}: {u.local_version} -> {u.latest_version}" for u in updates]
+        self._nexus_status.setText(tr("settings.nexus_updates_available", count=len(updates)))
+        self._nexus_status.setStyleSheet("color: #2878D0;")
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self.window())
+        msg.setWindowTitle(tr("settings.nexus_updates_title", count=len(updates)))
+        msg.setText("Newer versions on NexusMods:\n\n" + "\n".join(lines))
+        msg.exec()

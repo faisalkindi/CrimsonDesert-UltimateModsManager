@@ -339,10 +339,95 @@ def _pattern_scan(
     return None
 
 
+def _build_name_offsets_for_v2(game_file: str, pabgb_bytes: bytes,
+                               pabgh_bytes: bytes) -> dict[str, int] | None:
+    """Build a name→body-offset map for v2 entry-anchored patches.
+
+    Currently supports characterinfo.pabgb (via the SWISS Knife parser).
+    Returns None for unsupported file types so the caller can log a clear
+    error instead of silently applying at offset 0.
+    """
+    base = os.path.basename(game_file).lower()
+    if base.startswith("characterinfo."):
+        try:
+            from cdumm.archive.format_parsers.characterinfo_full_parser import (
+                build_name_to_body_offset,
+            )
+            return build_name_to_body_offset(pabgb_bytes, pabgh_bytes)
+        except Exception as e:
+            logger.warning("v2 name-offset build failed for %s: %s", game_file, e)
+            return None
+    return None
+
+
+def fixup_pabgh_after_inserts(pabgh: bytes,
+                              inserts: list[tuple[int, int]]) -> bytes:
+    """Shift entry pointers in a .pabgh by the total insert size that falls
+    before each entry.
+
+    Ports JMM V9.9.1 ``FixupPabghAfterInserts`` (ModManager.cs:855). Handles
+    the two 8-byte-entry pabgh variants (2-byte ushort header and 4-byte uint
+    header). The 6-byte-entry variant is left alone — JMM skips it too.
+
+    ``inserts`` is a list of ``(original_offset, size)`` tuples referring to
+    absolute byte positions in the PRE-insert .pabgb. Any pabgh pointer at
+    or past an insert offset is shifted by that insert's size.
+
+    Returns a new bytes object with the fixups applied (or the input bytes
+    unchanged if there's nothing to do or the format doesn't match).
+    """
+    if not inserts or len(pabgh) < 2:
+        return pabgh
+
+    arr = bytearray(pabgh)
+    # Format detection mirrors JMM: if ushort header and arr length fits a
+    # tail of 8*count plus up to 16 padding bytes, treat as format 2.
+    ushort_count = struct.unpack_from("<H", arr, 0)[0]
+    fmt2 = (ushort_count > 0
+            and 2 + ushort_count * 8 <= len(arr)
+            and 2 + ushort_count * 8 >= len(arr) - 16)
+    if fmt2:
+        entry_count = ushort_count
+        header_prefix = 2
+    else:
+        if len(arr) < 4:
+            return pabgh
+        entry_count = struct.unpack_from("<I", arr, 0)[0]
+        header_prefix = 4
+
+    entry_stride = 8
+    max_by_len = (len(arr) - header_prefix) // entry_stride
+    if entry_count > max_by_len:
+        entry_count = max_by_len
+
+    # Pre-sort inserts ascending so we can early-break.
+    sorted_inserts = sorted(inserts, key=lambda x: x[0])
+    shifted = 0
+    for i in range(entry_count):
+        pos = header_prefix + i * entry_stride
+        if pos + entry_stride > len(arr):
+            break
+        ptr = struct.unpack_from("<I", arr, pos + 4)[0]
+        delta = 0
+        for ins_off, ins_size in sorted_inserts:
+            if ins_off <= ptr:
+                delta += ins_size
+            else:
+                break
+        if delta:
+            struct.pack_into("<I", arr, pos + 4, ptr + delta)
+            shifted += 1
+    logger.info("PABGH fixup: %d/%d entry offsets shifted (+%d bytes total)",
+                shifted, entry_count, sum(sz for _, sz in inserts))
+    return bytes(arr)
+
+
 def _apply_byte_patches(data: bytearray, changes: list[dict],
                         signature: str | None = None,
                         vanilla_data: bytes | None = None,
-                        record_offsets: dict[int, int] | None = None) -> tuple[int, int, int]:
+                        record_offsets: dict[int, int] | None = None,
+                        name_offsets: dict[str, int] | None = None,
+                        inserts_out: list | None = None) -> tuple[int, int, int]:
     """Apply byte patches to decompressed file data.
 
     If signature is provided, find it in data and treat change offsets
@@ -356,6 +441,11 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     If record_offsets is provided (from pabgh index), changes with
     "record_key" + "relative_offset" resolve their offset via the
     record index instead of using the absolute "offset" field.
+
+    If name_offsets is provided (v2 entry-anchored format — JMM V8+ /
+    SWISS Knife style), changes with "entry" name + "rel_offset" resolve
+    their offset via the name→body-offset map. This lets mods survive
+    game updates that shuffle record keys but keep names stable.
 
     Returns (applied_count, mismatched_count, relocated_count).
     """
@@ -380,16 +470,35 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     # with cumulative delta tracking. This correctly handles interleaved
     # insert+replace ops where inserts shift subsequent offsets.
     def _parse_offset(change):
-        # Record-relative offset: resolve via pabgh index
+        # Record-relative offset: resolve via pabgh index.
+        # Accept `relative_offset` (canonical) OR `rel_offset` (shorter alias
+        # some tools emit). Both are treated as the same.
         record_key = change.get("record_key")
         if record_key is not None and record_offsets:
             key = int(record_key)
             if key in record_offsets:
-                rel = change.get("relative_offset", 0)
+                rel = change.get("relative_offset")
+                if rel is None:
+                    rel = change.get("rel_offset", 0)
                 rel = int(rel, 0) if isinstance(rel, str) else int(rel)
                 return record_offsets[key] + rel
             else:
                 logger.warning("record_key %d not found in pabgh index", key)
+                return None
+
+        # v2 entry-anchored: look up by record NAME instead of numeric key.
+        # This is the JMM V8+ / SWISS Knife export format.
+        entry_name = change.get("entry")
+        if entry_name and name_offsets:
+            body_offset = name_offsets.get(str(entry_name))
+            if body_offset is not None:
+                rel = change.get("rel_offset")
+                if rel is None:
+                    rel = change.get("relative_offset", 0)
+                rel = int(rel, 0) if isinstance(rel, str) else int(rel)
+                return body_offset + rel
+            else:
+                logger.warning("entry %r not found in name→offset index", entry_name)
                 return None
 
         raw = change.get("offset", 0)
@@ -405,7 +514,13 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     for change in changes:
         offset = _parse_offset(change)
         if offset is None:
-            logger.warning("Invalid offset '%s', skipping", change.get("offset"))
+            # Unresolvable offset (bad record_key, entry name missing, or
+            # malformed offset). Count as mismatched so the import layer
+            # reports this as a compatibility failure, not "already applied".
+            mismatched += 1
+            logger.warning("Unresolvable offset for change: entry=%r record_key=%r offset=%r",
+                           change.get("entry"), change.get("record_key"),
+                           change.get("offset"))
             continue
         all_changes.append((offset, change))
     all_changes.sort(key=lambda x: x[0])
@@ -426,6 +541,11 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 continue
             if offset <= len(data):
                 data[offset:offset] = insert_bytes
+                # Record the ORIGINAL (pre-insert-shift) offset so a
+                # companion .pabgh can be shifted against the vanilla
+                # layout. Using `original_offset` here mirrors JMM.
+                if inserts_out is not None:
+                    inserts_out.append((original_offset, len(insert_bytes)))
                 cumulative_delta += len(insert_bytes)
                 applied += 1
         else:
@@ -561,9 +681,12 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
                 logger.error("Failed to extract %s: %s", game_file, e, exc_info=True)
                 raise RuntimeError(f"Failed to extract {game_file}: {e}") from e
 
-        # Resolve pabgh record offsets if any change uses record_key
+        # Resolve pabgh record offsets if any change uses record_key OR entry (v2)
         record_offsets = None
-        if any(c.get("record_key") is not None for c in changes):
+        name_offsets = None
+        needs_pabgh = any(
+            c.get("record_key") is not None or c.get("entry") for c in changes)
+        if needs_pabgh:
             pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
             pabgh_entry = entry_cache.get(pabgh_file.lower())
             if pabgh_entry is None:
@@ -580,6 +703,13 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
                     _key_size, record_offsets = parse_pabgh_index(pabgh_plain, table_name)
                     logger.info("Loaded pabgh index for %s: %d records",
                                 pabgh_file, len(record_offsets))
+                    # Also build name→offset map if any change uses the v2 entry form
+                    if any(c.get("entry") for c in changes):
+                        name_offsets = _build_name_offsets_for_v2(
+                            game_file, bytes(plaintext), pabgh_plain)
+                        if name_offsets is not None:
+                            logger.info("Built v2 name index for %s: %d names",
+                                        game_file, len(name_offsets))
                 except Exception as e_pabgh:
                     logger.warning("Failed to parse pabgh for %s: %s", pabgh_file, e_pabgh)
 
@@ -588,7 +718,7 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
         signature = patch.get("signature")
         applied, mismatched, relocated_count = _apply_byte_patches(
             modified, changes, signature=signature, vanilla_data=bytes(plaintext),
-            record_offsets=record_offsets)
+            record_offsets=record_offsets, name_offsets=name_offsets)
         if relocated_count:
             logger.info("Applied %d/%d patches to %s (mismatched=%d, relocated=%d)",
                          applied, len(changes), game_file, mismatched, relocated_count)
@@ -938,11 +1068,32 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                 db.connection.commit()
                 return None
 
+        # v2 entry-anchored: resolve name→offset map for characterinfo.pabgb etc.
+        name_offsets = None
+        if any(c.get("entry") for c in changes):
+            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_entry = entry_cache.get(pabgh_file.lower())
+            if pabgh_entry is None:
+                pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
+                if pabgh_entry:
+                    entry_cache[pabgh_file.lower()] = pabgh_entry
+            if pabgh_entry:
+                try:
+                    pabgh_plain = _extract_from_paz(pabgh_entry)
+                    name_offsets = _build_name_offsets_for_v2(
+                        game_file, bytes(plaintext), pabgh_plain)
+                    if name_offsets is not None:
+                        logger.info("Built v2 name index for %s: %d names",
+                                    game_file, len(name_offsets))
+                except Exception as e_pabgh:
+                    logger.warning("v2 index build failed for %s: %s", pabgh_file, e_pabgh)
+
         # Apply byte patches
         modified = bytearray(plaintext)
         signature = patch.get("signature")
         applied, mismatched, relocated_count = _apply_byte_patches(
-            modified, changes, signature=signature, vanilla_data=bytes(plaintext))
+            modified, changes, signature=signature, vanilla_data=bytes(plaintext),
+            name_offsets=name_offsets)
         if relocated_count:
             logger.info("Applied %d/%d patches to %s (mismatched=%d, relocated=%d)",
                          applied, len(changes), game_file, mismatched, relocated_count)
@@ -1290,11 +1441,30 @@ def process_json_patches_for_overlay(
         # If we fell back to game_dir, the data may be modded — don't use it as reference
         vanilla_ref = bytes(plaintext) if from_vanilla else None
 
-        # Apply byte patches with pattern scan against vanilla
+        # v2 entry-anchored: build name→offset map when any change uses `entry`
+        name_offsets = None
+        if any(c.get("entry") for c in changes):
+            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_entry = _find_pamt_entry(pabgh_file, vanilla_dir)
+            if pabgh_entry is None:
+                pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
+            if pabgh_entry:
+                try:
+                    pabgh_plain = _extract_from_paz(pabgh_entry)
+                    name_offsets = _build_name_offsets_for_v2(
+                        game_file, bytes(plaintext), pabgh_plain)
+                except Exception as e_pabgh:
+                    logger.warning("mount-time: v2 index build failed for %s: %s",
+                                   pabgh_file, e_pabgh)
+
+        # Apply byte patches with pattern scan against vanilla. Also capture
+        # inserts so we can shift a companion .pabgh (JMM parity).
         modified = bytearray(plaintext)
         signature = patch.get("signature")
+        inserts_out: list[tuple[int, int]] = []
         applied, mismatched, relocated = _apply_byte_patches(
-            modified, changes, signature=signature, vanilla_data=vanilla_ref)
+            modified, changes, signature=signature, vanilla_data=vanilla_ref,
+            name_offsets=name_offsets, inserts_out=inserts_out)
 
         if applied == 0 and mismatched > 0:
             logger.warning("mount-time: all patches mismatched for '%s' — game update?",
@@ -1311,9 +1481,54 @@ def process_json_patches_for_overlay(
             "pamt_dir": pamt_dir,
             "compression_type": entry.compression_type,
         }
+        # JMM parity: preserve the vanilla's encryption state on the overlay
+        # so the game's VFS decoder treats the bytes the same way it would
+        # have treated the original PAZ entry. Pass the vanilla flags ushort
+        # verbatim — JMM writes it into the overlay PAMT unchanged.
+        if getattr(entry, "encrypted", False):
+            metadata["encrypted"] = True
+            metadata["crypto_filename"] = entry.path.rsplit("/", 1)[-1]
+            metadata["vanilla_flags"] = entry.flags & 0xFFFF
 
         overlay_entries.append((bytes(modified), metadata))
-        logger.info("mount-time: patched '%s' (%d applied, %d relocated)",
-                    game_file, applied, relocated)
+        logger.info("mount-time: patched '%s' (%d applied, %d relocated, %d inserts)",
+                    game_file, applied, relocated, len(inserts_out))
+
+        # JMM FixupPabghAfterInserts: if we inserted bytes into a .pabgb,
+        # the companion .pabgh must have its entry pointers shifted so the
+        # game can still find each blob. Emit the fixed .pabgh as an extra
+        # overlay entry so it overrides vanilla at load time.
+        if inserts_out and game_file.lower().endswith(".pabgb"):
+            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, vanilla_dir)
+            if pabgh_entry_for_fixup is None:
+                pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, game_dir)
+            if pabgh_entry_for_fixup is None:
+                logger.warning(
+                    "mount-time: inserts into %s but no companion .pabgh found — "
+                    "overlay will ship vanilla .pabgh, game may read stale offsets",
+                    game_file,
+                )
+            else:
+                try:
+                    pabgh_plain = _extract_from_paz(pabgh_entry_for_fixup)
+                    fixed_pabgh = fixup_pabgh_after_inserts(
+                        bytes(pabgh_plain), inserts_out)
+                    pabgh_pamt_dir = Path(
+                        pabgh_entry_for_fixup.paz_file).parent.name
+                    overlay_entries.append((fixed_pabgh, {
+                        "entry_path": pabgh_entry_for_fixup.path,
+                        "pamt_dir": pabgh_pamt_dir,
+                        "compression_type": pabgh_entry_for_fixup.compression_type,
+                    }))
+                    logger.info(
+                        "mount-time: emitted fixed .pabgh companion for %s (%d inserts)",
+                        pabgh_file, len(inserts_out),
+                    )
+                except Exception as e_fix:
+                    logger.error(
+                        "mount-time: PABGH fixup failed for %s: %s",
+                        pabgh_file, e_fix, exc_info=True,
+                    )
 
     return overlay_entries

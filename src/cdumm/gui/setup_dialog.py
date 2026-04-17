@@ -59,7 +59,7 @@ class SetupDialog(MessageBoxBase):
         self._path_edit.textChanged.connect(self._on_path_changed)
         path_row.addWidget(self._path_edit)
 
-        browse_btn = PushButton("Browse...")
+        browse_btn = PushButton(tr("setup.browse"))
         browse_btn.clicked.connect(self._on_browse)
         path_row.addWidget(browse_btn)
         self.viewLayout.addLayout(path_row)
@@ -85,7 +85,7 @@ class SetupDialog(MessageBoxBase):
             logger.info("Auto-detected game directory: %s", candidates[0])
 
     def _on_browse(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Crimson Desert Folder")
+        folder = QFileDialog.getExistingDirectory(self, tr("setup.browse_dialog_title"))
         if folder:
             self._path_edit.setText(folder)
 

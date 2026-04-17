@@ -98,6 +98,7 @@ a = Analysis(
         'cdumm.archive.format_parsers.pabgb_parser',
         'cdumm.archive.format_parsers.paac_parser',
         'cdumm.archive.format_parsers.pamt_parser',
+        'cdumm.archive.format_parsers.characterinfo_full_parser',
         'cdumm.semantic',
         'cdumm.semantic.changeset',
         'cdumm.semantic.parser',
@@ -110,6 +111,10 @@ a = Analysis(
         'cdumm.archive.paz_repack',
         'cdumm.engine.crimson_browser_handler',
         'cdumm.engine.json_patch_handler',
+        'cdumm.engine.xml_patch_handler',
+        'cdumm.engine.variant_handler',
+        'cdumm.engine.language',
+        'cdumm.engine.compiled_merge',
         'cdumm.engine.texture_mod_handler',
         'cdumm.archive.pathc_handler',
         'cdumm.engine.mod_health_check',
@@ -133,10 +138,31 @@ a = Analysis(
         'cdumm.gui.activity_panel',
         'cdumm.engine.activity_log',
         'cdumm.engine.binary_search',
+        'cdumm.engine.nexus_api',
         'cdumm.engine.game_monitor',
         'cdumm.gui.binary_search_dialog',
         'cdumm.gui.patch_toggle_dialog',
         'py7zr',
+        # XML XPath patch support (JMM XmlPatchApplier parity)
+        'lxml',
+        'lxml.etree',
+        # PrivateBin upload for bug reports
+        'privatebin',
+        'privatebin._core',
+        'privatebin._crypto',
+        'privatebin._enums',
+        'privatebin._errors',
+        'privatebin._models',
+        'privatebin._utils',
+        'privatebin._version',
+        'privatebin._wrapper',
+        'base58',
+        'msgspec',
+        'msgspec.json',
+        'httpx',
+        'cryptography.hazmat.primitives.ciphers.aead',
+        'cryptography.hazmat.primitives.kdf.pbkdf2',
+        'cryptography.hazmat.backends',
     ] + _qflw_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -164,10 +190,7 @@ a = Analysis(
         'Pillow', 'colorthief',
         # brotli — not used by CDUMM (transitive dep from py7zr)
         'brotli', '_brotli', 'brotlicffi',
-        # cryptography — only used as ChaCha20 fallback in paz_crypto.py.
-        # cdumm_native Rust module handles all crypto at runtime.
-        'cryptography', 'cryptography.hazmat', 'cryptography.hazmat.primitives',
-        'cryptography.hazmat.primitives.ciphers', 'cryptography.hazmat.bindings',
+        # cryptography used by privatebin for AES-GCM + PBKDF2. Keep minimal subset.
         'cryptography.x509', 'cryptography.fernet',
         # setuptools/pkg_resources not needed at runtime
         'setuptools', 'pkg_resources',
@@ -196,9 +219,7 @@ _dll_excludes = {
     'avutil-59.dll',
     'swresample-5.dll',
     'swscale-8.dll',
-    # cryptography native DLLs (cdumm_native handles ChaCha20)
-    'libcrypto-3.dll',       # ~5 MB
-    'libssl-3.dll',          # ~0.76 MB
+    # libcrypto + libssl kept for HTTPS (NexusMods API, update checker)
     # Image format plugins CDUMM doesn't use (keep qico, qsvg, qgif)
     'qtiff.dll',             # ~0.43 MB
     'qwebp.dll',             # ~0.55 MB
@@ -211,7 +232,7 @@ _dll_excludes = {
 # Also filter out PIL/brotli/cryptography binary extensions
 _binary_name_excludes = {
     '_avif', '_imaging', '_webp', '_imagingcms', '_brotli',
-    '_rust',       # cryptography Rust binding (8.7 MB)
+    # '_rust' kept — cryptography uses it for AES-GCM in privatebin uploads
     '_ec_ws',      # Cryptodome elliptic curve (not used by CDUMM)
     '_ed448',      # Cryptodome Ed448
     '_curve448',   # Cryptodome Curve448

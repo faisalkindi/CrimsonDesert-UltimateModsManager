@@ -23,7 +23,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from cdumm.engine.activity_log import ActivityLog, CATEGORY_COLORS
+from cdumm.engine.activity_log import ActivityLog, CATEGORY_COLORS, category_color
 from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
@@ -40,14 +40,18 @@ class _ActivityEntryCard(CardWidget):
         layout.setContentsMargins(20, 12, 20, 12)
         layout.setSpacing(14)
 
-        # Category badge
+        # Category badge — theme-aware color + stronger tint in dark mode.
         category = entry.get("category", "info")
-        color = CATEGORY_COLORS.get(category, "#6B7280")
-        badge = CaptionLabel(category.upper(), self)
+        self._category = category
+        dark = isDarkTheme()
+        color = category_color(category, dark=dark)
+        alpha = "33" if dark else "20"  # ~20% vs ~12.5% — darker UI needs more fill
+        badge_text = tr(f"activity.cat_{category}") if category in CATEGORY_COLORS else category.upper()
+        badge = CaptionLabel(badge_text, self)
         badge.setFixedWidth(80)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
-            f"background: {color}20; color: {color}; "
+            f"background: {color}{alpha}; color: {color}; "
             f"border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 12px;"
         )
         layout.addWidget(badge)
@@ -90,7 +94,6 @@ class _ActivityEntryCard(CardWidget):
 
         self._badge = badge
         self._detail_label = detail_label
-        self._badge_color = color
 
     def changeEvent(self, event):  # noqa: N802
         super().changeEvent(event)
@@ -100,11 +103,18 @@ class _ActivityEntryCard(CardWidget):
             self._ts_label.setTextColor(text_color, text_color)
             if self._detail_label:
                 self._detail_label.setTextColor(text_color, text_color)
-            c = self._badge_color
+            # Re-pick badge color for the new theme — light and dark use different hues.
+            c = category_color(self._category, dark=dark)
+            alpha = "33" if dark else "20"
             self._badge.setStyleSheet(
-                f"background: {c}20; color: {c}; "
-                f"border-radius: 4px; padding: 2px 6px; font-weight: 600;"
+                f"background: {c}{alpha}; color: {c}; "
+                f"border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 12px;"
             )
+
+    def retranslate_badge(self) -> None:
+        """Refresh the badge label after a language change."""
+        if self._category in CATEGORY_COLORS:
+            self._badge.setText(tr(f"activity.cat_{self._category}"))
 
 
 class ActivityPage(SmoothScrollArea):
@@ -166,14 +176,14 @@ class ActivityPage(SmoothScrollArea):
         self._active_filter: str | None = None
 
         for category, color in CATEGORY_COLORS.items():
-            btn = PushButton(category.upper(), self._container)
+            btn = PushButton(tr(f"activity.cat_{category}"), self._container)
             btn.setFixedHeight(30)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             bf = btn.font()
             bf.setPixelSize(11)
             bf.setWeight(QFont.Weight.DemiBold)
             btn.setFont(bf)
-            self._apply_chip_style(btn, color, active=False)
+            self._apply_chip_style(btn, color, active=False, category=category)
             btn.clicked.connect(
                 lambda checked=False, c=category: self._on_filter_chip(c)
             )
@@ -226,6 +236,12 @@ class ActivityPage(SmoothScrollArea):
         self._title.setText(tr("activity.title"))
         self._refresh_btn.setText(tr("activity.refresh"))
         self._search.setPlaceholderText(tr("activity.search_placeholder"))
+        for cat, btn in self._filter_buttons.items():
+            btn.setText(tr(f"activity.cat_{cat}"))
+        # Also retranslate every visible entry badge
+        for card in self._cards:
+            if hasattr(card, "retranslate_badge"):
+                card.retranslate_badge()
 
     def refresh(self) -> None:
         """Reload activity log entries and rebuild cards."""
@@ -273,7 +289,8 @@ class ActivityPage(SmoothScrollArea):
         # Update chip visual states
         for cat, btn in self._filter_buttons.items():
             color = CATEGORY_COLORS.get(cat, "#88C0D0")
-            self._apply_chip_style(btn, color, active=(cat == self._active_filter))
+            self._apply_chip_style(btn, color, active=(cat == self._active_filter),
+                                   category=cat)
 
         self.refresh()
 
@@ -290,7 +307,8 @@ class ActivityPage(SmoothScrollArea):
     _CHIP_DEFAULT_COLORS = ("#4A5568", "#A0AEC0", "#E2E8F0", "#4A5568")
 
     @staticmethod
-    def _apply_chip_style(btn: PushButton, color: str, active: bool) -> None:
+    def _apply_chip_style(btn: PushButton, color: str, active: bool,
+                          category: str | None = None) -> None:
         from qfluentwidgets import setCustomStyleSheet
         if active:
             light = (
@@ -305,8 +323,9 @@ class ActivityPage(SmoothScrollArea):
             )
             setCustomStyleSheet(btn, light, dark)
         else:
-            # Look up per-category color, fall back to grey
-            cat_key = btn.text().lower()
+            # Look up per-category color, fall back to grey. Prefer the explicit
+            # English category key over the (now-localized) button text.
+            cat_key = (category or btn.text()).lower()
             lt, dt, lb, db = ActivityPage._CHIP_CATEGORY_COLORS.get(
                 cat_key, ActivityPage._CHIP_DEFAULT_COLORS)
             light = (

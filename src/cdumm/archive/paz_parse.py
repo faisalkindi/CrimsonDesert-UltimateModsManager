@@ -13,10 +13,13 @@ Library usage:
         print(e.path, e.comp_size, e.orig_size)
 """
 
+import logging
 import os
 import struct
 import fnmatch
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -196,6 +199,97 @@ def main():
               f"paz:{e.paz_index} @0x{e.offset:08X}  {e.path}")
 
     print(f"\n{len(entries):,} entries")
+
+
+def rewrite_pamt_localization_filename(
+    pamt_data: bytes, from_suffix: str, to_suffix: str,
+) -> bytes | None:
+    """Port of JMM ``RewritePamtLocalizationFilename`` (ModManager.cs:562).
+
+    Swaps the filename ``localizationstring_<from_suffix>.paloc`` for
+    ``localizationstring_<to_suffix>.paloc`` inside a PAMT's node (filename)
+    section. Used when a localisation PAZ mod targets language X but the
+    user's Steam language is Y — rewriting the filename inside the PAMT
+    makes the game resolve the mod's `.paloc` payload under the correct
+    per-language VFS key.
+
+    Returns the rewritten PAMT bytes, or ``None`` if the PAMT's file count
+    isn't exactly 1, the suffix is unchanged, or the target string isn't
+    present in the node section.
+    """
+    if from_suffix == to_suffix:
+        return None
+
+    from_name = f"localizationstring_{from_suffix}.paloc".encode("utf-8")
+    to_name = f"localizationstring_{to_suffix}.paloc".encode("utf-8")
+
+    # --- Walk the PAMT header to locate the node section (filename trie) ---
+    try:
+        off = 0
+        off += 4  # outer hash
+        paz_count = struct.unpack_from("<I", pamt_data, off)[0]
+        off += 4
+        off += 8  # constant + zero
+        for i in range(paz_count):
+            off += 8  # hash + size
+            if i < paz_count - 1:
+                off += 4  # separator
+        # Folder section
+        folder_size = struct.unpack_from("<I", pamt_data, off)[0]
+        off += 4
+        off += folder_size
+        # Node section — this is the fn_block. off currently points at the
+        # uint32 size prefix.
+        fn_block_offset = off
+        fn_block_size = struct.unpack_from("<I", pamt_data, off)[0]
+        off += 4
+        names_start = off
+        names_end = off + fn_block_size
+        # Folder record count comes after the node bytes — walk further only
+        # if we need file_count, but here we use JMM's convention of treating
+        # a single-file PAMT as the only valid input.
+        off = names_end
+        folder_count = struct.unpack_from("<I", pamt_data, off)[0]
+        off += 4 + folder_count * 16
+        file_count = struct.unpack_from("<I", pamt_data, off)[0]
+    except (struct.error, IndexError) as e:
+        logger.debug("PAMT rewrite: header parse failed: %s", e)
+        return None
+
+    if file_count != 1:
+        # JMM restricts this path to single-file localisation PAMTs.
+        return None
+
+    # --- Scan the node section for the target filename ---
+    found_at = -1
+    for i in range(names_start, names_end - len(from_name) + 1):
+        if pamt_data[i:i + len(from_name)] == from_name:
+            found_at = i
+            break
+    if found_at < 0:
+        return None
+
+    # The length byte precedes the filename in every node record.
+    length_byte_pos = found_at - 1
+    if length_byte_pos < names_start or pamt_data[length_byte_pos] != len(from_name):
+        # Either out of bounds or not actually a node entry (false positive).
+        return None
+
+    out = bytearray()
+    out += pamt_data[:length_byte_pos]
+    out.append(len(to_name))
+    out += to_name
+    out += pamt_data[found_at + len(from_name):]
+
+    delta = len(to_name) - len(from_name)
+    if delta != 0:
+        struct.pack_into("<I", out, fn_block_offset,
+                         fn_block_size + delta)
+
+    # Recompute the outer integrity hash (hashlittle over bytes[12:]).
+    from cdumm.archive.hashlittle import compute_pamt_hash
+    struct.pack_into("<I", out, 0, compute_pamt_hash(bytes(out)))
+    return bytes(out)
 
 
 if __name__ == "__main__":

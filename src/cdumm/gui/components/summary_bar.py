@@ -168,12 +168,12 @@ class SummaryBar(QWidget):
         self._launch_btn.setFont(lf)
         self._launch_btn.clicked.connect(self.launch_clicked)
         setCustomStyleSheet(self._launch_btn,
-            "PushButton { background: #F0F4F8; color: #4A5568; border: 1px solid #E2E8F0; border-radius: 20px; padding: 0 28px; }"
-            "PushButton:hover { background: #E2E8F0; }"
-            "PushButton:pressed { background: #CBD5E0; }",
-            "PushButton { background: #2D3748; color: #E2E8F0; border: 1px solid #4A5568; border-radius: 20px; padding: 0 28px; }"
-            "PushButton:hover { background: #3A4A5C; }"
-            "PushButton:pressed { background: #4A5568; }")
+            "PushButton { background: #2878D0; color: #FFFFFF; border: 1px solid #2878D0; border-radius: 20px; padding: 0 28px; }"
+            "PushButton:hover { background: #3A8AE0; border-color: #3A8AE0; }"
+            "PushButton:pressed { background: #1F68B8; border-color: #1F68B8; }",
+            "PushButton { background: #2878D0; color: #FFFFFF; border: 1px solid #3A8AE0; border-radius: 20px; padding: 0 28px; }"
+            "PushButton:hover { background: #3A8AE0; border-color: #5CA0F0; }"
+            "PushButton:pressed { background: #1F68B8; border-color: #2878D0; }")
         root.addWidget(self._launch_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Animation tracking

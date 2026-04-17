@@ -262,7 +262,8 @@ class WelcomeWizard(QDialog):
         nav_layout = QHBoxLayout(nav)
         nav_layout.setContentsMargins(30, 0, 30, 16)
 
-        self._back_btn = QPushButton("Back")
+        from cdumm.i18n import tr as _tr
+        self._back_btn = QPushButton(_tr("wizard.back"))
         self._back_btn.setFixedSize(100, 36)
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._back_btn.clicked.connect(self._go_back)
@@ -281,7 +282,7 @@ class WelcomeWizard(QDialog):
         nav_layout.addLayout(dots_layout)
         nav_layout.addStretch()
 
-        self._next_btn = QPushButton("Next")
+        self._next_btn = QPushButton(_tr("wizard.next"))
         self._next_btn.setFixedSize(100, 36)
         self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._next_btn.clicked.connect(self._go_next)
@@ -320,7 +321,8 @@ class WelcomeWizard(QDialog):
         layout.setContentsMargins(30, 10, 30, 10)
         layout.setSpacing(14)
 
-        self._p1_title = QLabel("Choose your language")
+        from cdumm.i18n import tr as _tr
+        self._p1_title = QLabel(_tr("wizard.choose_language"))
         self._p1_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         f = self._p1_title.font()
         f.setPixelSize(22)
@@ -328,7 +330,7 @@ class WelcomeWizard(QDialog):
         self._p1_title.setFont(f)
         layout.addWidget(self._p1_title)
 
-        self._p1_sub = QLabel("You can always change this later in Settings")
+        self._p1_sub = QLabel(_tr("wizard.change_later"))
         self._p1_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sf = self._p1_sub.font()
         sf.setPixelSize(12)
@@ -369,7 +371,8 @@ class WelcomeWizard(QDialog):
         layout.setContentsMargins(30, 20, 30, 20)
         layout.setSpacing(20)
 
-        self._p2_title = QLabel("Pick your vibe")
+        from cdumm.i18n import tr as _tr
+        self._p2_title = QLabel(_tr("wizard.pick_theme"))
         self._p2_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         f = self._p2_title.font()
         f.setPixelSize(22)
@@ -377,7 +380,7 @@ class WelcomeWizard(QDialog):
         self._p2_title.setFont(f)
         layout.addWidget(self._p2_title)
 
-        self._p2_sub = QLabel("Light for day raids, Dark for night sessions")
+        self._p2_sub = QLabel(_tr("wizard.theme_hint"))
         self._p2_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sf = self._p2_sub.font()
         sf.setPixelSize(12)
@@ -461,7 +464,8 @@ class WelcomeWizard(QDialog):
         layout.setContentsMargins(40, 20, 40, 10)
         layout.setSpacing(0)
 
-        self._p4_title = QLabel("Find your game")
+        from cdumm.i18n import tr as _tr
+        self._p4_title = QLabel(_tr("wizard.find_game"))
         self._p4_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         f = self._p4_title.font()
         f.setPixelSize(22)
@@ -542,12 +546,12 @@ class WelcomeWizard(QDialog):
         path_row = QHBoxLayout()
         path_row.setSpacing(8)
         self._path_edit = QLineEdit()
-        self._path_edit.setPlaceholderText("Select your Crimson Desert folder")
+        self._path_edit.setPlaceholderText(_tr("wizard.placeholder"))
         self._path_edit.setFixedHeight(38)
         self._path_edit.textChanged.connect(self._on_path_changed)
         path_row.addWidget(self._path_edit)
 
-        browse_btn = QPushButton("Browse")
+        browse_btn = QPushButton(_tr("wizard.browse"))
         browse_btn.setFixedSize(80, 38)
         browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         browse_btn.clicked.connect(self._on_browse)
@@ -650,7 +654,8 @@ class WelcomeWizard(QDialog):
                 self._path_status.setText("")
 
     def _on_browse(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Crimson Desert Folder")
+        from cdumm.i18n import tr as _tr
+        folder = QFileDialog.getExistingDirectory(self, _tr("setup.browse_dialog_title"))
         if folder:
             self._path_edit.setText(folder)
 

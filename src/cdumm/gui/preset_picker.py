@@ -145,13 +145,16 @@ class FolderVariantDialog(MessageBoxBase):
 
 
 class PresetPickerDialog(MessageBoxBase):
-    """Dialog for choosing which JSON preset to import."""
+    """Dialog for choosing which JSON presets to import (multi-select)."""
 
     def __init__(self, presets: list[tuple[Path, dict]], parent=None):
         super().__init__(parent)
         self._presets = presets
+        # Legacy single-select compat
         self.selected_path: Path | None = None
         self.selected_data: dict | None = None
+        # Multi-select results
+        self.selected_presets: list[tuple[Path, dict]] = []
 
         title = SubtitleLabel(tr("preset.choose"))
         tf = title.font()
@@ -169,7 +172,7 @@ class PresetPickerDialog(MessageBoxBase):
         self.viewLayout.addWidget(header)
         self.viewLayout.addSpacing(8)
 
-        # Radio button list inside a scroll area
+        # Checkbox list inside a scroll area (multi-select)
         from qfluentwidgets import isDarkTheme
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -180,17 +183,17 @@ class PresetPickerDialog(MessageBoxBase):
         container = QWidget()
         if isDarkTheme():
             container.setStyleSheet("QWidget { background: #1C2028; } "
-                "QRadioButton { color: #E2E8F0; padding: 10px; spacing: 8px; }"
-                "QRadioButton::indicator { width: 16px; height: 16px; }")
+                "QCheckBox { color: #E2E8F0; padding: 10px; spacing: 8px; }"
+                "QCheckBox::indicator { width: 16px; height: 16px; }")
         else:
             container.setStyleSheet("QWidget { background: #FAFBFC; } "
-                "QRadioButton { color: #1A202C; padding: 10px; spacing: 8px; }"
-                "QRadioButton::indicator { width: 16px; height: 16px; }")
-        radio_layout = QVBoxLayout(container)
-        radio_layout.setContentsMargins(8, 8, 8, 8)
-        radio_layout.setSpacing(4)
+                "QCheckBox { color: #1A202C; padding: 10px; spacing: 8px; }"
+                "QCheckBox::indicator { width: 16px; height: 16px; }")
+        cb_layout = QVBoxLayout(container)
+        cb_layout.setContentsMargins(8, 8, 8, 8)
+        cb_layout.setSpacing(4)
 
-        self._radios: list[QRadioButton] = []
+        self._checkboxes: list[QCheckBox] = []
         for i, (file_path, data) in enumerate(presets):
             name = data.get("name", file_path.stem)
             desc = data.get("description", "")
@@ -201,16 +204,15 @@ class PresetPickerDialog(MessageBoxBase):
                 label += f"\n{desc[:80]}"
             label += f"\n{patch_count} changes"
 
-            radio = QRadioButton(label)
-            rf = radio.font()
-            rf.setPixelSize(13)
-            radio.setFont(rf)
-            if i == 0:
-                radio.setChecked(True)
-            self._radios.append(radio)
-            radio_layout.addWidget(radio)
+            cb = QCheckBox(label)
+            cbf = cb.font()
+            cbf.setPixelSize(13)
+            cb.setFont(cbf)
+            cb.setChecked(i == 0)  # first one checked by default
+            self._checkboxes.append(cb)
+            cb_layout.addWidget(cb)
 
-        radio_layout.addStretch()
+        cb_layout.addStretch()
         scroll.setWidget(container)
         self.viewLayout.addWidget(scroll)
 
@@ -223,12 +225,15 @@ class PresetPickerDialog(MessageBoxBase):
         self.widget.setMinimumWidth(500)
 
     def _on_accept(self) -> None:
-        for i, radio in enumerate(self._radios):
-            if radio.isChecked() and i < len(self._presets):
+        self.selected_presets = []
+        for i, cb in enumerate(self._checkboxes):
+            if cb.isChecked() and i < len(self._presets):
                 fp, data = self._presets[i]
-                self.selected_path = fp
-                self.selected_data = data
-                break
+                self.selected_presets.append((fp, data))
+        # Legacy compat: set first selected as primary
+        if self.selected_presets:
+            self.selected_path = self.selected_presets[0][0]
+            self.selected_data = self.selected_presets[0][1]
         self.accept()
 
 

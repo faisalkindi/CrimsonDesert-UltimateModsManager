@@ -9,6 +9,8 @@ dependencies = [
     "bsdiff4>=1.2",
     "lz4>=4.3",
     "cryptography>=42.0",
+    "privatebin>=0.3.0",
+    "lxml>=5.0",
 ]
 
 [project.optional-dependencies]

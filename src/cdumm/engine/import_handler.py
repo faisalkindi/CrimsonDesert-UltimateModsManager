@@ -221,6 +221,65 @@ def _try_convert_crimson_browser(
     return converted
 
 
+def _register_xml_patches(
+    extracted_dir: Path, mod_id: int, mod_name: str,
+    db: Database, deltas_dir: Path,
+) -> list[Path]:
+    """Scan extracted mod content for XML XPath patch / merge files.
+
+    For each detected patch / merge file:
+      1. Copy it into ``deltas_dir`` with a unique name.
+      2. Derive the target game-file path from the file's position within
+         ``extracted_dir`` (JMM convention: strip ``.patch`` / ``.merge``
+         suffix, keep the rest of the relative path).
+      3. Insert a ``mod_deltas`` row with ``kind=xml_patch|xml_merge``,
+         ``delta_path`` pointing to the copy, ``file_path`` = target.
+
+    Returns the list of source paths we claimed, so the caller can ignore
+    them during regular import (prevents the CB / loose-file passes from
+    re-processing patch bodies as full-file replacements).
+    """
+    from cdumm.engine.xml_patch_handler import (
+        detect_patch_file, derive_target_from_patch_path,
+    )
+    claimed: list[Path] = []
+    for f in extracted_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        kind = detect_patch_file(f)
+        if kind not in ("xml_patch", "xml_merge"):
+            continue
+        target = derive_target_from_patch_path(f, extracted_dir)
+        if not target:
+            logger.warning("xml_patch: could not derive target for %s", f)
+            continue
+
+        # Copy the patch file into deltas_dir. Unique filename: mod_id + hash
+        # of the target path so two mods targeting the same file don't clash.
+        import hashlib
+        tag = hashlib.md5(target.encode("utf-8")).hexdigest()[:8]
+        dest_name = f"{mod_id}_{kind}_{tag}_{f.name}"
+        dest = deltas_dir / dest_name
+        try:
+            shutil.copy2(f, dest)
+        except Exception as e:
+            logger.error("xml_patch: copy failed (%s → %s): %s", f, dest, e)
+            continue
+
+        db.connection.execute(
+            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+            "byte_start, byte_end, is_new, kind) "
+            "VALUES (?, ?, ?, 0, 0, 0, ?)",
+            (mod_id, target, str(dest), kind),
+        )
+        claimed.append(f)
+        logger.info("xml_patch: registered %s → target=%s (kind=%s)",
+                    f.name, target, kind)
+    if claimed:
+        db.connection.commit()
+    return claimed
+
+
 def _detect_xml_replacements(extracted_dir: Path) -> list[dict]:
     """Detect OG_<name>__<suffix>.xml replacement files.
 
@@ -807,9 +866,11 @@ def import_from_rar(
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         try:
+            _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             proc = subprocess.run(
                 [seven_z, "x", str(archive_path), f"-o{tmp_path}", "-y"],
                 capture_output=True, timeout=120,
+                creationflags=_no_window,
             )
             if proc.returncode != 0:
                 stderr_msg = proc.stderr.decode(errors="replace").strip()
@@ -1031,7 +1092,50 @@ def _import_from_extracted(
             _import_remaining_loose_files(
                 tmp_path, game_dir, db, snapshot, deltas_dir, result)
 
+    # Third pass: register XML XPath patch / merge files (JMM parity).
+    # Runs regardless of whether the main pass found other content — some
+    # mods are purely XML patches and have no other game files.
+    if result.mod_id is None and _scan_xml_patches(tmp_path):
+        # No prior pass created a mod row; create one now for this
+        # XML-patches-only mod so the deltas have somewhere to anchor.
+        author = (modinfo or {}).get("author")
+        version = (modinfo or {}).get("version")
+        description = (modinfo or {}).get("description")
+        # Reuse 'paz' as the umbrella mod_type; the presence of deltas with
+        # kind='xml_patch'/'xml_merge' is what tags this mod as XML-patch
+        # style. Keeps the existing schema CHECK constraint happy.
+        cur = db.connection.execute(
+            "INSERT INTO mods (name, mod_type, priority, author, version, "
+            "description) VALUES (?, 'paz', 0, ?, ?, ?)",
+            (mod_name, author, version, description),
+        )
+        db.connection.commit()
+        result.mod_id = cur.lastrowid
+        result.error = None
+        logger.info("xml_patch-only mod created: id=%d name=%s",
+                    result.mod_id, mod_name)
+    if result.mod_id is not None:
+        claimed = _register_xml_patches(
+            tmp_path, result.mod_id, mod_name, db, deltas_dir)
+        if claimed:
+            for p in claimed:
+                rel = str(p.relative_to(tmp_path)).replace("\\", "/")
+                if rel not in result.changed_files:
+                    result.changed_files.append(rel)
+
     return result
+
+
+def _scan_xml_patches(root: Path) -> list[Path]:
+    """Lightweight detector — returns paths to XML patch / merge files
+    under ``root`` without touching the DB. Used to decide whether an
+    otherwise-empty archive actually contains patch content."""
+    from cdumm.engine.xml_patch_handler import detect_patch_file
+    hits: list[Path] = []
+    for f in root.rglob("*"):
+        if f.is_file() and detect_patch_file(f):
+            hits.append(f)
+    return hits
 
 
 def import_from_zip(
@@ -1191,8 +1295,9 @@ def import_from_zip(
         scripts = list(tmp_path.glob("*.bat")) + list(tmp_path.glob("*.py"))
         if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
             result.error = (
-                "This zip contains a script mod. "
-                "It should be handled by the script mod flow, not the worker."
+                f"'{archive_path.name}' is a standalone script/tool, not a "
+                "CDUMM mod. Run it directly if you need the tool, or extract "
+                "the script and drop the .py/.bat file if it's a CDUMM script mod."
             )
             return result
 
@@ -1202,6 +1307,12 @@ def import_from_zip(
             logger.info("Multi-variant zip, using: %s", variant.name)
             tmp_path = variant
             mod_name = f"{mod_name} ({variant.name})"
+        else:
+            wrapped = _first_numbered_parent(tmp_path)
+            if wrapped is not None and wrapped != tmp_path:
+                logger.info("Descending wrapper: %s -> %s",
+                            tmp_path.name, wrapped.relative_to(tmp_path))
+                tmp_path = wrapped
 
         # Read mod metadata from modinfo.json if present
         modinfo = _read_modinfo(tmp_path)
@@ -1311,7 +1422,11 @@ def import_from_folder(
     scripts = list(folder_path.glob("*.bat")) + list(folder_path.glob("*.py"))
     if scripts and not _match_game_files(folder_path, game_dir, snapshot):
         result = ModImportResult(folder_path.name)
-        result.error = "This folder contains a script mod. It should be handled by the script mod flow."
+        result.error = (
+            f"'{folder_path.name}' is a standalone script/tool, not a CDUMM mod. "
+            "Run it directly if you need the tool, or drop the .py/.bat file "
+            "individually if it's a CDUMM script mod."
+        )
         return result
 
     # Detect variant folders: parent folder has multiple subdirectories each
@@ -1322,6 +1437,15 @@ def import_from_folder(
         logger.info("Multi-variant mod detected, using variant: %s", variant.name)
         folder_path = variant
         mod_name = f"{folder_path.parent.name} ({variant.name})"
+    else:
+        # Single-variant mods may wrap content in '<ModName>/files/NNNN/' or
+        # similar. Descend through unambiguous single-subdir wrappers until we
+        # find the folder that directly contains the NNNN game directories.
+        wrapped = _first_numbered_parent(folder_path)
+        if wrapped is not None and wrapped != folder_path:
+            logger.info("Descending wrapper folder: %s -> %s",
+                        folder_path.name, wrapped.relative_to(folder_path))
+            folder_path = wrapped
 
     # Read mod metadata from modinfo.json if present
     modinfo = _read_modinfo(folder_path)
@@ -1347,35 +1471,80 @@ def import_from_folder(
     return result
 
 
+def _first_numbered_parent(root: Path, max_depth: int = 4) -> Path | None:
+    """Return the directory that directly contains an NNNN 4-digit subfolder.
+
+    Walks down from ``root`` through single-subdir wrappers (e.g. ``files/``)
+    up to ``max_depth`` levels. Stops as soon as any NNNN child is found.
+    Returns None if no numbered dir is reachable without branching.
+    """
+    import re as _re
+    current = root
+    for _ in range(max_depth):
+        if not current.is_dir():
+            return None
+        subdirs = [c for c in current.iterdir() if c.is_dir()]
+        for c in subdirs:
+            if _re.match(r"^\d{4}$", c.name):
+                return current
+        # Only descend through unambiguous single-subdir wrappers
+        if len(subdirs) == 1:
+            current = subdirs[0]
+            continue
+        return None
+    return None
+
+
 def _find_best_variant(folder_path: Path) -> Path | None:
     """Detect if a folder contains multiple mod variants.
 
-    Returns the best variant subfolder, or None if not a multi-variant mod.
-    A multi-variant mod has 2+ subdirectories each containing 0.paz + 0.pamt.
+    Returns the best variant root, or None if not a multi-variant mod.
+    Variants are either:
+      - subdirectories each containing 0.paz + 0.pamt
+      - subdirectories each containing at least one NNNN/ game directory
+        (may be nested under e.g. ``<variant>/files/0000/``)
+
+    When the variant wraps its content under an extra directory, the returned
+    path is the inner folder that directly contains the NNNN/ subdirs — so the
+    caller can treat it as a mod root without additional descent.
     """
-    # Check direct children for variant directories
+    # Tier 1: variants with 0.paz + 0.pamt (original JSON MM style bundles)
     variants: list[Path] = []
     for sub in folder_path.iterdir():
         if not sub.is_dir():
             continue
-        # A variant has its own 0.paz+0.pamt (directly or inside a numbered subdir)
         has_paz = list(sub.rglob("0.paz"))
         has_pamt = list(sub.rglob("0.pamt"))
         if has_paz and has_pamt:
             variants.append(sub)
 
-    if len(variants) < 2:
-        return None  # not multi-variant
+    if len(variants) >= 2:
+        variants.sort(key=lambda p: p.name)
+        chosen = variants[-1]
+        logger.info("Found %d PAZ variants: %s. Picking: %s",
+                    len(variants), [v.name for v in variants], chosen.name)
+        return chosen
 
-    # Multiple variants found. Pick the last one alphabetically (usually highest value).
-    # e.g., FatStacks10x > FatStacks2x, or variant names sorted naturally
-    variants.sort(key=lambda p: p.name)
-    chosen = variants[-1]
-    logger.info("Found %d variants: %s. Picking: %s",
-                len(variants),
-                [v.name for v in variants],
-                chosen.name)
-    return chosen
+    # Tier 2: variants by NNNN directory presence (Crimson Browser-style nests)
+    nnnn_variants: list[tuple[Path, Path]] = []  # (variant_subdir, content_root)
+    for sub in folder_path.iterdir():
+        if not sub.is_dir():
+            continue
+        content_root = _first_numbered_parent(sub)
+        if content_root is not None:
+            nnnn_variants.append((sub, content_root))
+
+    if len(nnnn_variants) >= 2:
+        nnnn_variants.sort(key=lambda t: t[0].name)
+        chosen_sub, chosen_root = nnnn_variants[-1]
+        logger.info("Found %d NNNN variants: %s. Picking: %s (content root: %s)",
+                    len(nnnn_variants),
+                    [v.name for v, _ in nnnn_variants],
+                    chosen_sub.name,
+                    chosen_root.relative_to(folder_path))
+        return chosen_root
+
+    return None
 
 
 def import_from_script(
@@ -1419,12 +1588,14 @@ def import_from_script(
             return result
 
         try:
+            _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             proc = subprocess.run(
                 cmd,
                 cwd=str(sandbox_path),
                 timeout=SCRIPT_TIMEOUT,
                 capture_output=True,
                 text=True,
+                creationflags=_no_window,
             )
             if proc.returncode != 0:
                 logger.warning("Script exited with code %d: %s", proc.returncode, proc.stderr[:500])

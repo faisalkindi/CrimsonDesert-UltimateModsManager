@@ -397,6 +397,14 @@ class ApplyWorker(QObject):
         revert_files = self._get_files_to_revert(set(file_deltas.keys()))
         _phase(f"Loaded {len(file_deltas)} file deltas, {len(revert_files)} reverts")
 
+        # JMM-parity localisation redirect. If a standalone PAZ mod targets
+        # a language group (0019-0032) that doesn't match the user's Steam
+        # language, rename the delta keys to point at the user's group and
+        # rewrite the PAMT's embedded .paloc filename in one pass so the
+        # game's VFS resolves the mod under the correct language slot.
+        file_deltas, revert_files = self._apply_language_redirect(
+            file_deltas, revert_files)
+
         if not file_deltas and not revert_files:
             self.error_occurred.emit("No mod changes to apply or revert.")
             return
@@ -561,6 +569,33 @@ class ApplyWorker(QObject):
                         logger.info("Mount-time: %s produced %d overlay entries",
                                     mod_name, len(entries))
 
+            _phase("Phase 1a-xml: Mount-time XML patches")
+            # Collect xml_patch / xml_merge deltas for all enabled mods and
+            # feed them to xml_patch_handler.process_xml_patches_for_overlay.
+            # Mirrors JMM XmlPatchApplier apply-time flow.
+            xml_rows = self._db.connection.execute(
+                "SELECT d.mod_id, m.name, d.kind, d.delta_path, d.file_path, "
+                "m.priority FROM mod_deltas d "
+                "JOIN mods m ON m.id = d.mod_id "
+                "WHERE m.enabled = 1 AND d.kind IN ('xml_patch', 'xml_merge') "
+                "ORDER BY m.priority ASC, d.id ASC"
+            ).fetchall()
+            if xml_rows:
+                self.progress_updated.emit(58, f"Applying XML patches ({len(xml_rows)})...")
+                from cdumm.engine.xml_patch_handler import process_xml_patches_for_overlay
+                items = [
+                    {
+                        "mod_id": mod_id, "mod_name": mod_name, "kind": kind,
+                        "delta_path": dp, "file_path": fp, "priority": prio,
+                    }
+                    for (mod_id, mod_name, kind, dp, fp, prio) in xml_rows
+                ]
+                xml_entries = process_xml_patches_for_overlay(items, self._game_dir)
+                self._overlay_entries.extend(xml_entries)
+                if xml_entries:
+                    logger.info("xml_patch: produced %d overlay entries from %d deltas",
+                                len(xml_entries), len(xml_rows))
+
             _phase(f"Phase 1b: Build overlay ({len(self._overlay_entries)} entries)")
             # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
             if self._overlay_entries:
@@ -607,10 +642,22 @@ class ApplyWorker(QObject):
                         pct = 60 + int((idx / max(total, 1)) * 25)
                         self.progress_updated.emit(pct, f"Building overlay ({idx + 1}/{total})...")
 
-                paz_bytes, pamt_bytes = build_overlay(self._overlay_entries,
-                                                       game_dir=self._game_dir,
-                                                       progress_cb=_overlay_progress,
-                                                       preloaded_cache=self._cached_overlay)
+                # DDS reserved1 / reserved2 are rewritten inside build_overlay
+                # itself now, as part of JMM-parity BuildPartialDdsPayload
+                # handling for `comp_type==1` entries. The builder needs the
+                # backed-up vanilla PATHC to resolve each DDS's expected last4.
+                vanilla_pathc_for_build = self._vanilla_dir / "meta" / "0.pathc"
+                if not vanilla_pathc_for_build.exists():
+                    game_pathc_fallback = self._game_dir / "meta" / "0.pathc"
+                    vanilla_pathc_for_build = game_pathc_fallback if game_pathc_fallback.exists() else None
+
+                paz_bytes, pamt_bytes, overlay_packed = build_overlay(
+                    self._overlay_entries,
+                    game_dir=self._game_dir,
+                    progress_cb=_overlay_progress,
+                    preloaded_cache=self._cached_overlay,
+                    vanilla_pathc_path=vanilla_pathc_for_build,
+                )
                 overlay_dir = self._allocate_overlay_dir(_staged_mod_dirs)
                 self._overlay_dir_name = overlay_dir
                 overlay_path = self._game_dir / overlay_dir
@@ -634,7 +681,7 @@ class ApplyWorker(QObject):
                 # Register DDS entries in PATHC (meta/0.pathc) so the game
                 # can find textures via its texture path index.
                 # DMM does this for all DDS overlay entries.
-                self._update_pathc_for_overlay(txn)
+                self._update_pathc_for_overlay(txn, overlay_packed)
 
             _phase("Phase 2: Compose PAMT files")
             # ── Phase 2: Compose PAMT files (entry updates + byte deltas) ──
@@ -663,10 +710,16 @@ class ApplyWorker(QObject):
                 entry_updates = self._pamt_entry_updates.get(pamt_dir, [])
 
                 if new_pamt_deltas and not byte_deltas and not entry_updates:
-                    # Purely new PAMT — use last copy
-                    src = Path(new_pamt_deltas[-1]["delta_path"])
-                    if src.exists():
-                        result_bytes = src.read_bytes()
+                    # Purely new PAMT — use last copy. If the language-
+                    # redirect pass rewrote this PAMT's .paloc filename in
+                    # memory, prefer those bytes over the raw delta file.
+                    last_delta = new_pamt_deltas[-1]
+                    result_bytes = last_delta.get("_rewritten_bytes")
+                    if result_bytes is None:
+                        src = Path(last_delta["delta_path"])
+                        if src.exists():
+                            result_bytes = src.read_bytes()
+                    if result_bytes:
                         txn.stage_file(pamt_path, result_bytes)
                         modified_pamts[pamt_dir] = result_bytes
                     continue
@@ -1334,6 +1387,56 @@ class ApplyWorker(QObject):
             except Exception as e:
                 logger.debug("Semantic merge failed for %s: %s", entry_path, e)
 
+            # JMM-parity byte-level fallback (MergeCompiledModFiles). Fires
+            # when the schema-aware semantic merge couldn't cleanly combine
+            # the conflicting entries. We have vanilla + each mod's body in
+            # memory already — walk each mod's bytes against vanilla, copy
+            # differing runs into a shared buffer, log overlaps.
+            try:
+                vanilla_for_bytes = self._get_vanilla_entry_content(
+                    file_path, entry_path)
+                if vanilla_for_bytes and mod_bodies and len(mod_bodies) >= 2:
+                    from cdumm.engine.compiled_merge import merge_compiled_mod_files
+                    ordered = list(mod_bodies.items())  # priority order preserved
+                    merged_body, warnings = merge_compiled_mod_files(
+                        vanilla_for_bytes, ordered)
+                    for w in warnings:
+                        logger.info("byte-merge: %s", w)
+                    if merged_body and merged_body != vanilla_for_bytes:
+                        from cdumm.engine.delta_engine import load_entry_delta
+                        pamt_dir = file_path.split("/")[0]
+                        merged_meta = {
+                            "pamt_dir": pamt_dir,
+                            "entry_path": entry_path,
+                            "_byte_merged": True,
+                        }
+                        first_d = conflicting[0]
+                        _, first_meta = load_entry_delta(Path(first_d["delta_path"]))
+                        merged_meta.update({
+                            k: first_meta[k] for k in (
+                                "paz_index", "compression_type", "flags",
+                                "vanilla_offset", "vanilla_comp_size",
+                                "vanilla_orig_size", "encrypted")
+                            if k in first_meta
+                        })
+                        merged_d = dict(first_d)
+                        merged_d["_merged_content"] = merged_body
+                        merged_d["_merged_metadata"] = merged_meta
+                        merged_d["mod_name"] = "byte_merge"
+                        ep_set = {entry_path}
+                        merged_deltas = [
+                            d for d in merged_deltas
+                            if d.get("entry_path") not in ep_set
+                        ]
+                        merged_deltas.append(merged_d)
+                        logger.info(
+                            "Byte-merge fallback SUCCESS: %s — %d mod(s) merged, "
+                            "%d overlap warning(s)",
+                            entry_path, len(ordered), len(warnings))
+            except Exception as e:
+                logger.debug("Byte-merge fallback failed for %s: %s",
+                             entry_path, e)
+
         return merged_deltas
 
     def _extract_sibling_entry(self, pamt_dir: str, entry_path: str) -> bytes | None:
@@ -1924,33 +2027,38 @@ class ApplyWorker(QObject):
                         logger.warning("Restored orphaned file to vanilla: %s "
                                        "(backup exists, no active mod)", rel)
 
-    def _update_pathc_for_overlay(self, txn) -> None:
+    def _update_pathc_for_overlay(self, txn, overlay_packed) -> None:
         """Register DDS overlay entries in meta/0.pathc.
 
         The game uses PATHC as a texture path index to find DDS files.
         Without registration, DDS textures in the overlay PAZ are invisible
         to the game's texture loader.
+
+        Mirrors JMM's ``UpdatePathcForTextures``: reads the m-values and
+        DDS template header straight from the bytes build_overlay produced
+        (``BuildPartialDdsPayload`` output), not from pre-build content, so
+        PATHC and overlay PAZ agree on reserved1 / last4.
         """
-        # Collect DDS entries from the overlay
-        dds_entries = []
+        if not overlay_packed:
+            return
+
+        # Build a lookup of DDS entries {entry_path: (OverlayEntry, content_bytes)}.
+        dds_entries: list[tuple[str, "OverlayEntry", bytes]] = []
         for content, metadata in self._overlay_entries:
             entry_path = metadata.get("entry_path", "")
             if entry_path.lower().endswith(".dds"):
-                dds_entries.append((content, metadata))
-
+                dds_entries.append((entry_path, None, content))
         if not dds_entries:
             return
 
-        try:
-            from cdumm.archive.pathc_handler import (
-                read_pathc, serialize_pathc, get_dds_metadata,
-                update_entry,
-            )
-        except ImportError:
-            logger.debug("PATHC handler not available, skipping DDS registration")
-            return
+        # Index overlay_packed by "dir_path/filename" so we can pair each
+        # source (entry_path, content) with the OverlayEntry carrying the
+        # final m-values.
+        packed_by_filename: dict[str, "OverlayEntry"] = {}
+        for oe in overlay_packed:
+            packed_by_filename[oe.filename.lower()] = oe
 
-        # Backup vanilla PATHC if not already backed up
+        # Backup vanilla PATHC if not already backed up.
         pathc_path = self._game_dir / "meta" / "0.pathc"
         if not pathc_path.exists():
             logger.debug("No meta/0.pathc found, skipping DDS registration")
@@ -1964,51 +2072,196 @@ class ApplyWorker(QObject):
             logger.info("Backed up vanilla PATHC: %s", vanilla_pathc)
 
         try:
-            # Read from vanilla backup (clean state)
+            from cdumm.archive.pathc_handler import (
+                read_pathc, serialize_pathc, update_entry, get_path_hash,
+            )
+        except ImportError:
+            logger.debug("PATHC handler not available, skipping DDS registration")
+            return
+
+        try:
             pathc = read_pathc(vanilla_pathc)
+            import bisect
+            import struct as _st
 
-            for content, metadata in dds_entries:
-                entry_path = metadata.get("entry_path", "")
-                pamt_dir = metadata.get("pamt_dir", "")
-
-                # Build virtual path: /{dir_path}/{filename}
-                # where dir_path comes from the PAMT folder prefix
-                if "/" in entry_path:
-                    vpath = "/" + entry_path
+            updated = 0
+            added = 0
+            preserved = 0
+            for entry_path, _placeholder, content in dds_entries:
+                filename = entry_path.rsplit("/", 1)[-1]
+                oe = packed_by_filename.get(filename.lower())
+                # Prefer m-values from the OverlayEntry (authoritative for
+                # what went into the overlay PAZ). Fall back to re-reading
+                # from the content bytes if the field is missing.
+                if oe and oe.dds_m_values is not None:
+                    m = oe.dds_m_values
+                elif len(content) >= 128 and content[:4] == b"DDS ":
+                    # Pathological fallback — OverlayEntry lost its m-values
+                    # (e.g. old cache schema). Recompute from the source bytes
+                    # so we never register PATHC entries with zero m-values
+                    # (game would reject the texture).
+                    try:
+                        from cdumm.archive.overlay_builder import (
+                            _build_dds_partial_payload,
+                        )
+                        _, m = _build_dds_partial_payload(content)
+                    except Exception as e:
+                        logger.warning(
+                            "PATHC update: partial-payload fallback "
+                            "failed for %s: %s — skipping entry",
+                            entry_path, e)
+                        continue
                 else:
-                    vpath = "/" + entry_path
+                    logger.warning(
+                        "PATHC update: entry %s has neither OverlayEntry "
+                        "m-values nor a valid DDS header — skipping",
+                        entry_path)
+                    continue
 
-                # Create DDS record from content bytes
+                # PATHC keys are FULL hierarchical paths (e.g. "/ui/texture/
+                # cd_icon_map_00.dds"), NOT the flattened PAMT entry_path
+                # ("ui/cd_icon_map_00.dds"). OverlayEntry.dir_path carries
+                # the full folder path resolved via _build_full_path_map;
+                # prefer that when available. Fall back to entry_path for
+                # cases where the builder couldn't resolve a dir_path.
+                if oe and oe.dir_path:
+                    vpath = "/" + oe.dir_path.strip("/") + "/" + filename
+                else:
+                    vpath = "/" + entry_path.lstrip("/")
+                target_hash = get_path_hash(vpath)
+                idx = bisect.bisect_left(pathc.key_hashes, target_hash)
+                existing = (idx < len(pathc.key_hashes)
+                            and pathc.key_hashes[idx] == target_hash)
+                if existing and pathc.map_entries[idx].m1 == m[0]:
+                    preserved += 1
+                    continue
+
+                # DDS template record for PATHC — JMM uses the header+padding
+                # portion of the MOD's DDS bytes (clipped to pathc's per-record
+                # size). Detect DX10 via fourcc for correct 148-byte length.
                 record_size = pathc.header.dds_record_size
+                fourcc = content[84:88] if len(content) >= 88 else b""
+                head_size = 148 if (fourcc == b"DX10" and len(content) >= 148) else 128
                 dds_rec = bytearray(record_size)
-                to_copy = min(len(content), record_size)
+                to_copy = min(len(content), head_size, record_size)
                 dds_rec[:to_copy] = content[:to_copy]
                 dds_rec = bytes(dds_rec)
 
-                # Deduplicate against existing records
                 try:
                     dds_idx = pathc.dds_records.index(dds_rec)
                 except ValueError:
                     pathc.dds_records.append(dds_rec)
                     dds_idx = len(pathc.dds_records) - 1
 
-                # Compute mip metadata
-                m = get_dds_metadata(content)
-
-                # Update hash table entry
                 update_entry(pathc, vpath, dds_idx, m)
+                if existing:
+                    updated += 1
+                else:
+                    added += 1
 
-            # Update header counts
             pathc.header.dds_record_count = len(pathc.dds_records)
             pathc.header.hash_count = len(pathc.key_hashes)
 
-            # Serialize and stage
             pathc_bytes = serialize_pathc(pathc)
             txn.stage_file("meta/0.pathc", pathc_bytes)
-            logger.info("Updated PATHC: registered %d DDS overlay entries", len(dds_entries))
+            logger.info("Updated PATHC: %d updated, %d added, %d preserved "
+                        "(%d DDS overlay entries)",
+                        updated, added, preserved, len(dds_entries))
 
         except Exception as e:
             logger.error("Failed to update PATHC for DDS overlay: %s", e, exc_info=True)
+
+    def _apply_language_redirect(self, file_deltas: dict, revert_files: set
+                                 ) -> tuple[dict, set]:
+        """Redirect standalone PAZ deltas from a localisation group that
+        doesn't match the user's Steam language.
+
+        Ports JMM ``CmdApply`` language-redirect logic (ModManager.cs:3403-
+        3472): when a PAZ-replacement mod targets ``0020`` (English) but
+        the user is running Korean (``0019``), rewrite every ``0020/``
+        delta key to ``0019/`` and — for the ``.pamt`` file — replace the
+        embedded ``localizationstring_eng.paloc`` filename with
+        ``localizationstring_kor.paloc`` so the game's VFS resolves the
+        mod under the correct per-language slot.
+
+        Returns a possibly new ``(file_deltas, revert_files)`` pair. If no
+        redirect is needed the inputs are returned unchanged.
+        """
+        try:
+            from cdumm.engine.language import (
+                STEAM_LANG_TO_GROUP, LOCALIZATION_GROUPS,
+                GROUP_TO_PALOC_SUFFIX, detect_steam_language,
+            )
+            from cdumm.archive.paz_parse import rewrite_pamt_localization_filename
+        except ImportError:
+            return file_deltas, revert_files
+
+        lang = detect_steam_language(self._game_dir)
+        user_group = STEAM_LANG_TO_GROUP.get(lang.lower()) if lang else None
+        if not user_group or user_group not in LOCALIZATION_GROUPS:
+            return file_deltas, revert_files
+
+        # Collect keys needing redirect.
+        redirects: list[tuple[str, str, str]] = []  # (old_key, new_key, source_group)
+        for fp in list(file_deltas.keys()):
+            top = fp.split("/", 1)[0] if "/" in fp else fp
+            if top in LOCALIZATION_GROUPS and top != user_group:
+                new_key = fp.replace(f"{top}/", f"{user_group}/", 1)
+                redirects.append((fp, new_key, top))
+
+        if not redirects:
+            return file_deltas, revert_files
+
+        from_suffixes = {src: GROUP_TO_PALOC_SUFFIX.get(src) for _, _, src in redirects}
+        to_suffix = GROUP_TO_PALOC_SUFFIX.get(user_group)
+        logger.info(
+            "language redirect: user=%s group=%s — redirecting %d delta key(s)",
+            lang, user_group, len(redirects))
+
+        new_file_deltas: dict = dict(file_deltas)
+        for old_key, new_key, src_group in redirects:
+            deltas = new_file_deltas.pop(old_key, None)
+            if deltas is None:
+                continue
+            # Copy each delta dict so `_rewritten_bytes` never leaks onto
+            # the underlying objects that other code paths may share.
+            deltas = [dict(d) for d in deltas]
+            from_suffix = from_suffixes.get(src_group)
+            # Rewrite PAMT bytes in-place for every is_new PAMT delta under
+            # this key so the staged bytes carry the correct .paloc name.
+            if old_key.endswith(".pamt") and from_suffix and to_suffix:
+                for d in deltas:
+                    if not d.get("is_new"):
+                        continue
+                    dp = d.get("delta_path")
+                    if not dp:
+                        continue
+                    try:
+                        src_bytes = Path(dp).read_bytes()
+                    except OSError as e:
+                        logger.warning("lang redirect: read failed %s: %s", dp, e)
+                        continue
+                    rewritten = rewrite_pamt_localization_filename(
+                        src_bytes, from_suffix, to_suffix)
+                    if rewritten:
+                        # Stash rewritten bytes on the delta so _compose_pamt
+                        # / new-PAMT handler picks them up.
+                        d["_rewritten_bytes"] = rewritten
+                        logger.info(
+                            "lang redirect: %s → %s (PAMT filename: %s→%s)",
+                            old_key, new_key, from_suffix, to_suffix)
+            new_file_deltas[new_key] = deltas
+
+        # Also redirect any revert paths pointing at the original language dir.
+        new_reverts = set()
+        for rf in revert_files:
+            top = rf.split("/", 1)[0]
+            if top in LOCALIZATION_GROUPS and top != user_group:
+                new_reverts.add(rf.replace(f"{top}/", f"{user_group}/", 1))
+            else:
+                new_reverts.add(rf)
+
+        return new_file_deltas, new_reverts
 
     def _allocate_overlay_dir(self, staged_dirs: set[str] | None = None) -> str:
         """Find the next available 4-digit directory >= 0037 for the overlay PAZ.

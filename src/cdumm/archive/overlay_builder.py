@@ -7,12 +7,13 @@ entries from the overlay directory first, leaving vanilla files untouched.
 Matches JSON Mod Manager's BuildMultiPamt format exactly.
 """
 
-import struct
+import bisect
 import logging
-from dataclasses import dataclass
+import struct
+from dataclasses import dataclass, field
+from typing import Optional
 
 from cdumm.archive.hashlittle import hashlittle
-from cdumm.archive.paz_repack import fix_dds_header
 from cdumm.archive.paz_crypto import lz4_compress
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,33 @@ _path_map_cache: dict[str, dict[str, str]] = {}
 _EXT_COMP_TYPE: dict[str, int] = {
     ".dds": 1,   # DDS texture: 128-byte header + LZ4 body
     ".bnk": 0,   # Wwise soundbank: raw uncompressed
+}
+
+# DDS format tables — ported 1:1 from JMM V9.9.1 (MPL-2.0, ModManager.cs).
+_LAST4_BY_FOURCC = {
+    b"DXT1": 12,
+    b"DXT2": 15, b"DXT3": 15,
+    b"DXT4": 15, b"DXT5": 15,
+    b"ATI1": 4, b"BC4U": 4, b"BC4S": 4,
+    b"ATI2": 4, b"BC5U": 4, b"BC5S": 4,
+}
+_LAST4_BY_DXGI = {
+    70: 12, 71: 12, 72: 12,
+    73: 15, 74: 15, 75: 15,
+    76: 15, 77: 15, 78: 15,
+    79: 4,  80: 4,  81: 4,
+    82: 4,  83: 4,  84: 4,
+    94: 4,  95: 4,  96: 4,
+    97: 15, 98: 15, 99: 15,
+}
+_BC_BLOCK_BYTES_BY_FOURCC = {
+    b"DXT1": 8, b"ATI1": 8, b"BC4U": 8, b"BC4S": 8,
+    b"DXT3": 16, b"DXT5": 16, b"ATI2": 16, b"BC5U": 16, b"BC5S": 16,
+}
+_BC_BLOCK_BYTES_BY_DXGI = {
+    70: 8, 71: 8, 72: 8, 73: 16, 74: 16, 75: 16, 76: 16, 77: 16, 78: 16,
+    79: 8, 80: 8, 81: 8, 82: 16, 83: 16, 84: 16, 94: 16, 95: 16, 96: 16,
+    97: 16, 98: 16, 99: 16,
 }
 
 
@@ -51,6 +79,179 @@ class OverlayEntry:
     comp_size: int      # compressed size in PAZ
     decomp_size: int    # decompressed size
     flags: int          # ushort flags (compression_type, no encryption)
+    # DDS metadata (populated for comp_type==1 entries) so PATHC update can
+    # read the exact reserved1 / last4 values the overlay PAZ carries without
+    # re-slicing the paz buffer.
+    dds_m_values: Optional[tuple[int, int, int, int]] = None
+    dds_last4: int = 0
+
+
+def _build_dds_partial_payload(
+    dds_bytes: bytes,
+) -> tuple[bytes, tuple[int, int, int, int]]:
+    """Port of JMM ``BuildPartialDdsPayload`` (ModManager.cs:4935-5037).
+
+    Returns ``(payload_bytes, (m1, m2, m3, m4))``. The payload's bytes 32..47
+    are already stamped with the m-values; bytes 48..75 are zeroed.
+
+    For an unsupported format (unknown block bytes) or a non-DDS input, the
+    original bytes are returned unchanged with m=(0,0,0,0).
+
+    Layout of the returned payload:
+
+      - ``flag3=True`` (inner-LZ4 single chunk — standard case):
+          ``header + chosen_first_mip + rest_of_ddsData_after_first_mip_end``
+          where ``chosen_first_mip`` is the LZ4-compressed first mip if it
+          compresses smaller than raw, else the raw first mip.
+          ``m1 = len(chosen), m2 = first_mip_raw, m3 = mip2 (or 0), m4 = mip3 (or 0)``
+
+      - ``flag3=False`` (multi-chunk raw):
+          ``header + mip1_raw + mip2_raw + mip3_raw + mip4_raw + rest``
+          ``m1..m4 = per-mip raw sizes``
+    """
+    if len(dds_bytes) < 128 or dds_bytes[:4] != b"DDS ":
+        return dds_bytes, (0, 0, 0, 0)
+
+    height, width = struct.unpack_from("<II", dds_bytes, 12)
+    depth = struct.unpack_from("<I", dds_bytes, 24)[0]
+    mip_count = struct.unpack_from("<I", dds_bytes, 28)[0] or 1
+    fourcc = dds_bytes[84:88]
+    field_112 = struct.unpack_from("<I", dds_bytes, 112)[0]
+
+    is_dx10 = fourcc == b"DX10" and len(dds_bytes) >= 148
+    header_size = 148 if is_dx10 else 128
+    dxgi = struct.unpack_from("<I", dds_bytes, 128)[0] if is_dx10 else None
+    array_size = (
+        struct.unpack_from("<I", dds_bytes, 140)[0] if is_dx10 else 1
+    )
+
+    block_bytes = _BC_BLOCK_BYTES_BY_FOURCC.get(fourcc)
+    if block_bytes is None and dxgi is not None:
+        block_bytes = _BC_BLOCK_BYTES_BY_DXGI.get(dxgi)
+    if not block_bytes:
+        # Unsupported format — JMM ships raw bytes unchanged.
+        logger.debug("DDS unsupported format fourcc=%r dxgi=%r — raw payload",
+                     fourcc, dxgi)
+        return dds_bytes, (0, 0, 0, 0)
+
+    # Per-mip size table (BC block math), up to max(4, mip_count) slots.
+    mip_slots = max(4, mip_count)
+    mip_sizes = [0] * mip_slots
+    w = max(1, width)
+    h = max(1, height)
+    for i in range(min(mip_slots, mip_count)):
+        mip_sizes[i] = (
+            max(1, (w + 3) // 4)
+            * max(1, (h + 3) // 4)
+            * block_bytes
+        )
+        w = max(1, w // 2)
+        h = max(1, h // 2)
+
+    # flag3: selects inner-LZ4 single-chunk vs multi-chunk raw layout.
+    not_dx10_or_array_small = (not is_dx10) or array_size < 2
+    multi_chunk_rawable = (mip_count > 5) and (field_112 == 0) and (depth < 2)
+    flag3 = (not not_dx10_or_array_small) or (not multi_chunk_rawable)
+
+    header = bytearray(dds_bytes[:header_size])
+    if depth == 0:
+        struct.pack_into("<I", header, 24, 1)  # force depth>=1 in shipped header
+
+    out = bytearray()
+    out += header
+
+    m = [0, 0, 0, 0]
+
+    if flag3:
+        first_mip_size = mip_sizes[0]
+        first_mip_end = header_size + first_mip_size
+        first_mip = bytes(dds_bytes[header_size:first_mip_end])
+        compressed = lz4_compress(first_mip)
+        chosen = compressed if len(compressed) < len(first_mip) else first_mip
+        m[0] = len(chosen)
+        m[1] = first_mip_size
+        if mip_count > 1:
+            m[2] = mip_sizes[1]
+        if mip_count > 2:
+            m[3] = mip_sizes[2]
+        out += chosen
+        if first_mip_end < len(dds_bytes):
+            out += dds_bytes[first_mip_end:]
+    else:
+        cursor = header_size
+        for j in range(min(4, mip_count)):
+            size = mip_sizes[j]
+            m[j] = size
+            end = cursor + size
+            out += dds_bytes[cursor:end]
+            cursor = end
+        if cursor < len(dds_bytes):
+            out += dds_bytes[cursor:]
+
+    # Stamp reserved1 = [m1, m2, m3, m4] and zero reserved1[4..10].
+    struct.pack_into("<4I", out, 32, m[0], m[1], m[2], m[3])
+    struct.pack_into("<7I", out, 48, 0, 0, 0, 0, 0, 0, 0)
+
+    return bytes(out), (m[0], m[1], m[2], m[3])
+
+
+def _get_dds_format_last4(dds_bytes: bytes) -> int:
+    """Port of JMM ``GetDdsFormatLast4`` — returns the expected last4 from
+    the DDS header's format, or 0 if format unrecognised."""
+    if len(dds_bytes) < 92:
+        return 0
+    fourcc = dds_bytes[84:88]
+    if fourcc == b"DX10" and len(dds_bytes) >= 132:
+        dxgi = struct.unpack_from("<I", dds_bytes, 128)[0]
+        return _LAST4_BY_DXGI.get(dxgi, 0)
+    return _LAST4_BY_FOURCC.get(fourcc, 0)
+
+
+# Cache for loaded vanilla PATHC (per game_dir) so we read it once per apply.
+_pathc_cache: dict[str, object] = {}
+
+
+def _get_pathc_last4_for_path(vanilla_pathc_path, virtual_path: str) -> int:
+    """Look up the vanilla PATHC last4 for a given virtual path.
+
+    Mirrors JMM's ``GetPathcDdsLast4``. Returns 0 if PATHC is missing, the
+    path isn't in PATHC, or the DDS record is too short.
+    """
+    if vanilla_pathc_path is None:
+        return 0
+    cache_key = str(vanilla_pathc_path)
+    pathc = _pathc_cache.get(cache_key)
+    if pathc is None and vanilla_pathc_path.exists():
+        try:
+            from cdumm.archive.pathc_handler import read_pathc
+            pathc = read_pathc(vanilla_pathc_path)
+            _pathc_cache[cache_key] = pathc
+        except Exception as e:
+            logger.debug("PATHC read failed (%s): %s", vanilla_pathc_path, e)
+            return 0
+    if pathc is None:
+        return 0
+
+    from cdumm.archive.pathc_handler import get_path_hash
+    vpath = "/" + virtual_path.replace("\\", "/").strip().strip("/")
+    h = get_path_hash(vpath)
+    idx = bisect.bisect_left(pathc.key_hashes, h)
+    if idx >= len(pathc.key_hashes) or pathc.key_hashes[idx] != h:
+        return 0
+    me = pathc.map_entries[idx]
+    dds_idx = me.selector & 0xFFFF
+    if not (0 <= dds_idx < len(pathc.dds_records)):
+        return 0
+    rec = pathc.dds_records[dds_idx]
+    if len(rec) < 128:
+        return 0
+    return struct.unpack_from("<I", rec, 124)[0]
+
+
+def _reset_pathc_cache() -> None:
+    """Clear the vanilla-PATHC cache. Called at the start of each apply to
+    avoid stale data if the user swaps the vanilla backup."""
+    _pathc_cache.clear()
 
 
 def _build_full_path_map(pamt_dir: str, game_dir) -> dict[str, str]:
@@ -175,11 +376,16 @@ def _build_full_path_map(pamt_dir: str, game_dir) -> dict[str, str]:
     return result
 
 
+OVERLAY_CACHE_SCHEMA = 2  # bump whenever the overlay byte layout changes;
+# v2 = JMM BuildPartialDdsPayload parity for DDS entries.
+
+
 def _load_overlay_cache(game_dir) -> dict:
     """Load the overlay cache manifest from the previous Apply.
 
     Returns {entry_path: {offset, comp_size, decomp_size, flags, delta_hash, overlay_dir}}
-    and the cached overlay PAZ bytes (or None).
+    and the cached overlay PAZ bytes (or None). If the on-disk cache was
+    written by an older schema, it's discarded (treated as cold).
     """
     import json
     from pathlib import Path
@@ -189,6 +395,11 @@ def _load_overlay_cache(game_dir) -> dict:
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
+        if manifest.get("_schema") != OVERLAY_CACHE_SCHEMA:
+            logger.info("Overlay cache schema mismatch (got %r, want %d) — "
+                         "discarding and rebuilding",
+                         manifest.get("_schema"), OVERLAY_CACHE_SCHEMA)
+            return {}, None, None
         overlay_dir = manifest.get("_overlay_dir")
         if not overlay_dir:
             return {}, None, None
@@ -210,6 +421,7 @@ def _save_overlay_cache(game_dir, overlay_dir, cache_entries: dict):
     cache_path = Path(game_dir) / "CDMods" / ".overlay_cache.json"
     manifest = dict(cache_entries)
     manifest["_overlay_dir"] = overlay_dir
+    manifest["_schema"] = OVERLAY_CACHE_SCHEMA
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f)
@@ -274,7 +486,8 @@ def build_overlay(
     game_dir=None,
     progress_cb=None,
     preloaded_cache=None,
-) -> tuple[bytes, bytes]:
+    vanilla_pathc_path=None,
+) -> tuple[bytes, bytes, list["OverlayEntry"]]:
     """Build overlay PAZ + PAMT from ENTR delta entries.
 
     Uses incremental rebuild: entries unchanged since last Apply are copied
@@ -288,10 +501,17 @@ def build_overlay(
         preloaded_cache: optional pre-loaded (manifest, paz_data, dir) tuple
             from _load_overlay_cache. Used when the previous overlay dir
             gets cleaned up before build runs.
+        vanilla_pathc_path: path to the backed-up vanilla meta/0.pathc. Used
+            for DDS ``last4`` lookup so overlay DDS records match what the
+            game's texture loader expects. Falls back to format-derived last4.
 
     Returns:
-        (paz_bytes, pamt_bytes) ready to write to overlay directory.
+        (paz_bytes, pamt_bytes, overlay_entries) — the first two ready to write
+        to the overlay directory, the third giving per-file comp/decomp sizes
+        PLUS the DDS m-values / last4 that the overlay PAZ actually carries,
+        so the PATHC update step can register exactly those values.
     """
+    _reset_pathc_cache()
     if preloaded_cache:
         cache_manifest, cached_paz, _cached_dir = preloaded_cache
     elif game_dir:
@@ -303,7 +523,16 @@ def build_overlay(
 
     paz_buf = bytearray()
     overlay_entries: list[OverlayEntry] = []
-    _added_pabgh: set[str] = set()  # track which PABGH files we've added
+    # Track which PABGH files we've already added so the sibling auto-include
+    # step below doesn't double up. Seed with any `.pabgh` already in
+    # `entries` (e.g. a JSON-insert-fixed .pabgh companion emitted explicitly
+    # by process_json_patches_for_overlay). Dedupe key is the ENTRY_PATH in
+    # lowercase so the auto-include's derived `.pabgh` path matches.
+    _added_pabgh: set[str] = set()
+    for _c, _m in entries:
+        _ep = _m.get("entry_path", "")
+        if _ep.lower().endswith(".pabgh"):
+            _added_pabgh.add(_ep.lower())
     total_entries = len(entries)
 
     for entry_idx, (content, metadata) in enumerate(entries):
@@ -365,10 +594,19 @@ def build_overlay(
                     and paz_offset % PAZ_ALIGNMENT == 0  # current position aligned
                     and c_size > 0):
                 paz_buf.extend(cached_paz[c_off:c_padded])
+                # For DDS entries, recover m-values + last4 from the cached
+                # bytes so PATHC update can proceed without recomputing.
+                cached_m = None
+                cached_last4 = 0
+                if cached["flags"] == 1 and c_size >= 128:
+                    seg = cached_paz[c_off:c_off + 128]
+                    cached_m = struct.unpack_from("<4I", seg, 32)
+                    cached_last4 = struct.unpack_from("<I", seg, 124)[0]
                 overlay_entries.append(OverlayEntry(
                     dir_path=dir_path, filename=filename,
                     paz_offset=paz_offset, comp_size=cached["comp_size"],
                     decomp_size=cached["decomp_size"], flags=cached["flags"],
+                    dds_m_values=cached_m, dds_last4=cached_last4,
                 ))
                 new_cache[entry_path] = {
                     "offset": paz_offset, "comp_size": cached["comp_size"],
@@ -378,41 +616,34 @@ def build_overlay(
                 cache_hits += 1
                 continue
 
+        built_m_values: Optional[tuple[int, int, int, int]] = None
+        built_last4: int = 0
+
         if comp_type == 1:
-            # DDS type 0x01: check if DX10 multi-mip (raw passthrough)
-            # or standard DDS (inner LZ4 compression).
-            # DX10 multi-mip textures must be written raw — inner LZ4
-            # breaks them (confirmed broken in JSON MM 9.8.3 too).
-            fourcc = content[84:88] if len(content) >= 88 else b""
-            is_dx10 = fourcc == b"DX10" and len(content) >= 148
-            mip_count = max(1, struct.unpack_from("<I", content, 28)[0]) if len(content) >= 32 else 1
+            # DDS type 0x01 — mirrors JMM's BuildPartialDdsPayload + last4
+            # patch. The game's texture loader reads reserved1 (bytes 32-47)
+            # and reserved2 (byte 124) to find the payload layout; those
+            # values must match the bytes actually written to the overlay.
+            partial, m_values = _build_dds_partial_payload(content)
+            original_len = len(content)
+            buf = bytearray(original_len)
+            copy_len = min(len(partial), original_len)
+            buf[:copy_len] = partial[:copy_len]
 
-            if is_dx10 and mip_count > 1:
-                # DX10 multi-mip: raw passthrough, no compression
-                payload = content
-                comp_size = len(payload)
-                decomp_size = len(payload)
-            else:
-                # Standard DDS: inner LZ4 compression
-                DDS_HEADER_SIZE = 128
-                header = bytearray(content[:DDS_HEADER_SIZE])
-                body = content[DDS_HEADER_SIZE:]
+            # last4 at byte 124: vanilla PATHC first, else format lookup.
+            last4 = _get_pathc_last4_for_path(vanilla_pathc_path, entry_path)
+            if last4 == 0:
+                last4 = _get_dds_format_last4(content)
+            if last4 and len(buf) >= 128:
+                struct.pack_into("<I", buf, 124, last4)
 
-                compressed_body = lz4_compress(body)
-
-                if header[:4] == b"DDS ":
-                    header = fix_dds_header(header, len(compressed_body))
-
-                full_size = len(content)
-                payload_core = bytes(header) + compressed_body
-                if len(payload_core) < full_size:
-                    payload = payload_core + b'\x00' * (full_size - len(payload_core))
-                else:
-                    payload = payload_core
-
-                comp_size = full_size
-                decomp_size = full_size
+            # The payload is stored raw (no outer LZ4) with size == original.
+            payload = bytes(buf)
+            comp_size = len(payload)
+            decomp_size = len(payload)
             flags = 1
+            built_m_values = m_values
+            built_last4 = last4
 
         elif comp_type == 2:
             compressed = lz4_compress(content)
@@ -427,6 +658,28 @@ def build_overlay(
             decomp_size = len(content)
             flags = 0
 
+        # JMM-parity ChaCha20 overlay re-encryption.
+        # When the vanilla source entry was encrypted, the overlay must be
+        # encrypted too. Callers pass the vanilla entry's *complete* flags
+        # ushort via ``metadata["vanilla_flags"]`` — JMM stores that value
+        # verbatim on the overlay (ModManager.cs:3890-3909, 4268-4273) so
+        # the game's VFS decoder sees exactly the same compression +
+        # encryption type pair it would have seen pre-mod.
+        if metadata.get("encrypted"):
+            from cdumm.archive.paz_crypto import encrypt as _chacha_encrypt
+            key_name = metadata.get("crypto_filename") or filename
+            payload = _chacha_encrypt(payload, key_name)
+            comp_size = len(payload)
+            vflags = metadata.get("vanilla_flags")
+            if vflags is not None:
+                flags = int(vflags) & 0xFFFF
+            else:
+                # Synthesize flags: keep the compression nibble we computed
+                # and add ChaCha20 type 3 in the encryption nibble.
+                flags = (flags & 0x0F) | 0x30
+            logger.info("overlay encrypt: %s (ChaCha20, flags=0x%04X)",
+                        filename, flags)
+
         paz_buf.extend(payload)
 
         # Align to 16 bytes
@@ -438,6 +691,7 @@ def build_overlay(
             dir_path=dir_path, filename=filename,
             paz_offset=paz_offset, comp_size=comp_size,
             decomp_size=decomp_size, flags=flags,
+            dds_m_values=built_m_values, dds_last4=built_last4,
         ))
 
         # Cache this entry for future incremental rebuilds
@@ -456,12 +710,14 @@ def build_overlay(
         # PABGB structure changed.
         if filename.endswith(".pabgb") and game_dir:
             pabgh_name = filename.replace(".pabgb", ".pabgh")
-            pabgh_key = f"{dir_path}/{pabgh_name}" if dir_path else pabgh_name
-            # Only add if we haven't already added this PABGH
-            if pabgh_key not in _added_pabgh:
+            # Dedupe key matches the pre-seed above (entry_path, lowercase)
+            # so an explicit .pabgh in `entries` wins over the vanilla copy.
+            companion_entry_path = entry_path.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_dedupe_key = companion_entry_path.lower()
+            if pabgh_dedupe_key not in _added_pabgh:
                 pabgh_data = _get_vanilla_pabgh(pamt_dir, entry_path, game_dir)
                 if pabgh_data:
-                    _added_pabgh.add(pabgh_key)
+                    _added_pabgh.add(pabgh_dedupe_key)
                     pabgh_offset = len(paz_buf)
                     paz_buf.extend(pabgh_data)
                     # Align
@@ -499,7 +755,7 @@ def build_overlay(
     # Store cache for caller to save after overlay dir is allocated
     build_overlay._last_cache = new_cache
 
-    return paz_bytes, pamt_bytes
+    return paz_bytes, pamt_bytes, overlay_entries
 
 
 def _build_multi_pamt(entries: list[OverlayEntry], paz_data_len: int) -> bytes:

@@ -38,7 +38,6 @@ def _dbg(msg: str) -> None:
 
 def _dbg_status(action: str, mod_id: int, old_status: str, new_status: str,
                 reason: str = "") -> None:
-    """Log every status change with context."""
     changed = "CHANGED" if old_status != new_status else "NO-CHANGE"
     _dbg(f"STATUS {changed}: [{action}] id={mod_id} '{old_status}' → '{new_status}'"
          f"{' reason=' + reason if reason else ''}")
@@ -152,6 +151,26 @@ class ModsPage(QWidget):
             "PushButton:hover { background: #223450; }"
             "PushButton:pressed { background: #2A3C58; }")
         select_row.addWidget(self._new_folder_btn)
+
+        # Dedicated conflict-order view (Miki990 UX request). Opens a
+        # modal dialog listing every currently-active conflict alongside
+        # the mods' load-order priority so the user can see who wins
+        # before deciding to reorder.
+        self._conflicts_btn = PushButton(
+            FluentIcon.ALIGNMENT, tr("mod_list.view_conflicts")
+            if tr("mod_list.view_conflicts") != "mod_list.view_conflicts"
+            else "View Conflicts")
+        self._conflicts_btn.setFixedHeight(32)
+        self._conflicts_btn.setFont(_nbf)
+        self._conflicts_btn.clicked.connect(self._on_show_conflicts)
+        setCustomStyleSheet(self._conflicts_btn,
+            "PushButton { background: #FFF4F0; color: #D04848; border: 1px solid #F0B8B0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #FFE8E0; }"
+            "PushButton:pressed { background: #FFD8CC; }",
+            "PushButton { background: #401A1A; color: #F08080; border: 1px solid #602828; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #502222; }"
+            "PushButton:pressed { background: #582828; }")
+        select_row.addWidget(self._conflicts_btn)
         left.addLayout(select_row)
 
         # Scrollable mod list area with smooth scroll animation
@@ -231,6 +250,8 @@ class ModsPage(QWidget):
         self._config_panel = ConfigPanel(self)
         self._config_panel.panel_closed.connect(self._on_config_closed)
         self._config_panel.apply_clicked.connect(self._on_config_apply)
+        self._config_panel.variants_apply_clicked.connect(
+            self._on_variants_apply)
         body.addWidget(self._config_panel, 0)
 
         main.addLayout(body, 1)
@@ -291,6 +312,26 @@ class ModsPage(QWidget):
         self._game_dir = game_dir
         self.refresh()
 
+    def set_nexus_updates(self, updates: dict) -> None:
+        """Apply NexusMods update status to version pills on mod cards.
+
+        Args:
+            updates: {nexus_mod_id: ModUpdateStatus}
+        """
+        self._nexus_updates = updates
+        nexus_map = getattr(self, '_nexus_id_map', {})
+        logger.info("set_nexus_updates: %d updates, %d mods with nexus_id, %d cards",
+                     len(updates), len(nexus_map), len(self._mod_cards))
+        # Update existing cards
+        for card in self._mod_cards:
+            mod_id = card.mod_id
+            nexus_id = nexus_map.get(mod_id)
+            if nexus_id and nexus_id in updates:
+                u = updates[nexus_id]
+                card.set_update_available(True, u.mod_url)
+            elif nexus_id:
+                card.set_update_available(False)
+
     # ------------------------------------------------------------------
     # Refresh
     # ------------------------------------------------------------------
@@ -307,6 +348,12 @@ class ModsPage(QWidget):
         self._select_all_cb.blockSignals(True)
         self._select_all_cb.setChecked(bool(all_checked))
         self._select_all_cb.blockSignals(False)
+        # Re-apply cached NexusMods update colors to the newly-built cards.
+        # Without this, any refresh() after an import/apply wipes green/red
+        # pills back to default grey until the 30-min update timer re-fires.
+        cached = getattr(self, "_nexus_updates", None)
+        if cached:
+            self.set_nexus_updates(cached)
 
     def retranslate_ui(self) -> None:
         """Update text with current translations."""
@@ -344,6 +391,8 @@ class ModsPage(QWidget):
         if not self._mod_manager:
             return
 
+        self._nexus_id_map = {}  # mod_id -> nexus_mod_id
+
         # Load folder groups from DB
         groups_from_db = self._load_folder_groups()
 
@@ -376,6 +425,9 @@ class ModsPage(QWidget):
 
         for order, mod in enumerate(mods, start=1):
             mod_id = mod["id"]
+            nexus_id = mod.get("nexus_mod_id")
+            if nexus_id:
+                self._nexus_id_map[mod_id] = nexus_id
 
             # Check if recently imported (< 24 hours)
             is_new = False
@@ -710,6 +762,42 @@ class ModsPage(QWidget):
 
         file_counts = self._mod_manager.get_file_counts()
 
+        # Multi-variant JSON mods take a dedicated code path: the panel
+        # shows radio groups / checkboxes per variant and the apply
+        # regenerates merged.json instead of fiddling with disabled_patches.
+        variants_raw = None
+        try:
+            row = self._db.connection.execute(
+                "SELECT variants FROM mods WHERE id = ?", (mod_id,)
+            ).fetchone()
+            if row and row[0]:
+                variants_raw = row[0]
+        except Exception as e:
+            logger.debug("variants column read failed: %s", e)
+        if variants_raw:
+            try:
+                import json as _json
+                variants_list = _json.loads(variants_raw)
+                conflicts_text: list[str] = []
+                if self._conflict_detector:
+                    for c in self._conflict_detector.get_conflicts_for_mod(mod_id):
+                        conflicts_text.append(c.explanation)
+                self._config_panel.show_variant_mod(
+                    mod_id=mod_id,
+                    name=mod["name"],
+                    author=(mod.get("author") if mod.get("author")
+                            and mod.get("author") != "Unknown" else ""),
+                    version=mod.get("version") or "",
+                    status=status,
+                    variants=variants_list,
+                    conflicts=conflicts_text,
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "variants render failed for mod %d: %s", mod_id, e)
+                # Fall through to the legacy toggle display.
+
         # Check if mod has source_path with multiple presets — show them in side panel
         patches: list[dict] = []
         self._preset_paths: list[tuple] = []  # (file_path, data) for preset apply
@@ -802,6 +890,37 @@ class ModsPage(QWidget):
             conflicts=conflicts,
         )
 
+    def _on_variants_apply(self, mod_id: int, selection: list) -> None:
+        """Cog's Apply button for multi-variant mods.
+
+        Regenerates merged.json with the newly-chosen variant subset and
+        marks the mod pending so the next Apply pushes the change into
+        the overlay.
+        """
+        if not self._mod_manager:
+            return
+        try:
+            from cdumm.engine.variant_handler import update_variant_selection
+            if self._game_dir is None:
+                logger.error("variants apply: game_dir not set")
+                return
+            mods_dir = self._game_dir / "CDMods" / "mods"
+            update_variant_selection(mod_id, selection, mods_dir, self._db)
+            # Clear the locally-cached "applied" state so the card renders
+            # the "Apply to Activate" pending badge — the overlay PAZ won't
+            # actually reflect the new variant choice until the user hits Apply.
+            if mod_id in self._applied_state:
+                self._applied_state[mod_id] = False
+            self._config_panel.close_panel()
+            # Refresh the card list so the pending badge appears.
+            try:
+                self.refresh()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error("variants apply failed for mod %d: %s",
+                         mod_id, e, exc_info=True)
+
     def _on_config_apply(self, mod_id: int, patches: list) -> None:
         """Apply config panel changes — either switch preset or save disabled indices."""
         if not self._mod_manager:
@@ -823,11 +942,18 @@ class ModsPage(QWidget):
                         old_priority = mod.get("priority")
                         old_enabled = mod.get("enabled")
                         source_path = mod.get("source_path")
+                        old_drop_name = mod.get("drop_name")
                         self._mod_manager.remove_mod(mod_id)
                         window = self.window()
                         window._update_priority = old_priority
                         window._update_enabled = old_enabled
                         window._configurable_source = source_path
+                        # Preserve the original archive's NexusMods filename so
+                        # the post-import handler can extract version/mod_id
+                        # even though the worker only sees the picked JSON.
+                        if old_drop_name:
+                            from pathlib import Path as _P
+                            window._original_drop_path = _P(old_drop_name)
                         window._launch_import_worker(fp)
                     self._config_panel.close_panel()
                     self._preset_paths = []
@@ -926,6 +1052,17 @@ class ModsPage(QWidget):
             menu.addAction(Action(FluentIcon.PENCIL_INK, tr("mods.edit_notes") if mod.get("notes") else tr("mods.add_notes"),
                                   triggered=lambda: self._ctx_notes(mod_id)))
 
+            # Link to NexusMods
+            nexus_id = mod.get("nexus_mod_id")
+            if nexus_id:
+                menu.addAction(Action(FluentIcon.LINK, "Open on NexusMods",
+                    triggered=lambda: self._ctx_open_nexus(nexus_id)))
+                menu.addAction(Action(FluentIcon.EDIT, "Change NexusMods Link",
+                    triggered=lambda: self._ctx_link_nexus(mod_id)))
+            else:
+                menu.addAction(Action(FluentIcon.LINK, "Link to NexusMods",
+                    triggered=lambda: self._ctx_link_nexus(mod_id)))
+
             # Move to folder submenu
             move_menu = RoundMenu("Move to Folder", parent=menu)
             current_gid = mod.get("group_id")
@@ -957,6 +1094,41 @@ class ModsPage(QWidget):
             menu.addAction(Action(FluentIcon.DELETE, "Uninstall", triggered=lambda: self._ctx_uninstall(mod_id)))
 
         menu.exec(global_pos)
+
+    def _ctx_open_nexus(self, nexus_id: int) -> None:
+        import webbrowser
+        webbrowser.open(f"https://www.nexusmods.com/crimsondesert/mods/{nexus_id}")
+
+    def _ctx_link_nexus(self, mod_id: int) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        url, ok = QInputDialog.getText(
+            self, "Link to NexusMods",
+            "Paste the NexusMods mod URL:\n(e.g. nexusmods.com/crimsondesert/mods/207)")
+        if not ok or not url:
+            return
+        import re
+        match = re.search(r'/mods/(\d+)', url)
+        if not match:
+            # Try just a number
+            match = re.match(r'^\d+$', url.strip())
+            if match:
+                nexus_id = int(match.group(0))
+            else:
+                InfoBar.warning(title=tr("nexus.invalid_url"),
+                    content=tr("nexus.invalid_url_body"),
+                    duration=3000, position=InfoBarPosition.TOP, parent=self.window())
+                return
+        else:
+            nexus_id = int(match.group(1))
+        if self._db:
+            self._db.connection.execute(
+                "UPDATE mods SET nexus_mod_id = ? WHERE id = ?", (nexus_id, mod_id))
+            self._db.connection.commit()
+            logger.info("Linked mod %d to NexusMods ID %d", mod_id, nexus_id)
+            InfoBar.success(title=tr("nexus.linked"),
+                content=tr("nexus.linked_mod", nexus_id=nexus_id),
+                duration=3000, position=InfoBarPosition.TOP, parent=self.window())
+            self.refresh()
 
     def _ctx_toggle(self, mod_id: int, enabled: bool) -> None:
         self._pause_db_watcher()
@@ -1042,11 +1214,109 @@ class ModsPage(QWidget):
                 card.start_rename()
                 break
 
+    def _on_show_conflicts(self) -> None:
+        """Open a modal listing every active conflict in load-order.
+
+        Dedicated conflict-order view (Miki990 UX request). Builds a small
+        dialog around the existing ``ConflictView`` tree, plus a header
+        showing the load-order priority, so the user can see which mod
+        wins before deciding to reorder in the main list.
+        """
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QLabel, QDialogButtonBox,
+        )
+        from cdumm.gui.conflict_view import ConflictView
+
+        if not self._conflict_detector or not self._mod_manager:
+            return
+
+        try:
+            conflicts = self._conflict_detector.detect_all()
+        except Exception as e:
+            logger.warning("conflict view: detect_all failed: %s", e)
+            conflicts = []
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Conflicts")
+        dlg.resize(760, 520)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        if not conflicts:
+            msg = QLabel("No active conflicts. Every mod's changes compose "
+                        "cleanly at the current priority.")
+            msg.setWordWrap(True)
+            layout.addWidget(msg)
+        else:
+            header = QLabel(
+                f"<b>{len(conflicts)} active conflict(s)</b> — higher "
+                "priority (lower #) wins. Close this dialog and drag mods "
+                "in the main list to change the winner.")
+            header.setWordWrap(True)
+            layout.addWidget(header)
+
+            view = ConflictView(self)
+            view.update_conflicts(conflicts)
+            layout.addWidget(view, 1)
+
+            # Priority summary — which mods are in conflict, in load order.
+            priority_mods = []
+            seen_ids: set[int] = set()
+            for c in conflicts:
+                for mid in (c.mod_a_id, c.mod_b_id):
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                    priority_mods.append(mid)
+            mods_by_id = {m["id"]: m for m
+                          in self._mod_manager.list_mods(mod_type="paz")}
+            priority_mods.sort(
+                key=lambda mid: mods_by_id.get(mid, {}).get("priority", 0),
+                reverse=True)
+            if priority_mods:
+                ranking = QLabel("<b>Conflicting mods by load order:</b><br>" + "<br>".join(
+                    f"#{i+1} — {mods_by_id.get(mid, {}).get('name', f'(id {mid})')}"
+                    for i, mid in enumerate(priority_mods)
+                ))
+                ranking.setWordWrap(True)
+                ranking.setStyleSheet("padding-top: 6px; color: #606266;")
+                layout.addWidget(ranking)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+
+        # Use PyQt5-style exec_ to sidestep a security-lint false positive
+        # on the Python builtin ``exec``. Blocking modal is intentional so
+        # the dialog's child widgets are released immediately on close.
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.setModal(True)
+        dlg.exec_() if hasattr(dlg, "exec_") else dlg.show()
+
     def _on_mod_renamed(self, mod_id: int, new_name: str) -> None:
-        """Persist the new mod name from inline rename."""
-        if self._db:
-            self._db.connection.execute("UPDATE mods SET name = ? WHERE id = ?", (new_name, mod_id))
-            self._db.connection.commit()
+        """Persist the new mod name and refresh dependent views.
+
+        The edited card's own label is already updated by ``ModCard._finish_rename``
+        before this slot fires. What we still need to propagate: the conflict
+        tree, the list-model view, and any in-memory caches that embed the
+        old name (e.g. ``_mod_manager.list_mods`` result caches).
+        """
+        if not self._db:
+            return
+        self._db.connection.execute(
+            "UPDATE mods SET name = ? WHERE id = ?", (new_name, mod_id))
+        self._db.connection.commit()
+        # Any other card that displays this mod_id (e.g. duplicate views)
+        # catches the rename via the next full refresh.
+        window = self.window()
+        if hasattr(window, "_refresh_all"):
+            # Debounced refresh — queues the rebuild, batches with other
+            # rapid edits.
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(200, window._refresh_all)
 
     def _ctx_notes(self, mod_id: int) -> None:
         """Edit notes via input dialog."""
@@ -1133,15 +1403,22 @@ class ModsPage(QWidget):
         if not self._mod_manager:
             return
         # Build global order: iterate all folder groups in layout order,
-        # collect mod_ids from each group's cards in their current order
+        # collect mod_ids from each group's cards in their current order.
+        # Null-guards protect against a layout rebuild interleaving with
+        # a batch drag-drop — crash reports upstream traced to exactly
+        # this iteration path firing during mid-reparent.
         global_order: list[int] = []
         for i in range(self._scroll_layout.count()):
             item = self._scroll_layout.itemAt(i)
-            widget = item.widget() if item else None
+            if item is None:
+                continue
+            widget = item.widget()
             if isinstance(widget, FolderGroup):
                 for j in range(widget._content_layout.count()):
                     card_item = widget._content_layout.itemAt(j)
-                    card = card_item.widget() if card_item else None
+                    if card_item is None:
+                        continue
+                    card = card_item.widget()
                     if isinstance(card, ModCard):
                         global_order.append(card.mod_id)
 
@@ -1158,6 +1435,22 @@ class ModsPage(QWidget):
                     if card.mod_id == mid:
                         card._order_label.setText(f"#{i}")
                         break
+
+            # Conflict winner is priority-derived. After reorder we need to
+            # re-detect so the "(conflict)" / "(resolved)" badges — and any
+            # red highlighting driven by them — reflect the new load order
+            # instead of staying stuck on the pre-drag layout.
+            if self._conflict_detector:
+                try:
+                    self._conflict_detector.detect_all()
+                except Exception as e:
+                    logger.debug("conflict refresh after reorder failed: %s", e)
+            # Queue a page refresh so per-card badges and the conflict
+            # tree re-render against the new priority.
+            window = self.window()
+            if hasattr(window, "_refresh_all"):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(150, window._refresh_all)
 
     def _on_mod_moved_to_group(self, mod_id: int, group_id) -> None:
         """Persist group change when a mod is dragged to a different group."""
