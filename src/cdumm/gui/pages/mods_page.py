@@ -43,6 +43,24 @@ def _dbg_status(action: str, mod_id: int, old_status: str, new_status: str,
          f"{' reason=' + reason if reason else ''}")
 
 
+def _preset_signature(data: dict) -> str | None:
+    """Return a stable signature over the `patches` block so two JSON
+    presets can be compared even when they have no `name` field. Used
+    by the cog side panel to mark the active preset for version-
+    variant mods (Even Faster Vanilla Trimmer etc.)."""
+    try:
+        import hashlib
+        import json as _json
+        patches = data.get("patches") if isinstance(data, dict) else None
+        if patches is None:
+            return None
+        blob = _json.dumps(patches, sort_keys=True,
+                           ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+    except Exception:
+        return None
+
+
 # ======================================================================
 # ModsPage
 # ======================================================================
@@ -1055,14 +1073,23 @@ class ModsPage(QWidget):
                                 "enabled": is_active,
                             })
                     if len(presets) > 1:
-                        # Get current json_source to mark which preset is active
+                        # Mark which preset is active. Try matching by the
+                        # `name` field first (structured mods). Fall back to
+                        # a content signature over the patches block when
+                        # `name` is absent — bare-bones mods like Even
+                        # Faster Vanilla Trimmer have no name/description,
+                        # so name-matching always returned False and the
+                        # cog wouldn't show which version was picked.
                         current_json = self._mod_manager.get_json_source(mod_id)
                         current_name = ""
+                        current_sig = None
                         if current_json:
                             try:
                                 import json as _json
                                 with open(current_json, "r", encoding="utf-8") as _f:
-                                    current_name = _json.load(_f).get("name", "")
+                                    current_data = _json.load(_f)
+                                current_name = current_data.get("name", "") or ""
+                                current_sig = _preset_signature(current_data)
                             except Exception:
                                 pass
 
@@ -1071,7 +1098,12 @@ class ModsPage(QWidget):
                             name = data.get("name", fp.stem)
                             desc = data.get("description", "")
                             change_count = sum(len(p.get("changes", [])) for p in data.get("patches", []))
-                            is_active = (name == current_name) if current_name else False
+                            if current_name and data.get("name"):
+                                is_active = (name == current_name)
+                            elif current_sig is not None:
+                                is_active = (_preset_signature(data) == current_sig)
+                            else:
+                                is_active = False
                             label = name
                             if desc:
                                 label += f" — {desc[:50]}"
