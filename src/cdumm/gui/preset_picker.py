@@ -31,15 +31,29 @@ def find_json_presets(path: Path) -> list[tuple[Path, dict]]:
     """Find all valid JSON patch files in a path.
 
     Returns list of (file_path, parsed_json) for each valid preset.
-    """
-    candidates = []
 
+    Optimisation: skip parsing entirely when there's only one .json
+    candidate. The caller only shows the preset picker for ``> 1``
+    presets, so for single-AIO-JSON folders (the common case for
+    mods like 0xNobody's stamina-and-spirit pack with 4000+ offsets)
+    we'd otherwise burn 10s+ on the GUI thread parsing a file the
+    picker won't display anyway. The import worker re-parses on its
+    own thread via :func:`detect_json_patch` later.
+    """
     if path.is_file() and path.suffix.lower() == ".json":
         candidates = [path]
     elif path.is_dir():
         candidates = sorted(path.glob("*.json"))
         if not candidates:
             candidates = sorted(path.glob("*/*.json"))
+    else:
+        candidates = []
+
+    if len(candidates) <= 1:
+        # Picker isn't shown for ≤1 preset; don't pay the parse cost
+        # on the GUI thread. Return empty so the caller proceeds
+        # straight to import_handler, which parses on a worker.
+        return []
 
     presets = []
     for f in candidates:
@@ -195,7 +209,12 @@ class PresetPickerDialog(MessageBoxBase):
         cb_layout.setSpacing(4)
 
         self._checkboxes: list[QCheckBox] = []
-        for i, (file_path, data) in enumerate(presets):
+        # Mutable copy of each preset's parsed data — when the user
+        # opens "Customize" and unchecks individual entries, we replace
+        # the preset's dict in-place so the import flow uses the
+        # filtered version. Preserving the file path for diagnostics.
+        self._presets: list[tuple[Path, dict]] = list(presets)
+        for i, (file_path, data) in enumerate(self._presets):
             name = data.get("name", file_path.stem)
             desc = data.get("description", "")
             patch_count = sum(len(p.get("changes", [])) for p in data.get("patches", []))
@@ -205,13 +224,35 @@ class PresetPickerDialog(MessageBoxBase):
                 label += f"\n{desc[:80]}"
             label += f"\n{patch_count} changes"
 
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
             cb = QCheckBox(label)
             cbf = cb.font()
             cbf.setPixelSize(13)
             cb.setFont(cbf)
             cb.setChecked(i == 0)  # first one checked by default
             self._checkboxes.append(cb)
-            cb_layout.addWidget(cb)
+            row_layout.addWidget(cb, 1)
+
+            # "Customize" button — shows TogglePickerDialog for this
+            # specific preset so power users can fine-tune which
+            # individual changes apply (butanokaabii's request).
+            # Hidden when the preset has no labelled changes.
+            if has_labeled_changes(data):
+                customize_btn = PushButton(tr("preset.customize"))
+                customize_btn.setFixedHeight(28)
+                cf = customize_btn.font()
+                cf.setPixelSize(12)
+                customize_btn.setFont(cf)
+                customize_btn.clicked.connect(
+                    lambda _checked, idx=i: self._on_customize(idx))
+                row_layout.addWidget(customize_btn, 0,
+                                     Qt.AlignmentFlag.AlignTop)
+
+            cb_layout.addWidget(row_widget)
 
         cb_layout.addStretch()
         scroll.setWidget(container)
@@ -224,6 +265,31 @@ class PresetPickerDialog(MessageBoxBase):
         self.cancelButton.setText(tr("main.cancel"))
 
         self.widget.setMinimumWidth(500)
+
+    def _on_customize(self, idx: int) -> None:
+        """Open the TogglePickerDialog for one preset so the user can
+        fine-tune which labelled changes apply. Result replaces the
+        preset's data in-place so :meth:`_on_accept` picks up the
+        filtered version.
+        """
+        if idx >= len(self._presets):
+            return
+        fp, data = self._presets[idx]
+        dlg = TogglePickerDialog(data, parent=self)
+        accepted = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        if accepted and dlg.selected_data:
+            self._presets[idx] = (fp, dlg.selected_data)
+            self._checkboxes[idx].setChecked(True)
+            new_count = sum(
+                len(p.get("changes", []))
+                for p in dlg.selected_data.get("patches", []))
+            name = dlg.selected_data.get("name", fp.stem)
+            desc = dlg.selected_data.get("description", "")
+            label = name
+            if desc:
+                label += f"\n{desc[:80]}"
+            label += f"\n{new_count} changes (customised)"
+            self._checkboxes[idx].setText(label)
 
     def _on_accept(self) -> None:
         self.selected_presets = []

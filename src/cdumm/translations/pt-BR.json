@@ -819,7 +819,7 @@
   "changelog.patch_notes": "Notas de Atualização do CDUMM",
   "changelog.updated": "CDUMM foi atualizado para v{version}",
   "preset.choose": "Escolher Preset do Mod",
-  "preset.choose_desc": "Este mod possui múltiplos presets. Escolha qual deseja instalar:",
+  "preset.choose_desc": "Este mod tem múltiplas predefinições. Marque TODAS que você quer instalar, as predefinições marcadas serão agrupadas em um único mod que você pode ativar individualmente depois. Use Personalizar para ajustar quais entradas individuais dentro de uma predefinição se aplicam.",
   "preset.choose_apply": "Escolher o que aplicar",
   "preset.choose_preset": "Escolha um preset:",
   "preset.check_items": "Marque os itens que deseja aplicar:",
@@ -1004,5 +1004,6 @@
   "settings.privatebin_expire_row_title": "Expira após",
   "settings.privatebin_instance_row_desc": "Servidor que recebe o relatório criptografado.",
   "settings.privatebin_instance_row_title": "URL da instância",
-  "status.inactive": "Desativado"
+  "status.inactive": "Desativado",
+  "preset.customize": "Personalizar…"
 }

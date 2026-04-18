@@ -645,7 +645,23 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
 
     entry_cache: dict[str, PazEntry] = {}
 
-    for patch in patches:
+    # Same AIO performance fix as import_json_as_entr — collapse patches
+    # that target the same game_file so we don't extract+recompress the
+    # same .pabgb 4000 times for a 4000-offset stamina mod.
+    grouped: dict[str, dict] = {}
+    for _p in patches:
+        gf = _p.get("game_file")
+        if not gf:
+            continue
+        if gf not in grouped:
+            grouped[gf] = {"game_file": gf, "changes": list(_p.get("changes", [])),
+                           "signature": _p.get("signature")}
+        else:
+            grouped[gf]["changes"].extend(_p.get("changes", []))
+            if grouped[gf].get("signature") is None and _p.get("signature"):
+                grouped[gf]["signature"] = _p.get("signature")
+
+    for patch in grouped.values():
         game_file = patch["game_file"]
         changes = patch["changes"]
 
@@ -1034,7 +1050,35 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
     changed_files = []
     entry_cache: dict[str, PazEntry] = {}
 
-    for patch in patches:
+    # ── AIO performance fix ──────────────────────────────────────────
+    # Group patches by game_file BEFORE the per-file extract loop. AIO
+    # mods (e.g. 0xNobody's stamina + spirit pack) ship multiple patch
+    # entries that all target the same .pabgb. The original per-patch
+    # loop re-extracted the same PAZ file once per patch, which on a
+    # 4000-offset mod meant decompressing the same file 4000 times and
+    # locking the import worker for over a minute. Grouping collapses
+    # that to one extract + one delta save per unique game_file.
+    plaintext_cache: dict[str, bytes] = {}
+    grouped: dict[str, dict] = {}
+    for _p in patches:
+        gf = _p.get("game_file")
+        if not gf:
+            continue
+        if gf not in grouped:
+            grouped[gf] = {"game_file": gf, "changes": list(_p.get("changes", [])),
+                           "signature": _p.get("signature")}
+        else:
+            grouped[gf]["changes"].extend(_p.get("changes", []))
+            # Inherit signature from first patch that declares one.
+            if grouped[gf].get("signature") is None and _p.get("signature"):
+                grouped[gf]["signature"] = _p.get("signature")
+    if len(grouped) < len(patches):
+        logger.info(
+            "import_json_as_entr: collapsed %d patches into %d unique "
+            "game_files (saved %d redundant extracts)",
+            len(patches), len(grouped), len(patches) - len(grouped))
+
+    for patch in grouped.values():
         game_file = patch["game_file"]
         changes = patch["changes"]
         if not changes:
