@@ -1016,14 +1016,44 @@ class ModsPage(QWidget):
         # Check if mod has source_path with multiple presets — show them in side panel
         patches: list[dict] = []
         self._preset_paths: list[tuple] = []  # (file_path, data) for preset apply
+        self._folder_variant_paths: list[tuple] = []  # (variant_dir, display_name)
         source_path = mod.get("source_path")
         if source_path:
             from pathlib import Path as _Path
             sp = _Path(source_path)
-            if sp.exists() and sp.is_dir():
+            # Folder-variant archives (e.g. Vaxis LoD): source_path points
+            # at the original archive. Re-extract on demand to a temp
+            # dir, scan for NNNN-style variant folders, and show them.
+            # Apply re-launches the import worker on the chosen variant.
+            if sp.exists() and sp.is_file() and sp.suffix.lower() in (
+                    ".zip", ".7z", ".rar"):
                 try:
-                    from cdumm.gui.preset_picker import find_json_presets
+                    sp = self._extract_archive_for_cog(sp, mod_id)
+                except Exception as e:
+                    logger.debug("archive extract for cog failed: %s", e)
+                    sp = None
+            if sp and sp.exists() and sp.is_dir():
+                try:
+                    from cdumm.gui.preset_picker import (
+                        find_json_presets, find_folder_variants)
                     presets = find_json_presets(sp)
+                    folder_variants = find_folder_variants(sp)
+                    # Folder-variant branch — only when there are no JSON
+                    # presets (XML-only mods like Vaxis LoD). JSON-preset
+                    # mods take priority below.
+                    if len(presets) <= 1 and len(folder_variants) >= 2:
+                        current_variant = mod.get("drop_name") or ""
+                        self._folder_variant_paths = [
+                            (vp, vp.name) for vp in folder_variants]
+                        for vp in folder_variants:
+                            is_active = current_variant.startswith(vp.name)
+                            patches.append({
+                                "label": vp.name.replace("_", " "),
+                                "description": (
+                                    "folder variant"
+                                    + (" (active)" if is_active else "")),
+                                "enabled": is_active,
+                            })
                     if len(presets) > 1:
                         # Get current json_source to mark which preset is active
                         current_json = self._mod_manager.get_json_source(mod_id)
@@ -1136,9 +1166,93 @@ class ModsPage(QWidget):
             logger.error("variants apply failed for mod %d: %s",
                          mod_id, e, exc_info=True)
 
+    def _extract_archive_for_cog(self, archive: Path, mod_id: int) -> Path | None:
+        """Extract a folder-variant archive to a per-session temp dir so
+        the cog panel can scan variants without leaving files on disk.
+
+        Re-uses the same extraction for repeated opens of the same mod's
+        cog by keying on mod_id. The temp dir is cleaned up on app exit
+        (tempfile default behaviour)."""
+        cache = getattr(self, "_folder_variant_extract_cache", None)
+        if cache is None:
+            cache = {}
+            self._folder_variant_extract_cache = cache
+        if mod_id in cache:
+            cached = cache[mod_id]
+            if cached.exists():
+                return cached
+        import tempfile
+        dest = Path(tempfile.mkdtemp(prefix=f"cdumm_cog_{mod_id}_"))
+        suffix = archive.suffix.lower()
+        if suffix == ".zip":
+            import zipfile
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(dest)
+        elif suffix == ".7z":
+            import py7zr
+            with py7zr.SevenZipFile(archive, "r") as zf:
+                zf.extractall(dest)
+        elif suffix == ".rar":
+            import subprocess
+            for tool in ("7z", "7z.exe",
+                         r"C:\Program Files\7-Zip\7z.exe"):
+                try:
+                    subprocess.run(
+                        [tool, "x", str(archive), f"-o{dest}", "-y"],
+                        capture_output=True, timeout=120,
+                        creationflags=getattr(
+                            subprocess, "CREATE_NO_WINDOW", 0))
+                    break
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+        else:
+            import shutil as _sh
+            _sh.rmtree(dest, ignore_errors=True)
+            return None
+        cache[mod_id] = dest
+        return dest
+
     def _on_config_apply(self, mod_id: int, patches: list) -> None:
         """Apply config panel changes — either switch preset or save disabled indices."""
         if not self._mod_manager:
+            return
+
+        # Folder-variant swap (Vaxis LoD style XML-only mods). Whichever
+        # variant the user enabled in the panel becomes the new active
+        # one — we drop the existing mod row and re-launch the import
+        # worker on the chosen variant directory, restoring priority +
+        # enabled state so the swap is transparent.
+        if (hasattr(self, "_folder_variant_paths")
+                and self._folder_variant_paths):
+            for i, p in enumerate(patches):
+                if p.get("enabled") and i < len(self._folder_variant_paths):
+                    variant_dir, _name = self._folder_variant_paths[i]
+                    mod = None
+                    for m in self._mod_manager.list_mods():
+                        if m["id"] == mod_id:
+                            mod = m
+                            break
+                    if mod:
+                        old_priority = mod.get("priority")
+                        old_enabled = mod.get("enabled")
+                        source_path = mod.get("source_path")
+                        old_drop_name = mod.get("drop_name")
+                        self._mod_manager.remove_mod(mod_id)
+                        window = self.window()
+                        window._update_priority = old_priority
+                        window._update_enabled = old_enabled
+                        # Keep source_path pointing at the original
+                        # archive so next cog open still works.
+                        window._configurable_source = source_path
+                        if old_drop_name:
+                            from pathlib import Path as _P
+                            window._original_drop_path = _P(old_drop_name)
+                        window._launch_import_worker(variant_dir)
+                    self._config_panel.close_panel()
+                    self._folder_variant_paths = []
+                    return
+            self._folder_variant_paths = []
+            self._config_panel.close_panel()
             return
 
         # If this is a preset selection (from _preset_paths), reimport with chosen preset

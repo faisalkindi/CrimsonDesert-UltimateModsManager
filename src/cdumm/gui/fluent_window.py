@@ -371,6 +371,51 @@ from cdumm.gui.pages.tool_page import (  # noqa: E402
 )
 
 
+_VERSION_RE = __import__("re").compile(r"\s*[\-_]?\s*\d+(?:\.\d+){1,3}\s*$")
+
+
+def _presets_are_version_variants(presets: list[tuple]) -> bool:
+    """Return True when every preset is a version alternative of one mod.
+
+    Heuristic: after stripping a trailing version-number suffix from
+    each preset's filename stem, all stems collapse to the same base
+    name, AND every preset targets the same set of game_files with the
+    same number of changes per game_file. Example:
+    ``ModName 1.02.00.json`` + ``ModName 1.03.00.json`` both collapse
+    to ``ModName``, both patch one game file with two changes — these
+    are bundled baselines for different game builds.
+
+    Byte offsets CAN differ (game binary layout shifts between
+    versions) so we don't require offset equality.
+
+    Callers that hit True should auto-pick the filename-last preset
+    and skip the picker entirely; nothing is reconfigurable.
+    """
+    if len(presets) < 2:
+        return False
+    bases: set[str] = set()
+    structures: list[tuple] = []
+    for fp, data in presets:
+        if not isinstance(data, dict):
+            return False
+        stem = fp.stem
+        base = _VERSION_RE.sub("", stem).strip().lower()
+        if not base:
+            return False
+        bases.add(base)
+        patches = data.get("patches", [])
+        if not patches:
+            return False
+        sig = tuple(sorted(
+            (p.get("game_file") or "", len(p.get("changes", []) or []))
+            for p in patches))
+        structures.append(sig)
+    if len(bases) != 1:
+        return False
+    first = structures[0]
+    return all(s == first for s in structures[1:])
+
+
 # ---------------------------------------------------------------------------
 # CdummWindow — the v3 main window
 # ---------------------------------------------------------------------------
@@ -2310,6 +2355,23 @@ class CdummWindow(FluentWindow):
                 check_path = tmp_extract
 
             presets = find_json_presets(check_path) if check_path.is_dir() else []
+            # Version-variant detection: if every preset patches the exact
+            # same game_file(s) at the exact same byte offsets, they're
+            # version alternatives of the same mod (e.g. ModName-1.02.json
+            # and ModName-1.03.json differing only in baseline values for
+            # a newer game build). Showing a picker for those is useless —
+            # auto-pick the alphabetically-last filename (highest version)
+            # and skip the dialog entirely. Don't set _configurable_source
+            # so no cog appears; there's nothing to reconfigure.
+            if len(presets) > 1 and _presets_are_version_variants(presets):
+                chosen_fp, chosen_data = max(presets, key=lambda pd: pd[0].name)
+                logger.info(
+                    "preset picker: %d JSONs look like version variants "
+                    "(same game_file + same offsets) — auto-picking %s, "
+                    "skipping dialog",
+                    len(presets), chosen_fp.name)
+                path = chosen_fp
+                presets = []  # prevent dialog
             if len(presets) > 1:
                 # Mark as configurable so user can re-pick preset later
                 self._configurable_source = str(path)
@@ -2439,6 +2501,17 @@ class CdummWindow(FluentWindow):
                         path = fv_dialog.selected_path
                         logger.info(
                             "User selected folder variant: %s", path.name)
+                        # Remember the original archive/folder path so the
+                        # cog-side panel can re-show FolderVariantDialog
+                        # and swap variants without re-dropping the file.
+                        # For archives we stash the archive path itself;
+                        # for pre-extracted folders we stash the parent
+                        # that contains the variant subfolders.
+                        _original = getattr(
+                            self, "_original_drop_path", None) or path
+                        if (isinstance(_original, Path) and _original.exists()
+                                and (_original.is_file() or _original.is_dir())):
+                            self._configurable_source = str(_original)
                     else:
                         if _tmp_extract_for_picker:
                             import shutil
