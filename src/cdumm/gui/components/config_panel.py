@@ -472,12 +472,20 @@ class ConfigPanel(QWidget):
                     enabled = bool(v.get("enabled"))
                 else:
                     enabled = widget.isChecked()
-                out.append({
+                row = {
                     "label": v.get("label", ""),
                     "filename": v.get("filename", ""),
                     "enabled": enabled,
                     "group": v.get("group", -1),
-                })
+                }
+                # Pass through grid-variant metadata (Character Creator
+                # style) so mods_page can tell a grid apply from a JSON
+                # multi-variant apply.
+                if "_level" in v:
+                    row["_level"] = v["_level"]
+                if "_header" in v:
+                    row["_header"] = v["_header"]
+                out.append(row)
             self.variants_apply_clicked.emit(self._mod_id, out)
             return
 
@@ -542,10 +550,15 @@ class ConfigPanel(QWidget):
         self._clear_body()
         # Translation key may not exist in older locale files — fall back to
         # the English literal if tr() returns the key unchanged.
-        variants_header = tr("config_panel.section_variants")
-        if variants_header == "config_panel.section_variants":
-            variants_header = "VARIANTS"
-        self._add_section_header(variants_header)
+        # Skip the generic VARIANTS header when every group has its own
+        # _header (Character-Creator-style gender/race per-axis headers).
+        _every_group_has_header = bool(variants) and all(
+            v.get("_header") for v in variants if v.get("group", -1) >= 0)
+        if not _every_group_has_header:
+            variants_header = tr("config_panel.section_variants")
+            if variants_header == "config_panel.section_variants":
+                variants_header = "VARIANTS"
+            self._add_section_header(variants_header)
 
         # Render radio groups (positive group ids, size ≥ 2) first, then
         # independent checkboxes (group = -1). Each row uses the same
@@ -561,6 +574,13 @@ class ConfigPanel(QWidget):
                 independents.append(i)
 
         for g_id, members in sorted(groups.items()):
+            # Per-group header (axis name like "Gender" / "Race") when
+            # the variants were emitted with `_header` metadata.
+            if members:
+                first = self._variants_meta[members[0]]
+                hdr = first.get("_header")
+                if hdr:
+                    self._add_section_header(hdr.upper())
             button_group = QButtonGroup(self)
             button_group.setExclusive(True)
             for idx in members:

@@ -79,6 +79,53 @@ def _flatten_folder_variants(root, max_depth: int = 4):
     return results
 
 
+def _grid_axes_from_leaves(leaves):
+    """Return per-level axis lists when the leaves form a regular grid.
+
+    A regular grid means: every leaf rel_path has the same depth, and
+    at each level the set of options is identical across every parent
+    combination. Character Creator satisfies this — every leaf has
+    depth 2, level-0 is always {Female, Male}, level-1 is always
+    {Goblin, Human, Orc}.
+
+    Returns list of ordered option lists, one per level
+    (e.g. [["Female", "Male"], ["Goblin", "Human", "Orc"]]) or None
+    when the tree is irregular and should fall back to flat radio.
+    """
+    if len(leaves) < 2:
+        return None
+    parts_list = [rel.split("/") for _, rel in leaves]
+    depth = len(parts_list[0])
+    if depth < 2 or any(len(p) != depth for p in parts_list):
+        return None
+    axes: list[list[str]] = []
+    for level in range(depth):
+        # Option must appear in the SAME set for every prefix combo.
+        # Simple check: collect the unique level-values and require the
+        # set of (prefix_tuple, level_value) to contain every combo of
+        # prefix * level_value.
+        level_values: list[str] = []
+        seen = set()
+        for parts in parts_list:
+            v = parts[level]
+            if v not in seen:
+                seen.add(v)
+                level_values.append(v)
+        axes.append(level_values)
+    # Verify grid: total combos must equal leaf count
+    product = 1
+    for a in axes:
+        product *= len(a)
+    if product != len(parts_list):
+        return None
+    # Verify every leaf's parts are in the axis values (defensive)
+    for parts in parts_list:
+        for i, v in enumerate(parts):
+            if v not in axes[i]:
+                return None
+    return axes
+
+
 def _preset_signature(data: dict) -> str | None:
     """Return a stable signature over the `patches` block so two JSON
     presets can be compared even when they have no `name` field. Used
@@ -1105,14 +1152,63 @@ class ModsPage(QWidget):
                             current_rel = current_drop.split("||", 1)[1]
                         self._folder_variant_paths = [
                             (lp, rel) for lp, rel in leaves]
+
+                        # Grid detection: if leaves form a clean product
+                        # (gender × race for Character Creator), render
+                        # as multiple radio groups (one per level) so
+                        # the user picks independently per axis.
+                        axes = _grid_axes_from_leaves(leaves)
+                        if axes is not None:
+                            active_parts = (current_rel.split("/")
+                                             if current_rel else [])
+                            # Heuristic header per level based on common
+                            # Character-Creator-style prefixes.
+                            def _level_header(values: list[str]) -> str:
+                                joined = " ".join(values).lower()
+                                if any("male" in v.lower() or "female" in v.lower()
+                                       for v in values):
+                                    return "Gender"
+                                if any(v.lower() in ("human", "orc", "goblin", "elf")
+                                       for v in values):
+                                    return "Race"
+                                return "Variant"
+                            self._folder_variant_axes = axes
+                            self._folder_variant_is_grid = True
+                            variants_meta: list[dict] = []
+                            for level, values in enumerate(axes):
+                                active_val = (active_parts[level]
+                                              if level < len(active_parts)
+                                              else None)
+                                for v in values:
+                                    variants_meta.append({
+                                        "label": v.replace("_", " "),
+                                        "filename": v,
+                                        "enabled": v == active_val,
+                                        "group": level,
+                                        "_level": level,
+                                        "_header": _level_header(values),
+                                    })
+                            self._config_panel.show_variant_mod(
+                                mod_id=mod_id,
+                                name=mod["name"],
+                                author=(mod.get("author")
+                                        if mod.get("author")
+                                        and mod.get("author") != "Unknown"
+                                        else ""),
+                                version=mod.get("version") or "",
+                                status=status,
+                                variants=variants_meta,
+                                conflicts=[],
+                            )
+                            return  # show_variant_mod fires its own animation
+                        # Irregular tree — fall through to flat radio
+                        self._folder_variant_is_grid = False
                         active_i = -1
                         for i, (lp, rel) in enumerate(leaves):
                             if current_rel and rel == current_rel:
                                 active_i = i
                                 break
                         if active_i < 0 and current_drop:
-                            # Legacy rows with no ||: match by the leaf
-                            # basename appearing in drop_name.
                             for i, (lp, rel) in enumerate(leaves):
                                 if lp.name and lp.name in current_drop:
                                     active_i = i
@@ -1225,12 +1321,76 @@ class ModsPage(QWidget):
     def _on_variants_apply(self, mod_id: int, selection: list) -> None:
         """Cog's Apply button for multi-variant mods.
 
-        Regenerates merged.json with the newly-chosen variant subset and
-        marks the mod pending so the next Apply pushes the change into
-        the overlay.
+        Two flavours:
+        - Grid folder variants (Character Creator): selection rows have
+          '_level' / '_header' keys. Route to a folder-re-import that
+          drops the current mod and relaunches the worker on the new
+          leaf path.
+        - Legacy JSON multi-variant mods (``mods.variants`` column): fall
+          through to update_variant_selection.
         """
         if not self._mod_manager:
             return
+
+        # Grid folder-variant branch — pick from each level's enabled
+        # radio, combine into a rel_path, find the matching leaf.
+        if getattr(self, "_folder_variant_is_grid", False) and \
+                selection and any("_level" in s for s in selection):
+            picks_by_level: dict[int, str] = {}
+            for s in selection:
+                if s.get("enabled") and "_level" in s:
+                    picks_by_level.setdefault(s["_level"], s["filename"])
+            axes = getattr(self, "_folder_variant_axes", None) or []
+            if not axes or any(
+                    level not in picks_by_level
+                    for level in range(len(axes))):
+                logger.warning(
+                    "variants apply: grid pick incomplete "
+                    "(levels=%s picks=%s)", len(axes), picks_by_level)
+                return
+            target_rel = "/".join(
+                picks_by_level[level] for level in range(len(axes)))
+            # Find the leaf path matching that rel.
+            chosen_leaf = None
+            for lp, rel in getattr(self, "_folder_variant_paths", []):
+                if rel == target_rel:
+                    chosen_leaf = lp
+                    break
+            if chosen_leaf is None:
+                logger.error(
+                    "variants apply: no leaf matches rel=%r", target_rel)
+                return
+            mod = None
+            for m in self._mod_manager.list_mods():
+                if m["id"] == mod_id:
+                    mod = m
+                    break
+            if mod:
+                old_priority = mod.get("priority")
+                old_enabled = mod.get("enabled")
+                source_path = mod.get("source_path")
+                old_drop_name = mod.get("drop_name")
+                self._mod_manager.remove_mod(mod_id)
+                window = self.window()
+                window._update_priority = old_priority
+                window._update_enabled = old_enabled
+                window._configurable_source = source_path
+                # Stash the new variant rel so the post-import handler
+                # writes "<archive>||<new_rel>" into drop_name.
+                window._variant_leaf_rel = target_rel
+                if old_drop_name:
+                    # Preserve the original archive name for version /
+                    # nexus parsing. drop_name may contain '||<rel>';
+                    # strip that.
+                    raw = old_drop_name.split("||", 1)[0]
+                    from pathlib import Path as _P
+                    window._original_drop_path = _P(raw)
+                window._launch_import_worker(chosen_leaf)
+            self._config_panel.close_panel()
+            self._folder_variant_paths = []
+            self._folder_variant_is_grid = False
+            return
+
         try:
             from cdumm.engine.variant_handler import update_variant_selection
             if self._game_dir is None:
