@@ -157,6 +157,10 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
         needs_flag = False
         new_source_path: str | None = None
 
+        logger.info(
+            "[scan] mod_id=%s configurable_before=%s json_source=%r source_path=%r",
+            mod_id, configurable, json_source, source_path)
+
         # Type A — labeled changes in the stored JSON source
         if json_source:
             try:
@@ -166,8 +170,13 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
                     if data and _has_labeled_changes(data):
                         needs_flag = True
                         stats["flagged_a"] += 1
-            except Exception:
+                        logger.info(
+                            "[scan] mod_id=%s Type A HIT (labeled changes)",
+                            mod_id)
+            except Exception as _e:
                 stats["errors"] += 1
+                logger.warning(
+                    "[scan] mod_id=%s Type A threw: %s", mod_id, _e)
 
         # Type B — multiple preset JSONs OR multiple folder variants
         # in the archived source folder. Folder variants cover XML-only
@@ -177,27 +186,60 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
         if source_path:
             try:
                 sp = Path(source_path)
-                if sp.exists():
+                if not sp.exists():
+                    logger.info(
+                        "[scan] mod_id=%s source_path does not exist on disk",
+                        mod_id)
+                else:
                     if sp.is_dir():
                         has_jsons = _find_json_presets_dir(sp) > 1
                         has_folders = _has_folder_variants(sp)
+                        logger.info(
+                            "[scan] mod_id=%s source is DIR jsons>1=%s "
+                            "folder_variants=%s",
+                            mod_id, has_jsons, has_folders)
                         if has_jsons or has_folders:
                             needs_flag = True
                             stats["flagged_b"] += 1
                     elif sp.is_file() and sp.suffix.lower() in ARCHIVE_SUFFIXES:
+                        logger.info(
+                            "[scan] mod_id=%s source is ARCHIVE, rescuing to %s",
+                            mod_id, sources_root / str(mod_id))
                         rescued = _rescue_archive(
                             sp, sources_root / str(mod_id))
-                        if rescued and (
-                                _find_json_presets_dir(rescued) > 1
-                                or _has_folder_variants(rescued)):
-                            needs_flag = True
-                            new_source_path = str(rescued)
-                            stats["flagged_b"] += 1
-                            stats["rescued"] += 1
-                        elif rescued is None:
+                        if rescued is None:
+                            logger.warning(
+                                "[scan] mod_id=%s rescue FAILED (returned None)",
+                                mod_id)
                             stats["errors"] += 1
-            except Exception:
+                        else:
+                            has_jsons = _find_json_presets_dir(rescued) > 1
+                            has_folders = _has_folder_variants(rescued)
+                            logger.info(
+                                "[scan] mod_id=%s rescued to %s jsons>1=%s "
+                                "folder_variants=%s",
+                                mod_id, rescued, has_jsons, has_folders)
+                            if has_jsons or has_folders:
+                                needs_flag = True
+                                new_source_path = str(rescued)
+                                stats["flagged_b"] += 1
+                                stats["rescued"] += 1
+                    else:
+                        logger.info(
+                            "[scan] mod_id=%s source is neither dir nor "
+                            "supported archive (suffix=%s)",
+                            mod_id, sp.suffix)
+            except Exception as _e:
                 stats["errors"] += 1
+                logger.warning(
+                    "[scan] mod_id=%s Type B threw: %s", mod_id, _e)
+
+        logger.info(
+            "[scan] mod_id=%s needs_flag=%s -> action=%s",
+            mod_id, needs_flag,
+            "SET 1" if (needs_flag and not configurable)
+            else "CLEAR 0" if (configurable and not needs_flag)
+            else "no-op")
 
         if needs_flag and not configurable:
             db.connection.execute(

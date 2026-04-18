@@ -36,6 +36,26 @@ logger = logging.getLogger(__name__)
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
 
 
+def _probe_console_state(tag: str) -> None:
+    """Log whether the current process has a console attached. On
+    Windows a windowed (console=False) exe has None; if Qt/subprocess
+    ever flips that during a spawn, the returned handle is non-zero.
+    Used to diagnose the flash-window complaint: if this logs a non-
+    zero handle around the moment of the flash, the OS is allocating
+    a console and we need CREATE_NO_WINDOW on the child.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        pid = ctypes.windll.kernel32.GetCurrentProcessId()
+        logger.info("[flash-probe] %s pid=%s console_hwnd=%s",
+                    tag, pid, hwnd)
+    except Exception as e:
+        logger.debug("[flash-probe] %s probe failed: %s", tag, e)
+
+
 def _is_standalone_paz_mod(path: Path) -> bool:
     """Check if path is a standalone PAZ mod (0.paz + 0.pamt, not in a numbered dir).
     These mods add a new PAZ directory and don't need a vanilla snapshot.
@@ -2522,7 +2542,9 @@ class CdummWindow(FluentWindow):
         tip = self._make_state_tooltip(f"Importing {path.name}...{suffix}")
         self._active_progress = tip
 
+        _probe_console_state("before import QProcess(self)")
         proc = QProcess(self)
+        _probe_console_state("after import QProcess(self)")
         self._active_worker = proc  # reuse guard flag
 
         # Build command: the exe calls itself with --worker
@@ -2721,8 +2743,11 @@ class CdummWindow(FluentWindow):
         proc.readyReadStandardOutput.connect(_on_stdout)
         proc.readyReadStandardError.connect(_on_stderr)
         proc.finished.connect(_on_finished)
+        _probe_console_state("before proc.start(exe, args)")
         proc.start(exe, args)
-        logger.info("Import QProcess started: PID %s", proc.processId())
+        _probe_console_state("after proc.start(exe, args)")
+        logger.info("Import QProcess started: PID %s exe=%s args=%s",
+                     proc.processId(), exe, args)
 
     def _install_asi_mod(self, path: Path, asi_mgr=None) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
