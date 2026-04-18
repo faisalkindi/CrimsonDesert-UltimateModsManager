@@ -4179,19 +4179,33 @@ class CdummWindow(FluentWindow):
             try:
                 listener.terminate()
                 listener.deleteLater()
-            except Exception as _e:
+            except (RuntimeError, Exception) as _e:
                 logger.debug("Theme listener teardown failed: %s", _e)
-        # Stop timers
+        # Stop timers (guard against already-deleted C++ objects — Qt may
+        # have reaped children by the time closeEvent fires)
         for timer_name in ("_update_timer", "_db_poll_timer"):
             timer = getattr(self, timer_name, None)
-            if timer:
+            if timer is None:
+                continue
+            try:
                 timer.stop()
-        # Stop worker threads
+            except RuntimeError:
+                pass
+        # Stop worker threads. Wrap every access in try/except because
+        # shiboken raises RuntimeError('Internal C++ object already
+        # deleted') if Qt's normal parent-teardown has already reaped
+        # the QThread before our closeEvent runs. Seen in the debug
+        # build's log at line 4192 after a clean app exit.
         for thread_name in ("_worker_thread", "_update_thread"):
             thread = getattr(self, thread_name, None)
-            if thread and thread.isRunning():
-                thread.quit()
-                thread.wait(2000)
+            if thread is None:
+                continue
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(2000)
+            except RuntimeError:
+                pass
         # Persist window geometry so the next launch opens at the same size/position.
         # Must happen BEFORE db.close(). Ignore errors — this is best-effort.
         if self._db:
