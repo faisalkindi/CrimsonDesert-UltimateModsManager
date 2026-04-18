@@ -414,10 +414,19 @@ class AsiCard(CardWidget):
         from cdumm.gui.components.mod_card import _VERSION_COLORS, _pill_qss
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
 
-    def set_update_available(self, has_update: bool, nexus_url: str = "") -> None:
-        """Color the version pill green (up to date) or red (update available)."""
+    def set_update_available(self, has_update: bool, nexus_url: str = "",
+                              nexus_mod_id: int = 0,
+                              latest_file_id: int = 0) -> None:
+        """Color the version pill green (up to date) or red (update available).
+
+        Mirrors the ModCard behaviour so PAZ + ASI cards look consistent
+        when an update is available (red pill that says "Click To Update").
+        """
         from cdumm.gui.components.mod_card import _pill_qss, _theme_key as _tkey
         self._nexus_url = nexus_url
+        self._nexus_mod_id = int(nexus_mod_id or 0)
+        self._latest_file_id = int(latest_file_id or 0)
+        self._has_update = bool(has_update)
         if has_update:
             c = (
                 {"bg": "#FEE2E2", "text": "#DC2626", "border": "#FCA5A5"}
@@ -425,19 +434,55 @@ class AsiCard(CardWidget):
                 else {"bg": "#3B1111", "text": "#FCA5A5", "border": "#7F1D1D"}
             )
             self._version_pill.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._version_pill.setToolTip(tr("tooltip.update_available"))
+            if not hasattr(self, "_version_pill_orig_text"):
+                self._version_pill_orig_text = self._version_pill.text()
+            self._version_pill.setText(tr("mod_list.click_to_update"))
+            self._version_pill.setToolTip(tr(
+                "tooltip.update_available_with_version",
+                version=self._version_pill_orig_text))
             self._version_pill.mousePressEvent = self._on_version_clicked
+            # H1 fix: 65px pill clipped "Click To Update". Expand.
+            self._version_pill.setFixedWidth(150)
         else:
             c = (
                 {"bg": "#DCFCE7", "text": "#16A34A", "border": "#86EFAC"}
                 if _tkey() == "light"
                 else {"bg": "#0A2E14", "text": "#86EFAC", "border": "#166534"}
             )
+            if hasattr(self, "_version_pill_orig_text"):
+                self._version_pill.setText(self._version_pill_orig_text)
+                del self._version_pill_orig_text
             self._version_pill.setToolTip(tr("tooltip.up_to_date"))
+            # H2 fix: detach handler + restore arrow cursor when the
+            # pill is no longer an update target.
+            self._version_pill.setCursor(Qt.CursorShape.ArrowCursor)
+            self._version_pill.mousePressEvent = lambda e: None
+            self._version_pill.setFixedWidth(65)
         self._version_pill.setStyleSheet(_pill_qss(c))
 
+    def retranslate_version(self) -> None:
+        """Re-render the version pill in the current locale (H3 fix)."""
+        if getattr(self, "_has_update", False):
+            self.set_update_available(
+                True, getattr(self, "_nexus_url", "") or "",
+                nexus_mod_id=getattr(self, "_nexus_mod_id", 0),
+                latest_file_id=getattr(self, "_latest_file_id", 0))
+        else:
+            self.set_update_available(False)
+
     def _on_version_clicked(self, event):
-        url = getattr(self, "_nexus_url", "")
+        # Try the parent window's direct-update path first (premium
+        # users skip the browser handover). Fall back to opening the
+        # mod's Files tab when the window doesn't expose the helper
+        # or when no nexus_mod_id/file_id were attached.
+        url = getattr(self, "_nexus_url", "") or ""
+        nexus_mod_id = getattr(self, "_nexus_mod_id", 0)
+        file_id = getattr(self, "_latest_file_id", 0)
+        win = self.window()
+        if (nexus_mod_id and file_id
+                and hasattr(win, "_handle_direct_update")):
+            win._handle_direct_update(0, nexus_mod_id, file_id, url)
+            return
         if url:
             import webbrowser
             webbrowser.open(url)
@@ -537,6 +582,7 @@ class _AsiSummaryBar(QWidget):
         ("stats.total", "#2878D0"),
         ("asi.status_enabled", "#22C55E"),
         ("asi.status_disabled", "#9CA3AF"),
+        ("stats.outdated", "#DC2626"),
     ]
 
     def __init__(self, parent=None) -> None:
@@ -613,8 +659,9 @@ class _AsiSummaryBar(QWidget):
             "PushButton:pressed { background: #2A3C58; }")
         root.addWidget(self._refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-    def update_stats(self, total: int = 0, enabled: int = 0, disabled: int = 0) -> None:
-        values = (total, enabled, disabled)
+    def update_stats(self, total: int = 0, enabled: int = 0,
+                     disabled: int = 0, outdated: int = 0) -> None:
+        values = (total, enabled, disabled, outdated)
         for label, value in zip(self._number_labels, values):
             label.setText(str(value))
 
@@ -1202,14 +1249,22 @@ class AsiPluginsPage(QWidget):
             return
         logger.info("ASI set_nexus_updates: %d updates, %d plugins with nexus_id, %d cards",
                      len(updates), len(nexus_map), len(self._cards))
+        # Stash the plugin_name → nexus_id map so _update_stats can
+        # count outdated plugins for the summary bar.
+        self._nexus_id_map = nexus_map
         for card in self._cards:
             plugin_name = card.plugin_name
             nexus_id = nexus_map.get(plugin_name)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(True, u.mod_url)
+                card.set_update_available(
+                    True, u.mod_url,
+                    nexus_mod_id=nexus_id,
+                    latest_file_id=getattr(u, "latest_file_id", 0))
             elif nexus_id:
                 card.set_update_available(False)
+        # Refresh the summary bar's Outdated count.
+        self._update_stats()
 
     def retranslate_ui(self) -> None:
         """Update text with current translations."""
@@ -1218,6 +1273,10 @@ class AsiPluginsPage(QWidget):
         self._select_all_cb.setText(tr("asi.select_all"))
         self._new_folder_btn.setText(tr("asi.new_folder"))
         self._summary_bar.retranslate_ui()
+        # Re-render every red "Click To Update" pill in the new locale.
+        for card in self._cards:
+            if hasattr(card, "retranslate_version"):
+                card.retranslate_version()
 
     # ------------------------------------------------------------------
     # Stats
@@ -1227,7 +1286,19 @@ class AsiPluginsPage(QWidget):
         total = len(self._cards)
         enabled = sum(1 for c in self._cards if c._checkbox.isChecked())
         disabled = total - enabled
-        self._summary_bar.update_stats(total, enabled, disabled)
+        # Count plugins with a NexusMods update available. ASI cards key
+        # by plugin_name (not mod_id), so we look up via _nexus_id_map
+        # which is populated by set_nexus_updates as {plugin_name: nexus_id}.
+        outdated = 0
+        nexus_updates = getattr(self, "_nexus_updates", None) or {}
+        if nexus_updates:
+            nexus_map = getattr(self, "_nexus_id_map", {}) or {}
+            for c in self._cards:
+                nid = nexus_map.get(getattr(c, "plugin_name", ""))
+                if nid and nid in nexus_updates:
+                    outdated += 1
+        self._summary_bar.update_stats(total, enabled, disabled,
+                                       outdated=outdated)
 
     # ------------------------------------------------------------------
     # Search

@@ -74,6 +74,7 @@ class SummaryBar(QWidget):
         ("stats.active", "#22C55E"),
         ("stats.pending", "#E65100"),
         ("stats.inactive", "#9CA3AF"),
+        ("stats.outdated", "#DC2626"),
     ]
 
     def __init__(self, parent=None) -> None:
@@ -176,19 +177,20 @@ class SummaryBar(QWidget):
             "PushButton:pressed { background: #1F68B8; border-color: #2878D0; }")
         root.addWidget(self._launch_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Animation tracking
-        self._current_values: list[int] = [0, 0, 0, 0]
-        self._timelines: list[QTimeLine | None] = [None, None, None, None]
+        # Animation tracking — one slot per stat in _STAT_DEFS.
+        self._current_values: list[int] = [0] * len(self._STAT_DEFS)
+        self._timelines: list[QTimeLine | None] = [None] * len(self._STAT_DEFS)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def update_stats(
-        self, total: int = 0, active: int = 0, pending: int = 0, inactive: int = 0
+        self, total: int = 0, active: int = 0, pending: int = 0,
+        inactive: int = 0, outdated: int = 0,
     ) -> None:
         """Animate stat numbers from current to new values."""
-        new_values = [total, active, pending, inactive]
+        new_values = [total, active, pending, inactive, outdated]
 
         for i, (label, new_val) in enumerate(zip(self._number_labels, new_values)):
             old_val = self._current_values[i]
