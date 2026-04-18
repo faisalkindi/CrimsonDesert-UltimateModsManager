@@ -36,32 +36,6 @@ logger = logging.getLogger(__name__)
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
 
 
-_CREATE_NO_WINDOW = 0x08000000
-
-
-def _hide_qprocess_console(proc) -> None:
-    """Apply CREATE_NO_WINDOW to a QProcess spawn on Windows so the
-    briefly-visible console window that CreateProcess can flash for a
-    PyInstaller onefile child never appears. Qt exposes this via
-    setCreateProcessArgumentsModifier; the modifier receives a struct
-    with a writable `flags` field mapped to CreateProcess's
-    dwCreationFlags parameter.
-    """
-    if sys.platform != "win32":
-        return
-    setter = getattr(proc, "setCreateProcessArgumentsModifier", None)
-    if setter is None:
-        return
-
-    def _mod(args):
-        args.flags |= _CREATE_NO_WINDOW
-        return args
-    try:
-        setter(_mod)
-    except Exception as e:
-        logger.debug("setCreateProcessArgumentsModifier failed: %s", e)
-
-
 def _is_standalone_paz_mod(path: Path) -> bool:
     """Check if path is a standalone PAZ mod (0.paz + 0.pamt, not in a numbered dir).
     These mods add a new PAZ directory and don't need a vanilla snapshot.
@@ -1593,7 +1567,6 @@ class CdummWindow(FluentWindow):
             page._progress_detail.setText(f"Analyzing {mod_path.name}...")
 
         proc = QProcess(self)
-        _hide_qprocess_console(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -1661,7 +1634,6 @@ class CdummWindow(FluentWindow):
         import json as _json
 
         proc = QProcess(self)
-        _hide_qprocess_console(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -1910,7 +1882,6 @@ class CdummWindow(FluentWindow):
 
         from PySide6.QtCore import QProcess
         proc = QProcess(self)
-        _hide_qprocess_console(proc)
         self._active_worker = proc
 
         exe = sys.executable
@@ -2552,7 +2523,6 @@ class CdummWindow(FluentWindow):
         self._active_progress = tip
 
         proc = QProcess(self)
-        _hide_qprocess_console(proc)
         self._active_worker = proc  # reuse guard flag
 
         # Build command: the exe calls itself with --worker
@@ -3567,7 +3537,6 @@ class CdummWindow(FluentWindow):
 
         self._active_progress = tip
         proc = QProcess(self)
-        _hide_qprocess_console(proc)
         self._active_worker = proc
 
         # Pause non-essential timers

@@ -217,6 +217,36 @@ class PresetPickerDialog(MessageBoxBase):
             logger.debug("detect_conflict_groups failed: %s", _e)
             self._auto_group_ids = [-1] * len(presets)
 
+        # Version-variant grouping: byte-range overlap misses presets
+        # that target the same game_file but at different offsets
+        # because the game binary shifted between builds (e.g. "Mod
+        # 1.02.00.json" and "Mod 1.03.00.json" both patch the same
+        # .paseq but at offsets 35824 vs 36019). Those are still
+        # mutually exclusive. Detect them by stripping a trailing
+        # version number from the filename stem — presets whose stems
+        # collapse to the same base name get grouped together so the
+        # dialog renders them as radio buttons.
+        import re as _re
+        _version_re = _re.compile(r"\s*[\-_]?\s*\d+(?:\.\d+){1,3}\s*$")
+        _base_to_indices: dict[str, list[int]] = {}
+        for i, (fp, _d) in enumerate(presets):
+            base = _version_re.sub("", fp.stem).strip().lower()
+            if base:
+                _base_to_indices.setdefault(base, []).append(i)
+        _next_gid = max(self._auto_group_ids, default=-1) + 1
+        for base, idxs in _base_to_indices.items():
+            if len(idxs) < 2:
+                continue
+            existing = {self._auto_group_ids[i] for i in idxs
+                        if self._auto_group_ids[i] >= 0}
+            if existing:
+                target = min(existing)
+            else:
+                target = _next_gid
+                _next_gid += 1
+            for i in idxs:
+                self._auto_group_ids[i] = target
+
         # Override toggle — when ON, every preset becomes a checkbox
         # regardless of detected conflicts. Lets users override the
         # auto-detect for mods whose author meant "pick any combo" but
