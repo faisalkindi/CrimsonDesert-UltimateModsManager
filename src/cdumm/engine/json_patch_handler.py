@@ -357,13 +357,83 @@ def _pattern_scan(
     return None
 
 
+def _build_name_offsets_generic(pabgb_bytes: bytes,
+                                 pabgh_bytes: bytes) -> dict[str, int] | None:
+    """Generic name→body-offset resolver for any .pabgb where each entry
+    begins with ``u32 entry_key`` + ``u32 name_len`` + UTF-8 ``name``.
+
+    This is the standard PABGB record layout — characterinfo, iteminfo,
+    and most other Crimson Desert data tables follow it. Returns a dict
+    mapping entry name to the absolute body offset the patch's
+    ``rel_offset`` is anchored against (which is the same offset the
+    .pabgh index stores, i.e. the start of the record before the key).
+
+    Returns None if the formats don't match (caller falls back to
+    absolute-offset mode).
+    """
+    try:
+        if len(pabgh_bytes) < 2:
+            return None
+        count = struct.unpack_from("<H", pabgh_bytes, 0)[0]
+        if count == 0 or 2 + count * 8 > len(pabgh_bytes) + 16:
+            return None
+        name_to_offset: dict[str, int] = {}
+        for i in range(count):
+            pos = 2 + i * 8
+            if pos + 8 > len(pabgh_bytes):
+                break
+            # .pabgh stores (u32 hash, u32 offset). Offset points at
+            # the entry's start in .pabgb. The entry layout:
+            #   u32 entry_key
+            #   u32 name_len
+            #   char[name_len] name
+            #   ... (record-specific fields)
+            offset = struct.unpack_from("<I", pabgh_bytes, pos + 4)[0]
+            if offset + 8 > len(pabgb_bytes):
+                continue
+            name_len = struct.unpack_from("<I", pabgb_bytes, offset + 4)[0]
+            if name_len == 0 or name_len > 100_000:
+                continue
+            name_end = offset + 8 + name_len
+            if name_end > len(pabgb_bytes):
+                continue
+            try:
+                name = pabgb_bytes[offset + 8:name_end].decode(
+                    "utf-8", errors="strict")
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not name or any(c == "\x00" for c in name[:1]):
+                continue
+            # JMM/SWISS Knife export convention: `rel_offset` is anchored
+            # AFTER the name string so mods don't have to track per-record
+            # name-length shifts. Verified against ExtraSockets: for
+            # Scalaphynion_Fabric_Armor with rel=357, expected bytes
+            # 03000000 live at record_start+8+name_len+357, not at
+            # record_start+357.
+            name_to_offset[name] = name_end
+        return name_to_offset if name_to_offset else None
+    except Exception as e:
+        logger.debug("generic name-offset build failed: %s", e)
+        return None
+
+
 def _build_name_offsets_for_v2(game_file: str, pabgb_bytes: bytes,
                                pabgh_bytes: bytes) -> dict[str, int] | None:
     """Build a name→body-offset map for v2 entry-anchored patches.
 
-    Currently supports characterinfo.pabgb (via the SWISS Knife parser).
-    Returns None for unsupported file types so the caller can log a clear
-    error instead of silently applying at offset 0.
+    characterinfo.pabgb uses a dedicated SWISS Knife parser (we extract
+    localization metadata + boolean blocks there). For every other
+    .pabgb we fall back to the generic resolver, which handles the
+    standard ``u32 key + u32 name_len + name`` entry header.
+
+    Returns None when the formats don't match so the caller can log
+    a clear error instead of silently applying at offset 0 — which was
+    the root cause of ExtraSockets and RingEarringGearSockets crashing
+    the game: mod patches use ``entry`` + ``rel_offset`` anchored
+    against iteminfo.pabgb's body layout, but without a name-offset
+    map the apply path treated ``rel_offset`` as absolute and wrote
+    to random positions in the file, leaving 217/884 patches failing
+    and the rest writing to wrong bytes.
     """
     base = os.path.basename(game_file).lower()
     if base.startswith("characterinfo."):
@@ -375,7 +445,10 @@ def _build_name_offsets_for_v2(game_file: str, pabgb_bytes: bytes,
         except Exception as e:
             logger.warning("v2 name-offset build failed for %s: %s", game_file, e)
             return None
-    return None
+    result = _build_name_offsets_generic(pabgb_bytes, pabgh_bytes)
+    if result is None:
+        logger.warning("v2 generic name-offset build failed for %s", game_file)
+    return result
 
 
 def fixup_pabgh_after_inserts(pabgh: bytes,
