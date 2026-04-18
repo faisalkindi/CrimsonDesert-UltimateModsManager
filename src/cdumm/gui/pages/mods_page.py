@@ -43,6 +43,42 @@ def _dbg_status(action: str, mod_id: int, old_status: str, new_status: str,
          f"{' reason=' + reason if reason else ''}")
 
 
+def _flatten_folder_variants(root, max_depth: int = 4):
+    """Walk a multi-level variant tree and return every LEAF variant.
+
+    Leaves are folders that contain game content (found by
+    find_folder_variants returning <2 nested variants AND the folder
+    itself passing find_folder_variants's content check). Used by the
+    cog side panel so nested variant mods like Character Creator
+    (Female/{Goblin,Human,Orc}) show as a single flat radio list
+    instead of just the top-level Female/Male.
+
+    Returns a list of (leaf_path, relative_label) tuples where the
+    label is the path relative to ``root`` with os separators
+    normalized to "/".
+    """
+    from cdumm.gui.preset_picker import find_folder_variants
+    results: list[tuple] = []
+
+    def walk(path, depth: int):
+        if depth > max_depth:
+            return
+        children = find_folder_variants(path)
+        if len(children) < 2:
+            # Leaf: the path itself IS one variant (or not a variant at
+            # all). Caller handled the "0 variants" case before calling
+            # us, so we only emit when path != root.
+            if path != root:
+                rel = path.relative_to(root).as_posix()
+                results.append((path, rel))
+            return
+        for child in children:
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return results
+
+
 def _preset_signature(data: dict) -> str | None:
     """Return a stable signature over the `patches` block so two JSON
     presets can be compared even when they have no `name` field. Used
@@ -1055,22 +1091,41 @@ class ModsPage(QWidget):
                     from cdumm.gui.preset_picker import (
                         find_json_presets, find_folder_variants)
                     presets = find_json_presets(sp)
-                    folder_variants = find_folder_variants(sp)
+                    leaves = _flatten_folder_variants(sp)
                     # Folder-variant branch — only when there are no JSON
                     # presets (XML-only mods like Vaxis LoD). JSON-preset
                     # mods take priority below.
-                    if len(presets) <= 1 and len(folder_variants) >= 2:
-                        current_variant = mod.get("drop_name") or ""
+                    if len(presets) <= 1 and len(leaves) >= 2:
+                        # drop_name encodes "<archive>||<variant_rel>" for
+                        # variant mods imported via the nested picker. We
+                        # parse out the rel path to mark the active leaf.
+                        current_drop = mod.get("drop_name") or ""
+                        current_rel = ""
+                        if "||" in current_drop:
+                            current_rel = current_drop.split("||", 1)[1]
                         self._folder_variant_paths = [
-                            (vp, vp.name) for vp in folder_variants]
-                        for vp in folder_variants:
-                            is_active = current_variant.startswith(vp.name)
+                            (lp, rel) for lp, rel in leaves]
+                        active_i = -1
+                        for i, (lp, rel) in enumerate(leaves):
+                            if current_rel and rel == current_rel:
+                                active_i = i
+                                break
+                        if active_i < 0 and current_drop:
+                            # Legacy rows with no ||: match by the leaf
+                            # basename appearing in drop_name.
+                            for i, (lp, rel) in enumerate(leaves):
+                                if lp.name and lp.name in current_drop:
+                                    active_i = i
+                                    break
+                        for i, (lp, rel) in enumerate(leaves):
                             patches.append({
-                                "label": vp.name.replace("_", " "),
+                                "label": rel.replace("/", " > ").replace(
+                                    "_", " "),
                                 "description": (
                                     "folder variant"
-                                    + (" (active)" if is_active else "")),
-                                "enabled": is_active,
+                                    + (" (active)"
+                                       if i == active_i else "")),
+                                "enabled": i == active_i,
                             })
                     if len(presets) > 1:
                         # Mark which preset is active. Try matching by the

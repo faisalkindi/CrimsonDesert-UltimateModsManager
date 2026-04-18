@@ -2482,6 +2482,30 @@ class CdummWindow(FluentWindow):
                     return
 
                 if _fired_any_picker:
+                    # Stash the variant's relative path from the scan
+                    # root so post-import can record "<archive>||<rel>"
+                    # into drop_name for cog active-state matching.
+                    try:
+                        self._variant_leaf_rel = _current.relative_to(
+                            scan_dir).as_posix()
+                    except (ValueError, AttributeError):
+                        self._variant_leaf_rel = _current.name
+                    # Collect any .asi plugins that ship alongside the
+                    # variants (Character Creator bundles
+                    # CharacterCreatorAsi/CharacterCreatorHead.asi at
+                    # the top level). Install them separately after
+                    # the variant import completes.
+                    _asi_files = [
+                        f for f in scan_dir.rglob("*")
+                        if f.is_file() and f.suffix.lower() == ".asi"
+                    ]
+                    if _asi_files:
+                        self._pending_asi_from_variant = _asi_files
+                        logger.info(
+                            "Variant archive bundles %d ASI file(s) — "
+                            "will install after main import: %s",
+                            len(_asi_files),
+                            [a.name for a in _asi_files])
                     path = _current
                     # Remember the original archive/folder path so the
                     # cog-side panel can re-show FolderVariantDialog
@@ -2660,6 +2684,26 @@ class CdummWindow(FluentWindow):
                     "SELECT MAX(id) FROM mods").fetchone()[0]
                 orig = getattr(self, '_original_drop_path', None)
                 drop_name = orig.name if orig else path.name
+                # Nested-variant mods: append "||<rel>" so the cog can
+                # identify which leaf is active and rewrite the mod's
+                # name to the pretty archive name (otherwise the card
+                # would read just the leaf folder name like "Human").
+                variant_rel = getattr(self, '_variant_leaf_rel', None)
+                if variant_rel:
+                    drop_name = f"{drop_name}||{variant_rel}"
+                    try:
+                        from cdumm.engine.import_handler import (
+                            prettify_mod_name)
+                        pretty = prettify_mod_name(
+                            orig.stem if orig and orig.is_file()
+                            else (orig.name if orig else path.name))
+                        if pretty:
+                            self._db.connection.execute(
+                                "UPDATE mods SET name = ? WHERE id = ?",
+                                (pretty, mod_id))
+                    except Exception as _e:
+                        logger.debug("variant rename failed: %s", _e)
+                    self._variant_leaf_rel = None
                 self._db.connection.execute(
                     "UPDATE mods SET drop_name = ? WHERE id = ?",
                     (drop_name, mod_id))
@@ -2717,6 +2761,14 @@ class CdummWindow(FluentWindow):
 
             # Install staged ASI files from mixed ZIP import
             asi_staged = getattr(self, '_import_result_asi_staged', [])
+            # Character Creator style: top-level .asi alongside variant
+            # folders. The variant picker detects them and stashes them
+            # here so they install alongside whichever gender/race was
+            # picked.
+            variant_asi = getattr(self, '_pending_asi_from_variant', None)
+            if variant_asi:
+                asi_staged = list(asi_staged) + [str(p) for p in variant_asi]
+                self._pending_asi_from_variant = None
             asi_count = 0
             if asi_staged:
                 try:
