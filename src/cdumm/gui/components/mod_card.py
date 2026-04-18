@@ -209,6 +209,11 @@ class ModCard(CardWidget):
     context_menu_requested = Signal(int, object)  # mod_id, QPoint (global pos)
     card_clicked = Signal(int, object)  # mod_id, QMouseEvent (for Ctrl/Shift detection)
     renamed = Signal(int, str)  # mod_id, new_name
+    # Emitted when the user clicks the red "Click To Update" pill. Page
+    # handler attempts a direct premium download (download_link.json
+    # without browser handover) and falls back to opening the Nexus
+    # mod page if the API rejects the call (free tier).
+    update_clicked = Signal(int, int, int, str)  # mod_id, nexus_mod_id, latest_file_id, nexus_url
 
     def __init__(
         self,
@@ -536,26 +541,83 @@ class ModCard(CardWidget):
         key = _theme_key()
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
 
-    def set_update_available(self, has_update: bool, nexus_url: str = "") -> None:
-        """Color the version pill green (up to date) or red (update available)."""
+    def set_update_available(self, has_update: bool, nexus_url: str = "",
+                              nexus_mod_id: int = 0,
+                              latest_file_id: int = 0) -> None:
+        """Color the version pill green (up to date) or red (update available).
+
+        On red, replaces the version text with "Click To Update" so the
+        action is unambiguous. The original version stays in the
+        tooltip so users can still see what they have installed.
+
+        ``nexus_mod_id`` and ``latest_file_id`` are stashed for the
+        click handler so direct premium download can be attempted
+        without parsing the URL.
+        """
         self._nexus_url = nexus_url
+        self._nexus_mod_id = int(nexus_mod_id or 0)
+        self._latest_file_id = int(latest_file_id or 0)
+        # Stash the latest has_update state so retranslate_version can
+        # re-render the pill in the new language without losing state.
+        self._has_update = bool(has_update)
         if has_update:
             c = {"bg": "#FEE2E2", "text": "#DC2626", "border": "#FCA5A5"} if _theme_key() == "light" else {"bg": "#3B1111", "text": "#FCA5A5", "border": "#7F1D1D"}
             self._version_pill.setCursor(Qt.CursorShape.PointingHandCursor)
             from cdumm.i18n import tr as _tr
-            self._version_pill.setToolTip(_tr("tooltip.update_available"))
+            if not hasattr(self, "_version_pill_orig_text"):
+                self._version_pill_orig_text = self._version_pill.text()
+            self._version_pill.setText(_tr("mod_list.click_to_update"))
+            self._version_pill.setToolTip(_tr(
+                "tooltip.update_available_with_version",
+                version=self._version_pill_orig_text))
             self._version_pill.mousePressEvent = self._on_version_clicked
+            # H1 fix: the default 60px pill clipped "Click To Update".
+            # Expand to fit the longer copy. Restore in the else branch.
+            self._version_pill.setMinimumWidth(140)
+            self._version_pill.setMaximumWidth(160)
         else:
             c = {"bg": "#DCFCE7", "text": "#16A34A", "border": "#86EFAC"} if _theme_key() == "light" else {"bg": "#0A2E14", "text": "#86EFAC", "border": "#166534"}
             from cdumm.i18n import tr as _tr
+            if hasattr(self, "_version_pill_orig_text"):
+                self._version_pill.setText(self._version_pill_orig_text)
+                del self._version_pill_orig_text
             self._version_pill.setToolTip(_tr("tooltip.up_to_date"))
+            # H2 fix: when the update is gone, reset the cursor and
+            # detach the click handler. Otherwise the pill keeps the
+            # pointing-hand cursor and a click goes to a no-op
+            # _on_version_clicked with all-zero payloads.
+            self._version_pill.setCursor(Qt.CursorShape.ArrowCursor)
+            self._version_pill.mousePressEvent = lambda e: None
+            self._version_pill.setMinimumWidth(60)
+            self._version_pill.setMaximumWidth(60)
         self._version_pill.setStyleSheet(_pill_qss(c))
 
+    def retranslate_version(self) -> None:
+        """Re-render the version pill in the current locale.
+
+        Called from the page's ``retranslate_ui`` so a language switch
+        immediately replaces "Click To Update" with the translated
+        label, without waiting for the next nexus update check (H3).
+        """
+        if getattr(self, "_has_update", False):
+            self.set_update_available(
+                True, getattr(self, "_nexus_url", "") or "",
+                nexus_mod_id=getattr(self, "_nexus_mod_id", 0),
+                latest_file_id=getattr(self, "_latest_file_id", 0))
+        else:
+            self.set_update_available(False)
+
     def _on_version_clicked(self, event):
-        url = getattr(self, "_nexus_url", "")
-        if url:
-            import webbrowser
-            webbrowser.open(url)
+        # Always emit the signal. The page handler is responsible for
+        # falling back to the browser when there's no nexus_mod_id /
+        # file_id (or when the parent window doesn't expose the
+        # direct-update helper). Don't try to use ``self.receivers()``
+        # here — PySide6 expects a string signature, not the
+        # SignalInstance, and would raise TypeError on click.
+        nexus_mod_id = getattr(self, "_nexus_mod_id", 0)
+        file_id = getattr(self, "_latest_file_id", 0)
+        url = getattr(self, "_nexus_url", "") or ""
+        self.update_clicked.emit(self._mod_id, nexus_mod_id, file_id, url)
 
     def _on_toggled(self, checked: bool) -> None:
         self.toggled.emit(self._mod_id, checked)

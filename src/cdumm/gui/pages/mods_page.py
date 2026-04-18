@@ -332,9 +332,48 @@ class ModsPage(QWidget):
             nexus_id = nexus_map.get(mod_id)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(True, u.mod_url)
+                card.set_update_available(
+                    True, u.mod_url,
+                    nexus_mod_id=nexus_id,
+                    latest_file_id=getattr(u, "latest_file_id", 0))
+                # Connect update_clicked once per card. Disconnect first
+                # to dedup since Qt 6 raises if the slot isn't connected
+                # — the only legitimate failures here are TypeError
+                # (signature mismatch) and RuntimeError (no connection).
+                # Catch only those so a real wiring bug isn't masked.
+                try:
+                    card.update_clicked.disconnect(self._on_update_clicked)
+                except (TypeError, RuntimeError):
+                    pass
+                card.update_clicked.connect(self._on_update_clicked)
             elif nexus_id:
                 card.set_update_available(False)
+        # Refresh the summary bar so the Outdated counter reflects the
+        # new update set. Without this the count would stay stale until
+        # the next refresh().
+        self._update_stats()
+
+    def _on_update_clicked(self, mod_id: int, nexus_mod_id: int,
+                            file_id: int, fallback_url: str) -> None:
+        """Handle a click on the red 'Click To Update' pill.
+
+        For premium users this triggers a direct download (no browser
+        round-trip). The Nexus AUP allows this for premium accounts —
+        the website handover is only required for free users. If
+        ``download_link.json`` returns 403 (free tier), we fall back
+        to opening the mod's Files tab, exactly like the old behaviour.
+
+        We delegate to the parent window's ``_handle_direct_update``
+        helper since download/import lives there alongside the existing
+        nxm:// pipeline.
+        """
+        win = self.window()
+        if hasattr(win, "_handle_direct_update"):
+            win._handle_direct_update(mod_id, nexus_mod_id, file_id,
+                                       fallback_url)
+        elif fallback_url:
+            import webbrowser
+            webbrowser.open(fallback_url)
 
     # ------------------------------------------------------------------
     # Refresh
@@ -366,6 +405,12 @@ class ModsPage(QWidget):
         self._select_all_cb.setText(tr("mod_list.select_all"))
         self._new_folder_btn.setText(tr("mod_list.new_folder"))
         self._summary_bar.retranslate_ui()
+        # Re-render every red "Click To Update" pill in the new
+        # locale (H3 fix). Without this, the pill stays in the old
+        # language until the next nexus update check (up to 30 min).
+        for card in self._mod_cards:
+            if hasattr(card, "retranslate_version"):
+                card.retranslate_version()
 
     # ------------------------------------------------------------------
     # Mod cards
@@ -427,9 +472,45 @@ class ModsPage(QWidget):
         from datetime import datetime, timedelta
         _now = datetime.now()
 
+        # Lazy-import the filename parser only when needed below.
+        _parse_nexus = None
+
         for order, mod in enumerate(mods, start=1):
             mod_id = mod["id"]
             nexus_id = mod.get("nexus_mod_id")
+            if not nexus_id:
+                # Fallback: try to parse it from drop_name on the fly.
+                # Mods imported as folders or with non-standard names
+                # might not have nexus_mod_id stored even after the
+                # one-shot backfill. Without this, those cards stay
+                # GREY forever (set_update_available is gated on
+                # nexus_id being truthy). One-time DB write so future
+                # update checks can find them too.
+                drop_name = mod.get("drop_name") or ""
+                if drop_name:
+                    if _parse_nexus is None:
+                        from cdumm.engine.nexus_filename import (
+                            parse_nexus_filename as _parse_nexus,
+                        )
+                    stem = drop_name
+                    for _ext in (".zip", ".7z", ".rar", ".json", ".bsdiff"):
+                        if stem.lower().endswith(_ext):
+                            stem = stem[: -len(_ext)]
+                            break
+                    nid, _ = _parse_nexus(stem)
+                    if nid:
+                        nexus_id = nid
+                        if self._db:
+                            try:
+                                self._db.connection.execute(
+                                    "UPDATE mods SET nexus_mod_id = ? "
+                                    "WHERE id = ? AND (nexus_mod_id IS NULL "
+                                    "OR nexus_mod_id = 0)",
+                                    (nexus_id, mod_id))
+                                self._db.connection.commit()
+                            except Exception as e:
+                                logger.debug(
+                                    "fallback nexus_id write failed: %s", e)
             if nexus_id:
                 self._nexus_id_map[mod_id] = nexus_id
 
@@ -542,6 +623,124 @@ class ModsPage(QWidget):
             self._entrance_anim = staggered_fade_in(self._mod_cards)
             self._initial_load_done = True
 
+    def stream_add_mod(self, mod_id: int) -> None:
+        """Append one mod card without rebuilding the whole list.
+
+        Called per-mod during batch import so cards appear as each mod
+        finishes. Rebuilding the whole list (via _build_mod_cards) stalls
+        the batch worker's stdout pipe. This single-row path reads just
+        one mod from the DB (SQLite WAL makes the read lock-free vs the
+        worker's writes) and creates one ModCard.
+        """
+        if not self._mod_manager:
+            return
+        # Avoid duplicates if streaming fires twice for the same mod
+        if any(c._mod_id == mod_id for c in self._mod_cards):
+            return
+
+        mod = None
+        for m in self._mod_manager.list_mods(mod_type="paz"):
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if not mod:
+            return
+
+        from datetime import datetime, timedelta
+        import re as _re
+        from cdumm.gui.fluent_window import _parse_nexus_filename
+        _now = datetime.now()
+
+        file_counts = self._mod_manager.get_file_counts()
+
+        is_new = False
+        import_date_str = mod.get("import_date")
+        if import_date_str:
+            try:
+                import_dt = datetime.strptime(
+                    import_date_str, "%Y-%m-%d %H:%M:%S")
+                is_new = (_now - import_dt) < timedelta(hours=2)
+            except ValueError:
+                pass
+
+        applied = self._applied_state.get(mod_id) is True
+        game_status = "active" if applied else "inactive"
+        pending = None
+        if mod["enabled"] and not applied:
+            pending = "Apply to Activate"
+        elif not mod["enabled"] and applied:
+            pending = "Apply to Deactivate"
+
+        has_config = bool(mod.get("configurable"))
+        if not has_config:
+            json_src = self._mod_manager.get_json_source(mod_id)
+            has_config = json_src is not None
+
+        display_ver = ""
+        dn = mod.get("drop_name") or ""
+        if dn:
+            _nid, _nver = _parse_nexus_filename(dn)
+            if _nid and _nver:
+                display_ver = _nver
+            else:
+                _vm = _re.search(r'[vV](\d+(?:\.\d+)*)', dn)
+                if _vm:
+                    display_ver = _vm.group(1)
+        if not display_ver:
+            raw = mod.get("version") or ""
+            _vm = _re.match(r'(\d+(?:\.\d+)*)', raw)
+            display_ver = _vm.group(1) if _vm else raw
+        if not display_ver:
+            display_ver = "\u2014"
+        if len(display_ver) > 7:
+            display_ver = display_ver[:6] + "…"
+
+        card = ModCard(
+            mod_id=mod_id,
+            order=len(self._mod_cards) + 1,
+            name=mod["name"],
+            author=(mod.get("author") if mod.get("author")
+                    and mod.get("author") != "Unknown" else ""),
+            version=display_ver,
+            status=game_status,
+            file_count=file_counts.get(mod_id, 0),
+            has_config=has_config,
+            has_notes=bool(mod.get("notes")),
+            is_new=is_new,
+            enabled=bool(mod["enabled"]),
+            target_language=mod.get("target_language"),
+            conflict_mode=mod.get("conflict_mode", "normal"),
+            parent=self._scroll_content,
+        )
+        card.set_note_text(mod.get("notes") or "")
+        card.set_pending(pending)
+        card.toggled.connect(self._on_mod_toggled)
+        card.config_clicked.connect(self._on_config_clicked)
+        card.context_menu_requested.connect(self._show_mod_context_menu)
+        card.renamed.connect(self._on_mod_renamed)
+        card.card_clicked.connect(self._on_card_clicked)
+
+        self._mod_cards.append(card)
+
+        # Route to the mod's folder group (batch imports go to Ungrouped
+        # by default, but a custom group_id might already be set).
+        gid = mod.get("group_id")
+        if gid not in self._folder_groups:
+            gid = None
+        target_group = self._folder_groups.get(gid)
+        if target_group is None:
+            # Ungrouped hasn't been created yet — fall back to a full
+            # rebuild so the scaffolding exists.
+            self._build_mod_cards()
+            return
+        target_group.add_mod_card(card)
+        target_group.set_count(target_group.count() + 1 if hasattr(
+            target_group, "count") else len(self._mod_cards))
+
+        # Hide the empty-state hero since we have at least one card now
+        if hasattr(self, "_empty_hero"):
+            self._empty_hero.hide()
+
     # ------------------------------------------------------------------
     # Conflict cards
     # ------------------------------------------------------------------
@@ -569,7 +768,19 @@ class ModsPage(QWidget):
                 inactive += 1
             else:
                 pending += 1  # needs Apply (either add or remove)
-        self._summary_bar.update_stats(total, active, pending, inactive)
+        # Count mods that have a NexusMods update available. The lookup
+        # is the same one set_nexus_updates uses to color the version
+        # pills, just summed here for the summary bar.
+        outdated = 0
+        nexus_updates = getattr(self, "_nexus_updates", None) or {}
+        if nexus_updates:
+            nexus_map = getattr(self, "_nexus_id_map", {}) or {}
+            for c in self._mod_cards:
+                nid = nexus_map.get(c.mod_id)
+                if nid and nid in nexus_updates:
+                    outdated += 1
+        self._summary_bar.update_stats(total, active, pending, inactive,
+                                       outdated=outdated)
 
     # ------------------------------------------------------------------
     # Search
