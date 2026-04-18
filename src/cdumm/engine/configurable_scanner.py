@@ -52,6 +52,21 @@ def _has_labeled_changes(data: dict) -> bool:
         return False
 
 
+def _has_folder_variants(folder: Path) -> bool:
+    """Return True when ``folder`` contains 2+ mutually-exclusive
+    variant subfolders, matching what ``preset_picker.find_folder_variants``
+    detects on import. Used so the scanner keeps the cog flag set on
+    XML-only mods like Vaxis LoD after a restart.
+    """
+    if not folder.is_dir():
+        return False
+    try:
+        from cdumm.gui.preset_picker import find_folder_variants
+        return len(find_folder_variants(folder)) >= 2
+    except Exception:
+        return False
+
+
 def _find_json_presets_dir(folder: Path) -> int:
     """Count valid JSON-patch preset files in a folder (depth 1)."""
     if not folder.is_dir():
@@ -154,19 +169,27 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
             except Exception:
                 stats["errors"] += 1
 
-        # Type B — multiple preset JSONs in the archived source folder
+        # Type B — multiple preset JSONs OR multiple folder variants
+        # in the archived source folder. Folder variants cover XML-only
+        # archives like Vaxis LoD where the author ships mutually-
+        # exclusive NNNN subfolders; the cog uses them to swap variants
+        # post-install.
         if source_path:
             try:
                 sp = Path(source_path)
                 if sp.exists():
                     if sp.is_dir():
-                        if _find_json_presets_dir(sp) > 1:
+                        has_jsons = _find_json_presets_dir(sp) > 1
+                        has_folders = _has_folder_variants(sp)
+                        if has_jsons or has_folders:
                             needs_flag = True
                             stats["flagged_b"] += 1
                     elif sp.is_file() and sp.suffix.lower() in ARCHIVE_SUFFIXES:
                         rescued = _rescue_archive(
                             sp, sources_root / str(mod_id))
-                        if rescued and _find_json_presets_dir(rescued) > 1:
+                        if rescued and (
+                                _find_json_presets_dir(rescued) > 1
+                                or _has_folder_variants(rescued)):
                             needs_flag = True
                             new_source_path = str(rescued)
                             stats["flagged_b"] += 1

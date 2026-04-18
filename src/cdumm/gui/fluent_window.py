@@ -36,6 +36,32 @@ logger = logging.getLogger(__name__)
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
 
 
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def _hide_qprocess_console(proc) -> None:
+    """Apply CREATE_NO_WINDOW to a QProcess spawn on Windows so the
+    briefly-visible console window that CreateProcess can flash for a
+    PyInstaller onefile child never appears. Qt exposes this via
+    setCreateProcessArgumentsModifier; the modifier receives a struct
+    with a writable `flags` field mapped to CreateProcess's
+    dwCreationFlags parameter.
+    """
+    if sys.platform != "win32":
+        return
+    setter = getattr(proc, "setCreateProcessArgumentsModifier", None)
+    if setter is None:
+        return
+
+    def _mod(args):
+        args.flags |= _CREATE_NO_WINDOW
+        return args
+    try:
+        setter(_mod)
+    except Exception as e:
+        logger.debug("setCreateProcessArgumentsModifier failed: %s", e)
+
+
 def _is_standalone_paz_mod(path: Path) -> bool:
     """Check if path is a standalone PAZ mod (0.paz + 0.pamt, not in a numbered dir).
     These mods add a new PAZ directory and don't need a vanilla snapshot.
@@ -369,51 +395,6 @@ from cdumm.gui.pages.tool_page import (  # noqa: E402
     VerifyStatePage, CheckModsPage, FindCulpritPage,
     InspectModPage, FixEverythingPage, RescanPage,
 )
-
-
-_VERSION_RE = __import__("re").compile(r"\s*[\-_]?\s*\d+(?:\.\d+){1,3}\s*$")
-
-
-def _presets_are_version_variants(presets: list[tuple]) -> bool:
-    """Return True when every preset is a version alternative of one mod.
-
-    Heuristic: after stripping a trailing version-number suffix from
-    each preset's filename stem, all stems collapse to the same base
-    name, AND every preset targets the same set of game_files with the
-    same number of changes per game_file. Example:
-    ``ModName 1.02.00.json`` + ``ModName 1.03.00.json`` both collapse
-    to ``ModName``, both patch one game file with two changes — these
-    are bundled baselines for different game builds.
-
-    Byte offsets CAN differ (game binary layout shifts between
-    versions) so we don't require offset equality.
-
-    Callers that hit True should auto-pick the filename-last preset
-    and skip the picker entirely; nothing is reconfigurable.
-    """
-    if len(presets) < 2:
-        return False
-    bases: set[str] = set()
-    structures: list[tuple] = []
-    for fp, data in presets:
-        if not isinstance(data, dict):
-            return False
-        stem = fp.stem
-        base = _VERSION_RE.sub("", stem).strip().lower()
-        if not base:
-            return False
-        bases.add(base)
-        patches = data.get("patches", [])
-        if not patches:
-            return False
-        sig = tuple(sorted(
-            (p.get("game_file") or "", len(p.get("changes", []) or []))
-            for p in patches))
-        structures.append(sig)
-    if len(bases) != 1:
-        return False
-    first = structures[0]
-    return all(s == first for s in structures[1:])
 
 
 # ---------------------------------------------------------------------------
@@ -1612,6 +1593,7 @@ class CdummWindow(FluentWindow):
             page._progress_detail.setText(f"Analyzing {mod_path.name}...")
 
         proc = QProcess(self)
+        _hide_qprocess_console(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -1679,6 +1661,7 @@ class CdummWindow(FluentWindow):
         import json as _json
 
         proc = QProcess(self)
+        _hide_qprocess_console(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -1927,6 +1910,7 @@ class CdummWindow(FluentWindow):
 
         from PySide6.QtCore import QProcess
         proc = QProcess(self)
+        _hide_qprocess_console(proc)
         self._active_worker = proc
 
         exe = sys.executable
@@ -2355,28 +2339,6 @@ class CdummWindow(FluentWindow):
                 check_path = tmp_extract
 
             presets = find_json_presets(check_path) if check_path.is_dir() else []
-            # Version-variant detection: if every preset patches the exact
-            # same game_file(s) at the exact same byte offsets, they're
-            # version alternatives of the same mod (e.g. ModName-1.02.json
-            # and ModName-1.03.json differing only in baseline values for
-            # a newer game build). Showing a picker for those is useless —
-            # auto-pick the alphabetically-last filename (highest version)
-            # and skip the dialog entirely. Don't set _configurable_source
-            # so no cog appears; there's nothing to reconfigure.
-            if len(presets) > 1 and _presets_are_version_variants(presets):
-                chosen_fp, chosen_data = max(presets, key=lambda pd: pd[0].name)
-                logger.info(
-                    "preset picker: %d JSONs look like version variants "
-                    "(same base name + same structure) — auto-picking %s, "
-                    "skipping dialog",
-                    len(presets), chosen_fp.name)
-                path = chosen_fp
-                presets = []  # prevent dialog
-                # The chosen JSON lives inside tmp_extract; defer
-                # cleanup until the worker has finished reading it.
-                if tmp_extract is not None:
-                    self._pending_tmp_cleanup = tmp_extract
-                    tmp_extract = None
             if len(presets) > 1:
                 # Mark as configurable so user can re-pick preset later
                 self._configurable_source = str(path)
@@ -2590,6 +2552,7 @@ class CdummWindow(FluentWindow):
         self._active_progress = tip
 
         proc = QProcess(self)
+        _hide_qprocess_console(proc)
         self._active_worker = proc  # reuse guard flag
 
         # Build command: the exe calls itself with --worker
@@ -3604,6 +3567,7 @@ class CdummWindow(FluentWindow):
 
         self._active_progress = tip
         proc = QProcess(self)
+        _hide_qprocess_console(proc)
         self._active_worker = proc
 
         # Pause non-essential timers
