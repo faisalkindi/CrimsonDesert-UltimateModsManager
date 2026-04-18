@@ -2367,11 +2367,16 @@ class CdummWindow(FluentWindow):
                 chosen_fp, chosen_data = max(presets, key=lambda pd: pd[0].name)
                 logger.info(
                     "preset picker: %d JSONs look like version variants "
-                    "(same game_file + same offsets) — auto-picking %s, "
+                    "(same base name + same structure) — auto-picking %s, "
                     "skipping dialog",
                     len(presets), chosen_fp.name)
                 path = chosen_fp
                 presets = []  # prevent dialog
+                # The chosen JSON lives inside tmp_extract; defer
+                # cleanup until the worker has finished reading it.
+                if tmp_extract is not None:
+                    self._pending_tmp_cleanup = tmp_extract
+                    tmp_extract = None
             if len(presets) > 1:
                 # Mark as configurable so user can re-pick preset later
                 self._configurable_source = str(path)
