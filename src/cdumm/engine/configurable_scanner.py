@@ -34,16 +34,22 @@ def _try_load_json(path: Path) -> dict | None:
 
 
 def _has_labeled_changes(data: dict) -> bool:
-    """Return True if a JSON patch contains any labeled byte change (toggles)."""
+    """Return True if a JSON patch has genuinely configurable options.
+
+    Delegates to `preset_picker.has_labeled_changes` so the scanner's
+    verdict matches what the import dialog and the cog-side panel use.
+    Without this, the scanner flags mods configurable when they only
+    have labels describing a single feature (like `[FASTER VANILLA] Trim
+    starting animations` + `[FASTER VANILLA] Trim ending animations` —
+    two parts of one behavior, not two toggles).
+    """
     if not isinstance(data, dict):
         return False
-    for patch in data.get("patches", []):
-        if not isinstance(patch, dict):
-            continue
-        for ch in patch.get("changes", []):
-            if isinstance(ch, dict) and ch.get("label"):
-                return True
-    return False
+    try:
+        from cdumm.gui.preset_picker import has_labeled_changes
+        return has_labeled_changes(data)
+    except Exception:
+        return False
 
 
 def _find_json_presets_dir(folder: Path) -> int:
@@ -173,6 +179,14 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
         if needs_flag and not configurable:
             db.connection.execute(
                 "UPDATE mods SET configurable = 1 WHERE id = ?", (mod_id,))
+        elif configurable and not needs_flag:
+            # Clean up stale configurable=1 set by the old dumb heuristic
+            # (any-label-at-all). The stricter logic now says this mod has
+            # nothing to configure, so clear the flag and the cog goes
+            # away on the next list refresh.
+            db.connection.execute(
+                "UPDATE mods SET configurable = 0 WHERE id = ?", (mod_id,))
+            stats["unflagged"] = stats.get("unflagged", 0) + 1
         if new_source_path:
             db.connection.execute(
                 "UPDATE mods SET source_path = ? WHERE id = ?",
