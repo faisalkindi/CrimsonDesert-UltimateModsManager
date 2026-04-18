@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Gagal pemeriksaan kompatibilitas mod",
   "activity.msg_fix_everything": "Perbaiki Semua: dikembalikan dan dibersihkan (tanpa pemindaian ulang)",
   "activity.msg_fix_everything_rescan": "Perbaiki Semua: dikembalikan, cadangan dibersihkan, memindai ulang",
-  "activity.msg_removed_stale_appdata": "Menghapus AppData kedaluwarsa ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "Menghapus AppData kedaluwarsa ({size_mb} MB)",
+  "stats.outdated": "Usang",
+  "mod_list.click_to_update": "Klik untuk memperbarui",
+  "tooltip.update_available_with_version": "Pembaruan tersedia. Terpasang: {version}. Klik untuk memperbarui."
 }

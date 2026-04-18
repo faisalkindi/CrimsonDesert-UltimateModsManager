@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Échec du test de compatibilité des mods",
   "activity.msg_fix_everything": "Tout réparer : restauré et nettoyé (sans re-scan)",
   "activity.msg_fix_everything_rescan": "Tout réparer : restauré, sauvegardes effacées, nouvelle analyse en cours",
-  "activity.msg_removed_stale_appdata": "AppData obsolète supprimé ({size_mb} Mo)"
+  "activity.msg_removed_stale_appdata": "AppData obsolète supprimé ({size_mb} Mo)",
+  "stats.outdated": "Obsolètes",
+  "mod_list.click_to_update": "Cliquer pour mettre à jour",
+  "tooltip.update_available_with_version": "Mise à jour disponible. Installé : {version}. Cliquer pour mettre à jour."
 }

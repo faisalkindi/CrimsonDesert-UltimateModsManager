@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Не пройдена проверка совместимости мода",
   "activity.msg_fix_everything": "Исправить всё: откачено и очищено (без повторного сканирования)",
   "activity.msg_fix_everything_rescan": "Исправить всё: откачено, резервные копии удалены, повторное сканирование",
-  "activity.msg_removed_stale_appdata": "Удалены устаревшие AppData ({size_mb} МБ)"
+  "activity.msg_removed_stale_appdata": "Удалены устаревшие AppData ({size_mb} МБ)",
+  "stats.outdated": "Устаревшие",
+  "mod_list.click_to_update": "Нажмите для обновления",
+  "tooltip.update_available_with_version": "Доступно обновление. Установлено: {version}. Нажмите для обновления."
 }

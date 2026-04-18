@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Nieudana kontrola zgodności moda",
   "activity.msg_fix_everything": "Napraw wszystko: przywrócono i wyczyszczono (bez ponownego skanowania)",
   "activity.msg_fix_everything_rescan": "Napraw wszystko: przywrócono, usunięto kopie, ponowne skanowanie",
-  "activity.msg_removed_stale_appdata": "Usunięto nieaktualne AppData ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "Usunięto nieaktualne AppData ({size_mb} MB)",
+  "stats.outdated": "Nieaktualne",
+  "mod_list.click_to_update": "Kliknij, aby zaktualizować",
+  "tooltip.update_available_with_version": "Aktualizacja dostępna. Zainstalowane: {version}. Kliknij, aby zaktualizować."
 }
