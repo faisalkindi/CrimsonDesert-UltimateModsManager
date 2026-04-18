@@ -86,18 +86,48 @@ def _find_json_presets_dir(folder: Path) -> int:
     return count
 
 
+def _dir_has_rescue_markers(d: Path) -> bool:
+    """Return True when ``d`` already holds the full archive contents
+    the scanner would extract (2+ JSON presets OR 2+ folder variants).
+
+    Used to decide whether to trust an existing rescue dir or wipe and
+    re-extract. The previous heuristic ``dest_dir.exists()`` reused
+    partially-populated dirs left by the import worker (which copies
+    only the USER-CHOSEN variant, not the full archive). That caused
+    folder-variant mods like Vaxis LoD to lose their cog on restart —
+    the scanner saw only one variant folder, ``_has_folder_variants``
+    returned False, and configurable got cleared to 0.
+    """
+    if _find_json_presets_dir(d) > 1:
+        return True
+    if _has_folder_variants(d):
+        return True
+    return False
+
+
 def _rescue_archive(archive: Path, dest_dir: Path) -> Path | None:
     """Extract a ZIP/7z/RAR archive into ``dest_dir`` for later preset lookup.
 
     Returns the extracted directory on success, or None if extraction
-    failed / the format is unsupported.
+    failed / the format is unsupported. If ``dest_dir`` exists but
+    lacks the expected markers (2+ presets or variants), it gets wiped
+    and re-extracted so stale import_handler output doesn't mask the
+    archive's real contents.
     """
     suffix = archive.suffix.lower()
     if suffix not in ARCHIVE_SUFFIXES:
         return None
     if dest_dir.exists():
-        # Already rescued previously — reuse it.
-        return dest_dir
+        if _dir_has_rescue_markers(dest_dir):
+            # Full archive contents already on disk — reuse.
+            return dest_dir
+        # Partial/stale contents (import_handler copied one variant
+        # only, or a prior rescue crashed mid-extract). Wipe and
+        # re-extract so the scanner sees the real archive layout.
+        logger.info(
+            "rescue: dest %s lacks variant/preset markers, re-extracting",
+            dest_dir)
+        shutil.rmtree(dest_dir, ignore_errors=True)
     try:
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         if suffix == ".zip":
