@@ -2443,47 +2443,62 @@ class CdummWindow(FluentWindow):
                     scan_dir = None
 
             if scan_dir is not None:
-                # Collect candidates from both folder-variant and loose-
-                # file-variant scanners. Both patterns mean "this archive
-                # has multiple mutually-exclusive subfolders."
-                folder_vars = find_folder_variants(scan_dir)
-                if len(folder_vars) < 2:
-                    _loose = find_loose_file_variants(scan_dir)
-                    if len(_loose) >= 2:
-                        folder_vars = [c["_base_dir"] for c in _loose]
+                # Walk the variant tree. Some mods nest variants (Character
+                # Creator for example ships Female/Male at the top and each
+                # has Goblin/Human/Orc inside). After the user picks a level,
+                # descend and check if the chosen folder has its own
+                # sub-variants. Cap at MAX_VARIANT_DEPTH to avoid infinite
+                # loops on pathological inputs.
+                MAX_VARIANT_DEPTH = 4
+                _current = scan_dir
+                _fired_any_picker = False
+                _aborted = False
+                for _depth in range(MAX_VARIANT_DEPTH):
+                    folder_vars = find_folder_variants(_current)
+                    if len(folder_vars) < 2:
+                        _loose = find_loose_file_variants(_current)
+                        if len(_loose) >= 2:
+                            folder_vars = [c["_base_dir"] for c in _loose]
+                    if len(folder_vars) < 2:
+                        break  # leaf — no more variant choices to offer
 
-                if len(folder_vars) >= 2:
                     fv_dialog = FolderVariantDialog(folder_vars, self)
                     result = fv_dialog.exec()
-                    if result and fv_dialog.selected_path:
-                        path = fv_dialog.selected_path
-                        logger.info(
-                            "User selected folder variant: %s", path.name)
-                        # Remember the original archive/folder path so the
-                        # cog-side panel can re-show FolderVariantDialog
-                        # and swap variants without re-dropping the file.
-                        # For archives we stash the archive path itself;
-                        # for pre-extracted folders we stash the parent
-                        # that contains the variant subfolders.
-                        _original = getattr(
-                            self, "_original_drop_path", None) or path
-                        if (isinstance(_original, Path) and _original.exists()
-                                and (_original.is_file() or _original.is_dir())):
-                            self._configurable_source = str(_original)
-                    else:
-                        if _tmp_extract_for_picker:
-                            import shutil
-                            shutil.rmtree(
-                                _tmp_extract_for_picker,
-                                ignore_errors=True)
-                        self._process_next_import()
-                        return
-                else:
+                    if not (result and fv_dialog.selected_path):
+                        _aborted = True
+                        break
+                    _current = fv_dialog.selected_path
+                    _fired_any_picker = True
+                    logger.info(
+                        "User selected folder variant (depth %d): %s",
+                        _depth, _current.name)
+
+                if _aborted:
+                    if _tmp_extract_for_picker:
+                        import shutil
+                        shutil.rmtree(
+                            _tmp_extract_for_picker, ignore_errors=True)
+                    self._process_next_import()
+                    return
+
+                if _fired_any_picker:
+                    path = _current
+                    # Remember the original archive/folder path so the
+                    # cog-side panel can re-show FolderVariantDialog
+                    # and swap variants without re-dropping the file.
+                    # For archives we stash the archive path itself;
+                    # for pre-extracted folders we stash the parent
+                    # that contains the variant subfolders.
+                    _original = getattr(
+                        self, "_original_drop_path", None) or path
+                    if (isinstance(_original, Path) and _original.exists()
+                            and (_original.is_file() or _original.is_dir())):
+                        self._configurable_source = str(_original)
+                elif _tmp_extract_for_picker is not None:
                     # No variant picker fired — if we pre-extracted just
                     # for scanning, point path at the extracted folder so
                     # the worker doesn't re-extract the same archive.
-                    if _tmp_extract_for_picker is not None:
-                        path = _tmp_extract_for_picker
+                    path = _tmp_extract_for_picker
         except Exception as e:
             logger.debug("Folder variant check failed: %s", e)
 
