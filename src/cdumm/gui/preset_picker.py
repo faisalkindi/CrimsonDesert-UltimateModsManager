@@ -136,10 +136,21 @@ class FolderVariantDialog(MessageBoxBase):
         self.viewLayout.addSpacing(12)
 
         from cdumm.engine.import_handler import prettify_mod_name
+        from qfluentwidgets import isDarkTheme
+
+        # Explicit theme-aware stylesheet — without this the radio text
+        # inherits an unstyled color and renders white-on-white in
+        # light mode (bug reported against 3.1.31a on Vaxis LoD).
+        _radio_style = (
+            "QRadioButton { color: %s; padding: 8px; spacing: 8px; "
+            "font-size: 14px; } "
+            "QRadioButton::indicator { width: 16px; height: 16px; }"
+        ) % ("#E2E8F0" if isDarkTheme() else "#1A202C")
 
         self._group = QButtonGroup(self)
         for i, v in enumerate(variants):
             radio = QRadioButton(prettify_mod_name(v.name))
+            radio.setStyleSheet(_radio_style)
             rf = radio.font()
             rf.setPixelSize(14)
             radio.setFont(rf)
@@ -148,7 +159,13 @@ class FolderVariantDialog(MessageBoxBase):
             self._group.addButton(radio, i)
             self.viewLayout.addWidget(radio)
 
+        # Wire Install to record the chosen path before accepting. The
+        # previous _on_yesButton_clicked method was never connected, so
+        # selected_path stayed None even after clicking Install, and
+        # callers silently treated that as Cancel.
         self.yesButton.setText(tr("main.install"))
+        self.yesButton.clicked.disconnect()
+        self.yesButton.clicked.connect(self._on_yesButton_clicked)
         self.cancelButton.setText(tr("main.cancel"))
         self.widget.setMinimumWidth(400)
 
@@ -187,75 +204,68 @@ class PresetPickerDialog(MessageBoxBase):
         self.viewLayout.addWidget(header)
         self.viewLayout.addSpacing(8)
 
-        # Checkbox list inside a scroll area (multi-select)
+        # Detect mutually exclusive groups the same way the cog side
+        # panel does. Presets whose patches overlap the same bytes of
+        # the same game_file can't coexist, so we render them as a
+        # radio group (pick one). Presets that don't overlap anyone
+        # get a plain checkbox (independent on/off).
+        from cdumm.engine.variant_handler import detect_conflict_groups
+        try:
+            self._auto_group_ids = detect_conflict_groups(
+                [d for _, d in presets])
+        except Exception as _e:
+            logger.debug("detect_conflict_groups failed: %s", _e)
+            self._auto_group_ids = [-1] * len(presets)
+
+        # Override toggle — when ON, every preset becomes a checkbox
+        # regardless of detected conflicts. Lets users override the
+        # auto-detect for mods whose author meant "pick any combo" but
+        # the patches technically overlap.
+        self._override_enabled = False
+
+        has_any_conflict = any(g >= 0 for g in self._auto_group_ids)
+        if has_any_conflict:
+            self._override_btn = PushButton(
+                tr("preset.override_allow_multi") or "Allow multi-select")
+            if (tr("preset.override_allow_multi")
+                    == "preset.override_allow_multi"):
+                self._override_btn.setText("Allow multi-select")
+            self._override_btn.setToolTip(
+                "Auto-detect says some of these presets conflict "
+                "(they edit the same bytes). Click to force multi-"
+                "select anyway — only use this if the mod's author "
+                "says independent picks are allowed.")
+            self._override_btn.setCheckable(True)
+            self._override_btn.clicked.connect(self._on_override_toggled)
+            self.viewLayout.addWidget(self._override_btn)
+            self.viewLayout.addSpacing(4)
+
         from qfluentwidgets import isDarkTheme
+        self._is_dark = isDarkTheme()
         scroll = SingleDirectionScrollArea(orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(200)
         scroll.setMaximumHeight(350)
 
-        container = QWidget()
-        if isDarkTheme():
-            container.setStyleSheet("QWidget { background: #1C2028; } "
-                "QCheckBox { color: #E2E8F0; padding: 10px; spacing: 8px; }"
-                "QCheckBox::indicator { width: 16px; height: 16px; }")
+        self._list_container = QWidget()
+        if self._is_dark:
+            self._list_container.setStyleSheet("QWidget { background: #1C2028; } "
+                "QCheckBox, QRadioButton { color: #E2E8F0; padding: 10px; spacing: 8px; }"
+                "QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; }")
         else:
-            container.setStyleSheet("QWidget { background: #FAFBFC; } "
-                "QCheckBox { color: #1A202C; padding: 10px; spacing: 8px; }"
-                "QCheckBox::indicator { width: 16px; height: 16px; }")
-        cb_layout = QVBoxLayout(container)
-        cb_layout.setContentsMargins(8, 8, 8, 8)
-        cb_layout.setSpacing(4)
+            self._list_container.setStyleSheet("QWidget { background: #FAFBFC; } "
+                "QCheckBox, QRadioButton { color: #1A202C; padding: 10px; spacing: 8px; }"
+                "QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; }")
+        self._list_layout = QVBoxLayout(self._list_container)
+        self._list_layout.setContentsMargins(8, 8, 8, 8)
+        self._list_layout.setSpacing(4)
 
-        self._checkboxes: list[QCheckBox] = []
-        # Mutable copy of each preset's parsed data — when the user
-        # opens "Customize" and unchecks individual entries, we replace
-        # the preset's dict in-place so the import flow uses the
-        # filtered version. Preserving the file path for diagnostics.
-        self._presets: list[tuple[Path, dict]] = list(presets)
-        for i, (file_path, data) in enumerate(self._presets):
-            name = data.get("name", file_path.stem)
-            desc = data.get("description", "")
-            patch_count = sum(len(p.get("changes", [])) for p in data.get("patches", []))
+        self._widgets: list[QCheckBox | QRadioButton] = []
+        self._button_groups: dict[int, QButtonGroup] = {}
+        self._rebuild_preset_list()
 
-            label = name
-            if desc:
-                label += f"\n{desc[:80]}"
-            label += f"\n{patch_count} changes"
-
-            row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(8)
-
-            cb = QCheckBox(label)
-            cbf = cb.font()
-            cbf.setPixelSize(13)
-            cb.setFont(cbf)
-            cb.setChecked(i == 0)  # first one checked by default
-            self._checkboxes.append(cb)
-            row_layout.addWidget(cb, 1)
-
-            # "Customize" button — shows TogglePickerDialog for this
-            # specific preset so power users can fine-tune which
-            # individual changes apply (butanokaabii's request).
-            # Hidden when the preset has no labelled changes.
-            if has_labeled_changes(data):
-                customize_btn = PushButton(tr("preset.customize"))
-                customize_btn.setFixedHeight(28)
-                cf = customize_btn.font()
-                cf.setPixelSize(12)
-                customize_btn.setFont(cf)
-                customize_btn.clicked.connect(
-                    lambda _checked, idx=i: self._on_customize(idx))
-                row_layout.addWidget(customize_btn, 0,
-                                     Qt.AlignmentFlag.AlignTop)
-
-            cb_layout.addWidget(row_widget)
-
-        cb_layout.addStretch()
-        scroll.setWidget(container)
+        scroll.setWidget(self._list_container)
         self.viewLayout.addWidget(scroll)
 
         # Override default buttons
@@ -279,22 +289,23 @@ class PresetPickerDialog(MessageBoxBase):
         accepted = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
         if accepted and dlg.selected_data:
             self._presets[idx] = (fp, dlg.selected_data)
-            self._checkboxes[idx].setChecked(True)
-            new_count = sum(
-                len(p.get("changes", []))
-                for p in dlg.selected_data.get("patches", []))
-            name = dlg.selected_data.get("name", fp.stem)
-            desc = dlg.selected_data.get("description", "")
-            label = name
-            if desc:
-                label += f"\n{desc[:80]}"
-            label += f"\n{new_count} changes (customised)"
-            self._checkboxes[idx].setText(label)
+            if idx < len(self._widgets):
+                self._widgets[idx].setChecked(True)
+                new_count = sum(
+                    len(p.get("changes", []))
+                    for p in dlg.selected_data.get("patches", []))
+                name = dlg.selected_data.get("name", fp.stem)
+                desc = dlg.selected_data.get("description", "")
+                label = name
+                if desc:
+                    label += f"\n{desc[:80]}"
+                label += f"\n{new_count} changes (customised)"
+                self._widgets[idx].setText(label)
 
     def _on_accept(self) -> None:
         self.selected_presets = []
-        for i, cb in enumerate(self._checkboxes):
-            if cb.isChecked() and i < len(self._presets):
+        for i, w in enumerate(self._widgets):
+            if w.isChecked() and i < len(self._presets):
                 fp, data = self._presets[i]
                 self.selected_presets.append((fp, data))
         # Legacy compat: set first selected as primary
@@ -302,6 +313,126 @@ class PresetPickerDialog(MessageBoxBase):
             self.selected_path = self.selected_presets[0][0]
             self.selected_data = self.selected_presets[0][1]
         self.accept()
+
+    def _rebuild_preset_list(self) -> None:
+        """(Re)build the checkbox/radio list based on current override state.
+
+        When override is OFF: respect auto-detected conflict groups
+        (radio for grouped, checkbox for independent).
+        When override is ON: every preset becomes a checkbox, no
+        exclusivity enforced anywhere.
+        """
+        # Preserve current selection across rebuild so user doesn't lose
+        # their picks when toggling override.
+        prior_checked: set[int] = set()
+        for i, w in enumerate(self._widgets):
+            if w.isChecked():
+                prior_checked.add(i)
+
+        # Clear existing widgets and button groups
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for bg in self._button_groups.values():
+            bg.setParent(None)
+            bg.deleteLater()
+        self._button_groups.clear()
+        self._widgets.clear()
+
+        # Force every preset to group=-1 (checkbox) when override is on
+        effective_groups = (
+            [-1] * len(self._presets)
+            if self._override_enabled
+            else list(self._auto_group_ids)
+        )
+
+        first_of_group_seen: set[int] = set()
+        has_any_default = False
+
+        for i, (file_path, data) in enumerate(self._presets):
+            name = data.get("name", file_path.stem)
+            desc = data.get("description", "")
+            patch_count = sum(
+                len(p.get("changes", [])) for p in data.get("patches", []))
+
+            label = name
+            if desc:
+                label += f"\n{desc[:80]}"
+            label += f"\n{patch_count} changes"
+
+            gid = effective_groups[i] if i < len(effective_groups) else -1
+            if gid >= 0:
+                rb = QRadioButton(label)
+                rf = rb.font()
+                rf.setPixelSize(13)
+                rb.setFont(rf)
+                bg = self._button_groups.get(gid)
+                if bg is None:
+                    bg = QButtonGroup(self)
+                    bg.setExclusive(True)
+                    self._button_groups[gid] = bg
+                bg.addButton(rb)
+                if i in prior_checked:
+                    rb.setChecked(True)
+                    has_any_default = True
+                elif gid not in first_of_group_seen and not prior_checked:
+                    rb.setChecked(True)
+                    first_of_group_seen.add(gid)
+                    has_any_default = True
+                self._widgets.append(rb)
+                self._list_layout.addWidget(
+                    self._wrap_with_customize(rb, i, data))
+            else:
+                cb = QCheckBox(label)
+                cbf = cb.font()
+                cbf.setPixelSize(13)
+                cb.setFont(cbf)
+                if i in prior_checked:
+                    cb.setChecked(True)
+                    has_any_default = True
+                elif (not has_any_default and not self._button_groups
+                        and not prior_checked):
+                    cb.setChecked(True)
+                    has_any_default = True
+                self._widgets.append(cb)
+                self._list_layout.addWidget(
+                    self._wrap_with_customize(cb, i, data))
+
+        self._list_layout.addStretch()
+
+    def _wrap_with_customize(self, widget, idx: int, data: dict):
+        """Wrap a preset row with a per-preset Customize button when the
+        preset has labelled toggles. Lets power users fine-tune which
+        individual changes apply without touching other presets
+        (butanokaabii's request, restored from v3.0.5 master)."""
+        if not has_labeled_changes(data):
+            return widget
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(widget, 1)
+        btn = PushButton(tr("preset.customize"))
+        btn.setFixedHeight(28)
+        bf = btn.font()
+        bf.setPixelSize(12)
+        btn.setFont(bf)
+        btn.clicked.connect(
+            lambda _checked=False, i=idx: self._on_customize(i))
+        row_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
+        return row
+
+    def _on_override_toggled(self) -> None:
+        """Flip override state and rebuild the preset list."""
+        self._override_enabled = self._override_btn.isChecked()
+        if self._override_enabled:
+            self._override_btn.setText("Revert to auto-detect")
+        else:
+            self._override_btn.setText("Allow multi-select")
+        self._rebuild_preset_list()
 
 
 def has_labeled_changes(data: dict) -> bool:
