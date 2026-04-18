@@ -122,6 +122,18 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
         "bsdiff": import_from_bsdiff,
     }
 
+    # Per-mod timing instrumentation. ``perf_counter`` for accuracy
+    # (monotonic, sub-microsecond resolution). Emitted via stderr so
+    # the GUI's _on_stderr handler logs it without parsing as JSON.
+    import time as _time, sys as _sys
+    batch_start = _time.perf_counter()
+    timings: list[tuple[str, float, str]] = []  # (mod_name, duration_s, fmt)
+
+    def _log_timing(msg: str) -> None:
+        # stderr path bypasses the JSON-pipe so timings land in the
+        # log file without polluting the structured progress stream.
+        print(f"[BATCH-TIMING] {msg}", file=_sys.stderr, flush=True)
+
     for idx, mod_path in enumerate(mod_paths):
         _emit({"type": "batch_progress", "index": idx, "total": total,
                "name": mod_path.name})
@@ -130,7 +142,10 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
             "type": "progress", "pct": pct, "msg": msg,
             "batch_index": _i, "batch_total": total}))
 
+        mod_t0 = _time.perf_counter()
+        t_detect_start = mod_t0
         fmt = detect_format(mod_path)
+        detect_ms = (_time.perf_counter() - t_detect_start) * 1000
         handler = dispatch_map.get(fmt)
         if handler is None:
             _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
@@ -138,16 +153,26 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
             continue
 
         try:
+            t_handler_start = _time.perf_counter()
             if fmt == "script":
                 result = handler(mod_path, game_dir, db, snapshot, deltas_dir)
             elif fmt == "bsdiff":
                 result = handler(mod_path, game_dir, db, snapshot, deltas_dir)
             else:
                 result = handler(mod_path, game_dir, db, snapshot, deltas_dir)
+            handler_ms = (_time.perf_counter() - t_handler_start) * 1000
         except Exception as e:
             _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
                    "error": str(e)})
             continue
+
+        mod_total_s = _time.perf_counter() - mod_t0
+        timings.append((mod_path.name, mod_total_s, fmt))
+        # Per-mod line: index, name, format, total, breakdown
+        _log_timing(
+            f"[{idx + 1}/{total}] {mod_path.name} "
+            f"fmt={fmt} total={mod_total_s:.2f}s "
+            f"(detect={detect_ms:.0f}ms handler={handler_ms:.0f}ms)")
 
         if result and result.error:
             _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
@@ -208,6 +233,22 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
         else:
             _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
                    "error": "Import returned no result"})
+
+    # Batch summary — what went where, slowest mods first. Helps
+    # diagnose "why is batch slow" by exposing exactly which mods
+    # dominated the wall-clock time.
+    batch_total_s = _time.perf_counter() - batch_start
+    sum_mod_s = sum(t for _, t, _ in timings)
+    overhead_s = max(0.0, batch_total_s - sum_mod_s)
+    avg_s = (sum_mod_s / len(timings)) if timings else 0.0
+    _log_timing(
+        f"BATCH SUMMARY: {len(timings)}/{total} imported in "
+        f"{batch_total_s:.1f}s "
+        f"(sum-of-mods={sum_mod_s:.1f}s avg={avg_s:.2f}s/mod "
+        f"overhead={overhead_s:.1f}s)")
+    # Top 5 slowest — the actual offenders.
+    for name, dur, fmt in sorted(timings, key=lambda r: -r[1])[:5]:
+        _log_timing(f"  slow: {dur:.2f}s [{fmt}] {name}")
 
     db.close()
     _emit({"type": "done", "batch_total": total})
