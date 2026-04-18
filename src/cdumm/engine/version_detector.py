@@ -1,9 +1,18 @@
 """Game version detection via Steam build ID + exe hash fingerprinting."""
 import hashlib
 import logging
+import os
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=4)
+def _cached_version(game_dir_str: str, exe_mtime_ns: int, exe_size: int) -> str | None:
+    """LRU-cached inner computation. Cache invalidates when the game
+    exe changes (Steam update = new mtime + size)."""
+    return _compute_game_version(Path(game_dir_str))
 
 
 def detect_game_version(game_dir: Path) -> str | None:
@@ -11,7 +20,25 @@ def detect_game_version(game_dir: Path) -> str | None:
 
     Uses Steam's buildid (most reliable — changes with every update),
     plus game exe hash for definitive change detection.
+
+    Cached per-process based on exe mtime+size; a batch import of 40
+    mods pays the cost once instead of 40 times.
     """
+    try:
+        exe = game_dir / "bin64" / "CrimsonDesert.exe"
+        if exe.exists():
+            st = exe.stat()
+            return _cached_version(str(game_dir), st.st_mtime_ns, st.st_size)
+        # Xbox/custom install — no stable cache key, fall through to
+        # direct call (still returns None cleanly if nothing detects).
+        return _compute_game_version(game_dir)
+    except Exception as e:
+        logger.warning("Could not detect game version: %s", e)
+        return None
+
+
+def _compute_game_version(game_dir: Path) -> str | None:
+    """Do the actual fingerprint work. Called once per (game_dir, exe) pair."""
     try:
         parts = []
 

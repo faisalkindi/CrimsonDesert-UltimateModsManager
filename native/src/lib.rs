@@ -270,6 +270,138 @@ fn build_overlay_paz(py: Python<'_>, entries: Vec<OverlayEntryPy>) -> PyResult<P
     Ok(dict.into())
 }
 
+// ── ENTR per-entry raw-bytes filter ─────────────────────────────────
+
+/// Input tuple: (paz_index, mod_offset, mod_comp_size, van_offset, van_comp_size)
+#[derive(FromPyObject)]
+struct EntryPairPy(u32, u64, u64, u64, u64);
+
+/// For each same-offset-same-size entry, seek+read the raw bytes in both
+/// PAZ files and compare. Return the indices of entries where the raw
+/// bytes differ (these are the ones that need full extraction + delta
+/// generation on the Python side). Entries with offset/size mismatch are
+/// always returned (the caller pre-filtered).
+///
+/// Replaces a Python per-entry loop that did 4 file-I/O syscalls +
+/// byte comparison per entry. On a PAZ with 115K entries where only 1
+/// changed, the Python loop took 13.7s. The Rust version batches the I/O
+/// and uses native memcmp, running the same work in under a second.
+#[pyfunction]
+fn filter_changed_entries(
+    py: Python<'_>,
+    mod_paz_path: &str,
+    van_paz_path: &str,
+    entries: Vec<EntryPairPy>,
+) -> PyResult<Vec<usize>> {
+    let mod_path = mod_paz_path.to_string();
+    let van_path = van_paz_path.to_string();
+
+    let result: Result<Vec<usize>, String> = py.allow_threads(move || {
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut mod_f = File::open(&mod_path)
+            .map_err(|e| format!("Failed to open {}: {}", mod_path, e))?;
+        let mut van_f = File::open(&van_path)
+            .map_err(|e| format!("Failed to open {}: {}", van_path, e))?;
+
+        let mut changed: Vec<usize> = Vec::new();
+        // Reused buffers. Grow as needed; most entries are <1MB.
+        let mut mod_buf: Vec<u8> = Vec::new();
+        let mut van_buf: Vec<u8> = Vec::new();
+
+        for (idx, EntryPairPy(_paz_idx, mod_off, mod_sz, van_off, van_sz))
+            in entries.iter().enumerate()
+        {
+            // Caller passes same-offset-same-size entries only. If they
+            // ever differ we can't do a raw-bytes compare — flag as changed.
+            if mod_sz != van_sz {
+                changed.push(idx);
+                continue;
+            }
+
+            let sz = *mod_sz as usize;
+            if mod_buf.len() < sz {
+                mod_buf.resize(sz, 0);
+            }
+            if van_buf.len() < sz {
+                van_buf.resize(sz, 0);
+            }
+
+            mod_f.seek(SeekFrom::Start(*mod_off))
+                .map_err(|e| format!("mod seek: {}", e))?;
+            mod_f.read_exact(&mut mod_buf[..sz])
+                .map_err(|e| format!("mod read: {}", e))?;
+
+            van_f.seek(SeekFrom::Start(*van_off))
+                .map_err(|e| format!("van seek: {}", e))?;
+            van_f.read_exact(&mut van_buf[..sz])
+                .map_err(|e| format!("van read: {}", e))?;
+
+            if mod_buf[..sz] != van_buf[..sz] {
+                changed.push(idx);
+            }
+        }
+
+        Ok(changed)
+    });
+
+    result.map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+// ── Sparse diff finder ──────────────────────────────────────────────
+
+/// Find runs of differing bytes between two equal-length slices.
+///
+/// Returns a list of (absolute_offset, diff_bytes) for each contiguous
+/// range where `va[i] != vb[i]`. Used by the streaming sparse-delta
+/// generator to replace a Python byte-by-byte loop that was running
+/// 1M+ iterations per 1MB chunk on large PAZ mods.
+///
+/// `base_offset` is added to the in-slice position so callers can feed
+/// in chunks and get back absolute offsets into the original file.
+#[pyfunction]
+fn find_sparse_diffs(
+    py: Python<'_>,
+    va: &[u8],
+    vb: &[u8],
+    base_offset: u64,
+) -> PyResult<PyObject> {
+    // Compute ranges without holding the GIL so parallel callers could
+    // overlap. The diff list itself stays small (few hundred ranges at
+    // worst), so allocating here is cheap.
+    let patches: Vec<(u64, Vec<u8>)> = py.allow_threads(|| {
+        let len = va.len().min(vb.len());
+        let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut i = 0usize;
+        while i < len {
+            if va[i] == vb[i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < len && va[i] != vb[i] {
+                i += 1;
+            }
+            out.push((base_offset + start as u64, vb[start..i].to_vec()));
+        }
+        out
+    });
+
+    let list = pyo3::types::PyList::empty(py);
+    for (off, data) in patches {
+        let tup = pyo3::types::PyTuple::new(
+            py,
+            &[
+                off.into_pyobject(py)?.into_any().unbind(),
+                pyo3::types::PyBytes::new(py, &data).into_any().unbind(),
+            ],
+        )?;
+        list.append(tup)?;
+    }
+    Ok(list.into())
+}
+
 // ── Module registration ─────────────────────────────────────────────
 
 #[pymodule]
@@ -302,6 +434,12 @@ fn cdumm_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Overlay builder
     m.add_function(wrap_pyfunction!(build_overlay_paz, m)?)?;
+
+    // Sparse diff finder (streaming delta hot loop)
+    m.add_function(wrap_pyfunction!(find_sparse_diffs, m)?)?;
+
+    // ENTR per-entry raw-bytes filter
+    m.add_function(wrap_pyfunction!(filter_changed_entries, m)?)?;
 
     Ok(())
 }
