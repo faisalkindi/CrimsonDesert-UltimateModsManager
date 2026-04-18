@@ -1161,17 +1161,21 @@ class ModsPage(QWidget):
                         if axes is not None:
                             active_parts = (current_rel.split("/")
                                              if current_rel else [])
-                            # Heuristic header per level based on common
-                            # Character-Creator-style prefixes.
-                            def _level_header(values: list[str]) -> str:
-                                joined = " ".join(values).lower()
+                            # Heuristic header per level: recognise common
+                            # axis names (Gender/Race) else fall back to
+                            # "Variant N" so mods with arbitrary axes
+                            # (e.g. "Size / Color") still render as
+                            # distinct sections rather than two "VARIANT"
+                            # headers the user can't distinguish.
+                            def _level_header(values: list[str],
+                                              level: int) -> str:
                                 if any("male" in v.lower() or "female" in v.lower()
                                        for v in values):
                                     return "Gender"
                                 if any(v.lower() in ("human", "orc", "goblin", "elf")
                                        for v in values):
                                     return "Race"
-                                return "Variant"
+                                return f"Variant {level + 1}"
                             self._folder_variant_axes = axes
                             self._folder_variant_is_grid = True
                             variants_meta: list[dict] = []
@@ -1186,7 +1190,7 @@ class ModsPage(QWidget):
                                         "enabled": v == active_val,
                                         "group": level,
                                         "_level": level,
-                                        "_header": _level_header(values),
+                                        "_header": _level_header(values, level),
                                     })
                             self._config_panel.show_variant_mod(
                                 mod_id=mod_id,
