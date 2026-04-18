@@ -664,15 +664,25 @@ class ApplyWorker(QObject):
                             custom_vals = _json.loads(cv_row[0])
                     except (ValueError, TypeError):
                         pass
+                    patch_errors: list[str] = []
                     entries = process_json_patches_for_overlay(
                         mod_id, json_source, self._game_dir,
                         disabled_indices=disabled,
                         custom_values=custom_vals,
-                        vanilla_source_resolver=resolver)
+                        vanilla_source_resolver=resolver,
+                        errors_out=patch_errors)
                     self._overlay_entries.extend(entries)
                     if entries:
                         logger.info("Mount-time: %s produced %d overlay entries",
                                     mod_name, len(entries))
+                    # Bubble partial-apply abort messages (mod built
+                    # for a different game version etc.) up to the GUI
+                    # so the user knows WHY an apply completed but the
+                    # mod's effect is missing in-game.
+                    for err in patch_errors:
+                        logger.warning("Mount-time abort: %s", err)
+                        self._soft_warnings.append(err)
+                        self.warning.emit(err)
                 # Task 1.3: loud error when enabled JSON mods produced no
                 # overlay at all — the user thought their mods applied but
                 # mount-time extraction failed silently for every target.

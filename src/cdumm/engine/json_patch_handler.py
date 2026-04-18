@@ -1511,6 +1511,7 @@ def process_json_patches_for_overlay(
     disabled_indices: list[int] | None = None,
     custom_values: dict | None = None,
     vanilla_source_resolver=None,
+    errors_out: list[str] | None = None,
 ) -> list[tuple[bytes, dict]]:
     """Process a JSON mod's patches at Apply time (mount-time patching).
 
@@ -1528,6 +1529,12 @@ def process_json_patches_for_overlay(
     is used — the caller in apply_engine.py normally provides a
     resolver so the live-PAZ fallback can self-heal after a missing
     vanilla backup.
+
+    ``errors_out`` is an optional mutable list the function will append
+    user-facing error strings to — used to surface partial-apply aborts
+    (Kliff Wears Damiane style mods that mismatch against the current
+    game version) via InfoBar without crashing the game on a half-
+    patched data table.
 
     Returns list of (decompressed_content, metadata) tuples ready for
     the overlay builder.
@@ -1646,6 +1653,40 @@ def process_json_patches_for_overlay(
         if applied == 0 and mismatched > 0:
             logger.warning("mount-time: all patches mismatched for '%s' — game update?",
                           game_file)
+            if errors_out is not None:
+                errors_out.append(
+                    f"{Path(json_source).stem}: all {mismatched} patches "
+                    f"mismatched against vanilla {game_file} — the mod "
+                    f"was built for a different game version.")
+            continue
+
+        # Strict-abort for data-table files (.pabgb / .pabgh / .pamt):
+        # these formats mix inserts with cumulative-offset tracking and
+        # replaces that encode counts/sizes elsewhere. Shipping a
+        # partially-applied data table is how Kliff Wears Damiane style
+        # mods crash the game before the main menu. Better to refuse
+        # the apply and tell the user the mod is incompatible than to
+        # ship a half-patched iteminfo.pabgb.
+        gf_lower = game_file.lower()
+        is_data_table = (gf_lower.endswith(".pabgb")
+                         or gf_lower.endswith(".pabgh")
+                         or gf_lower.endswith(".pamt"))
+        if mismatched > 0 and is_data_table:
+            logger.error(
+                "mount-time: aborting overlay for '%s' — %d of %d patches "
+                "mismatched against vanilla. Data tables cannot be partially "
+                "applied (causes game crashes). Mod likely built for a "
+                "different game version.",
+                game_file, mismatched, applied + mismatched)
+            if errors_out is not None:
+                mod_name = Path(json_source).stem
+                errors_out.append(
+                    f"{mod_name} skipped: {mismatched} of "
+                    f"{applied + mismatched} patches don't match vanilla "
+                    f"{game_file}. Shipping a partial data table would "
+                    f"crash the game. This mod was likely built for a "
+                    f"different game version — check the mod page for an "
+                    f"updated release.")
             continue
 
         if bytes(modified) == plaintext:
