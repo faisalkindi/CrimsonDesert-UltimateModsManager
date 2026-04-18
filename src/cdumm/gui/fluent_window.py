@@ -36,6 +36,26 @@ logger = logging.getLogger(__name__)
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
 
 
+def _probe_console_state(tag: str) -> None:
+    """Log whether the current process has a console attached. On
+    Windows a windowed (console=False) exe has None; if Qt/subprocess
+    ever flips that during a spawn, the returned handle is non-zero.
+    Used to diagnose the flash-window complaint: if this logs a non-
+    zero handle around the moment of the flash, the OS is allocating
+    a console and we need CREATE_NO_WINDOW on the child.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        pid = ctypes.windll.kernel32.GetCurrentProcessId()
+        logger.info("[flash-probe] %s pid=%s console_hwnd=%s",
+                    tag, pid, hwnd)
+    except Exception as e:
+        logger.debug("[flash-probe] %s probe failed: %s", tag, e)
+
+
 def _is_standalone_paz_mod(path: Path) -> bool:
     """Check if path is a standalone PAZ mod (0.paz + 0.pamt, not in a numbered dir).
     These mods add a new PAZ directory and don't need a vanilla snapshot.
@@ -1923,6 +1943,18 @@ class CdummWindow(FluentWindow):
                         _batch_errors.append(f"{msg.get('name', '?')}: {msg['error']}")
                     else:
                         _batch_results.append(msg)
+                        # Stream the finished mod's card into the list.
+                        # Lightweight single-row DB read (WAL-safe vs
+                        # the worker's writes) + one card construct.
+                        # An earlier full-refresh approach stalled the
+                        # worker stdout pipe for ~400ms per mod (cost
+                        # 50-77s per 40-mod batch). This costs <10ms.
+                        mid = msg.get("mod_id")
+                        if mid and hasattr(self, "paz_mods_page"):
+                            try:
+                                self.paz_mods_page.stream_add_mod(int(mid))
+                            except Exception as _e:
+                                logger.debug("stream_add_mod failed: %s", _e)
                 elif mtype == "done":
                     pass  # handled in _on_finished
 
@@ -2355,19 +2387,103 @@ class CdummWindow(FluentWindow):
             logger.debug("Preset check failed: %s", e)
 
         # ── 5b. Folder variant picker ─────────────────────────────────
+        # For archives (zip/7z/rar) with multiple NNNN-variant folders
+        # inside, extract first, show the picker, then feed the chosen
+        # subfolder to the worker. Otherwise the worker silently auto-
+        # picks the alphabetically-last variant and the user never sees
+        # the dialog (Vaxis LoD extra-shadows vs no-extra-shadows case).
         try:
             from cdumm.gui.preset_picker import find_folder_variants, FolderVariantDialog
+            from cdumm.engine.import_handler import find_loose_file_variants
+
+            scan_dir: Path | None = None
+            _tmp_extract_for_picker: Path | None = None
             if path.is_dir():
-                folder_vars = find_folder_variants(path)
+                scan_dir = path
+            elif path.suffix.lower() in (".zip", ".7z", ".rar"):
+                import tempfile as _tmp
+                _extract_dir = Path(_tmp.mkdtemp(prefix="cdumm_variant_"))
+                try:
+                    if path.suffix.lower() == ".zip":
+                        import zipfile
+                        with zipfile.ZipFile(path) as zf:
+                            zf.extractall(_extract_dir)
+                    elif path.suffix.lower() == ".7z":
+                        import py7zr
+                        with py7zr.SevenZipFile(path, "r") as zf:
+                            zf.extractall(_extract_dir)
+                    elif path.suffix.lower() == ".rar":
+                        import subprocess
+                        _seven = None
+                        for t in ("7z", "7z.exe",
+                                  r"C:\Program Files\7-Zip\7z.exe"):
+                            try:
+                                subprocess.run(
+                                    [t, "--help"], capture_output=True,
+                                    timeout=5,
+                                    creationflags=getattr(
+                                        subprocess, "CREATE_NO_WINDOW", 0))
+                                _seven = t
+                                break
+                            except (FileNotFoundError,
+                                    subprocess.TimeoutExpired):
+                                continue
+                        if _seven:
+                            subprocess.run(
+                                [_seven, "x", str(path),
+                                 f"-o{_extract_dir}", "-y"],
+                                capture_output=True, timeout=120,
+                                creationflags=getattr(
+                                    subprocess, "CREATE_NO_WINDOW", 0))
+                    scan_dir = _extract_dir
+                    _tmp_extract_for_picker = _extract_dir
+                except Exception as _ee:
+                    logger.debug(
+                        "Pre-extract for variant picker failed: %s", _ee)
+                    scan_dir = None
+
+            if scan_dir is not None:
+                # Collect candidates from both folder-variant and loose-
+                # file-variant scanners. Both patterns mean "this archive
+                # has multiple mutually-exclusive subfolders."
+                folder_vars = find_folder_variants(scan_dir)
+                if len(folder_vars) < 2:
+                    _loose = find_loose_file_variants(scan_dir)
+                    if len(_loose) >= 2:
+                        folder_vars = [c["_base_dir"] for c in _loose]
+
                 if len(folder_vars) >= 2:
                     fv_dialog = FolderVariantDialog(folder_vars, self)
                     result = fv_dialog.exec()
                     if result and fv_dialog.selected_path:
                         path = fv_dialog.selected_path
-                        logger.info("User selected folder variant: %s", path.name)
+                        logger.info(
+                            "User selected folder variant: %s", path.name)
+                        # Remember the original archive/folder path so the
+                        # cog-side panel can re-show FolderVariantDialog
+                        # and swap variants without re-dropping the file.
+                        # For archives we stash the archive path itself;
+                        # for pre-extracted folders we stash the parent
+                        # that contains the variant subfolders.
+                        _original = getattr(
+                            self, "_original_drop_path", None) or path
+                        if (isinstance(_original, Path) and _original.exists()
+                                and (_original.is_file() or _original.is_dir())):
+                            self._configurable_source = str(_original)
                     else:
+                        if _tmp_extract_for_picker:
+                            import shutil
+                            shutil.rmtree(
+                                _tmp_extract_for_picker,
+                                ignore_errors=True)
                         self._process_next_import()
                         return
+                else:
+                    # No variant picker fired — if we pre-extracted just
+                    # for scanning, point path at the extracted folder so
+                    # the worker doesn't re-extract the same archive.
+                    if _tmp_extract_for_picker is not None:
+                        path = _tmp_extract_for_picker
         except Exception as e:
             logger.debug("Folder variant check failed: %s", e)
 
@@ -2426,7 +2542,9 @@ class CdummWindow(FluentWindow):
         tip = self._make_state_tooltip(f"Importing {path.name}...{suffix}")
         self._active_progress = tip
 
+        _probe_console_state("before import QProcess(self)")
         proc = QProcess(self)
+        _probe_console_state("after import QProcess(self)")
         self._active_worker = proc  # reuse guard flag
 
         # Build command: the exe calls itself with --worker
@@ -2625,8 +2743,11 @@ class CdummWindow(FluentWindow):
         proc.readyReadStandardOutput.connect(_on_stdout)
         proc.readyReadStandardError.connect(_on_stderr)
         proc.finished.connect(_on_finished)
+        _probe_console_state("before proc.start(exe, args)")
         proc.start(exe, args)
-        logger.info("Import QProcess started: PID %s", proc.processId())
+        _probe_console_state("after proc.start(exe, args)")
+        logger.info("Import QProcess started: PID %s exe=%s args=%s",
+                     proc.processId(), exe, args)
 
     def _install_asi_mod(self, path: Path, asi_mgr=None) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
@@ -4058,19 +4179,33 @@ class CdummWindow(FluentWindow):
             try:
                 listener.terminate()
                 listener.deleteLater()
-            except Exception as _e:
+            except (RuntimeError, Exception) as _e:
                 logger.debug("Theme listener teardown failed: %s", _e)
-        # Stop timers
+        # Stop timers (guard against already-deleted C++ objects — Qt may
+        # have reaped children by the time closeEvent fires)
         for timer_name in ("_update_timer", "_db_poll_timer"):
             timer = getattr(self, timer_name, None)
-            if timer:
+            if timer is None:
+                continue
+            try:
                 timer.stop()
-        # Stop worker threads
+            except RuntimeError:
+                pass
+        # Stop worker threads. Wrap every access in try/except because
+        # shiboken raises RuntimeError('Internal C++ object already
+        # deleted') if Qt's normal parent-teardown has already reaped
+        # the QThread before our closeEvent runs. Seen in the debug
+        # build's log at line 4192 after a clean app exit.
         for thread_name in ("_worker_thread", "_update_thread"):
             thread = getattr(self, thread_name, None)
-            if thread and thread.isRunning():
-                thread.quit()
-                thread.wait(2000)
+            if thread is None:
+                continue
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(2000)
+            except RuntimeError:
+                pass
         # Persist window geometry so the next launch opens at the same size/position.
         # Must happen BEFORE db.close(). Ignore errors — this is best-effort.
         if self._db:

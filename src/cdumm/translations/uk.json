@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Не пройдено перевірку сумісності мода",
   "activity.msg_fix_everything": "Виправити все: повернено і очищено (без повторного сканування)",
   "activity.msg_fix_everything_rescan": "Виправити все: повернено, резервні копії стерті, повторне сканування",
-  "activity.msg_removed_stale_appdata": "Видалено застарілі AppData ({size_mb} МБ)"
+  "activity.msg_removed_stale_appdata": "Видалено застарілі AppData ({size_mb} МБ)",
+  "stats.outdated": "Застарілі",
+  "mod_list.click_to_update": "Натисніть для оновлення",
+  "tooltip.update_available_with_version": "Доступне оновлення. Встановлено: {version}. Натисніть для оновлення."
 }

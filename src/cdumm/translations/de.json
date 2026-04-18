@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Mod-Kompatibilitätsprüfung nicht bestanden",
   "activity.msg_fix_everything": "Alles reparieren: zurückgesetzt und bereinigt (kein erneuter Scan)",
   "activity.msg_fix_everything_rescan": "Alles reparieren: zurückgesetzt, Backups gelöscht, erneuter Scan läuft",
-  "activity.msg_removed_stale_appdata": "Veraltete AppData entfernt ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "Veraltete AppData entfernt ({size_mb} MB)",
+  "stats.outdated": "Veraltet",
+  "mod_list.click_to_update": "Zum Aktualisieren klicken",
+  "tooltip.update_available_with_version": "Update verfügbar. Installiert: {version}. Klicken zum Aktualisieren."
 }

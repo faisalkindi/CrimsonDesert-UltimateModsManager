@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Mod uyumluluk denetimi başarısız",
   "activity.msg_fix_everything": "Her Şeyi Onar: geri alındı ve temizlendi (yeniden tarama yok)",
   "activity.msg_fix_everything_rescan": "Her Şeyi Onar: geri alındı, yedekler silindi, yeniden tarama",
-  "activity.msg_removed_stale_appdata": "Eski AppData silindi ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "Eski AppData silindi ({size_mb} MB)",
+  "stats.outdated": "Güncel Değil",
+  "mod_list.click_to_update": "Güncellemek için tıkla",
+  "tooltip.update_available_with_version": "Güncelleme mevcut. Yüklü: {version}. Güncellemek için tıkla."
 }

@@ -1005,5 +1005,8 @@
   "settings.privatebin_instance_row_desc": "Servidor que recebe o relatório criptografado.",
   "settings.privatebin_instance_row_title": "URL da instância",
   "status.inactive": "Desativado",
-  "preset.customize": "Personalizar…"
+  "preset.customize": "Personalizar…",
+  "stats.outdated": "Desatualizado",
+  "mod_list.click_to_update": "Clique para atualizar",
+  "tooltip.update_available_with_version": "Atualização disponível. Instalado: {version}. Clique para atualizar."
 }

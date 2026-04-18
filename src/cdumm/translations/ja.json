@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "MOD の互換性チェックに失敗しました",
   "activity.msg_fix_everything": "すべて修復: 元に戻してクリーンアップしました(再スキャンなし)",
   "activity.msg_fix_everything_rescan": "すべて修復: 元に戻し、バックアップを消去、再スキャン中",
-  "activity.msg_removed_stale_appdata": "古い AppData を削除しました ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "古い AppData を削除しました ({size_mb} MB)",
+  "stats.outdated": "古い",
+  "mod_list.click_to_update": "クリックで更新",
+  "tooltip.update_available_with_version": "アップデートあり。インストール済み: {version}。クリックで更新。"
 }

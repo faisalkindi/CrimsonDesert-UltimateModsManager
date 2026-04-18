@@ -43,6 +43,24 @@ def _dbg_status(action: str, mod_id: int, old_status: str, new_status: str,
          f"{' reason=' + reason if reason else ''}")
 
 
+def _preset_signature(data: dict) -> str | None:
+    """Return a stable signature over the `patches` block so two JSON
+    presets can be compared even when they have no `name` field. Used
+    by the cog side panel to mark the active preset for version-
+    variant mods (Even Faster Vanilla Trimmer etc.)."""
+    try:
+        import hashlib
+        import json as _json
+        patches = data.get("patches") if isinstance(data, dict) else None
+        if patches is None:
+            return None
+        blob = _json.dumps(patches, sort_keys=True,
+                           ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+    except Exception:
+        return None
+
+
 # ======================================================================
 # ModsPage
 # ======================================================================
@@ -332,9 +350,48 @@ class ModsPage(QWidget):
             nexus_id = nexus_map.get(mod_id)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(True, u.mod_url)
+                card.set_update_available(
+                    True, u.mod_url,
+                    nexus_mod_id=nexus_id,
+                    latest_file_id=getattr(u, "latest_file_id", 0))
+                # Connect update_clicked once per card. Disconnect first
+                # to dedup since Qt 6 raises if the slot isn't connected
+                # — the only legitimate failures here are TypeError
+                # (signature mismatch) and RuntimeError (no connection).
+                # Catch only those so a real wiring bug isn't masked.
+                try:
+                    card.update_clicked.disconnect(self._on_update_clicked)
+                except (TypeError, RuntimeError):
+                    pass
+                card.update_clicked.connect(self._on_update_clicked)
             elif nexus_id:
                 card.set_update_available(False)
+        # Refresh the summary bar so the Outdated counter reflects the
+        # new update set. Without this the count would stay stale until
+        # the next refresh().
+        self._update_stats()
+
+    def _on_update_clicked(self, mod_id: int, nexus_mod_id: int,
+                            file_id: int, fallback_url: str) -> None:
+        """Handle a click on the red 'Click To Update' pill.
+
+        For premium users this triggers a direct download (no browser
+        round-trip). The Nexus AUP allows this for premium accounts —
+        the website handover is only required for free users. If
+        ``download_link.json`` returns 403 (free tier), we fall back
+        to opening the mod's Files tab, exactly like the old behaviour.
+
+        We delegate to the parent window's ``_handle_direct_update``
+        helper since download/import lives there alongside the existing
+        nxm:// pipeline.
+        """
+        win = self.window()
+        if hasattr(win, "_handle_direct_update"):
+            win._handle_direct_update(mod_id, nexus_mod_id, file_id,
+                                       fallback_url)
+        elif fallback_url:
+            import webbrowser
+            webbrowser.open(fallback_url)
 
     # ------------------------------------------------------------------
     # Refresh
@@ -366,6 +423,12 @@ class ModsPage(QWidget):
         self._select_all_cb.setText(tr("mod_list.select_all"))
         self._new_folder_btn.setText(tr("mod_list.new_folder"))
         self._summary_bar.retranslate_ui()
+        # Re-render every red "Click To Update" pill in the new
+        # locale (H3 fix). Without this, the pill stays in the old
+        # language until the next nexus update check (up to 30 min).
+        for card in self._mod_cards:
+            if hasattr(card, "retranslate_version"):
+                card.retranslate_version()
 
     # ------------------------------------------------------------------
     # Mod cards
@@ -427,9 +490,45 @@ class ModsPage(QWidget):
         from datetime import datetime, timedelta
         _now = datetime.now()
 
+        # Lazy-import the filename parser only when needed below.
+        _parse_nexus = None
+
         for order, mod in enumerate(mods, start=1):
             mod_id = mod["id"]
             nexus_id = mod.get("nexus_mod_id")
+            if not nexus_id:
+                # Fallback: try to parse it from drop_name on the fly.
+                # Mods imported as folders or with non-standard names
+                # might not have nexus_mod_id stored even after the
+                # one-shot backfill. Without this, those cards stay
+                # GREY forever (set_update_available is gated on
+                # nexus_id being truthy). One-time DB write so future
+                # update checks can find them too.
+                drop_name = mod.get("drop_name") or ""
+                if drop_name:
+                    if _parse_nexus is None:
+                        from cdumm.engine.nexus_filename import (
+                            parse_nexus_filename as _parse_nexus,
+                        )
+                    stem = drop_name
+                    for _ext in (".zip", ".7z", ".rar", ".json", ".bsdiff"):
+                        if stem.lower().endswith(_ext):
+                            stem = stem[: -len(_ext)]
+                            break
+                    nid, _ = _parse_nexus(stem)
+                    if nid:
+                        nexus_id = nid
+                        if self._db:
+                            try:
+                                self._db.connection.execute(
+                                    "UPDATE mods SET nexus_mod_id = ? "
+                                    "WHERE id = ? AND (nexus_mod_id IS NULL "
+                                    "OR nexus_mod_id = 0)",
+                                    (nexus_id, mod_id))
+                                self._db.connection.commit()
+                            except Exception as e:
+                                logger.debug(
+                                    "fallback nexus_id write failed: %s", e)
             if nexus_id:
                 self._nexus_id_map[mod_id] = nexus_id
 
@@ -542,6 +641,124 @@ class ModsPage(QWidget):
             self._entrance_anim = staggered_fade_in(self._mod_cards)
             self._initial_load_done = True
 
+    def stream_add_mod(self, mod_id: int) -> None:
+        """Append one mod card without rebuilding the whole list.
+
+        Called per-mod during batch import so cards appear as each mod
+        finishes. Rebuilding the whole list (via _build_mod_cards) stalls
+        the batch worker's stdout pipe. This single-row path reads just
+        one mod from the DB (SQLite WAL makes the read lock-free vs the
+        worker's writes) and creates one ModCard.
+        """
+        if not self._mod_manager:
+            return
+        # Avoid duplicates if streaming fires twice for the same mod
+        if any(c._mod_id == mod_id for c in self._mod_cards):
+            return
+
+        mod = None
+        for m in self._mod_manager.list_mods(mod_type="paz"):
+            if m["id"] == mod_id:
+                mod = m
+                break
+        if not mod:
+            return
+
+        from datetime import datetime, timedelta
+        import re as _re
+        from cdumm.gui.fluent_window import _parse_nexus_filename
+        _now = datetime.now()
+
+        file_counts = self._mod_manager.get_file_counts()
+
+        is_new = False
+        import_date_str = mod.get("import_date")
+        if import_date_str:
+            try:
+                import_dt = datetime.strptime(
+                    import_date_str, "%Y-%m-%d %H:%M:%S")
+                is_new = (_now - import_dt) < timedelta(hours=2)
+            except ValueError:
+                pass
+
+        applied = self._applied_state.get(mod_id) is True
+        game_status = "active" if applied else "inactive"
+        pending = None
+        if mod["enabled"] and not applied:
+            pending = "Apply to Activate"
+        elif not mod["enabled"] and applied:
+            pending = "Apply to Deactivate"
+
+        has_config = bool(mod.get("configurable"))
+        if not has_config:
+            json_src = self._mod_manager.get_json_source(mod_id)
+            has_config = json_src is not None
+
+        display_ver = ""
+        dn = mod.get("drop_name") or ""
+        if dn:
+            _nid, _nver = _parse_nexus_filename(dn)
+            if _nid and _nver:
+                display_ver = _nver
+            else:
+                _vm = _re.search(r'[vV](\d+(?:\.\d+)*)', dn)
+                if _vm:
+                    display_ver = _vm.group(1)
+        if not display_ver:
+            raw = mod.get("version") or ""
+            _vm = _re.match(r'(\d+(?:\.\d+)*)', raw)
+            display_ver = _vm.group(1) if _vm else raw
+        if not display_ver:
+            display_ver = "\u2014"
+        if len(display_ver) > 7:
+            display_ver = display_ver[:6] + "…"
+
+        card = ModCard(
+            mod_id=mod_id,
+            order=len(self._mod_cards) + 1,
+            name=mod["name"],
+            author=(mod.get("author") if mod.get("author")
+                    and mod.get("author") != "Unknown" else ""),
+            version=display_ver,
+            status=game_status,
+            file_count=file_counts.get(mod_id, 0),
+            has_config=has_config,
+            has_notes=bool(mod.get("notes")),
+            is_new=is_new,
+            enabled=bool(mod["enabled"]),
+            target_language=mod.get("target_language"),
+            conflict_mode=mod.get("conflict_mode", "normal"),
+            parent=self._scroll_content,
+        )
+        card.set_note_text(mod.get("notes") or "")
+        card.set_pending(pending)
+        card.toggled.connect(self._on_mod_toggled)
+        card.config_clicked.connect(self._on_config_clicked)
+        card.context_menu_requested.connect(self._show_mod_context_menu)
+        card.renamed.connect(self._on_mod_renamed)
+        card.card_clicked.connect(self._on_card_clicked)
+
+        self._mod_cards.append(card)
+
+        # Route to the mod's folder group (batch imports go to Ungrouped
+        # by default, but a custom group_id might already be set).
+        gid = mod.get("group_id")
+        if gid not in self._folder_groups:
+            gid = None
+        target_group = self._folder_groups.get(gid)
+        if target_group is None:
+            # Ungrouped hasn't been created yet — fall back to a full
+            # rebuild so the scaffolding exists.
+            self._build_mod_cards()
+            return
+        target_group.add_mod_card(card)
+        target_group.set_count(target_group.count() + 1 if hasattr(
+            target_group, "count") else len(self._mod_cards))
+
+        # Hide the empty-state hero since we have at least one card now
+        if hasattr(self, "_empty_hero"):
+            self._empty_hero.hide()
+
     # ------------------------------------------------------------------
     # Conflict cards
     # ------------------------------------------------------------------
@@ -569,7 +786,19 @@ class ModsPage(QWidget):
                 inactive += 1
             else:
                 pending += 1  # needs Apply (either add or remove)
-        self._summary_bar.update_stats(total, active, pending, inactive)
+        # Count mods that have a NexusMods update available. The lookup
+        # is the same one set_nexus_updates uses to color the version
+        # pills, just summed here for the summary bar.
+        outdated = 0
+        nexus_updates = getattr(self, "_nexus_updates", None) or {}
+        if nexus_updates:
+            nexus_map = getattr(self, "_nexus_id_map", {}) or {}
+            for c in self._mod_cards:
+                nid = nexus_map.get(c.mod_id)
+                if nid and nid in nexus_updates:
+                    outdated += 1
+        self._summary_bar.update_stats(total, active, pending, inactive,
+                                       outdated=outdated)
 
     # ------------------------------------------------------------------
     # Search
@@ -805,23 +1034,62 @@ class ModsPage(QWidget):
         # Check if mod has source_path with multiple presets — show them in side panel
         patches: list[dict] = []
         self._preset_paths: list[tuple] = []  # (file_path, data) for preset apply
+        self._folder_variant_paths: list[tuple] = []  # (variant_dir, display_name)
         source_path = mod.get("source_path")
         if source_path:
             from pathlib import Path as _Path
             sp = _Path(source_path)
-            if sp.exists() and sp.is_dir():
+            # Folder-variant archives (e.g. Vaxis LoD): source_path points
+            # at the original archive. Re-extract on demand to a temp
+            # dir, scan for NNNN-style variant folders, and show them.
+            # Apply re-launches the import worker on the chosen variant.
+            if sp.exists() and sp.is_file() and sp.suffix.lower() in (
+                    ".zip", ".7z", ".rar"):
                 try:
-                    from cdumm.gui.preset_picker import find_json_presets
+                    sp = self._extract_archive_for_cog(sp, mod_id)
+                except Exception as e:
+                    logger.debug("archive extract for cog failed: %s", e)
+                    sp = None
+            if sp and sp.exists() and sp.is_dir():
+                try:
+                    from cdumm.gui.preset_picker import (
+                        find_json_presets, find_folder_variants)
                     presets = find_json_presets(sp)
+                    folder_variants = find_folder_variants(sp)
+                    # Folder-variant branch — only when there are no JSON
+                    # presets (XML-only mods like Vaxis LoD). JSON-preset
+                    # mods take priority below.
+                    if len(presets) <= 1 and len(folder_variants) >= 2:
+                        current_variant = mod.get("drop_name") or ""
+                        self._folder_variant_paths = [
+                            (vp, vp.name) for vp in folder_variants]
+                        for vp in folder_variants:
+                            is_active = current_variant.startswith(vp.name)
+                            patches.append({
+                                "label": vp.name.replace("_", " "),
+                                "description": (
+                                    "folder variant"
+                                    + (" (active)" if is_active else "")),
+                                "enabled": is_active,
+                            })
                     if len(presets) > 1:
-                        # Get current json_source to mark which preset is active
+                        # Mark which preset is active. Try matching by the
+                        # `name` field first (structured mods). Fall back to
+                        # a content signature over the patches block when
+                        # `name` is absent — bare-bones mods like Even
+                        # Faster Vanilla Trimmer have no name/description,
+                        # so name-matching always returned False and the
+                        # cog wouldn't show which version was picked.
                         current_json = self._mod_manager.get_json_source(mod_id)
                         current_name = ""
+                        current_sig = None
                         if current_json:
                             try:
                                 import json as _json
                                 with open(current_json, "r", encoding="utf-8") as _f:
-                                    current_name = _json.load(_f).get("name", "")
+                                    current_data = _json.load(_f)
+                                current_name = current_data.get("name", "") or ""
+                                current_sig = _preset_signature(current_data)
                             except Exception:
                                 pass
 
@@ -830,7 +1098,12 @@ class ModsPage(QWidget):
                             name = data.get("name", fp.stem)
                             desc = data.get("description", "")
                             change_count = sum(len(p.get("changes", [])) for p in data.get("patches", []))
-                            is_active = (name == current_name) if current_name else False
+                            if current_name and data.get("name"):
+                                is_active = (name == current_name)
+                            elif current_sig is not None:
+                                is_active = (_preset_signature(data) == current_sig)
+                            else:
+                                is_active = False
                             label = name
                             if desc:
                                 label += f" — {desc[:50]}"
@@ -925,9 +1198,93 @@ class ModsPage(QWidget):
             logger.error("variants apply failed for mod %d: %s",
                          mod_id, e, exc_info=True)
 
+    def _extract_archive_for_cog(self, archive: Path, mod_id: int) -> Path | None:
+        """Extract a folder-variant archive to a per-session temp dir so
+        the cog panel can scan variants without leaving files on disk.
+
+        Re-uses the same extraction for repeated opens of the same mod's
+        cog by keying on mod_id. The temp dir is cleaned up on app exit
+        (tempfile default behaviour)."""
+        cache = getattr(self, "_folder_variant_extract_cache", None)
+        if cache is None:
+            cache = {}
+            self._folder_variant_extract_cache = cache
+        if mod_id in cache:
+            cached = cache[mod_id]
+            if cached.exists():
+                return cached
+        import tempfile
+        dest = Path(tempfile.mkdtemp(prefix=f"cdumm_cog_{mod_id}_"))
+        suffix = archive.suffix.lower()
+        if suffix == ".zip":
+            import zipfile
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(dest)
+        elif suffix == ".7z":
+            import py7zr
+            with py7zr.SevenZipFile(archive, "r") as zf:
+                zf.extractall(dest)
+        elif suffix == ".rar":
+            import subprocess
+            for tool in ("7z", "7z.exe",
+                         r"C:\Program Files\7-Zip\7z.exe"):
+                try:
+                    subprocess.run(
+                        [tool, "x", str(archive), f"-o{dest}", "-y"],
+                        capture_output=True, timeout=120,
+                        creationflags=getattr(
+                            subprocess, "CREATE_NO_WINDOW", 0))
+                    break
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+        else:
+            import shutil as _sh
+            _sh.rmtree(dest, ignore_errors=True)
+            return None
+        cache[mod_id] = dest
+        return dest
+
     def _on_config_apply(self, mod_id: int, patches: list) -> None:
         """Apply config panel changes — either switch preset or save disabled indices."""
         if not self._mod_manager:
+            return
+
+        # Folder-variant swap (Vaxis LoD style XML-only mods). Whichever
+        # variant the user enabled in the panel becomes the new active
+        # one — we drop the existing mod row and re-launch the import
+        # worker on the chosen variant directory, restoring priority +
+        # enabled state so the swap is transparent.
+        if (hasattr(self, "_folder_variant_paths")
+                and self._folder_variant_paths):
+            for i, p in enumerate(patches):
+                if p.get("enabled") and i < len(self._folder_variant_paths):
+                    variant_dir, _name = self._folder_variant_paths[i]
+                    mod = None
+                    for m in self._mod_manager.list_mods():
+                        if m["id"] == mod_id:
+                            mod = m
+                            break
+                    if mod:
+                        old_priority = mod.get("priority")
+                        old_enabled = mod.get("enabled")
+                        source_path = mod.get("source_path")
+                        old_drop_name = mod.get("drop_name")
+                        self._mod_manager.remove_mod(mod_id)
+                        window = self.window()
+                        window._update_priority = old_priority
+                        window._update_enabled = old_enabled
+                        # Keep source_path pointing at the original
+                        # archive so next cog open still works.
+                        window._configurable_source = source_path
+                        if old_drop_name:
+                            from pathlib import Path as _P
+                            window._original_drop_path = _P(old_drop_name)
+                        window._launch_import_worker(variant_dir)
+                    self._config_panel.close_panel()
+                    self._folder_variant_paths = []
+                    return
+            self._folder_variant_paths = []
+            self._config_panel.close_panel()
             return
 
         # If this is a preset selection (from _preset_paths), reimport with chosen preset

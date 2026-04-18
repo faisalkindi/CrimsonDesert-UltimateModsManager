@@ -9,13 +9,114 @@ import os
 import struct
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 from cdumm.archive.hashlittle import hashlittle
 
 logger = logging.getLogger(__name__)
 
 INTEGRITY_SEED = 0xC5EDE
+
+# Module-level handle to the Rust parser so tests can patch it to None to
+# force the pure-Python fallback (otherwise they'd have to mock cdumm_native
+# + open() + parse_pamt all at once).
+_NATIVE_PARSE_PAMT = None
+try:
+    from cdumm_native import parse_pamt as _NATIVE_PARSE_PAMT
+except ImportError:
+    pass
+
+
+class VanillaPamtEntry(NamedTuple):
+    """Immutable PAMT entry used by health-check + ENTR-import caches.
+
+    Mirrors the subset of `PazEntry` attributes both callers read.
+    Being a NamedTuple means it is hashable, immutable, and safe to
+    share across callers — no mutation can leak between cache hits.
+    """
+    path: str
+    paz_index: int
+    offset: int
+    comp_size: int
+    orig_size: int
+    flags: int = 0  # default 0 for callers that only need size/offset fields
+
+    @property
+    def compressed(self) -> bool:
+        return self.comp_size != self.orig_size
+
+    @property
+    def compression_type(self) -> int:
+        """0=none, 2=LZ4, 3=custom, 4=zlib — derived from flags bits 16..19."""
+        return (self.flags >> 16) & 0x0F
+
+    @property
+    def encrypted(self) -> bool:
+        """ChaCha20 encryption heuristic. XML entries are always encrypted.
+
+        Note: the full PazEntry dataclass has an `_encrypted_override` for
+        run-time override during extraction. We don't need that here — the
+        ENTR import uses this flag only for metadata tagging, and falls
+        back to speculative LZ4 decompression to detect encryption when
+        the heuristic is wrong.
+        """
+        return self.path.lower().endswith('.xml')
+
+
+@lru_cache(maxsize=32)
+def _cached_vanilla_pamt_tuples(
+    pamt_path: str, paz_dir: str, mtime_ns: int, size: int,
+) -> tuple[VanillaPamtEntry, ...]:
+    """LRU-cached parse of a PAMT (any PAMT, not just vanilla — the name
+    is historical). Keyed on (path, mtime, size).
+
+    Uses cdumm_native (Rust) when available, falls back to pure Python.
+    Rust parse is ~2x faster on 396K-entry PAMTs and the returned
+    NamedTuple constructors run the actual allocation in Python, which
+    is ~3x faster than PazEntry dataclass. Combined: ~1.5s vs ~2.4s
+    on the biggest PAMTs.
+
+    When the file changes on disk, the key changes, so the next call
+    transparently re-parses (Parso / Jedi cache pattern). Scoped to
+    the calling process only — the batch-import worker is short-lived,
+    so nothing persists across sessions.
+    """
+    if _NATIVE_PARSE_PAMT is not None:
+        with open(pamt_path, "rb") as _f:
+            _data = _f.read()
+        dicts = _NATIVE_PARSE_PAMT(_data)
+        return tuple(
+            VanillaPamtEntry(
+                d["path"], d["paz_index"],
+                d["offset"], d["comp_size"], d["orig_size"], d["flags"],
+            )
+            for d in dicts
+        )
+
+    from cdumm.archive.paz_parse import parse_pamt
+    entries = parse_pamt(pamt_path, paz_dir=paz_dir)
+    return tuple(
+        VanillaPamtEntry(
+            e.path, e.paz_index, e.offset, e.comp_size, e.orig_size, e.flags,
+        )
+        for e in entries
+    )
+
+
+def _load_vanilla_pamt(pamt_path: str, paz_dir: str) -> tuple[VanillaPamtEntry, ...]:
+    """Load vanilla PAMT entries with batch-scoped caching.
+
+    Vanilla PAMTs for large game dirs (e.g. 0008/0.pamt has 1.2M entries)
+    take ~9s to parse. Without a cache, a 29-mod batch that hits the
+    same dir re-parses 29 times. With this wrapper, every call after
+    the first is a dict lookup.
+    """
+    st = os.stat(pamt_path)
+    return _cached_vanilla_pamt_tuples(
+        pamt_path, paz_dir, st.st_mtime_ns, st.st_size,
+    )
 
 
 @dataclass
@@ -45,37 +146,131 @@ def check_mod_health(
     """
     issues: list[HealthIssue] = []
 
+    import sys
+    import time as _time
+
     pamt_files = {k: v for k, v in mod_files.items() if k.endswith(".pamt")}
     paz_files = {k: v for k, v in mod_files.items() if k.endswith(".paz")}
     papgt_files = {k: v for k, v in mod_files.items() if k.endswith(".papgt")}
 
+    timings: dict[str, float] = {}
+    _check_start = _time.perf_counter()
+
     # C2: PAMT hash verification
+    _t = _time.perf_counter()
     for rel_path, abs_path in pamt_files.items():
         issues.extend(_check_pamt_hash(rel_path, abs_path))
+    timings["C2_pamt_hash"] = _time.perf_counter() - _t
 
     # C3: PAPGT hash verification
+    _t = _time.perf_counter()
     for rel_path, abs_path in papgt_files.items():
         issues.extend(_check_papgt_hash(rel_path, abs_path))
+    timings["C3_papgt_hash"] = _time.perf_counter() - _t
 
     # C5: PAZ size in PAMT vs actual file size
+    _t = _time.perf_counter()
     for rel_path, abs_path in pamt_files.items():
         issues.extend(_check_paz_sizes(rel_path, abs_path, mod_files, game_dir))
+    timings["C5_paz_sizes"] = _time.perf_counter() - _t
+
+    # Pre-parse each mod PAMT once — C1 and C6 both need it. Uses
+    # cdumm_native (Rust) when available for the ~2x speedup on 396K-
+    # entry PAMTs. We don't route through _load_vanilla_pamt here
+    # because the cache wrapper's extra indirection cost outweighs the
+    # savings (mod PAMTs are in temp dirs with unique paths — each mod's
+    # PAMT is a fresh cache miss, so the wrapper is pure overhead).
+    _mod_entries_by_pamt: dict[str, list] = {}
+    if pamt_files:
+        _t = _time.perf_counter()
+        _parse_pamt = None
+        try:
+            from cdumm.archive.paz_parse import parse_pamt as _parse_pamt
+        except ImportError:
+            pass
+
+        for _rel, _abs in pamt_files.items():
+            try:
+                if _NATIVE_PARSE_PAMT is not None:
+                    _data = _abs.read_bytes()
+                    _dicts = _NATIVE_PARSE_PAMT(_data)
+                    _mod_entries_by_pamt[str(_abs)] = [
+                        VanillaPamtEntry(
+                            d["path"], d["paz_index"],
+                            d["offset"], d["comp_size"], d["orig_size"],
+                            d["flags"],
+                        ) for d in _dicts
+                    ]
+                elif _parse_pamt is not None:
+                    _mod_entries_by_pamt[str(_abs)] = _parse_pamt(
+                        str(_abs), paz_dir=str(_abs.parent))
+            except Exception as e:
+                logger.warning("Mod PAMT pre-parse failed for %s: %s", _rel, e)
+        timings["mod_pamt_preparse"] = _time.perf_counter() - _t
+
+    # Vanilla PAMT prefetch — warm the LRU cache for every game dir this
+    # mod touches (via .pamt OR .paz). Mods that ship a .pamt already
+    # trigger a warm via _check_duplicate_paths below, but PAZ-only mods
+    # skipped that path and hit a cold cache in _try_paz_entry_import
+    # during file_processing_loop. Doing it here turns that cold parse
+    # (~2-3s per unique dir) into a hot hit later.
+    _dirs_touched = {
+        k.split("/")[0] for k in list(pamt_files.keys()) + list(paz_files.keys())
+        if "/" in k
+    }
+    if _dirs_touched:
+        _t = _time.perf_counter()
+        for _dir in _dirs_touched:
+            _van_pamt = game_dir / "CDMods" / "vanilla" / _dir / "0.pamt"
+            _van_paz_dir = game_dir / "CDMods" / "vanilla" / _dir
+            if not _van_pamt.exists():
+                _van_pamt = game_dir / _dir / "0.pamt"
+                _van_paz_dir = game_dir / _dir
+            if _van_pamt.exists():
+                try:
+                    _load_vanilla_pamt(str(_van_pamt), str(_van_paz_dir))
+                except Exception as e:
+                    logger.debug("Vanilla prefetch failed for %s: %s", _dir, e)
+        timings["vanilla_prefetch"] = _time.perf_counter() - _t
 
     # C1: Duplicate PAMT paths
+    _t = _time.perf_counter()
     for rel_path, abs_path in pamt_files.items():
-        issues.extend(_check_duplicate_paths(rel_path, abs_path, game_dir))
+        issues.extend(_check_duplicate_paths(
+            rel_path, abs_path, game_dir,
+            mod_entries=_mod_entries_by_pamt.get(str(abs_path)),
+        ))
+    timings["C1_duplicate_paths"] = _time.perf_counter() - _t
 
     # C6: Record out of bounds
+    _t = _time.perf_counter()
     for rel_path, abs_path in pamt_files.items():
-        issues.extend(_check_record_bounds(rel_path, abs_path, mod_files, game_dir))
+        issues.extend(_check_record_bounds(
+            rel_path, abs_path, mod_files, game_dir,
+            mod_entries=_mod_entries_by_pamt.get(str(abs_path)),
+        ))
+    timings["C6_record_bounds"] = _time.perf_counter() - _t
 
     # C7: PAPGT overwrites other mods
+    _t = _time.perf_counter()
     for rel_path, abs_path in papgt_files.items():
         issues.extend(_check_papgt_overwrites(rel_path, abs_path, game_dir))
+    timings["C7_papgt_overwrites"] = _time.perf_counter() - _t
 
     # W1: Version mismatch
+    _t = _time.perf_counter()
     for rel_path, abs_path in pamt_files.items():
         issues.extend(_check_version_mismatch(rel_path, abs_path, game_dir))
+    timings["W1_version_mismatch"] = _time.perf_counter() - _t
+
+    # Emit per-check timings ONLY when total health_check exceeds 1s,
+    # so fast mods don't bloat the log. Sorted by cost descending so
+    # the hot checks jump out first.
+    total = _time.perf_counter() - _check_start
+    if total >= 1.0:
+        hot = sorted(timings.items(), key=lambda kv: kv[1], reverse=True)
+        parts = " ".join(f"{name}={int(dt * 1000)}ms" for name, dt in hot if dt >= 0.05)
+        print(f"[HEALTH-TIMING] total={int(total * 1000)}ms {parts}", file=sys.stderr)
 
     # W3: PAZ-only mod (no PAMT)
     if paz_files and not pamt_files:
@@ -251,8 +446,14 @@ def _check_paz_sizes(
 
 def _check_duplicate_paths(
     pamt_rel: str, pamt_path: Path, game_dir: Path,
+    mod_entries: list | None = None,
 ) -> list[HealthIssue]:
-    """C1: Check if mod adds files that already exist in a different PAZ."""
+    """C1: Check if mod adds files that already exist in a different PAZ.
+
+    `mod_entries` is an optional pre-parsed list from the caller. When the
+    caller parses the mod PAMT once and shares it across C1 and C6, we
+    avoid parsing the same 13MB PAMT twice per mod.
+    """
     try:
         from cdumm.archive.paz_parse import parse_pamt
     except ImportError:
@@ -270,8 +471,9 @@ def _check_duplicate_paths(
         return []
 
     try:
-        mod_entries = parse_pamt(str(pamt_path), paz_dir=mod_dir)
-        van_entries = parse_pamt(str(game_pamt), paz_dir=paz_dir)
+        if mod_entries is None:
+            mod_entries = parse_pamt(str(pamt_path), paz_dir=mod_dir)
+        van_entries = _load_vanilla_pamt(str(game_pamt), paz_dir)
     except Exception as e:
         logger.warning("Failed to parse PAMT for duplicate check: %s", e)
         return []
@@ -345,13 +547,9 @@ def _check_duplicate_paths(
                     technical_detail=f"Path: {path}, mod entries: {len(mod_list)}, vanilla: {len(van_list)}",
                 ))
 
-    # Also detect: new paths in mod that don't exist in vanilla at all,
-    # but exist in another directory's vanilla PAMT
-    for path, mod_list in mod_by_path.items():
-        if path in van_by_path:
-            continue  # already in vanilla for this dir — handled above
-        # This is a genuinely new file added by the mod to this directory.
-        # Not necessarily a problem, but log it for awareness.
+    # (Previously a second loop here iterated mod_by_path to detect paths
+    # absent from vanilla, but the body was empty — it's dead code that
+    # walks 100K+ entries for nothing. Removed in v3.1.19a.)
 
     return issues
 
@@ -359,8 +557,13 @@ def _check_duplicate_paths(
 def _check_record_bounds(
     pamt_rel: str, pamt_path: Path,
     mod_files: dict[str, Path], game_dir: Path,
+    mod_entries: list | None = None,
 ) -> list[HealthIssue]:
-    """C6: Check if any PAMT records point outside PAZ file boundaries."""
+    """C6: Check if any PAMT records point outside PAZ file boundaries.
+
+    `mod_entries` is an optional pre-parsed list shared with C1 so we
+    parse each mod's 13MB PAMT once instead of twice.
+    """
     try:
         from cdumm.archive.paz_parse import parse_pamt
     except ImportError:
@@ -369,7 +572,9 @@ def _check_record_bounds(
     dir_name = pamt_rel.split("/")[0]
 
     try:
-        entries = parse_pamt(str(pamt_path), paz_dir=str(pamt_path.parent))
+        if mod_entries is None:
+            mod_entries = parse_pamt(str(pamt_path), paz_dir=str(pamt_path.parent))
+        entries = mod_entries
     except Exception:
         return []
 
@@ -634,7 +839,7 @@ def _fix_duplicate_pamt(
 
     try:
         mod_entries = parse_pamt(str(pamt_path), paz_dir=str(pamt_path.parent))
-        van_entries = parse_pamt(str(game_pamt), paz_dir=str(game_dir / dir_name))
+        van_entries = _load_vanilla_pamt(str(game_pamt), str(game_dir / dir_name))
     except Exception as e:
         logger.warning("Failed to parse PAMT for fix: %s", e)
         return None

@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "فشل فحص توافق التعديل",
   "activity.msg_fix_everything": "إصلاح كل شيء: تم الإرجاع والتنظيف (بدون إعادة فحص)",
   "activity.msg_fix_everything_rescan": "إصلاح كل شيء: تم الإرجاع، ومُسحت النسخ الاحتياطية، وإعادة الفحص",
-  "activity.msg_removed_stale_appdata": "تمت إزالة AppData القديمة ({size_mb} م.ب)"
+  "activity.msg_removed_stale_appdata": "تمت إزالة AppData القديمة ({size_mb} م.ب)",
+  "stats.outdated": "قديمة",
+  "mod_list.click_to_update": "انقر للتحديث",
+  "tooltip.update_available_with_version": "يتوفر تحديث. المثبَّت: {version}. انقر للتحديث."
 }

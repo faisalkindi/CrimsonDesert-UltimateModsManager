@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "모드 호환성 검사 실패",
   "activity.msg_fix_everything": "전체 수정: 되돌리고 정리했습니다 (다시 스캔 없음)",
   "activity.msg_fix_everything_rescan": "전체 수정: 되돌리고 백업 삭제, 다시 스캔 중",
-  "activity.msg_removed_stale_appdata": "오래된 AppData 제거됨 ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "오래된 AppData 제거됨 ({size_mb} MB)",
+  "stats.outdated": "구버전",
+  "mod_list.click_to_update": "클릭하여 업데이트",
+  "tooltip.update_available_with_version": "업데이트 있음. 설치됨: {version}. 클릭하여 업데이트."
 }

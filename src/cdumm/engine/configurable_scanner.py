@@ -34,16 +34,37 @@ def _try_load_json(path: Path) -> dict | None:
 
 
 def _has_labeled_changes(data: dict) -> bool:
-    """Return True if a JSON patch contains any labeled byte change (toggles)."""
+    """Return True if a JSON patch has genuinely configurable options.
+
+    Delegates to `preset_picker.has_labeled_changes` so the scanner's
+    verdict matches what the import dialog and the cog-side panel use.
+    Without this, the scanner flags mods configurable when they only
+    have labels describing a single feature (like `[FASTER VANILLA] Trim
+    starting animations` + `[FASTER VANILLA] Trim ending animations` —
+    two parts of one behavior, not two toggles).
+    """
     if not isinstance(data, dict):
         return False
-    for patch in data.get("patches", []):
-        if not isinstance(patch, dict):
-            continue
-        for ch in patch.get("changes", []):
-            if isinstance(ch, dict) and ch.get("label"):
-                return True
-    return False
+    try:
+        from cdumm.gui.preset_picker import has_labeled_changes
+        return has_labeled_changes(data)
+    except Exception:
+        return False
+
+
+def _has_folder_variants(folder: Path) -> bool:
+    """Return True when ``folder`` contains 2+ mutually-exclusive
+    variant subfolders, matching what ``preset_picker.find_folder_variants``
+    detects on import. Used so the scanner keeps the cog flag set on
+    XML-only mods like Vaxis LoD after a restart.
+    """
+    if not folder.is_dir():
+        return False
+    try:
+        from cdumm.gui.preset_picker import find_folder_variants
+        return len(find_folder_variants(folder)) >= 2
+    except Exception:
+        return False
 
 
 def _find_json_presets_dir(folder: Path) -> int:
@@ -65,18 +86,48 @@ def _find_json_presets_dir(folder: Path) -> int:
     return count
 
 
+def _dir_has_rescue_markers(d: Path) -> bool:
+    """Return True when ``d`` already holds the full archive contents
+    the scanner would extract (2+ JSON presets OR 2+ folder variants).
+
+    Used to decide whether to trust an existing rescue dir or wipe and
+    re-extract. The previous heuristic ``dest_dir.exists()`` reused
+    partially-populated dirs left by the import worker (which copies
+    only the USER-CHOSEN variant, not the full archive). That caused
+    folder-variant mods like Vaxis LoD to lose their cog on restart —
+    the scanner saw only one variant folder, ``_has_folder_variants``
+    returned False, and configurable got cleared to 0.
+    """
+    if _find_json_presets_dir(d) > 1:
+        return True
+    if _has_folder_variants(d):
+        return True
+    return False
+
+
 def _rescue_archive(archive: Path, dest_dir: Path) -> Path | None:
     """Extract a ZIP/7z/RAR archive into ``dest_dir`` for later preset lookup.
 
     Returns the extracted directory on success, or None if extraction
-    failed / the format is unsupported.
+    failed / the format is unsupported. If ``dest_dir`` exists but
+    lacks the expected markers (2+ presets or variants), it gets wiped
+    and re-extracted so stale import_handler output doesn't mask the
+    archive's real contents.
     """
     suffix = archive.suffix.lower()
     if suffix not in ARCHIVE_SUFFIXES:
         return None
     if dest_dir.exists():
-        # Already rescued previously — reuse it.
-        return dest_dir
+        if _dir_has_rescue_markers(dest_dir):
+            # Full archive contents already on disk — reuse.
+            return dest_dir
+        # Partial/stale contents (import_handler copied one variant
+        # only, or a prior rescue crashed mid-extract). Wipe and
+        # re-extract so the scanner sees the real archive layout.
+        logger.info(
+            "rescue: dest %s lacks variant/preset markers, re-extracting",
+            dest_dir)
+        shutil.rmtree(dest_dir, ignore_errors=True)
     try:
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         if suffix == ".zip":
@@ -136,6 +187,10 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
         needs_flag = False
         new_source_path: str | None = None
 
+        logger.info(
+            "[scan] mod_id=%s configurable_before=%s json_source=%r source_path=%r",
+            mod_id, configurable, json_source, source_path)
+
         # Type A — labeled changes in the stored JSON source
         if json_source:
             try:
@@ -145,34 +200,88 @@ def scan_configurable_mods(db: Database, sources_root: Path) -> dict[str, int]:
                     if data and _has_labeled_changes(data):
                         needs_flag = True
                         stats["flagged_a"] += 1
-            except Exception:
+                        logger.info(
+                            "[scan] mod_id=%s Type A HIT (labeled changes)",
+                            mod_id)
+            except Exception as _e:
                 stats["errors"] += 1
+                logger.warning(
+                    "[scan] mod_id=%s Type A threw: %s", mod_id, _e)
 
-        # Type B — multiple preset JSONs in the archived source folder
+        # Type B — multiple preset JSONs OR multiple folder variants
+        # in the archived source folder. Folder variants cover XML-only
+        # archives like Vaxis LoD where the author ships mutually-
+        # exclusive NNNN subfolders; the cog uses them to swap variants
+        # post-install.
         if source_path:
             try:
                 sp = Path(source_path)
-                if sp.exists():
+                if not sp.exists():
+                    logger.info(
+                        "[scan] mod_id=%s source_path does not exist on disk",
+                        mod_id)
+                else:
                     if sp.is_dir():
-                        if _find_json_presets_dir(sp) > 1:
+                        has_jsons = _find_json_presets_dir(sp) > 1
+                        has_folders = _has_folder_variants(sp)
+                        logger.info(
+                            "[scan] mod_id=%s source is DIR jsons>1=%s "
+                            "folder_variants=%s",
+                            mod_id, has_jsons, has_folders)
+                        if has_jsons or has_folders:
                             needs_flag = True
                             stats["flagged_b"] += 1
                     elif sp.is_file() and sp.suffix.lower() in ARCHIVE_SUFFIXES:
+                        logger.info(
+                            "[scan] mod_id=%s source is ARCHIVE, rescuing to %s",
+                            mod_id, sources_root / str(mod_id))
                         rescued = _rescue_archive(
                             sp, sources_root / str(mod_id))
-                        if rescued and _find_json_presets_dir(rescued) > 1:
-                            needs_flag = True
-                            new_source_path = str(rescued)
-                            stats["flagged_b"] += 1
-                            stats["rescued"] += 1
-                        elif rescued is None:
+                        if rescued is None:
+                            logger.warning(
+                                "[scan] mod_id=%s rescue FAILED (returned None)",
+                                mod_id)
                             stats["errors"] += 1
-            except Exception:
+                        else:
+                            has_jsons = _find_json_presets_dir(rescued) > 1
+                            has_folders = _has_folder_variants(rescued)
+                            logger.info(
+                                "[scan] mod_id=%s rescued to %s jsons>1=%s "
+                                "folder_variants=%s",
+                                mod_id, rescued, has_jsons, has_folders)
+                            if has_jsons or has_folders:
+                                needs_flag = True
+                                new_source_path = str(rescued)
+                                stats["flagged_b"] += 1
+                                stats["rescued"] += 1
+                    else:
+                        logger.info(
+                            "[scan] mod_id=%s source is neither dir nor "
+                            "supported archive (suffix=%s)",
+                            mod_id, sp.suffix)
+            except Exception as _e:
                 stats["errors"] += 1
+                logger.warning(
+                    "[scan] mod_id=%s Type B threw: %s", mod_id, _e)
+
+        logger.info(
+            "[scan] mod_id=%s needs_flag=%s -> action=%s",
+            mod_id, needs_flag,
+            "SET 1" if (needs_flag and not configurable)
+            else "CLEAR 0" if (configurable and not needs_flag)
+            else "no-op")
 
         if needs_flag and not configurable:
             db.connection.execute(
                 "UPDATE mods SET configurable = 1 WHERE id = ?", (mod_id,))
+        elif configurable and not needs_flag:
+            # Clean up stale configurable=1 set by the old dumb heuristic
+            # (any-label-at-all). The stricter logic now says this mod has
+            # nothing to configure, so clear the flag and the cog goes
+            # away on the next list refresh.
+            db.connection.execute(
+                "UPDATE mods SET configurable = 0 WHERE id = ?", (mod_id,))
+            stats["unflagged"] = stats.get("unflagged", 0) + 1
         if new_source_path:
             db.connection.execute(
                 "UPDATE mods SET source_path = ? WHERE id = ?",

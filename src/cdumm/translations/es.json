@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "Falló la comprobación de compatibilidad del mod",
   "activity.msg_fix_everything": "Arreglar todo: revertido y limpiado (sin reescanear)",
   "activity.msg_fix_everything_rescan": "Arreglar todo: revertido, copias borradas, reescaneando",
-  "activity.msg_removed_stale_appdata": "AppData obsoleto eliminado ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "AppData obsoleto eliminado ({size_mb} MB)",
+  "stats.outdated": "Desactualizados",
+  "mod_list.click_to_update": "Haz clic para actualizar",
+  "tooltip.update_available_with_version": "Actualización disponible. Instalado: {version}. Haz clic para actualizar."
 }

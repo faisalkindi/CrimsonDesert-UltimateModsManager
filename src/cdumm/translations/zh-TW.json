@@ -969,5 +969,8 @@
   "activity.msg_failed_compat_check": "模組相容性檢查失敗",
   "activity.msg_fix_everything": "修復全部: 已還原並清理(未重新掃描)",
   "activity.msg_fix_everything_rescan": "修復全部: 已還原、清除備份、正在重新掃描",
-  "activity.msg_removed_stale_appdata": "已移除過期 AppData ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "已移除過期 AppData ({size_mb} MB)",
+  "stats.outdated": "已過時",
+  "mod_list.click_to_update": "點擊更新",
+  "tooltip.update_available_with_version": "有可用更新。已安裝: {version}。點擊更新。"
 }
