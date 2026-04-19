@@ -148,9 +148,19 @@ def detect_json_patches_all(path: Path) -> list[dict]:
     if path.is_file() and path.suffix.lower() == ".json":
         candidates = [path]
     elif path.is_dir():
-        candidates = list(path.glob("*.json"))
-        if not candidates:
-            candidates = list(path.glob("*/*.json"))
+        # Walk the whole tree so mods like Gild's Gear that bury batch
+        # JSONs in subfolders (Weapons/Sword1/patch.json etc.) get picked
+        # up. Skip directories that look like extracted vanilla PAZ
+        # content (NNNN-numbered dirs + 'meta') so we don't false-positive
+        # on random bytes that happen to parse as JSON.
+        import re as _re_nnnn
+        _NNNN = _re_nnnn.compile(r"^\d{4}$")
+        for p in path.rglob("*.json"):
+            rel = p.relative_to(path)
+            if any(_NNNN.match(part) or part.lower() == "meta"
+                   for part in rel.parts[:-1]):
+                continue
+            candidates.append(p)
 
     from cdumm.engine.json_repair import load_json_tolerant
 
@@ -560,25 +570,42 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     # Parse and sort all changes by offset (ascending) for single-pass
     # with cumulative delta tracking. This correctly handles interleaved
     # insert+replace ops where inserts shift subsequent offsets.
-    def _parse_offset(change):
-        # Record-relative offset: resolve via pabgh index.
-        # Accept `relative_offset` (canonical) OR `rel_offset` (shorter alias
-        # some tools emit). Both are treated as the same.
+    def _resolve_all_offsets(change):
+        """Return (primary, fallbacks) — all resolvable offsets for a change.
+
+        Priority matters for the offset-drift scenario: anchored offsets
+        (record_key via pabgh index, entry name via current-game pabgb)
+        are computed against the CURRENT game's structure, so they
+        survive updates that shift bytes. Literal `offset` values are
+        baked in at mod-author time and go stale. Preferring the
+        literal would silently patch the wrong record whenever the mod
+        ships both and the game has drifted (Codex 2026-04 regression
+        report). BUT: if anchored resolves to bytes that don't match
+        vanilla (generic name-resolver gets specific formats like
+        multichangeinfo.pabgb wrong — the BRCC case), the apply loop
+        falls through to the literal fallback. Both paths are always
+        returned; the loop picks whichever one verifies.
+        """
+        resolved: list[int] = []
+
+        # 1. record_key + relative_offset via pabgh index (anchored).
         record_key = change.get("record_key")
         if record_key is not None and record_offsets:
-            key = int(record_key)
-            if key in record_offsets:
+            try:
+                key = int(record_key)
+            except (ValueError, TypeError):
+                key = None
+            if key is not None and key in record_offsets:
                 rel = change.get("relative_offset")
                 if rel is None:
                     rel = change.get("rel_offset", 0)
-                rel = int(rel, 0) if isinstance(rel, str) else int(rel)
-                return record_offsets[key] + rel
-            else:
-                logger.warning("record_key %d not found in pabgh index", key)
-                return None
+                try:
+                    rel = int(rel, 0) if isinstance(rel, str) else int(rel)
+                    resolved.append(record_offsets[key] + rel)
+                except (ValueError, TypeError):
+                    pass
 
-        # v2 entry-anchored: look up by record NAME instead of numeric key.
-        # This is the JMM V8+ / SWISS Knife export format.
+        # 2. v2 entry-anchored: resolve via name→body-offset map.
         entry_name = change.get("entry")
         if entry_name and name_offsets:
             body_offset = name_offsets.get(str(entry_name))
@@ -586,25 +613,43 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 rel = change.get("rel_offset")
                 if rel is None:
                     rel = change.get("relative_offset", 0)
-                rel = int(rel, 0) if isinstance(rel, str) else int(rel)
-                return body_offset + rel
-            else:
-                logger.warning("entry %r not found in name→offset index", entry_name)
-                return None
+                try:
+                    rel = int(rel, 0) if isinstance(rel, str) else int(rel)
+                    resolved.append(body_offset + rel)
+                except (ValueError, TypeError):
+                    pass
 
-        raw = change.get("offset", 0)
-        try:
-            return base_offset + (int(raw, 0) if isinstance(raw, str) else int(raw))
-        except (ValueError, TypeError):
+        # 3. Literal numeric `offset` — the stale/stable absolute.
+        raw = change.get("offset")
+        if raw is not None:
             try:
-                return base_offset + int(str(raw), 16)
+                val = int(raw, 0) if isinstance(raw, str) else int(raw)
+                resolved.append(base_offset + val)
             except (ValueError, TypeError):
-                return None
+                try:
+                    resolved.append(base_offset + int(str(raw), 16))
+                except (ValueError, TypeError):
+                    pass
+
+        # Deduplicate while preserving order.
+        seen: set[int] = set()
+        uniq: list[int] = []
+        for off in resolved:
+            if off not in seen:
+                seen.add(off)
+                uniq.append(off)
+        if not uniq:
+            return None, []
+        return uniq[0], uniq[1:]
+
+    def _parse_offset(change):
+        primary, _fallbacks = _resolve_all_offsets(change)
+        return primary
 
     all_changes = []
     for change in changes:
-        offset = _parse_offset(change)
-        if offset is None:
+        primary, fallbacks = _resolve_all_offsets(change)
+        if primary is None:
             # Unresolvable offset (bad record_key, entry name missing, or
             # malformed offset). Count as mismatched so the import layer
             # reports this as a compatibility failure, not "already applied".
@@ -613,13 +658,21 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                            change.get("entry"), change.get("record_key"),
                            change.get("offset"))
             continue
-        all_changes.append((offset, change))
+        all_changes.append((primary, change, fallbacks))
     all_changes.sort(key=lambda x: x[0])
 
-    cumulative_delta = 0
+    # Track writes as (original-coord position, size_delta) tuples. A
+    # single cumulative counter silently over-shifts later patches when
+    # an earlier patch's fallback/relocation lands above some subsequent
+    # primaries. For each patch, shift is the sum of deltas from writes
+    # whose position is strictly BELOW this patch's primary.
+    writes: list[tuple[int, int]] = []
 
-    for original_offset, change in all_changes:
-        offset = original_offset + cumulative_delta
+    def _shift_for(pos: int) -> int:
+        return sum(d for w_pos, d in writes if w_pos < pos)
+
+    for original_offset, change, fallback_offsets in all_changes:
+        offset = original_offset + _shift_for(original_offset)
         ct = change.get("type", "replace")
 
         if ct == "insert":
@@ -632,12 +685,9 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 continue
             if offset <= len(data):
                 data[offset:offset] = insert_bytes
-                # Record the ORIGINAL (pre-insert-shift) offset so a
-                # companion .pabgh can be shifted against the vanilla
-                # layout. Using `original_offset` here mirrors JMM.
                 if inserts_out is not None:
                     inserts_out.append((original_offset, len(insert_bytes)))
-                cumulative_delta += len(insert_bytes)
+                writes.append((original_offset, len(insert_bytes)))
                 applied += 1
         else:
             # Replace
@@ -657,21 +707,82 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 size_delta = len(patched_bytes) - len(original_bytes)
                 actual = data[offset:offset + len(original_bytes)]
                 if actual != original_bytes:
-                    # Check if already patched
+                    # Idempotent re-apply.
                     actual_at_patch = data[offset:offset + len(patched_bytes)]
                     if actual_at_patch == patched_bytes:
                         logger.debug("Already patched at %d, keeping as-is", offset)
-                        cumulative_delta += size_delta
+                        writes.append((original_offset, size_delta))
                         applied += 1
                         continue
 
-                    # Pattern scan: try to find where the original bytes moved to
+                    # Vanilla-remnant check. The mod's 'original' bytes
+                    # appear in vanilla — either at original_offset or at
+                    # a fallback offset (in case primary was anchored
+                    # against current-game, which drifted from vanilla).
+                    # If any location matches vanilla, the buffer
+                    # divergence is from a prior overlapping write in
+                    # this same run; keep going and write patched bytes.
+                    remnant_matched = False
+                    if vanilla_data is not None:
+                        check_positions = [original_offset] + list(fallback_offsets)
+                        for van_pos in check_positions:
+                            van_end = van_pos + len(original_bytes)
+                            if van_end <= len(vanilla_data) and \
+                                    vanilla_data[van_pos:van_end] == original_bytes:
+                                remnant_matched = True
+                                break
+                    if remnant_matched:
+                        logger.debug(
+                            "Overlap at %d: vanilla matches original, writing "
+                            "patched bytes over earlier-patch remnant", offset)
+                        data[offset:offset + len(original_bytes)] = patched_bytes
+                        writes.append((original_offset, size_delta))
+                        applied += 1
+                        continue
+
+                    # Fallback-offset resolution. Uniqueness guard: require
+                    # exactly one fallback to match (avoid silently patching
+                    # the wrong record when short `original` byte strings
+                    # recur).
+                    viable_fbs: list[int] = []
+                    for fb_orig in fallback_offsets:
+                        fb_off = fb_orig + _shift_for(fb_orig)
+                        if fb_off + len(original_bytes) > len(data):
+                            continue
+                        if data[fb_off:fb_off + len(original_bytes)] == original_bytes:
+                            viable_fbs.append(fb_orig)
+                    if len(viable_fbs) == 1:
+                        fb_orig = viable_fbs[0]
+                        fb_off = fb_orig + _shift_for(fb_orig)
+                        data[fb_off:fb_off + len(original_bytes)] = patched_bytes
+                        logger.info(
+                            "Fallback offset 0x%X matched (primary 0x%X missed) "
+                            "for entry=%r", fb_orig, original_offset,
+                            change.get("entry"))
+                        writes.append((fb_orig, size_delta))
+                        applied += 1
+                        continue
+                    elif len(viable_fbs) > 1:
+                        logger.warning(
+                            "Fallback offset ambiguous for entry=%r: %d "
+                            "candidates match (0x%s) — skipping rather than "
+                            "patching wrong bytes",
+                            change.get("entry"), len(viable_fbs),
+                            ", 0x".join(f"{o:X}" for o in viable_fbs))
+                        mismatched += 1
+                        continue
+
+                    # Pattern scan drift recovery.
                     new_offset = _pattern_scan(data, offset, original_bytes,
                                                vanilla_data=vanilla_data)
                     if new_offset is not None:
                         if data[new_offset:new_offset + len(original_bytes)] == original_bytes:
                             data[new_offset:new_offset + len(patched_bytes)] = patched_bytes
-                            cumulative_delta += size_delta
+                            # Convert new_offset (current-data coord) back
+                            # to approx original-coord so the shift-tracker
+                            # applies correctly to future patches.
+                            approx_orig = new_offset - _shift_for(new_offset)
+                            writes.append((approx_orig, size_delta))
                             applied += 1
                             relocated += 1
                             continue
@@ -684,7 +795,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             # Track size delta for replace ops that change size
             old_len = len(bytes.fromhex(change["original"])) if "original" in change else len(patched_bytes)
             data[offset:offset + old_len] = patched_bytes
-            cumulative_delta += len(patched_bytes) - old_len
+            writes.append((original_offset, len(patched_bytes) - old_len))
             applied += 1
 
     return applied, mismatched, relocated
@@ -704,7 +815,13 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
     Returns work_dir containing modified PAZ files, or None on failure.
     """
     patches = patch_data["patches"]
-    mod_name = patch_data.get("name", "unknown")
+    # Prefer modinfo.title (JMM spec) over top-level name so log messages
+    # and abort errors reference the mod by its real title.
+    _mi = patch_data.get("modinfo") if isinstance(
+        patch_data.get("modinfo"), dict) else {}
+    mod_name = (_mi.get("title") or _mi.get("name")
+                or patch_data.get("title")
+                or patch_data.get("name") or "unknown")
 
     # Use vanilla backups if available, fall back to game dir
     vanilla_dir = game_dir / "CDMods" / "vanilla"
@@ -1460,7 +1577,22 @@ def import_json_fast(
 
     # Store JSON file in CDMods/mods/
     mods_dir.mkdir(parents=True, exist_ok=True)
-    json_dest = mods_dir / f"{mod_name}.json"
+    # JMM titles can contain `:` `/` `\` `<` `>` `"` `|` `?` `*`, any of
+    # which raise OSError on Windows filesystems. Replace the reserved
+    # set with an underscore. Two different titles — `Foo:Bar` and
+    # `Foo?Bar` — both sanitize to `Foo_Bar`; append a short hash of
+    # the ORIGINAL title to keep them distinct and prevent one import
+    # from silently overwriting another mod's stored JSON.
+    import re as _re_fn
+    import hashlib as _hash
+    _safe_name = _re_fn.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", mod_name).strip()
+    if not _safe_name:
+        _safe_name = "mod"
+    if _safe_name != mod_name:
+        _suffix = _hash.sha1(
+            mod_name.encode("utf-8", errors="replace")).hexdigest()[:8]
+        _safe_name = f"{_safe_name}_{_suffix}"
+    json_dest = mods_dir / f"{_safe_name}.json"
     import json
     json_source_path = patch_data.get("_original_source") or patch_data.get("_json_path")
     if json_source_path and Path(json_source_path).exists():
