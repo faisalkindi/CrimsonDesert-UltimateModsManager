@@ -2553,6 +2553,71 @@ class CdummWindow(FluentWindow):
                     if (isinstance(_original, Path) and _original.exists()
                             and (_original.is_file() or _original.is_dir())):
                         self._configurable_source = str(_original)
+
+                    # Mutex-JSON folder detection. GildsGear-style packs
+                    # put N alternative JSONs (all patching the same
+                    # shop slots, different items) inside each category
+                    # folder. Treating each as its own mod creates N
+                    # confusing rows where only one can be enabled at a
+                    # time anyway. Route to import_multi_variant so the
+                    # user gets ONE card with a cog radio picker,
+                    # matching the author's 'install one, switch later'
+                    # workflow. The original archive is passed as
+                    # `source` so the mod name reflects the archive
+                    # (e.g. 'Gild's Gear') not the picked folder.
+                    try:
+                        from cdumm.engine.mutex_json_folder import (
+                            detect_mutex_folder_jsons)
+                        from cdumm.engine.variant_handler import (
+                            import_multi_variant)
+                        mutex_presets = detect_mutex_folder_jsons(_current)
+                    except Exception as _e:
+                        logger.debug("mutex detection failed: %s", _e)
+                        mutex_presets = None
+                    if mutex_presets:
+                        logger.info(
+                            "Mutex-JSON folder detected at %s — routing "
+                            "to import_multi_variant (%d alternatives)",
+                            _current.name, len(mutex_presets))
+                        try:
+                            mods_dir = self._game_dir / "CDMods" / "mods"
+                            # Default: first JSON enabled, rest disabled
+                            # (they're mutex — enabling more makes no
+                            # sense). User can swap via cog later.
+                            initial = {mutex_presets[0][0]}
+                            source_for_name = (
+                                _original
+                                if isinstance(_original, Path)
+                                and _original.exists()
+                                else _current)
+                            mv_result = import_multi_variant(
+                                mutex_presets, source_for_name,
+                                self._game_dir, mods_dir, self._db,
+                                initial_selection=initial)
+                            if (mv_result and hasattr(self, "_activity_log")
+                                    and self._activity_log):
+                                self._activity_log.log(
+                                    "import",
+                                    f"Imported variant mod: "
+                                    f"{mv_result['mod_name']}",
+                                    f"{len(mv_result['variants'])} "
+                                    f"alternatives (1 enabled)")
+                            if mv_result:
+                                self._refresh_all()
+                        except Exception as _mv_e:
+                            logger.error(
+                                "Mutex import_multi_variant failed: %s",
+                                _mv_e, exc_info=True)
+                        # Clean up the variant-picker pre-extract temp
+                        # immediately — we're not going through the
+                        # worker path that normally handles it.
+                        if _tmp_extract_for_picker is not None:
+                            import shutil
+                            shutil.rmtree(
+                                _tmp_extract_for_picker,
+                                ignore_errors=True)
+                        self._process_next_import()
+                        return
                 elif _tmp_extract_for_picker is not None:
                     # No variant picker fired. The pre-extract was a scan-
                     # only operation — throw it away and let the worker
