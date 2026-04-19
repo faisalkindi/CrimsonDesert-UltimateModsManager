@@ -1593,6 +1593,28 @@ def _import_sibling_json_patches(
                 logger.warning(
                     "Sibling JSON '%s' import failed: %s",
                     cand.name, e)
+                # Best-effort orphan cleanup: import_json_as_entr may
+                # have inserted the `mods` row before raising, leaving
+                # a name=jp_name row with zero mod_deltas. Find and
+                # remove those so the user doesn't see a ghost entry.
+                try:
+                    from cdumm.engine.mod_manager import ModManager
+                    rows = db.connection.execute(
+                        "SELECT m.id FROM mods m "
+                        "LEFT JOIN mod_deltas d ON d.mod_id = m.id "
+                        "WHERE m.name = ? AND d.id IS NULL",
+                        (jp_name,)).fetchall()
+                    mm = ModManager(db, deltas_dir)
+                    for (gid,) in rows:
+                        try:
+                            mm.remove_mod(gid)
+                        except Exception as e_rm:
+                            logger.debug(
+                                "orphan sibling cleanup remove_mod(%d) "
+                                "failed: %s", gid, e_rm)
+                except Exception as e_scan:
+                    logger.debug(
+                        "orphan sibling cleanup scan failed: %s", e_scan)
                 continue
             # Surface silent failures explicitly. import_json_as_entr
             # may create a ghost DB row before deciding a mod is
