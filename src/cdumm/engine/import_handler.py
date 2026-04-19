@@ -35,6 +35,41 @@ def _next_priority(db: Database) -> int:
     return cursor.fetchone()[0]
 
 
+def _json_mod_display_name(jp_data: dict, fallback: str) -> str:
+    """Pick the best human display name for a JSON-patch mod.
+
+    JMM spec nests title under 'modinfo.title'; older/simpler mods put
+    'name' or 'title' at the top level. Read all four in priority order
+    so Dark Mode Map doesn't get stuck with its zip filename.
+    """
+    mi = jp_data.get("modinfo")
+    mi = mi if isinstance(mi, dict) else {}
+    return (mi.get("title")
+            or mi.get("name")
+            or jp_data.get("title")
+            or jp_data.get("name")
+            or fallback)
+
+
+def _json_mod_modinfo(jp_data: dict) -> dict:
+    """Build the canonical modinfo dict for a JSON-patch mod.
+
+    Merges modinfo.* with top-level equivalents so the DB row carries
+    title/version/author/description regardless of which style the mod
+    author used.
+    """
+    mi = jp_data.get("modinfo")
+    mi = mi if isinstance(mi, dict) else {}
+    return {
+        "name": (mi.get("title") or mi.get("name")
+                 or jp_data.get("title") or jp_data.get("name")),
+        "version": mi.get("version") or jp_data.get("version"),
+        "author": mi.get("author") or jp_data.get("author"),
+        "description": (mi.get("description")
+                        or jp_data.get("description")),
+    }
+
+
 def prettify_mod_name(raw: str) -> str:
     """Clean up a raw mod name for display.
 
@@ -1112,9 +1147,21 @@ def _import_from_extracted(
             modinfo = _read_modinfo(tmp_path)
             if modinfo and modinfo.get("name"):
                 cb_name = modinfo["name"]
-            return _process_extracted_files(
+            cb_result = _process_extracted_files(
                 converted, game_dir, db, snapshot, deltas_dir, cb_name,
                 existing_mod_id=existing_mod_id, modinfo=modinfo)
+            # Compound archive support — see import_from_folder for context.
+            cb_base_raw = cb_manifest.get("_base_dir")
+            cb_base = Path(cb_base_raw) if cb_base_raw is not None else None
+            if (cb_base and cb_base != tmp_path
+                    and cb_result and not cb_result.error
+                    and cb_result.changed_files):
+                try:
+                    _import_sibling_json_patches(
+                        tmp_path, cb_base, game_dir, db, deltas_dir)
+                except Exception as e:
+                    logger.debug("Sibling JSON scan after CB failed: %s", e)
+            return cb_result
 
     # Check for loose file mod (mod.json + files/ directory)
     lfm = detect_loose_file_mod(tmp_path)
@@ -1137,13 +1184,8 @@ def _import_from_extracted(
     jp_data = detect_json_patch(tmp_path)
     if jp_data is not None:
         from cdumm.engine.json_patch_handler import import_json_as_entr
-        jp_name = jp_data.get("name", mod_name)
-        jp_modinfo = {
-            "name": jp_data.get("name"), "version": jp_data.get("version"),
-            "author": jp_data.get("author"), "description": jp_data.get("description"),
-        }
-        if jp_modinfo.get("name"):
-            jp_name = jp_modinfo["name"]
+        jp_name = _json_mod_display_name(jp_data, mod_name)
+        jp_modinfo = _json_mod_modinfo(jp_data)
         entr_result = import_json_as_entr(
             jp_data, game_dir, db, deltas_dir, jp_name,
             existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
@@ -1356,6 +1398,17 @@ def import_from_zip(
                 result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, cb_name,
                     existing_mod_id=existing_mod_id, modinfo=modinfo)
+                # Compound-mod support (Lightsaber: CB mod in Lightsaber_v1_3/
+                # plus a sibling Lightsaber_shop.json at archive root). Import
+                # any JSON patches outside the CB subfolder as their own mods.
+                cb_base = cb_manifest.get("_base_dir")
+                if (cb_base and cb_base != tmp_path
+                        and result and not result.error):
+                    try:
+                        _import_sibling_json_patches(
+                            tmp_path, cb_base, game_dir, db, deltas_dir)
+                    except Exception as e:
+                        logger.debug("Sibling JSON scan after CB failed: %s", e)
                 return result
 
         # Check for loose file mod (files/NNNN/ structure)
@@ -1379,13 +1432,8 @@ def import_from_zip(
         jp_data = detect_json_patch(tmp_path)
         if jp_data is not None:
             from cdumm.engine.json_patch_handler import import_json_as_entr
-            jp_name = jp_data.get("name", mod_name)
-            jp_modinfo = {
-                "name": jp_data.get("name"), "version": jp_data.get("version"),
-                "author": jp_data.get("author"), "description": jp_data.get("description"),
-            }
-            if jp_modinfo.get("name"):
-                jp_name = jp_modinfo["name"]
+            jp_name = _json_mod_display_name(jp_data, mod_name)
+            jp_modinfo = _json_mod_modinfo(jp_data)
             entr_result = import_json_as_entr(
                 jp_data, game_dir, db, deltas_dir, jp_name,
                 existing_mod_id=existing_mod_id, modinfo=jp_modinfo)
@@ -1479,6 +1527,142 @@ def import_from_zip(
     return result
 
 
+def _import_sibling_json_patches(
+    root: Path, exclude_subdir: Path, game_dir: Path,
+    db: Database, deltas_dir: Path,
+) -> None:
+    """Import JSON byte-patch siblings that live alongside a CB/loose-file mod.
+
+    Used when a compound archive contains multiple independent mod
+    components: e.g. a CB mod in Lightsaber_v1_3/ plus a standalone
+    Lightsaber_shop.json at the archive root. The JSONs outside
+    ``exclude_subdir`` are imported as their own separate mods so the
+    user can toggle stat changes vs shop changes independently.
+    """
+    from cdumm.engine.json_patch_handler import (
+        detect_json_patches_all, import_json_as_entr,
+    )
+    import re as _re_sib
+    _NNNN = _re_sib.compile(r"^\d{4}$")
+    try:
+        exclude_resolved = exclude_subdir.resolve()
+    except OSError:
+        exclude_resolved = exclude_subdir
+
+    candidates: list[Path] = []
+    for p in root.rglob("*.json"):
+        try:
+            presolved = p.resolve()
+            if exclude_resolved in presolved.parents or presolved == exclude_resolved:
+                continue
+        except OSError:
+            continue
+        # Mirror the NNNN/meta guard from detect_json_patches_all so we
+        # don't try to parse extracted-vanilla JSON-looking blobs as mod
+        # patches when the archive happens to ship alongside those dirs.
+        try:
+            rel = p.relative_to(root)
+        except ValueError:
+            continue
+        if any(_NNNN.match(part) or part.lower() == "meta"
+               for part in rel.parts[:-1]):
+            continue
+        candidates.append(p)
+
+    for cand in candidates:
+        jp_list = detect_json_patches_all(cand)
+        for jp_data in jp_list:
+            jp_name = _json_mod_display_name(
+                jp_data, jp_data["_json_path"].stem)
+            jp_modinfo = _json_mod_modinfo(jp_data)
+            # NOTE: we intentionally do NOT reuse an existing_mod_id by
+            # name here. A prior attempt matched `SELECT id FROM mods
+            # WHERE name = ?`, but that's too broad — an unrelated mod
+            # with the same display name ("Shop", "Dark Mode" etc.)
+            # would get its deltas/source silently overwritten. The
+            # better trade-off is to accept a potential duplicate row
+            # on compound-archive re-import and let the user remove the
+            # stale sibling manually; we will address this properly
+            # with a compound-archive ID once the import worker can
+            # thread that lineage through.
+            try:
+                entr_result = import_json_as_entr(
+                    jp_data, game_dir, db, deltas_dir, jp_name,
+                    existing_mod_id=None, modinfo=jp_modinfo)
+            except Exception as e:
+                logger.warning(
+                    "Sibling JSON '%s' import failed: %s",
+                    cand.name, e)
+                continue
+            # Surface silent failures explicitly. import_json_as_entr
+            # may create a ghost DB row before deciding a mod is
+            # incompatible (version_mismatch) or empty (no changed
+            # files). Roll back so the user doesn't see an orphan
+            # "Lightsaber_shop" row with zero deltas and no toggle.
+            if entr_result is None:
+                logger.warning(
+                    "Sibling JSON '%s' (%s): importer returned None",
+                    cand.name, jp_name)
+                continue
+            if entr_result.get("version_mismatch"):
+                game_ver = entr_result.get("game_version", "unknown")
+                mismatched = entr_result.get("mismatched", 0)
+                logger.warning(
+                    "Sibling JSON '%s' (%s): version mismatch, "
+                    "%d patches don't match vanilla (mod targets %s). "
+                    "Not importing.",
+                    cand.name, jp_name, mismatched, game_ver)
+                # Roll back any ghost mod row the importer may have
+                # created before failing. Use ModManager so mod_deltas /
+                # conflicts / sources folder get cleaned up too — the
+                # raw DELETE here was orphaning delta rows and the
+                # archived sources dir on every rejection.
+                gid = entr_result.get("mod_id")
+                if gid is not None:
+                    try:
+                        from cdumm.engine.mod_manager import ModManager
+                        ModManager(db, deltas_dir).remove_mod(gid)
+                    except Exception as e_rb:
+                        logger.debug(
+                            "Sibling rollback via ModManager failed (%s), "
+                            "falling back to raw DELETE", e_rb)
+                        try:
+                            db.connection.execute(
+                                "DELETE FROM mods WHERE id = ?", (gid,))
+                            db.connection.commit()
+                        except Exception:
+                            pass
+                continue
+            if not entr_result.get("changed_files"):
+                logger.info(
+                    "Sibling JSON '%s' (%s): no file changes, "
+                    "already applied or noop — rolling back",
+                    cand.name, jp_name)
+                # Symmetry with the version_mismatch branch: the importer
+                # may have created a ghost mod row before realising no
+                # bytes needed changing. Remove it so the user doesn't see
+                # an orphan sibling entry with zero deltas.
+                gid = entr_result.get("mod_id")
+                if gid is not None:
+                    try:
+                        from cdumm.engine.mod_manager import ModManager
+                        ModManager(db, deltas_dir).remove_mod(gid)
+                    except Exception as e_rb:
+                        logger.debug(
+                            "Sibling no-changes rollback failed (%s)", e_rb)
+                        try:
+                            db.connection.execute(
+                                "DELETE FROM mods WHERE id = ?", (gid,))
+                            db.connection.commit()
+                        except Exception:
+                            pass
+                continue
+            logger.info(
+                "Compound mod: sibling JSON '%s' imported as separate mod "
+                "'%s' (%d files changed)",
+                cand.name, jp_name, len(entr_result["changed_files"]))
+
+
 def import_from_folder(
     folder_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
@@ -1497,9 +1681,26 @@ def import_from_folder(
                 modinfo = _read_modinfo(folder_path)
                 if modinfo and modinfo.get("name"):
                     cb_name = modinfo["name"]
-                return _process_extracted_files(
+                cb_result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, cb_name,
                     existing_mod_id=existing_mod_id, modinfo=modinfo)
+                # Compound-mod support: when the CB manifest came from a
+                # SUBFOLDER (Lightsaber_v1_3/ inside a zip that also has a
+                # sibling Lightsaber_shop.json at the root), the sibling
+                # JSON patches are their own independent mod components and
+                # should be imported as separate mods so the user can toggle
+                # stat-buff vs shop-addition independently.
+                cb_base_raw = manifest.get("_base_dir")
+                cb_base = Path(cb_base_raw) if cb_base_raw is not None else None
+                if (cb_base and cb_base != folder_path
+                        and cb_result and not cb_result.error
+                        and cb_result.changed_files):
+                    try:
+                        _import_sibling_json_patches(
+                            folder_path, cb_base, game_dir, db, deltas_dir)
+                    except Exception as e:
+                        logger.debug("Sibling JSON scan after CB failed: %s", e)
+                return cb_result
 
     # Check for loose file mod (mod.json + files/ directory)
     lfm = detect_loose_file_mod(folder_path)
@@ -1537,13 +1738,9 @@ def import_from_folder(
         # Import the first as the primary result we return
         primary_result = None
         for idx, jp_data in enumerate(jp_list):
-            jp_name = jp_data.get("name", jp_data["_json_path"].stem)
-            jp_modinfo = {
-                "name": jp_data.get("name"), "version": jp_data.get("version"),
-                "author": jp_data.get("author"), "description": jp_data.get("description"),
-            }
-            if jp_modinfo.get("name"):
-                jp_name = jp_modinfo["name"]
+            jp_name = _json_mod_display_name(
+                jp_data, jp_data["_json_path"].stem)
+            jp_modinfo = _json_mod_modinfo(jp_data)
             # Only the first JSON reuses the existing_mod_id (when
             # re-importing). Extras always create new mod rows.
             target_id = existing_mod_id if idx == 0 else None
@@ -1948,15 +2145,8 @@ def import_from_json_patch(
         result.error = "Not a valid JSON patch mod."
         return result
 
-    mod_name = patch_data.get("name", json_path.stem)
-    modinfo = {
-        "name": patch_data.get("name"),
-        "version": patch_data.get("version"),
-        "author": patch_data.get("author"),
-        "description": patch_data.get("description"),
-    }
-    if modinfo.get("name"):
-        mod_name = modinfo["name"]
+    modinfo = _json_mod_modinfo(patch_data)
+    mod_name = _json_mod_display_name(patch_data, json_path.stem)
 
     # Mount-time fast import: just store JSON, patches applied at Apply time
     mods_dir = game_dir / "CDMods" / "mods"
