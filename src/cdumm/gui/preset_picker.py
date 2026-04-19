@@ -524,6 +524,108 @@ def has_labeled_changes(data: dict) -> bool:
     return False
 
 
+def _detect_mutex_offset_groups(data: dict) -> list[dict] | None:
+    """Detect changes that target the same (game_file, offset) — mutex presets.
+
+    When a mod ships multiple labeled changes at the same byte offset
+    (the Unlimited Dragon Flying case: five "Ride Duration" options at
+    offset 21860562), only one can apply at a time — they overwrite
+    each other. The toggle picker should present these as radio
+    buttons, not checkboxes, so the user picks exactly one.
+
+    Returns a list of group descriptors:
+        [{"key": "Ride Duration", "changes": [change_dict, ...],
+          "patch_idx": i, "group_label": "Ride Duration"}, ...]
+    or None if no mutex groups found.
+
+    A "group" is 2+ changes sharing the same numeric offset within one
+    patch. Changes with distinct offsets stay independent (checkboxes).
+    """
+    groups: list[dict] = []
+    for pidx, patch in enumerate(data.get("patches", [])):
+        changes = patch.get("changes", [])
+        # Preserve both the change dict AND its stable (patch_idx, change_idx)
+        # key in each bucket so downstream renderers can filter via indices
+        # rather than id() (HIGH #13: id() may alias after GC).
+        by_offset: dict[int, list[tuple[dict, tuple[int, int]]]] = {}
+        for cidx, ch in enumerate(changes):
+            raw = ch.get("offset")
+            if raw is None or "label" not in ch:
+                continue
+            try:
+                off = int(raw, 0) if isinstance(raw, str) else int(raw)
+            except (ValueError, TypeError):
+                continue
+            by_offset.setdefault(off, []).append((ch, (pidx, cidx)))
+        for off, entries in by_offset.items():
+            if len(entries) < 2:
+                continue
+            ch_list = [e[0] for e in entries]
+            key_list = [e[1] for e in entries]
+            labels = [c.get("label", "") for c in ch_list]
+            group_label = _common_label_prefix(labels) or f"Offset 0x{off:X}"
+            groups.append({
+                "key": f"{patch.get('game_file', '')}:{off}",
+                "group_label": group_label,
+                "changes": ch_list,
+                "change_keys": key_list,
+                "patch_idx": pidx,
+            })
+    return groups if groups else None
+
+
+def _filter_patches_by_keys(data: dict,
+                            selected_keys: set[tuple[int, int]]) -> dict:
+    """Return a deep copy of `data` keeping only changes whose
+    (patch_idx, change_idx) tuple is in `selected_keys`.
+
+    Used by the toggle-mode Apply handler. Index-based keys survive
+    deepcopy, JSON round-trips, and GC recycling — unlike id().
+    """
+    import copy as _copy
+    out = _copy.deepcopy(data)
+    kept_patches: list[dict] = []
+    for p_idx, patch in enumerate(data.get("patches", [])):
+        kept_changes: list[dict] = []
+        for c_idx, change in enumerate(patch.get("changes", [])):
+            if (p_idx, c_idx) in selected_keys:
+                kept_changes.append(_copy.deepcopy(change))
+        if kept_changes:
+            new_patch = _copy.deepcopy(patch)
+            new_patch["changes"] = kept_changes
+            kept_patches.append(new_patch)
+    out["patches"] = kept_patches
+    return out
+
+
+def _common_label_prefix(labels: list[str]) -> str:
+    """Pull a human group title from 2+ labels that share a common prefix.
+
+    'Ride Duration: 30 Minutes' + 'Ride Duration: 60 Minutes' → 'Ride Duration'.
+    Falls back to empty string if labels don't share a clean separator.
+    """
+    if not labels:
+        return ""
+    for sep in (": ", " - ", " – "):
+        prefixes = {lbl.split(sep, 1)[0] for lbl in labels if sep in lbl}
+        if len(prefixes) == 1:
+            candidate = prefixes.pop().strip()
+            if candidate:
+                return candidate
+    # Character-level common prefix fallback
+    first = labels[0]
+    shortest = min(len(lbl) for lbl in labels)
+    common_len = 0
+    for i in range(shortest):
+        if all(lbl[i] == first[i] for lbl in labels):
+            common_len = i + 1
+        else:
+            break
+    if common_len >= 4:
+        return first[:common_len].rstrip(" :-–").strip()
+    return ""
+
+
 def _detect_preset_groups(data: dict) -> dict[str, list[int]] | None:
     """Detect if patches represent mutually exclusive preset groups.
 
@@ -691,7 +793,24 @@ class TogglePickerDialog(MessageBoxBase):
         self.viewLayout.addWidget(scroll)
 
     def _build_toggle_mode(self):
-        """Independent toggles — checkboxes."""
+        """Independent toggles — checkboxes, with radio groups for mutex presets.
+
+        When multiple labeled changes target the same byte offset
+        (Unlimited Dragon Flying: 5 Ride Duration options at one offset)
+        they're mutually exclusive — rendered as a radio group so the
+        user picks exactly one, instead of checkboxes where enabling
+        all of them silently lets the last one win.
+        """
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+
+        self._mutex_groups = _detect_mutex_offset_groups(self._data) or []
+        # Collect (patch_idx, change_idx) keys for change dicts that
+        # belong to a mutex group — stable under deepcopy, unlike id().
+        mutex_keys: set[tuple[int, int]] = set()
+        for g in self._mutex_groups:
+            for key in g.get("change_keys", []):
+                mutex_keys.add(tuple(key))
+
         hint = BodyLabel(tr("preset.check_items"))
         self.viewLayout.addWidget(hint)
 
@@ -715,35 +834,100 @@ class TogglePickerDialog(MessageBoxBase):
         scroll_widget = QWidget()
         if isDarkTheme():
             scroll_widget.setStyleSheet("QWidget { background: #1C2028; } "
-                "QCheckBox { color: #E2E8F0; padding: 8px; }")
+                "QCheckBox { color: #E2E8F0; padding: 8px; } "
+                "QRadioButton { color: #E2E8F0; padding: 6px 20px; } "
+                "QLabel.mutexHeader { color: #E2E8F0; font-weight: bold; "
+                "padding: 6px 0 0 0; }")
         else:
             scroll_widget.setStyleSheet("QWidget { background: #FAFBFC; } "
-                "QCheckBox { color: #1A202C; padding: 8px; }")
+                "QCheckBox { color: #1A202C; padding: 8px; } "
+                "QRadioButton { color: #1A202C; padding: 6px 20px; } "
+                "QLabel.mutexHeader { color: #1A202C; font-weight: bold; "
+                "padding: 6px 0 0 0; }")
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setContentsMargins(8, 8, 8, 8)
         scroll_layout.setSpacing(4)
 
-        self._checkboxes: list[tuple[QCheckBox, dict]] = []
-        for patch in self._data.get("patches", []):
-            for change in patch.get("changes", []):
-                label = change.get("label", f"offset {change.get('offset', '?')}")
+        self._checkboxes: list[tuple[QCheckBox, tuple[int, int]]] = []
+        # Store: list of (button_group, [(radio, (p_idx,c_idx)), ...], group_label)
+        self._toggle_radio_groups: list[tuple] = []
+
+        # Render mutex groups first so they're visually at the top
+        for group in self._mutex_groups:
+            header_text = group["group_label"] + "  (pick one)"
+            header = BodyLabel(header_text)
+            header.setProperty("class", "mutexHeader")
+            hfont = header.font()
+            hfont.setBold(True)
+            header.setFont(hfont)
+            scroll_layout.addWidget(header)
+
+            button_group = QButtonGroup(scroll_widget)
+            button_group.setExclusive(True)
+            radios: list[tuple] = []
+            prefix_strip = group["group_label"]
+            preselected_any = False
+            for ch, ck in zip(group["changes"], group.get("change_keys", [])):
+                label = ch.get("label", "")
+                # Show just the option suffix if label starts with the
+                # group's common prefix (e.g. "Ride Duration: 30 Minutes"
+                # → "30 Minutes").
+                display = label
+                for sep in (": ", " - ", " – "):
+                    if label.startswith(prefix_strip + sep):
+                        display = label[len(prefix_strip) + len(sep):]
+                        break
+                radio = QRadioButton(display)
+                if self._previous and label in self._previous:
+                    radio.setChecked(True)
+                    preselected_any = True
+                button_group.addButton(radio)
+                scroll_layout.addWidget(radio)
+                radios.append((radio, tuple(ck)))
+            # Default: first radio if nothing was pre-selected
+            if not preselected_any and radios:
+                radios[0][0].setChecked(True)
+            self._toggle_radio_groups.append(
+                (button_group, radios, group["group_label"]))
+
+        # Then render independent changes as checkboxes
+        has_any_independent = False
+        for p_idx, patch in enumerate(self._data.get("patches", [])):
+            for c_idx, change in enumerate(patch.get("changes", [])):
+                key = (p_idx, c_idx)
+                if key in mutex_keys:
+                    continue
+                label = change.get("label",
+                                   f"offset {change.get('offset', '?')}")
                 cb = QCheckBox(label)
-                # Pre-select based on previous choice, or all if first time
                 if self._previous is not None:
                     cb.setChecked(label in self._previous)
                 else:
                     cb.setChecked(True)
                 scroll_layout.addWidget(cb)
-                self._checkboxes.append((cb, change))
+                self._checkboxes.append((cb, key))
+                has_any_independent = True
 
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
         self.viewLayout.addWidget(scroll)
 
-        self._count_label = CaptionLabel(f"{len(self._checkboxes)} items selected")
+        # Hide select/deselect-all buttons if there are no independent
+        # toggles (only mutex radios) — those buttons don't apply.
+        if not has_any_independent:
+            sel_all.setVisible(False)
+            desel_all.setVisible(False)
+
+        total = len(self._checkboxes) + len(self._toggle_radio_groups)
+        self._count_label = CaptionLabel(f"{total} configurable item(s)")
         self.viewLayout.addWidget(self._count_label)
         for cb, _ in self._checkboxes:
             cb.toggled.connect(self._update_count)
+        # Also refresh the count line when the user swaps a mutex radio
+        # pick — previously the label only reflected checkbox state.
+        for _bg, radios, _glabel in self._toggle_radio_groups:
+            for radio, _change in radios:
+                radio.toggled.connect(self._update_count)
 
     def _select_all(self):
         for cb, _ in self._checkboxes:
@@ -754,12 +938,16 @@ class TogglePickerDialog(MessageBoxBase):
             cb.setChecked(False)
 
     def _update_count(self):
-        count = sum(1 for cb, _ in self._checkboxes if cb.isChecked())
-        self._count_label.setText(f"{count} of {len(self._checkboxes)} items selected")
+        cb_count = sum(1 for cb, _ in self._checkboxes if cb.isChecked())
+        total = len(self._checkboxes) + len(
+            getattr(self, "_toggle_radio_groups", []))
+        picked = cb_count + len(
+            getattr(self, "_toggle_radio_groups", []))
+        self._count_label.setText(f"{picked} of {total} items selected")
 
     def _on_accept(self):
-        import copy
-        filtered = copy.deepcopy(self._data)
+        import copy as _copy
+        filtered = _copy.deepcopy(self._data)
 
         if self._groups:
             # Preset mode — keep only the selected group's patches
@@ -772,16 +960,22 @@ class TogglePickerDialog(MessageBoxBase):
                 if i in selected_indices
             ]
         else:
-            # Toggle mode — keep only checked changes
-            selected_changes = [change for cb, change in self._checkboxes if cb.isChecked()]
-            if not selected_changes:
+            # Toggle mode — keep checked changes PLUS the one chosen
+            # radio from each mutex group (same-offset presets).
+            # Stable (patch_index, change_index) keys instead of id() —
+            # id() may alias after GC or fail if dicts ever get copied.
+            selected_keys = {
+                key for cb, key in self._checkboxes if cb.isChecked()
+            }
+            for _bg, radios, _glabel in getattr(
+                    self, "_toggle_radio_groups", []):
+                for radio, key in radios:
+                    if radio.isChecked():
+                        selected_keys.add(key)
+                        break
+            if not selected_keys:
                 return
-            selected_keys = {(c.get("offset"), c.get("label")) for c in selected_changes}
-            for patch in filtered["patches"]:
-                patch["changes"] = [
-                    c for c in patch.get("changes", [])
-                    if (c.get("offset"), c.get("label")) in selected_keys
-                ]
+            filtered = _filter_patches_by_keys(self._data, selected_keys)
 
         self.selected_data = filtered
         self.accept()
