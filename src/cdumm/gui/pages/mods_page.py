@@ -25,6 +25,7 @@ from qfluentwidgets import (
     SmoothScrollArea,
 )
 
+from cdumm.engine.swap_cache import cache_root_for, resolve_cfg_src
 from cdumm.gui.components.config_panel import ConfigPanel
 from cdumm.gui.components.conflict_card import ConflictCard
 from cdumm.gui.components.mod_card import FolderGroup, ModCard
@@ -1098,6 +1099,51 @@ class ModsPage(QWidget):
                 if self._conflict_detector:
                     for c in self._conflict_detector.get_conflicts_for_mod(mod_id):
                         conflicts_text.append(c.explanation)
+                # Enrich each variant with `_has_labels` so the panel can
+                # surface a "Configure options..." button. Narrow this
+                # to variants with ACTUAL meaningful choices — a mutex
+                # group (Unlimited Dragon Flying's five Ride Duration
+                # presets) OR a small set of independent toggles (≤15).
+                # A flat list of 456 region flags has no meaningful
+                # choice beyond "all or none"; the variant's enable
+                # toggle already covers that — no point making the user
+                # scroll 456 checkboxes.
+                try:
+                    if self._game_dir is not None:
+                        from cdumm.gui.preset_picker import (
+                            _detect_mutex_offset_groups)
+                        variants_dir = (self._game_dir / "CDMods" / "mods"
+                                        / str(mod_id) / "variants")
+                        for v in variants_list:
+                            fn = v.get("filename")
+                            if not fn:
+                                continue
+                            vpath = variants_dir / fn
+                            if not vpath.exists():
+                                continue
+                            try:
+                                vdata = _json.loads(vpath.read_text(
+                                    encoding="utf-8"))
+                            except Exception:
+                                continue
+                            # ONLY surface the per-variant Configure
+                            # button when there's a real "pick one of N"
+                            # decision — a mutex group of changes that
+                            # share an offset (Unlimited Dragon Flying's
+                            # 5 Ride Duration presets at offset 21860562).
+                            # NPC Trust Gain's "Trust Me 10x" / "5x" /
+                            # "20x" are themselves the user's choice
+                            # (the variant radios above) and their
+                            # internal labels are just per-NPC patches —
+                            # toggling individual ones doesn't make UX
+                            # sense. Same for Region Dismount Removal's
+                            # 456 region flags. Mutex-only avoids
+                            # offering false choices.
+                            if _detect_mutex_offset_groups(vdata):
+                                v["_has_labels"] = True
+                                v["_json_path"] = str(vpath)
+                except Exception as _e:
+                    logger.debug("variant label enrichment failed: %s", _e)
                 self._config_panel.show_variant_mod(
                     mod_id=mod_id,
                     name=mod["name"],
@@ -1205,7 +1251,13 @@ class ModsPage(QWidget):
                                 conflicts=[],
                             )
                             return  # show_variant_mod fires its own animation
-                        # Irregular tree — fall through to flat radio
+                        # Flat folder variants (Vaxis LOD: extra-shadows
+                        # vs no-extra-shadows). They're mutually
+                        # exclusive — only ONE LOD configuration can be
+                        # active at a time. Render as a radio group via
+                        # show_variant_mod with `group=0` instead of
+                        # building checkbox `patches` (the prior code
+                        # used show_mod, letting the user tick both).
                         self._folder_variant_is_grid = False
                         active_i = -1
                         for i, (lp, rel) in enumerate(leaves):
@@ -1217,16 +1269,36 @@ class ModsPage(QWidget):
                                 if lp.name and lp.name in current_drop:
                                     active_i = i
                                     break
+                        # Default to first variant if nothing matches
+                        # so the radio group always has a selection
+                        # (Qt radios without a default look broken).
+                        if active_i < 0:
+                            active_i = 0
+                        flat_variants_meta: list[dict] = []
                         for i, (lp, rel) in enumerate(leaves):
-                            patches.append({
+                            flat_variants_meta.append({
                                 "label": rel.replace("/", " > ").replace(
                                     "_", " "),
-                                "description": (
-                                    "folder variant"
-                                    + (" (active)"
-                                       if i == active_i else "")),
+                                "filename": rel,
+                                "description": "folder variant",
                                 "enabled": i == active_i,
+                                # Same positive group => single radio
+                                # set with mutually-exclusive picks.
+                                "group": 0,
                             })
+                        self._config_panel.show_variant_mod(
+                            mod_id=mod_id,
+                            name=mod["name"],
+                            author=(mod.get("author")
+                                    if mod.get("author")
+                                    and mod.get("author") != "Unknown"
+                                    else ""),
+                            version=mod.get("version") or "",
+                            status=status,
+                            variants=flat_variants_meta,
+                            conflicts=[],
+                        )
+                        return  # show_variant_mod fires its own animation
                     if len(presets) > 1:
                         # Mark which preset is active. Try matching by the
                         # `name` field first (structured mods). Fall back to
@@ -1325,7 +1397,9 @@ class ModsPage(QWidget):
     def _on_variants_apply(self, mod_id: int, selection: list) -> None:
         """Cog's Apply button for multi-variant mods.
 
-        Two flavours:
+        Three flavours:
+        - Flat folder variants (Vaxis LoD: extra-shadows vs no-extra-
+          shadows). One radio group, pick one leaf, re-import on it.
         - Grid folder variants (Character Creator): selection rows have
           '_level' / '_header' keys. Route to a folder-re-import that
           drops the current mod and relaunches the worker on the new
@@ -1334,6 +1408,108 @@ class ModsPage(QWidget):
           through to update_variant_selection.
         """
         if not self._mod_manager:
+            return
+
+        # Flat folder-variant branch — single radio group, pick the
+        # enabled leaf, swap. _folder_variant_paths is set by the cog-
+        # open code when leaves are flat (no grid axes).
+        if (getattr(self, "_folder_variant_paths", None)
+                and not getattr(self, "_folder_variant_is_grid", False)
+                and selection and not any("_level" in s for s in selection)):
+            picked = None
+            for s in selection:
+                if s.get("enabled") and s.get("group", -1) >= 0:
+                    picked = s
+                    break
+            if picked is None:
+                logger.warning("flat folder-variant apply: no leaf picked")
+                return
+            target_rel = picked.get("filename", "")
+            chosen_leaf = None
+            for lp, rel in self._folder_variant_paths:
+                if rel == target_rel:
+                    chosen_leaf = lp
+                    break
+            if chosen_leaf is None:
+                logger.error(
+                    "flat folder-variant apply: no leaf matches %r",
+                    target_rel)
+                return
+            mod = None
+            for m in self._mod_manager.list_mods():
+                if m["id"] == mod_id:
+                    mod = m
+                    break
+            if mod:
+                old_priority = mod.get("priority")
+                old_enabled = mod.get("enabled")
+                source_path = mod.get("source_path")
+                old_drop_name = mod.get("drop_name")
+                # Stage out of sources/<id>/ before remove_mod yanks it.
+                worker_path = chosen_leaf
+                try:
+                    from pathlib import Path as _P
+                    cl = _P(chosen_leaf)
+                    sources_root = (self._game_dir / "CDMods"
+                                    / "sources" / str(mod_id)
+                                    if self._game_dir else None)
+                    if (sources_root and cl.exists()
+                            and (sources_root in cl.parents
+                                 or cl == sources_root)):
+                        import tempfile as _tmp
+                        import shutil as _sh
+                        staged_root = _P(_tmp.mkdtemp(
+                            prefix=f"cdumm_swap_{mod_id}_"))
+                        staged = staged_root / cl.name
+                        _sh.copytree(cl, staged)
+                        worker_path = staged
+                        logger.info(
+                            "Flat folder swap: staged %s -> %s "
+                            "before remove_mod", cl, staged)
+                except Exception as _e:
+                    logger.warning(
+                        "Flat folder staging failed: %s", _e)
+                # cfg_src: where the configurable_scanner will look on
+                # next startup to verify the mod still has variants.
+                # Priority:
+                #   1. Old source_path verbatim if it's the original
+                #      ARCHIVE file (rar/zip/7z) — scanner rescues from
+                #      the archive and finds all variants. This is the
+                #      common case: source_path was set during initial
+                #      import to the dropped archive.
+                #   2. Clone the FULL old sources/<id>/ to a stable
+                #      temp ONLY when source_path was already pointing
+                #      INTO sources/ (means the scanner had previously
+                #      rescued — sources/<id>/ now contains the full
+                #      archive contents, so cloning it captures all
+                #      variants).
+                #   3. drop_name basename as last-ditch.
+                sources_root = (self._game_dir / "CDMods"
+                                / "sources" / str(mod_id)
+                                if self._game_dir else None)
+                cfg_src = resolve_cfg_src(
+                    source_path=source_path,
+                    sources_dir=sources_root,
+                    cache_root=cache_root_for(self._game_dir, mod_id)
+                    if self._game_dir else Path(""),
+                )
+                if not cfg_src:
+                    cfg_src = source_path
+                if not cfg_src and old_drop_name:
+                    cfg_src = old_drop_name.split("||", 1)[0]
+                self._mod_manager.remove_mod(mod_id)
+                window = self.window()
+                window._update_priority = old_priority
+                window._update_enabled = old_enabled
+                window._configurable_source = cfg_src
+                window._variant_leaf_rel = target_rel
+                if old_drop_name:
+                    raw = old_drop_name.split("||", 1)[0]
+                    from pathlib import Path as _P
+                    window._original_drop_path = _P(raw)
+                window._launch_import_worker(worker_path)
+            self._config_panel.close_panel()
+            self._folder_variant_paths = []
             return
 
         # Grid folder-variant branch — pick from each level's enabled
@@ -1374,11 +1550,53 @@ class ModsPage(QWidget):
                 old_enabled = mod.get("enabled")
                 source_path = mod.get("source_path")
                 old_drop_name = mod.get("drop_name")
+                # Stage the chosen leaf to a session temp before
+                # remove_mod (mod_manager cleans CDMods/sources/<id>/,
+                # which yanks the leaf out from under the worker if
+                # the leaf lives there). Mirrors the non-grid swap
+                # branch in _on_config_apply.
+                worker_path = chosen_leaf
+                try:
+                    from pathlib import Path as _P
+                    cl = _P(chosen_leaf)
+                    sources_root = (self._game_dir / "CDMods"
+                                    / "sources" / str(mod_id)
+                                    if self._game_dir else None)
+                    if (sources_root and cl.exists()
+                            and (sources_root in cl.parents
+                                 or cl == sources_root)):
+                        import tempfile as _tmp
+                        import shutil as _sh
+                        staged_root = _P(_tmp.mkdtemp(
+                            prefix=f"cdumm_swap_{mod_id}_"))
+                        staged = staged_root / cl.name
+                        _sh.copytree(cl, staged)
+                        worker_path = staged
+                        logger.info(
+                            "Grid variant swap: staged %s -> %s "
+                            "before remove_mod", cl, staged)
+                except Exception as _e:
+                    logger.warning(
+                        "Grid variant staging failed (%s) — worker "
+                        "may not find leaf after remove_mod", _e)
+                sources_root = (self._game_dir / "CDMods"
+                                / "sources" / str(mod_id)
+                                if self._game_dir else None)
+                cfg_src = resolve_cfg_src(
+                    source_path=source_path,
+                    sources_dir=sources_root,
+                    cache_root=cache_root_for(self._game_dir, mod_id)
+                    if self._game_dir else Path(""),
+                )
+                if not cfg_src:
+                    cfg_src = source_path
+                if not cfg_src and old_drop_name:
+                    cfg_src = old_drop_name.split("||", 1)[0]
                 self._mod_manager.remove_mod(mod_id)
                 window = self.window()
                 window._update_priority = old_priority
                 window._update_enabled = old_enabled
-                window._configurable_source = source_path
+                window._configurable_source = cfg_src
                 # Stash the new variant rel so the post-import handler
                 # writes "<archive>||<new_rel>" into drop_name.
                 window._variant_leaf_rel = target_rel
@@ -1389,7 +1607,7 @@ class ModsPage(QWidget):
                     raw = old_drop_name.split("||", 1)[0]
                     from pathlib import Path as _P
                     window._original_drop_path = _P(raw)
-                window._launch_import_worker(chosen_leaf)
+                window._launch_import_worker(worker_path)
             self._config_panel.close_panel()
             self._folder_variant_paths = []
             self._folder_variant_is_grid = False
@@ -1401,7 +1619,21 @@ class ModsPage(QWidget):
                 logger.error("variants apply: game_dir not set")
                 return
             mods_dir = self._game_dir / "CDMods" / "mods"
-            update_variant_selection(mod_id, selection, mods_dir, self._db)
+            # Collect any per-variant label selections the user made via
+            # the "Configure options..." button on each variant row.
+            label_sel = None
+            try:
+                prev = getattr(self._config_panel,
+                               "_variant_label_prev", None)
+                dirty = getattr(self._config_panel,
+                                "_variant_label_dirty", None)
+                if prev and dirty:
+                    label_sel = {fn: prev[fn] for fn in dirty if fn in prev}
+            except Exception:
+                label_sel = None
+            update_variant_selection(
+                mod_id, selection, mods_dir, self._db,
+                label_selections=label_sel)
             # Clear the locally-cached "applied" state so the card renders
             # the "Apply to Activate" pending badge — the overlay PAZ won't
             # actually reflect the new variant choice until the user hits Apply.
@@ -1488,17 +1720,62 @@ class ModsPage(QWidget):
                         old_enabled = mod.get("enabled")
                         source_path = mod.get("source_path")
                         old_drop_name = mod.get("drop_name")
+                        # When source_path was a directory (already-
+                        # extracted folder mod), variant_dir lives INSIDE
+                        # CDMods/sources/<mod_id>/. remove_mod deletes
+                        # that whole tree (mod_manager.remove_mod cleans
+                        # both deltas/ and sources/), which would yank
+                        # variant_dir out from under the worker before
+                        # it can read. Stage the variant to a session
+                        # temp first so the worker gets a stable path.
+                        worker_path = variant_dir
+                        try:
+                            from pathlib import Path as _P
+                            vd = _P(variant_dir)
+                            sources_root = (self._game_dir / "CDMods"
+                                            / "sources" / str(mod_id)
+                                            if self._game_dir else None)
+                            if (sources_root and vd.exists()
+                                    and (sources_root in vd.parents
+                                         or vd == sources_root)):
+                                import tempfile as _tmp
+                                import shutil as _sh
+                                staged_root = _P(_tmp.mkdtemp(
+                                    prefix=f"cdumm_swap_{mod_id}_"))
+                                staged = staged_root / vd.name
+                                _sh.copytree(vd, staged)
+                                worker_path = staged
+                                logger.info(
+                                    "Folder-variant swap: staged %s -> "
+                                    "%s before remove_mod",
+                                    vd, staged)
+                        except Exception as _e:
+                            logger.warning(
+                                "Folder-variant staging failed (%s) — "
+                                "worker may not find variant after "
+                                "remove_mod", _e)
+                        sources_root = (self._game_dir / "CDMods"
+                                        / "sources" / str(mod_id)
+                                        if self._game_dir else None)
+                        cfg_src = resolve_cfg_src(
+                            source_path=source_path,
+                            sources_dir=sources_root,
+                            cache_root=cache_root_for(
+                                self._game_dir, mod_id)
+                            if self._game_dir else Path(""),
+                        )
+                        if not cfg_src:
+                            cfg_src = source_path
+                        if not cfg_src and old_drop_name:
+                            cfg_src = old_drop_name.split("||", 1)[0]
                         self._mod_manager.remove_mod(mod_id)
                         window = self.window()
                         window._update_priority = old_priority
                         window._update_enabled = old_enabled
-                        # Keep source_path pointing at the original
-                        # archive so next cog open still works.
-                        window._configurable_source = source_path
+                        window._configurable_source = cfg_src
                         if old_drop_name:
-                            from pathlib import Path as _P
-                            window._original_drop_path = _P(old_drop_name)
-                        window._launch_import_worker(variant_dir)
+                            window._original_drop_path = Path(old_drop_name)
+                        window._launch_import_worker(worker_path)
                     self._config_panel.close_panel()
                     self._folder_variant_paths = []
                     return
@@ -1523,18 +1800,64 @@ class ModsPage(QWidget):
                         old_enabled = mod.get("enabled")
                         source_path = mod.get("source_path")
                         old_drop_name = mod.get("drop_name")
+                        # Stage the picked preset to a session temp if
+                        # it lives inside sources/<mod_id>/ — remove_mod
+                        # would otherwise delete it before the worker
+                        # reads.
+                        worker_path = fp
+                        try:
+                            from pathlib import Path as _P
+                            fp_path = _P(fp)
+                            sources_root = (self._game_dir / "CDMods"
+                                            / "sources" / str(mod_id)
+                                            if self._game_dir else None)
+                            if (sources_root and fp_path.exists()
+                                    and (sources_root in fp_path.parents
+                                         or fp_path == sources_root)):
+                                import tempfile as _tmp
+                                import shutil as _sh
+                                staged_root = _P(_tmp.mkdtemp(
+                                    prefix=f"cdumm_preset_{mod_id}_"))
+                                staged = staged_root / fp_path.name
+                                if fp_path.is_file():
+                                    _sh.copy2(fp_path, staged)
+                                else:
+                                    _sh.copytree(fp_path, staged)
+                                worker_path = staged
+                                logger.info(
+                                    "Preset swap: staged %s -> %s "
+                                    "before remove_mod",
+                                    fp_path, staged)
+                        except Exception as _e:
+                            logger.warning(
+                                "Preset staging failed (%s) — worker "
+                                "may not find preset after remove_mod",
+                                _e)
+                        sources_root = (self._game_dir / "CDMods"
+                                        / "sources" / str(mod_id)
+                                        if self._game_dir else None)
+                        cfg_src = resolve_cfg_src(
+                            source_path=source_path,
+                            sources_dir=sources_root,
+                            cache_root=cache_root_for(
+                                self._game_dir, mod_id)
+                            if self._game_dir else Path(""),
+                        )
+                        if not cfg_src:
+                            cfg_src = source_path
+                        if not cfg_src and old_drop_name:
+                            cfg_src = old_drop_name.split("||", 1)[0]
                         self._mod_manager.remove_mod(mod_id)
                         window = self.window()
                         window._update_priority = old_priority
                         window._update_enabled = old_enabled
-                        window._configurable_source = source_path
+                        window._configurable_source = cfg_src
                         # Preserve the original archive's NexusMods filename so
                         # the post-import handler can extract version/mod_id
                         # even though the worker only sees the picked JSON.
                         if old_drop_name:
-                            from pathlib import Path as _P
-                            window._original_drop_path = _P(old_drop_name)
-                        window._launch_import_worker(fp)
+                            window._original_drop_path = Path(old_drop_name)
+                        window._launch_import_worker(worker_path)
                     self._config_panel.close_panel()
                     self._preset_paths = []
                     return
