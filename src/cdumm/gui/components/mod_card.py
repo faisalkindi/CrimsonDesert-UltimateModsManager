@@ -267,27 +267,15 @@ class ModCard(CardWidget):
         info.setContentsMargins(0, 0, 0, 0)
         info.setSpacing(2)
 
-        # Name row: name label + inline rename edit + gear icon
+        # Name row: gear icon + name label + inline rename edit
+        # Gear goes FIRST (left of the name) so it visually hugs the
+        # title. Putting it after the name with stretch=0 caused
+        # word-wrap to break at every word; putting the name at
+        # stretch=1 without a leading gear shoved it to the far
+        # right of the row next to the status pills.
         name_row = QHBoxLayout()
         name_row.setSpacing(6)
-        self._name_label = StrongBodyLabel(name)
-        # Wrap long names across two lines instead of clipping. The card's
-        # QVBoxLayout will grow vertically to fit.
-        self._name_label.setWordWrap(True)
-        self._name_label.setMinimumWidth(1)
-        # No stretch factor so the label sizes to its text and the gear
-        # icon sits immediately next to the name. Previously stretch=1
-        # made the name label eat all horizontal space and push the
-        # gear to the far right edge of the row (visually next to the
-        # status pills) even though it's laid out in the name row.
-        name_row.addWidget(self._name_label)
-        # Inline rename editor (hidden by default)
-        self._name_edit = QLineEdit(name)
-        self._name_edit.setVisible(False)
-        self._name_edit.returnPressed.connect(self._finish_rename)
-        self._name_edit.editingFinished.connect(self._finish_rename)
-        name_row.addWidget(self._name_edit)
-        # Gear icon next to name (only visible if configurable)
+        # Gear icon (only visible if configurable)
         self._gear = IconWidget(FluentIcon.SETTING, self)
         self._gear.setFixedSize(20, 20)
         if has_config:
@@ -295,7 +283,19 @@ class ModCard(CardWidget):
             self._gear.mousePressEvent = self._on_gear_clicked
         else:
             self._gear.setVisible(False)
-        name_row.addWidget(self._gear)
+        name_row.addWidget(self._gear, 0, Qt.AlignmentFlag.AlignTop)
+        self._name_label = StrongBodyLabel(name)
+        # Wrap long names across two lines instead of clipping. The card's
+        # QVBoxLayout will grow vertically to fit.
+        self._name_label.setWordWrap(True)
+        self._name_label.setMinimumWidth(1)
+        name_row.addWidget(self._name_label, 1)
+        # Inline rename editor (hidden by default)
+        self._name_edit = QLineEdit(name)
+        self._name_edit.setVisible(False)
+        self._name_edit.returnPressed.connect(self._finish_rename)
+        self._name_edit.editingFinished.connect(self._finish_rename)
+        name_row.addWidget(self._name_edit)
         # Note icon (visible if mod has notes, clickable to view)
         self._note_icon = IconWidget(FluentIcon.DOCUMENT, self)
         self._note_icon.setFixedSize(20, 20)
@@ -303,7 +303,7 @@ class ModCard(CardWidget):
         self._note_icon.setCursor(Qt.CursorShape.PointingHandCursor)
         self._note_icon.mousePressEvent = self._on_note_clicked
         self._note_text = ""
-        name_row.addWidget(self._note_icon)
+        name_row.addWidget(self._note_icon, 0, Qt.AlignmentFlag.AlignTop)
         name_row.addStretch()
         info.addLayout(name_row)
 
