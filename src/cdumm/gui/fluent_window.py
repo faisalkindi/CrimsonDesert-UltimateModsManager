@@ -534,24 +534,20 @@ class CdummWindow(FluentWindow):
         self._startup_context = startup_context or {}
 
         # ── Crash detection lock file ─────────────────────────────────
-        self._lock_file = self._app_data_dir / ".running"
-        crashed_last_time = self._lock_file.exists()
-        self._lock_file.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_file.write_text(str(datetime.now()), encoding="utf-8")
-        # Belt-and-suspenders: if closeEvent somehow doesn't fire (Qt
-        # teardown race, uncaught exception on exit, Windows shutdown),
-        # still clean the lock at process exit so the NEXT launch doesn't
-        # falsely report "Previous session crashed".
+        # install_lock writes a .running sentinel containing a timestamp.
+        # The returned state dict also carries `was_stale` (True if the
+        # sentinel survived from a previous run → crash) and a
+        # clean_shutdown flag that closeEvent flips before exit. The
+        # atexit hook only unlinks the lock when that flag is set, so
+        # crashes (uncaught exceptions, SIGTERM, Windows shutdown) leave
+        # the lock in place for the next launch to observe.
+        from cdumm.gui.running_lock import (
+            install_lock, _cleanup_running_lock)
+        self._lock_state = install_lock(self._app_data_dir / ".running")
+        self._lock_file = self._lock_state["lock_file"]
+        crashed_last_time = self._lock_state["was_stale"]
         import atexit as _atexit
-        _lock_path_str = str(self._lock_file)
-        def _cleanup_running_lock() -> None:
-            try:
-                import os as _os
-                if _os.path.exists(_lock_path_str):
-                    _os.unlink(_lock_path_str)
-            except OSError:
-                pass
-        _atexit.register(_cleanup_running_lock)
+        _atexit.register(_cleanup_running_lock, self._lock_state)
 
         # ── Deferred startup (after window is visible) ────────────────
         QTimer.singleShot(500, self._deferred_startup)
@@ -4379,7 +4375,14 @@ class CdummWindow(FluentWindow):
                 self._db.close()
             except Exception:
                 pass
-        # Remove lock file
+        # Mark clean shutdown so the atexit hook is allowed to remove
+        # the running lock. Without this flag, a crash path would drop
+        # through to atexit with clean_shutdown=False and the lock
+        # stays, which is exactly what we want for crash detection.
+        if hasattr(self, "_lock_state"):
+            from cdumm.gui.running_lock import mark_clean_shutdown
+            mark_clean_shutdown(self._lock_state)
+        # Remove lock file now (atexit would also do this post-flag).
         if hasattr(self, "_lock_file") and self._lock_file.exists():
             try:
                 self._lock_file.unlink()
