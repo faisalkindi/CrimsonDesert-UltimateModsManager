@@ -28,7 +28,19 @@ def _change_range(change: dict) -> tuple[int, int]:
     Raises KeyError if 'offset' is missing (matches apply path behavior).
     """
     raw = change["offset"]
-    offset = int(raw, 0) if isinstance(raw, str) else int(raw)
+    # Bare-hex offset strings like '12079F' (Kliff Wears Damiane
+    # convention) make int(s, 0) raise ValueError. Fall back to
+    # int(s, 16) — collision scan only cares that two mods overlap,
+    # so the same interpretation on both sides is self-consistent
+    # even if the hex-or-decimal guess is off relative to the
+    # mod's real intent.
+    if isinstance(raw, str):
+        try:
+            offset = int(raw, 0)
+        except ValueError:
+            offset = int(raw, 16)
+    else:
+        offset = int(raw)
     hex_src = change.get("original") or change.get("patched")
     if not hex_src:
         return offset, offset  # zero-width range, no collision possible

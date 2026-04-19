@@ -1685,12 +1685,43 @@ class ApplyWorker(QObject):
                 continue
 
             # Apply all patches: lowest priority first, highest last (wins)
+            # Detect the mod's offset convention from its first few
+            # string offsets: if any contain a-f, treat ALL string
+            # offsets for this mod as hex (Kliff Wears Damiane convention).
+            # Otherwise fall back to int(s, 0) which handles "0x..." and
+            # decimal. This avoids misinterpreting '120460' as decimal
+            # when the mod actually meant 0x120460.
             merged = bytearray(vanilla_content)
             mod_names = []
+            import re as _re
+            _HEX_ONLY = _re.compile(r"^[0-9a-fA-F]+$")
+            _HAS_AF = _re.compile(r"[a-fA-F]")
             for d, patch_info in reversed(mod_patches):
+                mod_is_bare_hex = False
+                try:
+                    for ch in patch_info.get("changes", []):
+                        r = ch.get("offset")
+                        if isinstance(r, str) and _HAS_AF.search(r):
+                            mod_is_bare_hex = True
+                            break
+                except Exception:
+                    pass
                 for change in patch_info.get("changes", []):
                     raw_off = change.get("offset", 0)
-                    offset = int(raw_off, 0) if isinstance(raw_off, str) else int(raw_off)
+                    try:
+                        if isinstance(raw_off, str):
+                            if mod_is_bare_hex and _HEX_ONLY.match(raw_off):
+                                offset = int(raw_off, 16)
+                            else:
+                                offset = int(raw_off, 0)
+                        else:
+                            offset = int(raw_off)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "JSON merge: unreadable offset %r in %s — "
+                            "skipping patch", raw_off,
+                            d.get("mod_name", "?"))
+                        continue
                     try:
                         patched = bytes.fromhex(change.get("patched", ""))
                         if offset + len(patched) <= len(merged):
