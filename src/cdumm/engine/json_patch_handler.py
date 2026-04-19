@@ -833,6 +833,33 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
             logger.info("Applied %d/%d patches to %s (mismatched=%d)",
                          applied, len(changes), game_file, mismatched)
 
+        # Strict-abort for data-table files (.pabgb / .pabgh / .pamt) at
+        # IMPORT time too: if any patch mismatches, refuse to store a
+        # half-patched delta. Kliff Wears Damiane V2 and similar mods
+        # ship absolute offsets that drift between game versions — the
+        # mount-time guard catches a json_source-driven apply but this
+        # path pre-computes deltas during import and the mount guard
+        # never fires. Raising makes the import fail cleanly with a
+        # user-visible error instead of shipping a crash-causing file.
+        gf_lower = game_file.lower()
+        is_data_table = (gf_lower.endswith(".pabgb")
+                         or gf_lower.endswith(".pabgh")
+                         or gf_lower.endswith(".pamt"))
+        if mismatched > 0 and is_data_table:
+            logger.error(
+                "JSON import: aborting — %d of %d patches mismatched "
+                "against vanilla %s. Data tables cannot be partially "
+                "applied (causes game crashes). Mod likely built for a "
+                "different game version.",
+                mismatched, applied + mismatched, game_file)
+            raise ValueError(
+                f"Mod '{mod_name}' has {mismatched} of "
+                f"{applied + mismatched} patches that do not match "
+                f"vanilla {game_file}. Shipping a partial data table "
+                f"would crash the game on startup. This mod was likely "
+                f"built for a different game version, check the mod "
+                f"page for an updated release.")
+
         if bytes(modified) == plaintext:
             logger.info("No actual changes after patching %s, skipping", game_file)
             continue
@@ -1246,6 +1273,32 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             return {"changed_files": [], "version_mismatch": True,
                     "game_file": game_file, "game_version": game_ver,
                     "mismatched": mismatched}
+
+        # PARTIAL mismatch on a data-table (.pabgb / .pabgh / .pamt):
+        # Shipping half-patched data crashes the game (socket counts vs
+        # cost tables drift, entry counts vs entries drift, etc.).
+        # Kliff Wears Damiane V2 is the reference case: 458/464 patches
+        # apply, 6 miss, a 4.6 MB delta gets stored, user enables it,
+        # game crashes on splash. Abort the import with a clear error.
+        gf_lower = game_file.lower()
+        is_data_table = (gf_lower.endswith(".pabgb")
+                         or gf_lower.endswith(".pabgh")
+                         or gf_lower.endswith(".pamt"))
+        if mismatched > 0 and is_data_table:
+            game_ver = patch_data.get("game_version", "unknown")
+            logger.error(
+                "JSON import: aborting — %d of %d patches mismatched on "
+                "data table %s. Shipping a partial data table crashes "
+                "the game. Mod was built for game version %s.",
+                mismatched, applied + mismatched, game_file, game_ver)
+            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+            db.connection.commit()
+            return {"changed_files": [], "version_mismatch": True,
+                    "game_file": game_file, "game_version": game_ver,
+                    "mismatched": mismatched,
+                    "partial_abort": True,
+                    "patches_applied": applied,
+                    "patches_total": applied + mismatched}
 
         if bytes(modified) == plaintext:
             # Content unchanged. Could mean: (a) patches had no effect, or
