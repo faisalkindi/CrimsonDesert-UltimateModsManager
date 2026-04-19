@@ -84,6 +84,15 @@ def main() -> int:
     logger = logging.getLogger(__name__)
     logger.info("Starting Crimson Desert Ultimate Mods Manager")
 
+    # Sweep stale extraction workspaces left over from prior runs that
+    # crashed or were force-killed before atexit fired. Scoped strictly
+    # to cdumm_* prefixes — never touches other apps' temp dirs.
+    try:
+        from cdumm.engine.temp_workspace import sweep_stale
+        sweep_stale(max_age_hours=48)
+    except Exception as e:
+        logger.debug("temp_workspace startup sweep skipped: %s", e)
+
     # Single instance check — prevent two GUI windows
     global _lock_fh
     _lock_file = APP_DATA_DIR / ".gui_lock"
