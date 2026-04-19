@@ -1,5 +1,35 @@
 """Right-side sliding configuration panel for mod settings."""
 
+from __future__ import annotations
+
+
+def _is_apply_visible(
+    variant_widgets: dict,
+    variant_initial: dict,
+    label_dirty: set,
+) -> bool:
+    """Return True if the Apply button should be shown.
+
+    Apply is visible when EITHER:
+      * the variant radio differs from the initial snapshot, OR
+      * any variant's labels were edited via the Configure picker
+        (tracked in label_dirty — a set of variant filenames).
+
+    Previously only the variant-changed branch existed, so a user who
+    edited labels and then reverted their variant pick to initial lost
+    the Apply button and dropped their label edits. Both conditions
+    now count as dirty.
+    """
+    for idx, widget in variant_widgets.items():
+        try:
+            if widget.isChecked() != variant_initial.get(idx, False):
+                return True
+        except AttributeError:
+            # test fixture may pass booleans directly
+            if widget != variant_initial.get(idx, False):
+                return True
+    return bool(label_dirty)
+
 from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
@@ -531,6 +561,38 @@ class ConfigPanel(QWidget):
         self._variant_initial: dict[int, bool] = {
             i: bool(v.get("enabled")) for i, v in enumerate(self._variants_meta)
         }
+        # Per-variant label selections (populated by the "Configure..."
+        # button and read by the page-level Apply handler). Keyed by
+        # the variant's filename.
+        self._variant_label_prev: dict[str, list[str]] = {}
+        self._variant_label_dirty: set[str] = set()
+        # Seed with any previously-persisted selections from mod_config
+        # so the dialog pre-checks the user's last picks.
+        try:
+            import json as _j
+            # Access the DB through the page parent if we can find it.
+            db = None
+            for cand in (getattr(self, "_db", None),
+                         getattr(self.parent(), "_db", None) if self.parent() else None):
+                if cand is not None:
+                    db = cand
+                    break
+            if db is not None:
+                row = db.connection.execute(
+                    "SELECT selected_labels FROM mod_config WHERE mod_id = ?",
+                    (mod_id,)).fetchone()
+                if row and row[0]:
+                    sel = _j.loads(row[0])
+                    # Accept the per-variant dict shape or a flat list
+                    # (legacy single-JSON mods). Only the per-variant
+                    # shape matters for variant mods.
+                    if isinstance(sel, dict):
+                        self._variant_label_prev = {
+                            str(k): list(v) for k, v in sel.items()
+                            if isinstance(v, list)
+                        }
+        except Exception as _e:
+            logger.debug("Could not seed variant label prev: %s", _e)
 
         self._title_label.setText(name)
         self._author_label.setText(f"by {author}" if author else "")
@@ -711,16 +773,84 @@ class ConfigPanel(QWidget):
         row.addWidget(indicator, 0,
                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
+        # When the variant ships internal labeled changes (e.g. Unlimited
+        # Dragon Flying's mutex Ride Duration presets), append a
+        # second-row Configure button BELOW the title. Inline placement
+        # competes with the variant title for horizontal space and
+        # truncates text in the narrow side panel.
+        cfg_btn_widget = None
+        if variant.get("_has_labels") and variant.get("_json_path"):
+            from qfluentwidgets import PushButton
+            cfg_btn = PushButton("Configure options...")
+            cfg_btn.setFixedHeight(28)
+            jp_path = variant["_json_path"]
+            v_fn = variant.get("filename", "")
+            cfg_btn.clicked.connect(
+                lambda _checked=False, p=jp_path, fn=v_fn:
+                    self._open_variant_label_picker(p, fn))
+            cfg_btn_widget = cfg_btn
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+        # Top: title + indicator row
+        top_row_widget = QWidget()
+        top_row_widget.setLayout(row)
+        outer.addWidget(top_row_widget)
+        # Bottom: full-width Configure button if relevant
+        if cfg_btn_widget is not None:
+            outer.addWidget(cfg_btn_widget)
+
         container = QWidget()
-        container.setLayout(row)
+        container.setLayout(outer)
         container.setStyleSheet(
             f"border-bottom: 1px solid {_row_border()}; background: transparent;")
         return container
 
+    def _open_variant_label_picker(self, json_path: str, variant_filename: str) -> None:
+        """Pop the TogglePickerDialog for a single variant's JSON.
+
+        The dialog already has mutex-offset detection (multiple changes
+        at the same byte offset become a radio group). User's picks get
+        stashed on the panel so the page-level Apply handler can persist
+        them to mod_config.selected_labels and regenerate merged.json
+        through synthesize_merged_json's label_selections param.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        from cdumm.gui.preset_picker import TogglePickerDialog
+        try:
+            data = _json.loads(_Path(json_path).read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("Could not read variant JSON %s: %s",
+                           json_path, e)
+            return
+        previous = self._variant_label_prev.get(variant_filename)
+        # Parent the modal dialog to the TOP-LEVEL window, not to the
+        # narrow side panel. Otherwise the dialog inherits the panel's
+        # cramped width and can't render readable mutex / checkbox
+        # rows (the user reported the dialog looking truncated).
+        top_parent = self.window() or self
+        dlg = TogglePickerDialog(data, parent=top_parent,
+                                  previous_labels=previous)
+        if dlg.exec() and dlg.selected_data is not None:
+            picked: list[str] = []
+            for p in dlg.selected_data.get("patches", []):
+                for c in p.get("changes", []):
+                    if "label" in c:
+                        picked.append(c["label"])
+            self._variant_label_prev[variant_filename] = picked
+            self._variant_label_dirty.add(variant_filename)
+            self._apply_btn.setVisible(True)
+
     def _on_variant_changed(self, *_a) -> None:
-        changed = False
-        for idx, widget in self._variant_widgets.items():
-            if widget.isChecked() != self._variant_initial.get(idx, False):
-                changed = True
-                break
-        self._apply_btn.setVisible(changed)
+        # Apply stays visible if EITHER the variant pick differs from
+        # initial OR any variant's labels were edited (tracked by
+        # _variant_label_dirty). Previously only the variant-change
+        # branch was checked, so reverting a variant after editing
+        # labels hid Apply and dropped the label edits.
+        self._apply_btn.setVisible(_is_apply_visible(
+            self._variant_widgets,
+            self._variant_initial,
+            getattr(self, "_variant_label_dirty", set()),
+        ))
