@@ -203,18 +203,22 @@ class FolderVariantDialog(MessageBoxBase):
             logger.debug("folder-independence detection failed: %s", e)
             self._multi_select = False
 
+        # Mode-specific copy: radio mode told the user to "Check ALL
+        # you want installed" which was a lie — they could only pick
+        # one. Split the strings so the text matches the actual UI.
         title = SubtitleLabel(
             tr("preset.choose_many") if self._multi_select
-            else tr("preset.choose"))
+            else tr("preset.choose_one"))
         tf = title.font()
         tf.setPixelSize(20)
         tf.setWeight(QFont.Weight.Bold)
         title.setFont(tf)
         self.viewLayout.addWidget(title)
-        self.viewLayout.addWidget(
-            CaptionLabel(
-                tr("preset.choose_desc_many") if self._multi_select
-                else tr("preset.choose_desc")))
+        desc_label = CaptionLabel(
+            tr("preset.choose_desc_many") if self._multi_select
+            else tr("preset.choose_one_desc"))
+        desc_label.setWordWrap(True)
+        self.viewLayout.addWidget(desc_label)
         self.viewLayout.addSpacing(12)
 
         from cdumm.engine.import_handler import prettify_mod_name
