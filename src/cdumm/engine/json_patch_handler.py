@@ -1200,6 +1200,22 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     return index
 
 
+def _derive_pamt_dir(paz_file: str | Path) -> str:
+    """Return the PAMT directory ('0009', '0002', …) for a PAZ file path.
+
+    When the caller passes a bare filename with no parent (rare, usually
+    a bug upstream), Path.parent.name is ''. Overlay entries keyed on
+    an empty pamt_dir collide in the overlay builder and misroute at
+    write-time, so log a warning rather than returning it silently.
+    """
+    name = Path(paz_file).parent.name
+    if not name:
+        logger.warning(
+            "_derive_pamt_dir: empty pamt_dir for paz_file=%r — "
+            "overlay metadata may be invalid", str(paz_file))
+    return name
+
+
 def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
     """Search all PAMT indices for a specific game file path.
 
@@ -1452,7 +1468,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                 continue
 
         # Determine PAZ file path for this entry
-        pamt_dir = Path(entry.paz_file).parent.name
+        pamt_dir = _derive_pamt_dir(entry.paz_file)
         paz_file_path = f"{pamt_dir}/{entry.paz_index}.paz"
 
         # Save as ENTR delta
@@ -1576,7 +1592,7 @@ def import_json_fast(
         if entry is None:
             logger.error("import_json_fast: game file '%s' not found in PAMTs", game_file)
             return None
-        pamt_dir = Path(entry.paz_file).parent.name
+        pamt_dir = _derive_pamt_dir(entry.paz_file)
         paz_file_path = f"{pamt_dir}/{entry.paz_index}.paz"
         entry_paths.append({
             "game_file": game_file,
@@ -1891,7 +1907,7 @@ def process_json_patches_for_overlay(
             logger.debug("mount-time: no changes for '%s', skipping", game_file)
             continue
 
-        pamt_dir = Path(entry.paz_file).parent.name
+        pamt_dir = _derive_pamt_dir(entry.paz_file)
         metadata = {
             "entry_path": entry.path,
             "pamt_dir": pamt_dir,
@@ -1937,8 +1953,8 @@ def process_json_patches_for_overlay(
                     pabgh_plain = _extract_from_paz(pabgh_entry_for_fixup)
                     fixed_pabgh = fixup_pabgh_after_inserts(
                         bytes(pabgh_plain), inserts_out)
-                    pabgh_pamt_dir = Path(
-                        pabgh_entry_for_fixup.paz_file).parent.name
+                    pabgh_pamt_dir = _derive_pamt_dir(
+                        pabgh_entry_for_fixup.paz_file)
                     overlay_entries.append((fixed_pabgh, {
                         "entry_path": pabgh_entry_for_fixup.path,
                         "pamt_dir": pabgh_pamt_dir,
