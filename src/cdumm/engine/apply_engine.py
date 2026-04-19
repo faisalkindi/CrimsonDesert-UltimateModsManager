@@ -1644,11 +1644,15 @@ class ApplyWorker(QObject):
         from cdumm.engine.compiled_merge import merge_compiled_mod_files
         # Byte-merge is safe ONLY on structured data tables where each
         # non-overlapping delta region means "one record field changed".
-        # Opaque assets (.dds textures, .bnk audio, compiled shaders…)
-        # would get spliced into a corrupt Frankenstein payload because
-        # both mods might rewrite overlapping header/offset tables.
-        # Stick to last-wins (priority-ordered) for non-table types.
-        _MERGEABLE_EXTS = (".pabgb", ".pabgh", ".pamt", ".xml", ".json", ".css")
+        # Opaque assets (.dds textures, .bnk audio, compiled shaders) and
+        # text formats (XML, JSON, CSS) would get spliced into corrupt
+        # output because either (a) both mods rewrite overlapping header
+        # / offset tables or (b) byte-level diffs on serialised text can
+        # land inside tokens. XML is further handled upstream by
+        # xml_patch_handler.process_xml_patches_for_overlay, which does
+        # structural merging; byte-merging its output would undo that.
+        # Stick to last-wins (priority-ordered) for everything else.
+        _MERGEABLE_EXTS = (".pabgb", ".pabgh", ".pamt")
         result: list[tuple[bytes, dict]] = []
         for (pamt_dir, entry_path), indices in grouped.items():
             if len(indices) < 2:
