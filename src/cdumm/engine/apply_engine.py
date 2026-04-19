@@ -378,6 +378,18 @@ def _apply_pamt_entry_update(data: bytearray, update: dict) -> None:
 
 # ── Workers ──────────────────────────────────────────────────────────
 
+def cdumm_to_xml_priority(cdumm_priority: int) -> int:
+    """Map CDUMM priority (lower = wins) to xml_patch_handler priority
+    (JMM convention: higher = wins, sorted last).
+
+    xml_patch_handler sorts ASC and lets the last item win, so we negate
+    the CDUMM value: CDUMM=1 becomes xml-priority=-1 (largest), sorting
+    last and winning conflicts, matching the JSON overlay's winning
+    order.
+    """
+    return -int(cdumm_priority or 0)
+
+
 class ApplyWorker(QObject):
     """Background worker for apply operation."""
 
@@ -637,9 +649,17 @@ class ApplyWorker(QObject):
             # ── Phase 1a: Mount-time patching for JSON mods ──────────
             # JSON mods with json_source are patched fresh from vanilla
             # at Apply time (no stored ENTR deltas needed).
+            # CDUMM convention (mod_manager.py:541): **lower priority
+            # number wins**. merge_compiled_mod_files (compiled_merge.py:47-50)
+            # expects "lowest priority first, highest last" in its input
+            # list so the highest-priority mod's bytes win in any overlap.
+            # Process LOW-precedence (high priority number) mods FIRST, so
+            # the HIGH-precedence (priority=1) mod applies LAST and wins.
+            # Use DESC so 10, 9, ..., 1 feeds merge in the correct order.
             json_mods = self._db.connection.execute(
                 "SELECT id, name, json_source, disabled_patches FROM mods "
-                "WHERE enabled = 1 AND json_source IS NOT NULL AND json_source != ''"
+                "WHERE enabled = 1 AND json_source IS NOT NULL AND json_source != '' "
+                "ORDER BY priority DESC, id ASC"
             ).fetchall()
             if json_mods:
                 from cdumm.engine.json_patch_handler import process_json_patches_for_overlay
@@ -698,13 +718,17 @@ class ApplyWorker(QObject):
             _phase("Phase 1a-xml: Mount-time XML patches")
             # Collect xml_patch / xml_merge deltas for all enabled mods and
             # feed them to xml_patch_handler.process_xml_patches_for_overlay.
-            # Mirrors JMM XmlPatchApplier apply-time flow.
+            # xml_patch_handler follows JMM convention ("higher priority
+            # number wins, executes last") but CDUMM uses the inverse
+            # ("priority=1 is top, wins"). Transform priorities via
+            # cdumm_to_xml_priority so the handler's ASC sort places
+            # CDUMM's lowest-priority mods LAST.
             xml_rows = self._db.connection.execute(
                 "SELECT d.mod_id, m.name, d.kind, d.delta_path, d.file_path, "
                 "m.priority FROM mod_deltas d "
                 "JOIN mods m ON m.id = d.mod_id "
                 "WHERE m.enabled = 1 AND d.kind IN ('xml_patch', 'xml_merge') "
-                "ORDER BY m.priority ASC, d.id ASC"
+                "ORDER BY m.priority DESC, d.id ASC"
             ).fetchall()
             if xml_rows:
                 self.progress_updated.emit(58, f"Applying XML patches ({len(xml_rows)})...")
@@ -712,7 +736,8 @@ class ApplyWorker(QObject):
                 items = [
                     {
                         "mod_id": mod_id, "mod_name": mod_name, "kind": kind,
-                        "delta_path": dp, "file_path": fp, "priority": prio,
+                        "delta_path": dp, "file_path": fp,
+                        "priority": cdumm_to_xml_priority(prio),
                     }
                     for (mod_id, mod_name, kind, dp, fp, prio) in xml_rows
                 ]
@@ -721,6 +746,15 @@ class ApplyWorker(QObject):
                 if xml_entries:
                     logger.info("xml_patch: produced %d overlay entries from %d deltas",
                                 len(xml_entries), len(xml_rows))
+
+            # Merge overlay entries that target the same (pamt_dir, entry_path).
+            # Without this, two JSON mods patching iteminfo.pabgb produce two
+            # separate overlay entries and only one wins in PAMT — the other
+            # mod silently drops. butanokaabii's "same-file mods no longer
+            # combine" regression report traces to this. Mirrors the JMM-parity
+            # MergeCompiledModFiles byte-merge already used for ENTR deltas.
+            self._overlay_entries = self._merge_same_target_overlay_entries(
+                self._overlay_entries)
 
             _phase(f"Phase 1b: Build overlay ({len(self._overlay_entries)} entries)")
             # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
@@ -1583,6 +1617,108 @@ class ApplyWorker(QObject):
         except Exception:
             pass
         return None
+
+    def _merge_same_target_overlay_entries(
+        self, entries: list[tuple[bytes, dict]],
+    ) -> list[tuple[bytes, dict]]:
+        """Collapse overlay entries that hit the same (pamt_dir, entry_path).
+
+        Multiple JSON mods can each produce an overlay entry for the same
+        PABGB (e.g. ALOO PC's Mega Stacks + Abyss Gear Stacking both patch
+        gamedata/iteminfo.pabgb). Without merging, the overlay PAMT ends up
+        with two entries at the same path and the game resolves only one,
+        silently discarding the other mod's changes. This runs a three-way
+        byte merge against vanilla — non-overlapping byte ranges from all
+        mods are kept; overlaps go to the later (higher-priority) entry.
+        """
+        if not entries or len(entries) < 2:
+            return entries
+        from collections import OrderedDict
+        grouped: "OrderedDict[tuple[str, str], list[int]]" = OrderedDict()
+        for i, (_, meta) in enumerate(entries):
+            key = (meta.get("pamt_dir", ""), meta.get("entry_path", ""))
+            grouped.setdefault(key, []).append(i)
+        if not any(len(v) >= 2 for v in grouped.values()):
+            return entries
+
+        from cdumm.engine.compiled_merge import merge_compiled_mod_files
+        # Byte-merge is safe ONLY on structured data tables where each
+        # non-overlapping delta region means "one record field changed".
+        # Opaque assets (.dds textures, .bnk audio, compiled shaders…)
+        # would get spliced into a corrupt Frankenstein payload because
+        # both mods might rewrite overlapping header/offset tables.
+        # Stick to last-wins (priority-ordered) for non-table types.
+        _MERGEABLE_EXTS = (".pabgb", ".pabgh", ".pamt", ".xml", ".json", ".css")
+        result: list[tuple[bytes, dict]] = []
+        for (pamt_dir, entry_path), indices in grouped.items():
+            if len(indices) < 2:
+                result.append(entries[indices[0]])
+                continue
+            ep_lower = entry_path.lower()
+            if not ep_lower.endswith(_MERGEABLE_EXTS):
+                logger.info(
+                    "Overlay merge: %s is not a mergeable table type "
+                    "(%d entries) — keeping highest-priority entry only",
+                    entry_path, len(indices))
+                # With ORDER BY priority DESC feeding _overlay_entries,
+                # the LAST index is the HIGHEST-priority (lowest number).
+                result.append(entries[indices[-1]])
+                continue
+            # Need a vanilla base for three-way byte merge. The
+            # _get_vanilla_entry_content helper expects file_path with a
+            # pamt_dir/ prefix; constructing it from pamt_dir + the PAMT
+            # filename gets us into the lookup.
+            vanilla = self._get_vanilla_entry_content(
+                f"{pamt_dir}/0.pamt", entry_path)
+            if not vanilla:
+                logger.warning(
+                    "Overlay merge: no vanilla for %s, falling back to "
+                    "last-wins (keeping entry %d)",
+                    entry_path, indices[-1])
+                result.append(entries[indices[-1]])
+                continue
+            ordered_bodies = [
+                (f"overlay_{i}", entries[i][0]) for i in indices
+            ]
+            # merge_compiled_mod_files always emits a buffer the same
+            # length as vanilla and silently drops bytes past that
+            # length. If any mod grew or shrank the decomp body (inserts
+            # for table extensions, etc.), three-way byte-merge would
+            # truncate the inserts. Fall back to last-wins (highest
+            # priority) instead so at least one mod's growth survives.
+            size_changed = [
+                len(body) for _n, body in ordered_bodies
+                if len(body) != len(vanilla)
+            ]
+            if size_changed:
+                logger.info(
+                    "Overlay merge: %s has size-changing entries "
+                    "(vanilla=%d, mod lens=%s) — using highest-priority "
+                    "last-wins instead of lossy byte-merge",
+                    entry_path, len(vanilla), size_changed)
+                result.append(entries[indices[-1]])
+                continue
+            try:
+                merged_body, warnings = merge_compiled_mod_files(
+                    vanilla, ordered_bodies)
+            except Exception as e:
+                logger.warning(
+                    "Overlay merge for %s failed (%s) — last-wins fallback",
+                    entry_path, e)
+                result.append(entries[indices[-1]])
+                continue
+            for w in warnings:
+                logger.info("Overlay byte-merge: %s", w)
+            if merged_body and merged_body != vanilla:
+                first_meta = dict(entries[indices[0]][1])
+                first_meta["_merged_from"] = len(indices)
+                result.append((merged_body, first_meta))
+                logger.info(
+                    "Overlay merge: collapsed %d entries for %s",
+                    len(indices), entry_path)
+            else:
+                result.append(entries[indices[-1]])
+        return result
 
     def _get_vanilla_entry_content(self, file_path: str, entry_path: str) -> bytes | None:
         """Get vanilla decompressed content for a specific PAMT entry."""
