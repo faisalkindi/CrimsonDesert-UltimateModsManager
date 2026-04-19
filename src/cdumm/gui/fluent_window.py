@@ -538,6 +538,20 @@ class CdummWindow(FluentWindow):
         crashed_last_time = self._lock_file.exists()
         self._lock_file.parent.mkdir(parents=True, exist_ok=True)
         self._lock_file.write_text(str(datetime.now()), encoding="utf-8")
+        # Belt-and-suspenders: if closeEvent somehow doesn't fire (Qt
+        # teardown race, uncaught exception on exit, Windows shutdown),
+        # still clean the lock at process exit so the NEXT launch doesn't
+        # falsely report "Previous session crashed".
+        import atexit as _atexit
+        _lock_path_str = str(self._lock_file)
+        def _cleanup_running_lock() -> None:
+            try:
+                import os as _os
+                if _os.path.exists(_lock_path_str):
+                    _os.unlink(_lock_path_str)
+            except OSError:
+                pass
+        _atexit.register(_cleanup_running_lock)
 
         # ── Deferred startup (after window is visible) ────────────────
         QTimer.singleShot(500, self._deferred_startup)
@@ -2507,6 +2521,13 @@ class CdummWindow(FluentWindow):
                             len(_asi_files),
                             [a.name for a in _asi_files])
                     path = _current
+                    # Variant picker fired and `_current` lives inside the
+                    # pre-extract temp dir. Schedule the temp for cleanup
+                    # AFTER the worker finishes (see _on_finished). Doing
+                    # it now would rug-pull the path the worker is about
+                    # to read.
+                    if _tmp_extract_for_picker is not None:
+                        self._pending_variant_cleanup = _tmp_extract_for_picker
                     # Remember the original archive/folder path so the
                     # cog-side panel can re-show FolderVariantDialog
                     # and swap variants without re-dropping the file.
@@ -2519,24 +2540,39 @@ class CdummWindow(FluentWindow):
                             and (_original.is_file() or _original.is_dir())):
                         self._configurable_source = str(_original)
                 elif _tmp_extract_for_picker is not None:
-                    # No variant picker fired — if we pre-extracted just
-                    # for scanning, point path at the extracted folder so
-                    # the worker doesn't re-extract the same archive.
-                    path = _tmp_extract_for_picker
+                    # No variant picker fired. The pre-extract was a scan-
+                    # only operation — throw it away and let the worker
+                    # re-extract from the original archive. Reusing the
+                    # temp path would leak the folder AND cause the mod to
+                    # be named after the temp dir (cdumm_variant_XXXX)
+                    # instead of the archive's filename.
+                    import shutil
+                    shutil.rmtree(
+                        _tmp_extract_for_picker, ignore_errors=True)
         except Exception as e:
             logger.debug("Folder variant check failed: %s", e)
 
         # ── 6. Toggle picker ──────────────────────────────────────────
         try:
-            from cdumm.engine.json_patch_handler import detect_json_patch, has_labeled_changes
+            from cdumm.engine.json_patch_handler import (
+                detect_json_patch, detect_json_patches_all, has_labeled_changes)
             json_data = None
             if path.suffix.lower() == '.json':
                 json_data = detect_json_patch(path)
             elif path.is_dir():
-                for f in path.rglob("*.json"):
-                    json_data = detect_json_patch(f)
-                    if json_data:
-                        break
+                # Archives with multiple JSON patches (Unlimited Dragon
+                # Flying ships main + RegionDismountRemoval; user
+                # naturally expects to configure each via its own cog
+                # AFTER import, not via a single drop-time dialog that
+                # arbitrarily picked one of them). Only show the toggle
+                # picker at drop time when the archive has exactly ONE
+                # configurable JSON — otherwise skip it and let each
+                # imported mod's cog surface the toggles per-mod.
+                all_json = detect_json_patches_all(path)
+                if len(all_json) == 1:
+                    json_data = all_json[0]
+                else:
+                    json_data = None
 
             if json_data and has_labeled_changes(json_data):
                 self._configurable_source = str(path)
@@ -2586,6 +2622,17 @@ class CdummWindow(FluentWindow):
         _probe_console_state("after import QProcess(self)")
         self._active_worker = proc  # reuse guard flag
 
+        # Snapshot the per-import context attributes set by the caller
+        # (usually mods_page swap branches) BEFORE any other code path
+        # can clobber them. Concurrent swaps would otherwise race the
+        # shared self._update_priority / self._configurable_source /
+        # self._original_drop_path fields between launch and finished.
+        # These snapshots are attached to `proc` and read from the
+        # closure-captured proc in _on_finished, so each proc's handler
+        # sees the context that belonged to ITS import.
+        from cdumm.gui.import_context import snapshot_and_clear_import_context
+        proc._cdumm_ctx = snapshot_and_clear_import_context(self)
+
         # Build command: the exe calls itself with --worker
         exe = sys.executable
         args = ["--worker", "import",
@@ -2618,9 +2665,16 @@ class CdummWindow(FluentWindow):
                     self._import_result_name = msg.get("name", path.stem)
                     self._import_result_error = None
                     self._import_result_asi_staged = msg.get("asi_staged", [])
+                    # Capture the PRIMARY mod id so post-import updates
+                    # (drop_name, nexus_id, game_version_hash, priority,
+                    # enabled) land on the right row. Compound imports
+                    # create sibling rows AFTER the primary; SELECT MAX(id)
+                    # lands on the wrong one.
+                    self._import_result_mod_id = msg.get("mod_id")
                 elif msg.get("type") == "error":
                     self._import_result_name = path.stem
                     self._import_result_error = msg.get("msg", "Unknown error")
+                    self._import_result_mod_id = None
 
         def _on_finished(exit_code, exit_status):
             tip.setContent(tr("progress.completed"))
@@ -2652,24 +2706,54 @@ class CdummWindow(FluentWindow):
                 import shutil
                 shutil.rmtree(str(tmp), ignore_errors=True)
                 self._pending_tmp_cleanup = None
+            # Clean variant-picker pre-extract dir (when a picker fired
+            # and the worker was fed a path inside this temp tree).
+            vtmp = getattr(self, '_pending_variant_cleanup', None)
+            if vtmp:
+                import shutil
+                shutil.rmtree(str(vtmp), ignore_errors=True)
+                self._pending_variant_cleanup = None
+
+            # Primary mod id captured from the worker's "done" message.
+            # Compound imports (Lightsaber: CB + shop JSON siblings) write
+            # MULTIPLE mod rows, so SELECT MAX(id) would land on the last
+            # sibling, not the primary. Use the captured id when we have it;
+            # only fall back to MAX(id) for legacy paths that don't plumb it.
+            primary_mod_id = getattr(self, '_import_result_mod_id', None)
+
+            def _primary_id():
+                if primary_mod_id is not None:
+                    return primary_mod_id
+                try:
+                    row = self._db.connection.execute(
+                        "SELECT MAX(id) FROM mods").fetchone()
+                    return row[0] if row else None
+                except Exception:
+                    return None
 
             # Post-import: game version stamp
             try:
                 from cdumm.engine.version_detector import detect_game_version
                 ver = detect_game_version(self._game_dir)
-                if ver:
+                _pid = _primary_id()
+                if ver and _pid is not None:
                     self._db.connection.execute(
-                        "UPDATE mods SET game_version_hash = ? WHERE id = (SELECT MAX(id) FROM mods)",
-                        (ver,))
+                        "UPDATE mods SET game_version_hash = ? WHERE id = ?",
+                        (ver, _pid))
                     self._db.connection.commit()
             except Exception:
                 pass
+
+            # Per-launch context snapshot (see _launch_import_worker):
+            # reads pull from this dict, not self.<attr>, so concurrent
+            # swap/update launches can't clobber our values.
+            _ctx = getattr(proc, "_cdumm_ctx", {}) or {}
 
             # Post-import: NexusMods mod ID from filename. Nested-variant
             # mods land at a leaf like 'Human' which never carries the
             # Nexus id — parse from the ORIGINAL dropped archive
             # (Character Creator-837-4-2-1776536785.zip) when available.
-            _orig_for_nexus = getattr(self, '_original_drop_path', None)
+            _orig_for_nexus = _ctx.get("original_drop_path")
             if _orig_for_nexus is not None:
                 _nexus_stem = (_orig_for_nexus.stem
                                if _orig_for_nexus.is_file()
@@ -2679,26 +2763,28 @@ class CdummWindow(FluentWindow):
             nexus_id, nexus_file_ver = _parse_nexus_filename(_nexus_stem)
             if nexus_id:
                 try:
-                    self._db.connection.execute(
-                        "UPDATE mods SET nexus_mod_id = ?, nexus_file_id = ? "
-                        "WHERE id = (SELECT MAX(id) FROM mods)",
-                        (nexus_id, nexus_file_ver))
-                    self._db.connection.commit()
-                    logger.info("Stored NexusMods ID: mod=%d file=%s", nexus_id, nexus_file_ver)
+                    _pid = _primary_id()
+                    if _pid is not None:
+                        self._db.connection.execute(
+                            "UPDATE mods SET nexus_mod_id = ?, nexus_file_id = ? "
+                            "WHERE id = ?",
+                            (nexus_id, nexus_file_ver, _pid))
+                        self._db.connection.commit()
+                        logger.info("Stored NexusMods ID: mod=%d file=%s",
+                                    nexus_id, nexus_file_ver)
                 except Exception:
                     pass
 
             # Post-import: store original drop name + extract version
             try:
-                mod_id = self._db.connection.execute(
-                    "SELECT MAX(id) FROM mods").fetchone()[0]
-                orig = getattr(self, '_original_drop_path', None)
+                mod_id = _primary_id()
+                orig = _ctx.get("original_drop_path")
                 drop_name = orig.name if orig else path.name
                 # Nested-variant mods: append "||<rel>" so the cog can
                 # identify which leaf is active and rewrite the mod's
                 # name to the pretty archive name (otherwise the card
                 # would read just the leaf folder name like "Human").
-                variant_rel = getattr(self, '_variant_leaf_rel', None)
+                variant_rel = _ctx.get("variant_leaf_rel")
                 if variant_rel:
                     drop_name = f"{drop_name}||{variant_rel}"
                     try:
@@ -2713,7 +2799,6 @@ class CdummWindow(FluentWindow):
                                 (pretty, mod_id))
                     except Exception as _e:
                         logger.debug("variant rename failed: %s", _e)
-                    self._variant_leaf_rel = None
                 self._db.connection.execute(
                     "UPDATE mods SET drop_name = ? WHERE id = ?",
                     (drop_name, mod_id))
@@ -2733,41 +2818,37 @@ class CdummWindow(FluentWindow):
                 pass
 
             # Post-import: configurable flag + source path
-            cfg_src = getattr(self, '_configurable_source', None)
+            cfg_src = _ctx.get("configurable_source")
             if cfg_src:
                 try:
-                    mod_id = self._db.connection.execute(
-                        "SELECT MAX(id) FROM mods").fetchone()[0]
-                    self._db.connection.execute(
-                        "UPDATE mods SET configurable = 1, source_path = ? WHERE id = ?",
-                        (cfg_src, mod_id))
-                    self._db.connection.commit()
-                    labels = getattr(self, '_configurable_labels', None)
-                    if labels:
-                        import json
+                    mod_id = _primary_id()
+                    if mod_id is not None:
                         self._db.connection.execute(
-                            "INSERT OR REPLACE INTO mod_config (mod_id, selected_labels) VALUES (?, ?)",
-                            (mod_id, json.dumps(labels)))
+                            "UPDATE mods SET configurable = 1, source_path = ? WHERE id = ?",
+                            (cfg_src, mod_id))
+                        self._db.connection.commit()
+                        labels = _ctx.get("configurable_labels")
+                        if labels:
+                            import json
+                            self._db.connection.execute(
+                                "INSERT OR REPLACE INTO mod_config (mod_id, selected_labels) VALUES (?, ?)",
+                                (mod_id, json.dumps(labels)))
+                            self._db.connection.commit()
+                except Exception:
+                    pass
+
+            # Post-import: restore update state (priority/enabled)
+            upri = _ctx.get("update_priority")
+            if upri is not None:
+                try:
+                    mod_id = _primary_id()
+                    if mod_id is not None:
+                        self._db.connection.execute(
+                            "UPDATE mods SET priority = ?, enabled = ? WHERE id = ?",
+                            (upri, _ctx.get("update_enabled") or 0, mod_id))
                         self._db.connection.commit()
                 except Exception:
                     pass
-                self._configurable_source = None
-                self._configurable_labels = None
-
-            # Post-import: restore update state (priority/enabled)
-            upri = getattr(self, '_update_priority', None)
-            if upri is not None:
-                try:
-                    mod_id = self._db.connection.execute(
-                        "SELECT MAX(id) FROM mods").fetchone()[0]
-                    self._db.connection.execute(
-                        "UPDATE mods SET priority = ?, enabled = ? WHERE id = ?",
-                        (upri, getattr(self, '_update_enabled', 0), mod_id))
-                    self._db.connection.commit()
-                except Exception:
-                    pass
-                self._update_priority = None
-                self._update_enabled = None
 
             # Install staged ASI files from mixed ZIP import
             asi_staged = getattr(self, '_import_result_asi_staged', [])
