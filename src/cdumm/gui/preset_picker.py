@@ -122,22 +122,99 @@ def find_folder_variants(path: Path) -> list[Path]:
     return variants if len(variants) >= 2 else []
 
 
+def folder_variant_game_files(folders: list[Path]) -> dict[Path, set[str]]:
+    """For each folder, collect the set of game_file targets its JSONs
+    declare. Used by the picker to decide whether the folders behave
+    like mutually-exclusive variants (overlapping targets) or
+    independent categories (disjoint targets).
+
+    Folders without JSONs contribute an empty set; they do not force
+    mutex mode because nothing they touch collides with anything.
+    """
+    result: dict[Path, set[str]] = {}
+    for folder in folders:
+        targets: set[str] = set()
+        if folder.is_dir():
+            for jp in folder.rglob("*.json"):
+                try:
+                    data = json.loads(jp.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                patches = data.get("patches")
+                if not isinstance(patches, list):
+                    continue
+                for p in patches:
+                    if isinstance(p, dict):
+                        gf = p.get("game_file")
+                        if isinstance(gf, str) and gf:
+                            targets.add(gf)
+        result[folder] = targets
+    return result
+
+
+def folders_are_independent(gf_map: dict[Path, set[str]]) -> bool:
+    """True if no two folders share any game_file target.
+
+    Empty sets never conflict (per folder_variant_game_files semantics).
+    A single-folder map is trivially independent.
+    """
+    non_empty = [t for t in gf_map.values() if t]
+    seen: set[str] = set()
+    for targets in non_empty:
+        if seen & targets:
+            return False
+        seen.update(targets)
+    return True
+
+
 class FolderVariantDialog(MessageBoxBase):
-    """Dialog for choosing which folder variant to import."""
+    """Dialog for choosing which folder variant(s) to import.
+
+    Two modes:
+      * Mutually exclusive (radio group, single pick) — when folders'
+        game_file targets overlap. Vaxis LoD, Character Creator, any
+        real "variant" mod.
+      * Independent (checkbox group, multi pick) — when folders target
+        disjoint game files. Mega-packs like GildsGear where each
+        folder is an independent category.
+
+    ``selected_paths`` always exposes the list of picked paths. The
+    legacy ``selected_path`` attribute points at the first pick (back-
+    compat for callers that haven't migrated yet).
+    """
 
     def __init__(self, variants: list[Path], parent=None):
         super().__init__(parent)
         self._variants = variants
         self.selected_path: Path | None = None
+        self.selected_paths: list[Path] = []
 
-        title = SubtitleLabel(tr("preset.choose"))
+        # Decide single-pick (radio) vs multi-pick (checkbox) based on
+        # whether the folders' JSON targets overlap. GildsGear-style
+        # category packs go to checkbox mode; Vaxis-style variants stay
+        # on radio. If detection fails for any reason, default to the
+        # safe radio mode so existing workflows don't regress.
+        try:
+            gf_map = folder_variant_game_files(variants)
+            self._multi_select = folders_are_independent(gf_map)
+        except Exception as e:  # pragma: no cover
+            logger.debug("folder-independence detection failed: %s", e)
+            self._multi_select = False
+
+        title = SubtitleLabel(
+            tr("preset.choose_many") if self._multi_select
+            else tr("preset.choose"))
         tf = title.font()
         tf.setPixelSize(20)
         tf.setWeight(QFont.Weight.Bold)
         title.setFont(tf)
         self.viewLayout.addWidget(title)
         self.viewLayout.addWidget(
-            CaptionLabel(tr("preset.choose_desc")))
+            CaptionLabel(
+                tr("preset.choose_desc_many") if self._multi_select
+                else tr("preset.choose_desc")))
         self.viewLayout.addSpacing(12)
 
         from cdumm.engine.import_handler import prettify_mod_name
@@ -146,23 +223,53 @@ class FolderVariantDialog(MessageBoxBase):
         # Explicit theme-aware stylesheet — without this the radio text
         # inherits an unstyled color and renders white-on-white in
         # light mode (bug reported against 3.1.31a on Vaxis LoD).
-        _radio_style = (
-            "QRadioButton { color: %s; padding: 8px; spacing: 8px; "
-            "font-size: 14px; } "
-            "QRadioButton::indicator { width: 16px; height: 16px; }"
-        ) % ("#E2E8F0" if isDarkTheme() else "#1A202C")
+        # Also setAutoFillBackground + an explicit widget background
+        # to prevent the 'black dialog' rendering bug users have
+        # occasionally hit on Windows 11 + PySide6 6.11 (Qt forum
+        # thread: 'Most widgets obscured, covered up by black' —
+        # the fix is always the same: set a background).
+        _is_dark = isDarkTheme()
+        _bg = "#1C2028" if _is_dark else "#FAFBFC"
+        _fg = "#E2E8F0" if _is_dark else "#1A202C"
+        _button_style = (
+            "QRadioButton, QCheckBox { color: %s; padding: 8px; "
+            "spacing: 8px; font-size: 14px; } "
+            "QRadioButton::indicator, QCheckBox::indicator { "
+            "width: 16px; height: 16px; }"
+        ) % _fg
+        try:
+            self.widget.setAutoFillBackground(True)
+            self.widget.setStyleSheet(
+                f"QWidget {{ background: {_bg}; color: {_fg}; }}")
+        except AttributeError:
+            pass
 
-        self._group = QButtonGroup(self)
-        for i, v in enumerate(variants):
-            radio = QRadioButton(prettify_mod_name(v.name))
-            radio.setStyleSheet(_radio_style)
-            rf = radio.font()
-            rf.setPixelSize(14)
-            radio.setFont(rf)
-            if i == 0:
-                radio.setChecked(True)
-            self._group.addButton(radio, i)
-            self.viewLayout.addWidget(radio)
+        self._widgets: list[QCheckBox | QRadioButton] = []
+        if self._multi_select:
+            # Category-pack mode: each folder is an independent pick.
+            for i, v in enumerate(variants):
+                cb = QCheckBox(prettify_mod_name(v.name))
+                cb.setStyleSheet(_button_style)
+                cf = cb.font()
+                cf.setPixelSize(14)
+                cb.setFont(cf)
+                cb.setChecked(True)   # default: install everything
+                self._widgets.append(cb)
+                self.viewLayout.addWidget(cb)
+        else:
+            # Variant mode: existing radio-group behaviour.
+            self._group = QButtonGroup(self)
+            for i, v in enumerate(variants):
+                radio = QRadioButton(prettify_mod_name(v.name))
+                radio.setStyleSheet(_button_style)
+                rf = radio.font()
+                rf.setPixelSize(14)
+                radio.setFont(rf)
+                if i == 0:
+                    radio.setChecked(True)
+                self._group.addButton(radio, i)
+                self._widgets.append(radio)
+                self.viewLayout.addWidget(radio)
 
         # Wire Install to record the chosen path before accepting. The
         # previous _on_yesButton_clicked method was never connected, so
@@ -172,12 +279,24 @@ class FolderVariantDialog(MessageBoxBase):
         self.yesButton.clicked.disconnect()
         self.yesButton.clicked.connect(self._on_yesButton_clicked)
         self.cancelButton.setText(tr("main.cancel"))
-        self.widget.setMinimumWidth(400)
+        self.widget.setMinimumWidth(440)
 
     def _on_yesButton_clicked(self):
-        idx = self._group.checkedId()
-        if 0 <= idx < len(self._variants):
-            self.selected_path = self._variants[idx]
+        picks: list[Path] = []
+        if self._multi_select:
+            for i, w in enumerate(self._widgets):
+                if w.isChecked():
+                    picks.append(self._variants[i])
+            if not picks:
+                # Nothing checked — treat as cancel so we don't import
+                # an empty pack.
+                return
+        else:
+            idx = self._group.checkedId()
+            if 0 <= idx < len(self._variants):
+                picks = [self._variants[idx]]
+        self.selected_paths = picks
+        self.selected_path = picks[0] if picks else None
         self.accept()
 
 

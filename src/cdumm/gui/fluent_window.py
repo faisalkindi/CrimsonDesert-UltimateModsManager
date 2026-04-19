@@ -2474,10 +2474,28 @@ class CdummWindow(FluentWindow):
 
                     fv_dialog = FolderVariantDialog(folder_vars, self)
                     result = fv_dialog.exec()
-                    if not (result and fv_dialog.selected_path):
+                    picks = list(getattr(fv_dialog, "selected_paths", []) or [])
+                    if not (result and picks):
                         _aborted = True
                         break
-                    _current = fv_dialog.selected_path
+                    # Multi-pick mega-pack (GildsGear / AIO pack with
+                    # independent categories): queue the extra picks as
+                    # additional imports so each category folder becomes
+                    # its own set of mods. The first pick is imported
+                    # now via the normal flow.
+                    if len(picks) > 1:
+                        for extra in picks[1:]:
+                            try:
+                                self._queue_import(extra)
+                            except Exception as _qe:
+                                logger.debug(
+                                    "queue extra category folder failed "
+                                    "(%s): %s", extra, _qe)
+                        logger.info(
+                            "Multi-pick category folders (depth %d): "
+                            "first=%s, queued %d more",
+                            _depth, picks[0].name, len(picks) - 1)
+                    _current = picks[0]
                     _fired_any_picker = True
                     logger.info(
                         "User selected folder variant (depth %d): %s",
