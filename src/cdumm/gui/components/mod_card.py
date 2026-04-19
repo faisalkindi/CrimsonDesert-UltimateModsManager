@@ -275,7 +275,12 @@ class ModCard(CardWidget):
         # QVBoxLayout will grow vertically to fit.
         self._name_label.setWordWrap(True)
         self._name_label.setMinimumWidth(1)
-        name_row.addWidget(self._name_label, 1)
+        # No stretch factor so the label sizes to its text and the gear
+        # icon sits immediately next to the name. Previously stretch=1
+        # made the name label eat all horizontal space and push the
+        # gear to the far right edge of the row (visually next to the
+        # status pills) even though it's laid out in the name row.
+        name_row.addWidget(self._name_label)
         # Inline rename editor (hidden by default)
         self._name_edit = QLineEdit(name)
         self._name_edit.setVisible(False)

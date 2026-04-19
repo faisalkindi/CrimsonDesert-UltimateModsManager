@@ -87,17 +87,22 @@ def find_folder_variants(path: Path) -> list[Path]:
     if not path.is_dir():
         return []
 
+    import re
     subdirs = sorted([
         d for d in path.iterdir()
         if d.is_dir() and not d.name.startswith('.') and not d.name.startswith('_')
+        # Exclude NNNN-numbered game-data directories and the 'meta'
+        # companion. These are destination folders the import worker
+        # writes to (Barber Unlocked, Enhanced Maps etc. produce a
+        # sources/<id>/0009/ + 0036/ + meta/ tree). Without this
+        # filter find_folder_variants treats 0009 and 0036 as
+        # 'variants' because they each contain a 0.paz, and the mod
+        # gets a phantom cog post-import.
+        and not re.match(r'^\d{4}$', d.name)
+        and d.name.lower() != 'meta'
     ])
 
     if len(subdirs) < 2:
-        return []
-
-    # Check if ALL subdirs are numbered PAZ dirs (like 0002/, 0012/) — not variants
-    import re
-    if all(re.match(r'^\d{4}$', d.name) for d in subdirs):
         return []
 
     # Check if subdirs look like mod variants (contain game files)
