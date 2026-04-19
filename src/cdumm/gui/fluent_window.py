@@ -2665,8 +2665,18 @@ class CdummWindow(FluentWindow):
             except Exception:
                 pass
 
-            # Post-import: NexusMods mod ID from filename
-            nexus_id, nexus_file_ver = _parse_nexus_filename(path.stem)
+            # Post-import: NexusMods mod ID from filename. Nested-variant
+            # mods land at a leaf like 'Human' which never carries the
+            # Nexus id — parse from the ORIGINAL dropped archive
+            # (Character Creator-837-4-2-1776536785.zip) when available.
+            _orig_for_nexus = getattr(self, '_original_drop_path', None)
+            if _orig_for_nexus is not None:
+                _nexus_stem = (_orig_for_nexus.stem
+                               if _orig_for_nexus.is_file()
+                               else _orig_for_nexus.name)
+            else:
+                _nexus_stem = path.stem
+            nexus_id, nexus_file_ver = _parse_nexus_filename(_nexus_stem)
             if nexus_id:
                 try:
                     self._db.connection.execute(
