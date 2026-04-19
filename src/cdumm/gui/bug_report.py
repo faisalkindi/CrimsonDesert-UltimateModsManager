@@ -518,7 +518,8 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
             vanilla_dir = (game_dir / "CDMods" / "vanilla") if game_dir else None
             cursor = db.connection.execute(
                 "SELECT id, name, enabled, priority, version, nexus_mod_id, "
-                "import_date, configurable, source_path, applied, drop_name "
+                "import_date, configurable, source_path, applied, drop_name, "
+                "json_source "
                 "FROM mods WHERE mod_type = 'paz' ORDER BY priority")
             mods = cursor.fetchall()
             if not mods:
@@ -529,7 +530,7 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                 missing_source = 0
                 for (mid, name, enabled, prio, ver, nexus_id,
                      import_date, configurable, source_path, applied,
-                     drop_name) in mods:
+                     drop_name, json_source) in mods:
                     state = "ON " if enabled else "OFF"
                     was_applied = " applied" if applied else ""
                     cfg_flag = " configurable" if configurable else ""
@@ -561,7 +562,12 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                         f"vanilla_backup={'yes' if has_backup else 'no'}")
                     if drop_name:
                         body.append(f"        drop_name={drop_name}")
-                    if dc == 0 and enabled:
+                    # JSON-patch mods (both preset-picker singletons and
+                    # multi-variant merged.json mods) apply at mount-time
+                    # from their json_source; they legitimately have no
+                    # deltas stored. Only flag pre-computed-delta mods
+                    # that have zero deltas (those really are broken).
+                    if dc == 0 and enabled and not json_source:
                         body.append("        !! WARNING: enabled but has no deltas")
                         zero_delta_enabled += 1
                     if source_path and src_status == "MISSING":
@@ -696,11 +702,14 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
         except Exception:
             current_hash = None
 
-        # Enabled mods with zero deltas
+        # Enabled mods with zero deltas. Mount-time JSON-patch mods
+        # (json_source is non-null) apply on the fly and legitimately
+        # have no deltas — skip them in this check.
         try:
             rows = db.connection.execute(
                 "SELECT m.name FROM mods m "
                 "WHERE m.enabled = 1 AND m.mod_type='paz' "
+                "AND (m.json_source IS NULL OR m.json_source = '') "
                 "AND NOT EXISTS (SELECT 1 FROM mod_deltas md WHERE md.mod_id = m.id)"
             ).fetchall()
             if rows:
