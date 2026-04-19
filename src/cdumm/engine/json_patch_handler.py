@@ -595,15 +595,22 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 key = int(record_key)
             except (ValueError, TypeError):
                 key = None
-            if key is not None and key in record_offsets:
-                rel = change.get("relative_offset")
-                if rel is None:
-                    rel = change.get("rel_offset", 0)
-                try:
-                    rel = int(rel, 0) if isinstance(rel, str) else int(rel)
-                    resolved.append(record_offsets[key] + rel)
-                except (ValueError, TypeError):
-                    pass
+                logger.debug("resolve_offsets: bad record_key %r (entry=%r)",
+                             record_key, change.get("entry"))
+            if key is not None:
+                if key in record_offsets:
+                    rel = change.get("relative_offset")
+                    if rel is None:
+                        rel = change.get("rel_offset", 0)
+                    try:
+                        rel = int(rel, 0) if isinstance(rel, str) else int(rel)
+                        resolved.append(record_offsets[key] + rel)
+                    except (ValueError, TypeError):
+                        logger.debug("resolve_offsets: bad relative_offset %r for key %d",
+                                     rel, key)
+                else:
+                    logger.debug("resolve_offsets: record_key %d not in index (entry=%r)",
+                                 key, change.get("entry"))
 
         # 2. v2 entry-anchored: resolve via name→body-offset map.
         entry_name = change.get("entry")
@@ -617,7 +624,12 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     rel = int(rel, 0) if isinstance(rel, str) else int(rel)
                     resolved.append(body_offset + rel)
                 except (ValueError, TypeError):
-                    pass
+                    logger.debug("resolve_offsets: bad rel_offset %r for entry %r",
+                                 rel, entry_name)
+            else:
+                logger.debug("resolve_offsets: entry %r not in name_offsets "
+                             "(%d names available)",
+                             entry_name, len(name_offsets))
 
         # 3. Literal numeric `offset` — the stale/stable absolute.
         raw = change.get("offset")
@@ -629,7 +641,8 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 try:
                     resolved.append(base_offset + int(str(raw), 16))
                 except (ValueError, TypeError):
-                    pass
+                    logger.debug("resolve_offsets: bad literal offset %r (entry=%r)",
+                                 raw, change.get("entry"))
 
         # Deduplicate while preserving order.
         seen: set[int] = set()
