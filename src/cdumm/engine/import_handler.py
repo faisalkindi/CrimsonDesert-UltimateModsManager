@@ -70,6 +70,45 @@ def _json_mod_modinfo(jp_data: dict) -> dict:
     }
 
 
+def _pick_cb_display_name(manifest_id: str | None, archive_stem: str) -> str:
+    """Choose a user-facing display name for a Crimson Browser mod.
+
+    CB's manifest.id is a machine identifier (e.g. "my_cool_hud_v1").
+    Authors sometimes set it to a lazy placeholder like "mm" or "test"
+    and forget to change it, then the Nexus-parsed archive filename
+    (e.g. "Witcher HUD-1432-1-...") carries the real display name.
+
+    Heuristic: trust manifest.id only when it looks intentional:
+      * contains a space, OR
+      * is ≥ 5 chars, OR
+      * has mixed case.
+    Otherwise fall back to prettify_mod_name(archive_stem).
+
+    Empty archive_stem defeats the fallback; keep id in that case
+    (better something than nothing).
+    """
+    mid = (manifest_id or "").strip()
+    stem = (archive_stem or "").strip()
+
+    def _looks_intentional(s: str) -> bool:
+        if not s:
+            return False
+        if " " in s:
+            return True
+        if len(s) >= 5:
+            return True
+        if s != s.lower() and s != s.upper():
+            return True   # mixed case
+        return False
+
+    if _looks_intentional(mid):
+        return mid
+    if stem:
+        pretty = prettify_mod_name(stem)
+        return pretty or mid or stem
+    return mid
+
+
 def prettify_mod_name(raw: str) -> str:
     """Clean up a raw mod name for display.
 
@@ -1143,7 +1182,7 @@ def _import_from_extracted(
         cb_work = tmp_path.parent / "_cb_converted"
         converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work)
         if converted is not None:
-            cb_name = cb_manifest.get("id", mod_name)
+            cb_name = _pick_cb_display_name(cb_manifest.get("id"), mod_name)
             modinfo = _read_modinfo(tmp_path)
             if modinfo and modinfo.get("name"):
                 cb_name = modinfo["name"]
@@ -1391,7 +1430,7 @@ def import_from_zip(
             cb_work = Path(tmp) / "_cb_converted"
             converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work)
             if converted is not None:
-                cb_name = cb_manifest.get("id", mod_name)
+                cb_name = _pick_cb_display_name(cb_manifest.get("id"), mod_name)
                 modinfo = _read_modinfo(tmp_path)
                 if modinfo and modinfo.get("name"):
                     cb_name = modinfo["name"]
@@ -1717,7 +1756,7 @@ def import_from_folder(
             cb_work = Path(cb_tmp) / "_cb_converted"
             converted = convert_to_paz_mod(manifest, game_dir, cb_work)
             if converted is not None:
-                cb_name = manifest.get("id", mod_name)
+                cb_name = _pick_cb_display_name(manifest.get("id"), mod_name)
                 modinfo = _read_modinfo(folder_path)
                 if modinfo and modinfo.get("name"):
                     cb_name = modinfo["name"]
