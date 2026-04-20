@@ -86,10 +86,23 @@ def main() -> int:
 
     # Sweep stale extraction workspaces left over from prior runs that
     # crashed or were force-killed before atexit fired. Scoped strictly
-    # to cdumm_* prefixes — never touches other apps' temp dirs.
+    # to cdumm_* prefixes — never touches other apps' temp dirs. On
+    # HDD-backed machines with a large %TEMP%, the sweep can take
+    # several seconds of dir-stating — run on a background thread so
+    # splash paints immediately. B3.
     try:
         from cdumm.engine.temp_workspace import sweep_stale
-        sweep_stale(max_age_hours=48)
+        import threading as _threading
+
+        def _bg_sweep() -> None:
+            try:
+                sweep_stale(max_age_hours=48)
+            except Exception as _e:
+                logger.debug("temp_workspace bg sweep error: %s", _e)
+
+        _sweep_thread = _threading.Thread(
+            target=_bg_sweep, name="cdumm-temp-sweep", daemon=True)
+        _sweep_thread.start()
     except Exception as e:
         logger.debug("temp_workspace startup sweep skipped: %s", e)
 

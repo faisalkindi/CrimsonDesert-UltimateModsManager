@@ -656,6 +656,12 @@ class ConfigPanel(QWidget):
         self._variant_initial: dict[int, bool] = {
             i: bool(v.get("enabled")) for i, v in enumerate(self._variants_meta)
         }
+        # Reset collapsible-section strong refs on every panel open.
+        # Without this, switching from a mutex-pack mod to a plain
+        # variant mod would leave dangling references to deleteLater'd
+        # widgets. Any later iteration (e.g. a theme reapply pass)
+        # would hit RuntimeError on a deleted C++ object. C-M2.
+        self._collapsible_sections: list[_CollapsibleSection] = []
         # Per-variant label selections (populated by the "Configure..."
         # button and read by the page-level Apply handler). Keyed by
         # the variant's filename.
