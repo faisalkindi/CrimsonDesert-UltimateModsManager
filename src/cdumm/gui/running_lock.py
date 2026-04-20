@@ -31,6 +31,12 @@ def install_lock(lock_file: Path) -> dict:
       * `lock_file`: path to the sentinel
       * `was_stale`: True if the sentinel already existed (prior crash)
       * `clean_shutdown`: False until mark_clean_shutdown() is called
+
+    Concurrency note: a second CDUMM instance launched at exactly the
+    same moment WOULD race on read/write of this sentinel. In
+    practice main.py's .gui_lock (msvcrt.locking + fcntl.flock) gates
+    single-instance enforcement before this is called, so the race
+    doesn't manifest in normal use. BMAD B5 documented.
     """
     lock_file = Path(lock_file)
     was_stale = lock_file.exists()

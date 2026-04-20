@@ -542,12 +542,25 @@ class CdummWindow(FluentWindow):
         # crashes (uncaught exceptions, SIGTERM, Windows shutdown) leave
         # the lock in place for the next launch to observe.
         from cdumm.gui.running_lock import (
-            install_lock, _cleanup_running_lock)
+            install_lock, _cleanup_running_lock, mark_clean_shutdown)
         self._lock_state = install_lock(self._app_data_dir / ".running")
         self._lock_file = self._lock_state["lock_file"]
         crashed_last_time = self._lock_state["was_stale"]
         import atexit as _atexit
         _atexit.register(_cleanup_running_lock, self._lock_state)
+        # Belt-and-suspenders: QApplication.aboutToQuit fires on clean
+        # exits that bypass main-window closeEvent (tray-icon quit,
+        # menu-triggered QApplication.quit()). Without this, those
+        # paths would leave the lock in place and the next launch
+        # would report a false crash. BMAD A4.
+        try:
+            from PySide6.QtWidgets import QApplication
+            _app = QApplication.instance()
+            if _app is not None:
+                _app.aboutToQuit.connect(
+                    lambda: mark_clean_shutdown(self._lock_state))
+        except Exception as _e_aq:
+            logger.debug("aboutToQuit wiring skipped: %s", _e_aq)
 
         # ── Deferred startup (after window is visible) ────────────────
         QTimer.singleShot(500, self._deferred_startup)
