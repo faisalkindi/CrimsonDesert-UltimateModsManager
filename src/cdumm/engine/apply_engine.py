@@ -2411,9 +2411,36 @@ class ApplyWorker(QObject):
         DDS template header straight from the bytes build_overlay produced
         (``BuildPartialDdsPayload`` output), not from pre-build content, so
         PATHC and overlay PAZ agree on reserved1 / last4.
+
+        If the vanilla PATHC cannot be decompressed (game-version
+        compression change, encrypted file, corrupted backup), log a
+        warning and skip DDS registration rather than failing the
+        whole apply. The user's non-DDS mods still apply successfully;
+        DDS-only mods may not appear in-game until the PATHC issue is
+        resolved (usually by re-running 'Fix Everything' to rebuild
+        the vanilla backup).
         """
         if not overlay_packed:
             return
+        try:
+            self._update_pathc_for_overlay_inner(txn, overlay_packed)
+        except Exception as e:
+            msg = (f"DDS texture registration failed: {e}. "
+                   f"Non-DDS mods still applied. If any DDS texture mods "
+                   f"look wrong in-game, run Settings → Fix Everything "
+                   f"to rebuild the vanilla PATHC backup, then Apply "
+                   f"again.")
+            logger.error("PATHC update skipped: %s", e, exc_info=True)
+            if hasattr(self, "_soft_warnings"):
+                self._soft_warnings.append(msg)
+            try:
+                self.warning.emit(msg)
+            except Exception:
+                pass
+
+    def _update_pathc_for_overlay_inner(self, txn, overlay_packed) -> None:
+        """Inner implementation — kept separate so the public entry
+        point can wrap it in a broad try/except."""
 
         # Build a lookup of DDS entries {entry_path: (OverlayEntry, content_bytes)}.
         dds_entries: list[tuple[str, "OverlayEntry", bytes]] = []
