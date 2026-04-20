@@ -778,9 +778,17 @@ class ConfigPanel(QWidget):
                     break
             button_group = QButtonGroup(self)
             button_group.setExclusive(True)
+            # PySide6 signal connections hold a WEAK reference to
+            # bound-method slots. If the section Python object goes out
+            # of scope after this loop, GC collects it and the
+            # header-button click becomes a silent no-op on Windows
+            # (confirmed via Qt forum thread 154590). Keep a strong
+            # reference on the panel so every section stays alive.
+            self._collapsible_sections: list[_CollapsibleSection] = []
             for cat, idxs in cat_groups.items():
                 section = _CollapsibleSection(
                     cat, len(idxs), start_expanded=(cat == active_cat))
+                self._collapsible_sections.append(section)
                 self._body_layout.addWidget(section.header)
                 self._body_layout.addWidget(section.body)
                 for idx in idxs:
