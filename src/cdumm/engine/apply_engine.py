@@ -1595,8 +1595,12 @@ class ApplyWorker(QObject):
                     ordered = list(mod_bodies.items())  # priority order preserved
                     merged_body, warnings = merge_compiled_mod_files(
                         vanilla_for_bytes, ordered)
-                    for w in warnings:
-                        logger.info("byte-merge: %s", w)
+                    if warnings:
+                        logger.info(
+                            "byte-merge: %d byte-range overlap(s)",
+                            len(warnings))
+                        for w in warnings:
+                            logger.debug("byte-merge: %s", w)
                     if merged_body and merged_body != vanilla_for_bytes:
                         from cdumm.engine.delta_engine import load_entry_delta
                         pamt_dir = file_path.split("/")[0]
@@ -1778,8 +1782,13 @@ class ApplyWorker(QObject):
                     entry_path, e)
                 result.append(entries[indices[-1]])
                 continue
-            for w in warnings:
-                logger.info("Overlay byte-merge: %s", w)
+            if warnings:
+                logger.info(
+                    "Overlay byte-merge: %d byte-range overlap(s) "
+                    "collapsed (last-mod-wins in each)",
+                    len(warnings))
+                for w in warnings:
+                    logger.debug("Overlay byte-merge: %s", w)
             if merged_body and merged_body != vanilla:
                 first_meta = dict(entries[indices[0]][1])
                 first_meta["_merged_from"] = len(indices)
