@@ -287,21 +287,53 @@ def synthesize_merged_json(
         for k in ("name", "author", "version", "description"):
             if k not in merged and data.get(k):
                 merged[k] = data[k]
-        selected_set: set[str] | None = None
+        # Stable (patch_idx, change_idx) selection keys. Label-TEXT
+        # matching (the previous approach) broke on any variant that
+        # reused a label across multiple changes — picking one silently
+        # picked every other change sharing that text. Codex P1.
+        #
+        # A small legacy concession: if picks is a list of plain
+        # strings (DBs that wrote the old format before this fix),
+        # fall back to label-text matching with a warning so users
+        # don't lose their prior selections outright.
+        selected_keys: set[tuple[int, int]] | None = None
+        legacy_labels: set[str] | None = None
         if label_selections is not None:
             picks = label_selections.get(v["filename"])
             if picks is not None:
-                selected_set = set(picks)
-        for p in data.get("patches", []):
-            if selected_set is None:
+                if picks and isinstance(picks[0], str):
+                    logger.warning(
+                        "variant mod: legacy label-string selections for "
+                        "'%s' — label collisions may resolve wrong. "
+                        "Re-pick via the cog to upgrade the format.",
+                        v["filename"])
+                    legacy_labels = set(picks)
+                else:
+                    try:
+                        selected_keys = {
+                            (int(pi), int(ci)) for pi, ci in picks
+                        }
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "variant mod: malformed label picks for '%s', "
+                            "keeping all changes", v["filename"])
+        for p_idx, p in enumerate(data.get("patches", [])):
+            if selected_keys is None and legacy_labels is None:
                 merged["patches"].append(p)
                 continue
-            # Filter changes to keep only those whose label was selected
-            # in the per-variant cog dialog. Changes with no label are
-            # kept unconditionally (can't be toggled off by label).
+            # Filter changes by (patch_idx, change_idx). Changes with
+            # no label are kept unconditionally — they can't be
+            # toggled in the UI.
+            def _keep(c_idx: int, c: dict) -> bool:
+                if "label" not in c:
+                    return True
+                if selected_keys is not None:
+                    return (p_idx, c_idx) in selected_keys
+                # legacy fallback
+                return c.get("label") in (legacy_labels or set())
             kept = [
-                c for c in p.get("changes", [])
-                if "label" not in c or c.get("label") in selected_set
+                c for c_idx, c in enumerate(p.get("changes", []))
+                if _keep(c_idx, c)
             ]
             if kept:
                 p_copy = dict(p)

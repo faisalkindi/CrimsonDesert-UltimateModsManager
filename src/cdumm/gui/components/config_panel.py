@@ -1027,21 +1027,65 @@ class ConfigPanel(QWidget):
             logger.warning("Could not read variant JSON %s: %s",
                            json_path, e)
             return
-        previous = self._variant_label_prev.get(variant_filename)
+        previous = self._variant_label_prev.get(variant_filename) or []
+        # `previous` is now a list of [patch_idx, change_idx] pairs
+        # (post Codex-P1 fix). TogglePickerDialog expects plain label
+        # strings for pre-check display, so convert. Legacy DB rows
+        # may still be plain strings — pass them through unchanged.
+        prev_labels: list[str] = []
+        if previous and isinstance(previous[0], str):
+            prev_labels = list(previous)
+        else:
+            for pair in previous:
+                try:
+                    pi, ci = int(pair[0]), int(pair[1])
+                    c = data["patches"][pi]["changes"][ci]
+                    if "label" in c:
+                        prev_labels.append(c["label"])
+                except (IndexError, KeyError, TypeError):
+                    continue
         # Parent the modal dialog to the TOP-LEVEL window, not to the
         # narrow side panel. Otherwise the dialog inherits the panel's
         # cramped width and can't render readable mutex / checkbox
         # rows (the user reported the dialog looking truncated).
         top_parent = self.window() or self
         dlg = TogglePickerDialog(data, parent=top_parent,
-                                  previous_labels=previous)
+                                  previous_labels=prev_labels)
         if dlg.exec() and dlg.selected_data is not None:
-            picked: list[str] = []
+            # Extract stable (patch_idx, change_idx) keys for each
+            # picked change. Label-text matching (old approach) broke
+            # on variants that reused a label — picking one silently
+            # picked every sibling sharing the text. Codex P1 fix.
+            # We look up the INDEX of each picked change inside the
+            # ORIGINAL variant JSON so downstream
+            # synthesize_merged_json can reproduce the exact pick.
+            picked_keys: list[list[int]] = []
+            # Build a lookup: (game_file, offset, patched) -> (p_idx, c_idx)
+            # from the ORIGINAL data, then stamp those indices onto
+            # each picked change. The picker returns a deep-copied
+            # subset of the data, so identity (id()) doesn't apply —
+            # but (game_file, offset, patched) is unique enough to
+            # locate each picked change in the source.
+            index_lookup: dict[tuple, list[int]] = {}
+            for p_idx, p in enumerate(data.get("patches", [])):
+                gf = p.get("game_file", "")
+                for c_idx, c in enumerate(p.get("changes", [])):
+                    if "label" not in c:
+                        continue
+                    key = (gf, c.get("offset"), c.get("patched"),
+                           c.get("label"))
+                    index_lookup.setdefault(key, [p_idx, c_idx])
             for p in dlg.selected_data.get("patches", []):
+                gf = p.get("game_file", "")
                 for c in p.get("changes", []):
-                    if "label" in c:
-                        picked.append(c["label"])
-            self._variant_label_prev[variant_filename] = picked
+                    if "label" not in c:
+                        continue
+                    key = (gf, c.get("offset"), c.get("patched"),
+                           c.get("label"))
+                    pair = index_lookup.get(key)
+                    if pair is not None:
+                        picked_keys.append(list(pair))
+            self._variant_label_prev[variant_filename] = picked_keys
             self._variant_label_dirty.add(variant_filename)
             self._apply_btn.setVisible(True)
 
