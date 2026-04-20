@@ -87,6 +87,29 @@ def test_dir_source_overwrites_stale_cache(tmp_path: Path) -> None:
     assert (Path(cfg) / "variant_C").is_dir(), "second call must reflect latest sources"
 
 
+def test_no_op_when_src_unchanged_between_calls(tmp_path: Path) -> None:
+    """B2: second call with identical src must skip the copy entirely."""
+    game = _make_game_dir(tmp_path)
+    sources = game / "CDMods" / "sources" / "1180"
+    cache_root = cache_root_for(game, 1180)
+
+    # First clone
+    resolve_cfg_src(None, sources, cache_root)
+    clone_dir = cache_root / sources.name
+    # Snapshot mtime of a file inside the clone
+    probe = clone_dir / "variant_A" / "patch.json"
+    first_mtime = probe.stat().st_mtime_ns
+
+    # Second call WITHOUT any src changes — the manifest matches,
+    # so no recopy should happen. Probe mtime stays the same.
+    import time
+    time.sleep(0.05)   # ensure FS mtime resolution would register changes
+    resolve_cfg_src(None, sources, cache_root)
+    second_mtime = probe.stat().st_mtime_ns
+    assert first_mtime == second_mtime, (
+        "unchanged src should not trigger a re-copy (would update mtime)")
+
+
 def test_missing_source_path_returns_none(tmp_path: Path) -> None:
     game = tmp_path / "g"
     (game / "CDMods").mkdir(parents=True)

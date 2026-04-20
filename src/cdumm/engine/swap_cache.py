@@ -47,17 +47,60 @@ def resolve_cfg_src(
     if sources_dir and Path(sources_dir).is_dir():
         src = Path(sources_dir)
         dest = Path(cache_root) / src.name
+        # Short-circuit when dest already matches src — same file set,
+        # same sizes. Destroy-and-recopy on every swap was a perf
+        # hit (10s+ GUI stall on multi-GB mods) and the rmtree→copytree
+        # pair had no rollback on mid-copy failure (disk-full would
+        # leave dest partially populated and the persisted source_path
+        # pointing at it). B2.
+        if dest.exists() and _manifest_matches(src, dest):
+            logger.debug("swap_cache: dest already current, skipping clone")
+            return str(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Copy into a temp name first, then atomically rename so a
+        # mid-copy failure can't leave `dest` half-populated.
+        staging = dest.parent / f".{dest.name}.swap_cache_tmp"
         try:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            shutil.copytree(src, staging)
             if dest.exists():
                 shutil.rmtree(dest, ignore_errors=True)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src, dest)
+            staging.rename(dest)
             logger.info(
                 "swap_cache: cloned %s -> %s (permanent, survives TEMP cleanup)",
                 src, dest,
             )
             return str(dest)
-        except Exception as e:  # pragma: no cover
-            logger.warning("swap_cache: clone failed (%s -> %s): %s", src, dest, e)
+        except Exception as e:
+            logger.warning(
+                "swap_cache: clone failed (%s -> %s): %s", src, dest, e)
+            # Best-effort cleanup of a half-copy.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
     return None
+
+
+def _manifest_matches(src: Path, dest: Path) -> bool:
+    """Cheap equality check — same relative file set, same file sizes.
+
+    Avoids re-cloning on every swap click when the user just re-opens
+    the cog without changing anything. A byte-level hash would be
+    more correct but prohibitive for multi-GB mod sources.
+    """
+    try:
+        def _manifest(root: Path) -> dict[str, int]:
+            # Files contribute their size; directories contribute -1 so
+            # adding an empty dir shows up as a difference.
+            m: dict[str, int] = {}
+            for p in root.rglob("*"):
+                rel = p.relative_to(root).as_posix()
+                if p.is_dir():
+                    m[rel] = -1
+                elif p.is_file():
+                    m[rel] = p.stat().st_size
+            return m
+        return _manifest(src) == _manifest(dest)
+    except OSError:
+        return False
