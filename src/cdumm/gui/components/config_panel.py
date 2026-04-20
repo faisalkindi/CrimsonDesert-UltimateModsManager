@@ -2,6 +2,88 @@
 
 from __future__ import annotations
 
+import re as _re
+
+_CATEGORY_PREFIX_RE = _re.compile(r"^(?P<cat>[^/]+?)\s*/\s*(?P<rest>.+)$")
+
+
+def _group_variants_by_category_prefix(
+    variants: list[dict],
+) -> dict[str, list[int]] | None:
+    """Parse variant labels of the form '<Category> / <Rest>' and
+    return {category: [variant_index, ...]} preserving discovery order.
+
+    Returns None unless:
+      * EVERY variant's label matches the pattern (mixed sets would
+        leave unmatched variants orphaned in the UI), AND
+      * the total set spans 2+ categories (1 category is just a flat
+        list, no collapsing needed).
+    """
+    groups: dict[str, list[int]] = {}
+    for i, v in enumerate(variants):
+        label = str(v.get("label", ""))
+        m = _CATEGORY_PREFIX_RE.match(label)
+        if not m:
+            return None
+        cat = m.group("cat").strip()
+        if not cat:
+            return None
+        groups.setdefault(cat, []).append(i)
+    if len(groups) < 2:
+        return None
+    return groups
+
+
+def _strip_category_prefix(label: str) -> str:
+    """Return the right-hand side of 'Category / Rest' labels, else
+    the label unchanged."""
+    if " / " in label:
+        return label.split(" / ", 1)[1]
+    return label
+
+
+class _CollapsibleSection:
+    """Tiny collapsible block: header button + a body widget that
+    toggles visibility on click. Not a widget itself — callers layout
+    the header and body separately. Kept deliberately simple so the
+    Apply-theme pass on the parent ConfigPanel recolours the header
+    label alongside every other text widget.
+    """
+
+    def __init__(self, title: str, count: int, *, start_expanded: bool):
+        from PySide6.QtWidgets import QPushButton, QWidget, QVBoxLayout
+        self._title = title
+        self._count = count
+        self._expanded = start_expanded
+        self.header = QPushButton()
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.setStyleSheet(
+            "QPushButton { text-align: left; padding: 10px 8px; "
+            "border: none; background: transparent; font-weight: bold; "
+            "font-size: 13px; } "
+            "QPushButton:hover { background: rgba(128,128,128,0.08); "
+            "border-radius: 4px; }"
+        )
+        self.body = QWidget()
+        self._body_layout = QVBoxLayout(self.body)
+        self._body_layout.setContentsMargins(18, 0, 0, 0)
+        self._body_layout.setSpacing(0)
+        self.header.clicked.connect(self._toggle)
+        self._refresh_header()
+        self.body.setVisible(self._expanded)
+
+    def add_row(self, widget) -> None:
+        self._body_layout.addWidget(widget)
+
+    def _toggle(self) -> None:
+        self._expanded = not self._expanded
+        self.body.setVisible(self._expanded)
+        self._refresh_header()
+
+    def _refresh_header(self) -> None:
+        arrow = "\u25BE" if self._expanded else "\u25B8"   # ▾ / ▸
+        self.header.setText(f"{arrow}  {self._title}    ({self._count})")
+
 
 def _is_apply_visible(
     variant_widgets: dict,
@@ -634,6 +716,86 @@ class ConfigPanel(QWidget):
                 groups.setdefault(g, []).append(i)
             else:
                 independents.append(i)
+
+        # Archive-wide mutex packs (GildsGear-style: 40+ variants in one
+        # radio group with 'Category / Variant' labels) render as
+        # collapsible category sections so the user isn't scrolling
+        # through 40 radios. Triggers when we have exactly ONE radio
+        # group, no independents, and every label parses into 2+
+        # categories.
+        cat_groups = None
+        if len(groups) == 1 and not independents:
+            only_members = next(iter(groups.values()))
+            member_variants = [self._variants_meta[i] for i in only_members]
+            parsed = _group_variants_by_category_prefix(member_variants)
+            if parsed is not None:
+                # Map local member indices back to full variants_meta
+                # indices so downstream handlers still work.
+                cat_groups = {
+                    cat: [only_members[li] for li in idxs]
+                    for cat, idxs in parsed.items()
+                }
+
+        if cat_groups:
+            # Which category contains the currently-enabled variant?
+            # That one starts expanded; the rest collapsed.
+            active_cat = next(iter(cat_groups))
+            for cat, idxs in cat_groups.items():
+                if any(self._variants_meta[i].get("enabled") for i in idxs):
+                    active_cat = cat
+                    break
+            button_group = QButtonGroup(self)
+            button_group.setExclusive(True)
+            for cat, idxs in cat_groups.items():
+                section = _CollapsibleSection(
+                    cat, len(idxs), start_expanded=(cat == active_cat))
+                self._body_layout.addWidget(section.header)
+                self._body_layout.addWidget(section.body)
+                for idx in idxs:
+                    v = dict(self._variants_meta[idx])
+                    # Show just the right-hand side ('AbyssGear_1')
+                    # since the section header already says
+                    # 'Abyss Gears'.
+                    v["label"] = _strip_category_prefix(v.get("label", ""))
+                    rb = QRadioButton()
+                    rb.setChecked(bool(self._variants_meta[idx].get("enabled")))
+                    rb.toggled.connect(self._on_variant_changed)
+                    button_group.addButton(rb, idx)
+                    self._variant_widgets[idx] = rb
+                    section.add_row(self._build_variant_row(rb, v))
+            # Skip the flat-group render below.
+            if conflicts:
+                self._add_section_header(tr("config_panel.section_conflicts"))
+                for desc in conflicts:
+                    lbl = CaptionLabel(desc)
+                    lbl.setWordWrap(True)
+                    lbl.setStyleSheet("color: #D04848; padding: 4px 0;")
+                    self._body_layout.addWidget(lbl)
+            self._body_layout.addStretch()
+            self._apply_theme()
+
+            self.setVisible(True)
+            self._anim.stop()
+            try:
+                self._anim.finished.disconnect(self._emit_closed)
+            except RuntimeError:
+                pass
+            self._anim.setStartValue(self.maximumWidth())
+            self._anim.setEndValue(self._PANEL_WIDTH)
+            self._opacity_effect = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self._opacity_effect)
+            self._opacity_effect.setOpacity(0.0)
+            self._fade_anim = QPropertyAnimation(
+                self._opacity_effect, b"opacity")
+            self._fade_anim.setDuration(self._ANIM_DURATION)
+            self._fade_anim.setStartValue(0.0)
+            self._fade_anim.setEndValue(1.0)
+            self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._fade_anim.finished.connect(
+                lambda: self.setGraphicsEffect(None))
+            self._anim.start()
+            self._fade_anim.start()
+            return
 
         for g_id, members in sorted(groups.items()):
             # Per-group header (axis name like "Gender" / "Race") when
