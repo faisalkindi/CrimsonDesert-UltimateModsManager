@@ -162,8 +162,12 @@ def collect_archive_mutex_jsons(
                 return None
 
     # Every folder pair overlaps → archive-wide mutex. Flatten.
+    # Labels use prettified names so 'AbyssGears' becomes 'Abyss Gears'
+    # and 'AbyssGear_1' becomes 'Abyss Gear 1' in the cog.
+    from cdumm.engine.import_handler import prettify_mod_name
     result: list[tuple[Path, dict, str]] = []
     for folder_name in sorted(folder_jsons.keys()):
+        pretty_folder = prettify_mod_name(folder_name) or folder_name
         for p in folder_jsons[folder_name]:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -172,7 +176,8 @@ def collect_archive_mutex_jsons(
                 continue
             if not isinstance(data, dict) or "patches" not in data:
                 continue
-            label = f"{folder_name} / {p.stem}"
+            pretty_variant = prettify_mod_name(p.stem) or p.stem
+            label = f"{pretty_folder} / {pretty_variant}"
             result.append((p, data, label))
     if len(result) < 2:
         return None

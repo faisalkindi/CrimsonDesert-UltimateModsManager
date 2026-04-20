@@ -43,10 +43,10 @@ def test_all_folders_mutex_returns_every_json_flat(tmp_path: Path):
     result = collect_archive_mutex_jsons(tmp_path)
     assert result is not None, "archive-wide mutex not detected"
     assert len(result) == 9, f"expected 9 JSONs, got {len(result)}"
-    # Folder prefix should be in each variant's label so the cog can
-    # group or distinguish them.
+    # Folder prefix (prettified) should be in each variant's label so
+    # the cog can group or distinguish them.
     labels = [lbl for _p, _d, lbl in result]
-    assert any(lbl.startswith("AbyssGears") for lbl in labels)
+    assert any(lbl.startswith("Abyss Gears") for lbl in labels)
     assert any(lbl.startswith("Armors") for lbl in labels)
     assert any(lbl.startswith("Weapons") for lbl in labels)
 
@@ -75,13 +75,14 @@ def test_single_folder_not_flattened(tmp_path: Path):
 
 
 def test_folder_prefix_in_variant_labels(tmp_path: Path):
-    """The returned label should let the cog show 'AbyssGears / AbyssGear_1'."""
+    """The returned label should be PRETTIFIED: 'AbyssGears/AbyssGear_1'
+    collapses to 'Abyss Gears / Abyss Gear 1' (CamelCase split, underscore
+    to space, title case)."""
     _write(tmp_path / "AbyssGears" / "AbyssGear_1.json", [10, 20], "abyss1")
     _write(tmp_path / "Armors" / "AllArmor_1.json", [10, 20], "armor1")
 
     result = collect_archive_mutex_jsons(tmp_path)
     assert result is not None
-    # Expect labels like "AbyssGears / AbyssGear_1" and "Armors / AllArmor_1"
     label_set = {lbl for _p, _d, lbl in result}
-    assert "AbyssGears / AbyssGear_1" in label_set
-    assert "Armors / AllArmor_1" in label_set
+    assert "Abyss Gears / Abyss Gear 1" in label_set
+    assert "Armors / All Armor 1" in label_set

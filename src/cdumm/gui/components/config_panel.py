@@ -57,12 +57,20 @@ class _CollapsibleSection:
         self._expanded = start_expanded
         self.header = QPushButton()
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Explicit theme-aware text color — the default QPushButton color
+        # didn't inherit the ConfigPanel stylesheet and rendered
+        # white-on-white in light mode. isDarkTheme() is sampled at
+        # build time; _apply_theme on the parent ConfigPanel re-runs
+        # show_variant_mod on theme flips which rebuilds these
+        # sections from scratch.
+        from qfluentwidgets import isDarkTheme
+        _fg = "#E2E8F0" if isDarkTheme() else "#1A202C"
         self.header.setStyleSheet(
-            "QPushButton { text-align: left; padding: 10px 8px; "
-            "border: none; background: transparent; font-weight: bold; "
-            "font-size: 13px; } "
-            "QPushButton:hover { background: rgba(128,128,128,0.08); "
-            "border-radius: 4px; }"
+            f"QPushButton {{ text-align: left; padding: 10px 8px; "
+            f"border: none; background: transparent; color: {_fg}; "
+            f"font-weight: bold; font-size: 13px; }} "
+            f"QPushButton:hover {{ background: rgba(128,128,128,0.08); "
+            f"border-radius: 4px; }}"
         )
         self.body = QWidget()
         self._body_layout = QVBoxLayout(self.body)
@@ -258,7 +266,12 @@ class ConfigPanel(QWidget):
         self._body = QWidget()
         self._body.setStyleSheet("background: transparent;")
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        # 14px right padding so the scrollbar track doesn't sit on top
+        # of radio / checkbox indicators at the right edge of each row.
+        # Qt's default vertical scrollbar is 12-14px wide on Windows;
+        # this clearance keeps the scrollbar and the indicators in
+        # separate columns.
+        self._body_layout.setContentsMargins(0, 0, 14, 0)
         self._body_layout.setSpacing(0)
         scroll.setWidget(self._body)
         root.addWidget(scroll, 1)
@@ -685,10 +698,29 @@ class ConfigPanel(QWidget):
             self._badge_row.insertWidget(
                 1, _make_badge(f"v{version}", "#444C5C"))
         n_enabled = sum(1 for v in self._variants_meta if v.get("enabled"))
+        # Detect mutex-variant-pack mode (collapsibles will render) so
+        # the badge doesn't read "1/144 variants" — which feels alarming,
+        # like 143 mods are broken. Show the active loadout name instead,
+        # matching the user's mental model ("I've picked ONE loadout").
+        _labels = [str(v.get("label", "")) for v in self._variants_meta]
+        _mutex_pack = (
+            len(self._variants_meta) >= 4
+            and all(" / " in lbl for lbl in _labels)
+            and _group_variants_by_category_prefix(self._variants_meta)
+                is not None
+        )
+        if _mutex_pack:
+            _active = next(
+                (v for v in self._variants_meta if v.get("enabled")), None)
+            if _active:
+                _short = _strip_category_prefix(_active.get("label", ""))
+                _badge_text = f"Active: {_short}"
+            else:
+                _badge_text = f"{len(self._variants_meta)} loadouts"
+        else:
+            _badge_text = f"{n_enabled}/{len(self._variants_meta)} variants"
         self._badge_row.insertWidget(
-            2,
-            _make_badge(f"{n_enabled}/{len(self._variants_meta)} variants",
-                        "#444C5C"),
+            2, _make_badge(_badge_text, "#444C5C"),
         )
 
         self._clear_body()
