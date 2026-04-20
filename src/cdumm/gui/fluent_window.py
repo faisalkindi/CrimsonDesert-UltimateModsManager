@@ -2484,14 +2484,19 @@ class CdummWindow(FluentWindow):
                         # gets two files named the same.
                         import tempfile as _tmp
                         import shutil as _sh
+                        import re as _re
                         from cdumm.engine.temp_workspace import make_temp_dir
                         staging = make_temp_dir("cdumm_archive_mutex_")
                         prefixed_presets: list[tuple[Path, dict]] = []
                         for src_path, data, label in archive_mutex:
-                            safe = (label.replace(" / ", "__")
-                                         .replace(" ", "_")
-                                         .replace("/", "_")
-                                         .replace("\\", "_"))
+                            # Sanitize Windows-reserved chars too
+                            # (< > : " | ? * / \). Prettified folder
+                            # or file names can contain ':' (from
+                            # "Level 1: Starter") which crashes the
+                            # copy mid-loop on Windows. E3.
+                            safe = label.replace(" / ", "__")
+                            safe = _re.sub(r'[<>:"|?*\\/]', '_', safe)
+                            safe = safe.replace(" ", "_")
                             dest = staging / f"{safe}.json"
                             _sh.copy2(src_path, dest)
                             # Tag the data so the cog label reads

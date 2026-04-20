@@ -151,14 +151,23 @@ def collect_archive_mutex_jsons(
         if union:
             per_folder_offsets[folder_name] = union
 
-    if len(per_folder_offsets) < 2:
+    # Only folders with NON-EMPTY offset targets can participate in the
+    # mutex cluster decision. Folders with empty sets (docs/readme or
+    # malformed JSONs) would otherwise break pair-overlap checks and
+    # defeat detection on archives with one stray non-mutex folder.
+    # C-M3 / BMAD B6.
+    active_folders = {
+        n: offs for n, offs in per_folder_offsets.items() if offs
+    }
+    if len(active_folders) < 2:
         return None
 
-    names = list(per_folder_offsets.keys())
+    names = list(active_folders.keys())
     for i, a in enumerate(names):
         for b in names[i + 1:]:
-            if not (per_folder_offsets[a] & per_folder_offsets[b]):
-                # Found a disjoint pair — NOT a full archive mutex.
+            if not (active_folders[a] & active_folders[b]):
+                # Found a disjoint pair among ACTIVE folders — NOT a
+                # full archive mutex.
                 return None
 
     # Every folder pair overlaps → archive-wide mutex. Flatten.

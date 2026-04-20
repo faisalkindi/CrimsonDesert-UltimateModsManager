@@ -63,13 +63,35 @@ def test_partial_overlap_is_not_independent(tmp_path: Path):
     assert not folders_are_independent(gf)
 
 
-def test_empty_folder_target_set_stays_independent(tmp_path: Path):
-    """A folder with no JSON game_files contributes nothing — not a conflict."""
+def test_one_real_one_empty_folder_is_not_independent(tmp_path: Path):
+    """E4: one real folder + one empty folder is NOT 'independent' for
+    picker purposes — we don't have ≥2 target-bearing folders, so the
+    safer default is mutex/radio mode. Treating this as 'independent'
+    let a single malformed JSON flip the picker to multi-select and
+    bypass the apply-time mutex detector (E4).
+    """
     (tmp_path / "Empty").mkdir()
     _make_json(tmp_path / "Real" / "r.json", "gamedata/z.pabgb")
 
     folders = [tmp_path / "Empty", tmp_path / "Real"]
     gf = folder_variant_game_files(folders)
+    assert not folders_are_independent(gf), (
+        "single target-bearing folder + empty folder must default to "
+        "mutex/radio mode, not multi-select")
+
+
+def test_two_real_folders_with_one_empty_siblings_still_independent(tmp_path: Path):
+    """Two real folders targeting different files + one stray empty
+    folder should STILL be considered independent."""
+    _make_json(tmp_path / "A" / "a.json", "gamedata/x.pabgb")
+    _make_json(tmp_path / "B" / "b.json", "gamedata/y.pabgb")
+    (tmp_path / "Docs").mkdir()
+
+    folders = [tmp_path / "A" / "..", tmp_path / "B" / "..",
+               tmp_path / "Docs"]
+    # reorganize the call:
+    gf = folder_variant_game_files(
+        [tmp_path / "A", tmp_path / "B", tmp_path / "Docs"])
     assert folders_are_independent(gf)
 
 

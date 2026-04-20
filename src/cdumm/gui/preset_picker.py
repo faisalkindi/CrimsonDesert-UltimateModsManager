@@ -155,12 +155,22 @@ def folder_variant_game_files(folders: list[Path]) -> dict[Path, set[str]]:
 
 
 def folders_are_independent(gf_map: dict[Path, set[str]]) -> bool:
-    """True if no two folders share any game_file target.
+    """True if no two non-empty folder target-sets share any game_file.
 
-    Empty sets never conflict (per folder_variant_game_files semantics).
-    A single-folder map is trivially independent.
+    Empty folders (unparseable JSONs, docs/readme siblings) USED to be
+    treated as "never conflict" which let a single malformed folder
+    flip the whole archive into checkbox mode — and the mutex folders
+    got silently drop-at-byte-level at apply time. E4 fix: require at
+    least 2 NON-EMPTY folders to consider the archive 'independent'
+    at all. If only one folder has byte targets, the 'independent'
+    check is moot — there's nothing to conflict WITH.
     """
     non_empty = [t for t in gf_map.values() if t]
+    if len(non_empty) < 2:
+        # With fewer than 2 target-bearing folders, there's no
+        # meaningful 'independent' decision to make — default to the
+        # safer mutex (radio) mode.
+        return False
     seen: set[str] = set()
     for targets in non_empty:
         if seen & targets:
