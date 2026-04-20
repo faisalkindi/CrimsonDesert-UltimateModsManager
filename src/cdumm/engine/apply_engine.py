@@ -1695,11 +1695,30 @@ class ApplyWorker(QObject):
                 if len(body) != len(vanilla)
             ]
             if size_changed:
-                logger.info(
+                logger.warning(
                     "Overlay merge: %s has size-changing entries "
                     "(vanilla=%d, mod lens=%s) — using highest-priority "
                     "last-wins instead of lossy byte-merge",
                     entry_path, len(vanilla), size_changed)
+                # Surface to the GUI so the user sees the drop — not
+                # just a log line. Byte-merge can't mix inserts
+                # safely, and the lower-priority mods' changes are
+                # silently gone. C-H4 (GDS + BMAD).
+                kept_mod_meta = entries[indices[-1]][1]
+                kept_name = kept_mod_meta.get(
+                    "mod_name", "highest-priority mod")
+                dropped_count = len(indices) - 1
+                msg = (f"{dropped_count} mod(s) targeting "
+                       f"'{entry_path}' were dropped because they change "
+                       f"the file size and can't merge with inserts. "
+                       f"Only '{kept_name}' is active for that file. "
+                       f"Use priority to pick a different winner.")
+                if hasattr(self, "_soft_warnings"):
+                    self._soft_warnings.append(msg)
+                try:
+                    self.warning.emit(msg)
+                except Exception:
+                    pass
                 result.append(entries[indices[-1]])
                 continue
             try:
