@@ -2453,6 +2453,90 @@ class CdummWindow(FluentWindow):
                     scan_dir = None
 
             if scan_dir is not None:
+                # Archive-wide mutex check: if EVERY folder's JSONs
+                # target overlapping shop slots (GildsGear pattern —
+                # 10 category folders × N alt JSONs, all fighting for
+                # the same 93 slots), skip the folder picker entirely
+                # and bundle all JSONs into one variant mod. The cog
+                # shows every option across every category, labelled
+                # with the folder name, so the user can switch between
+                # ANY variant without re-dropping the archive.
+                try:
+                    from cdumm.engine.mutex_json_folder import (
+                        collect_archive_mutex_jsons)
+                    from cdumm.engine.variant_handler import (
+                        import_multi_variant)
+                    archive_mutex = collect_archive_mutex_jsons(scan_dir)
+                except Exception as _e:
+                    logger.debug("archive-wide mutex check failed: %s", _e)
+                    archive_mutex = None
+                if archive_mutex:
+                    logger.info(
+                        "Archive-wide mutex detected: %d JSONs across "
+                        "all folders — bundling into one variant mod",
+                        len(archive_mutex))
+                    try:
+                        # Rewrite each JSON's name field to the folder-
+                        # prefixed label so the cog distinguishes
+                        # "AbyssGears / AbyssGear_1" from "Armors /
+                        # AllArmor_1". Copy into a staging dir with
+                        # disambiguated basenames so variants/ never
+                        # gets two files named the same.
+                        import tempfile as _tmp
+                        import shutil as _sh
+                        from cdumm.engine.temp_workspace import make_temp_dir
+                        staging = make_temp_dir("cdumm_archive_mutex_")
+                        prefixed_presets: list[tuple[Path, dict]] = []
+                        for src_path, data, label in archive_mutex:
+                            safe = (label.replace(" / ", "__")
+                                         .replace(" ", "_")
+                                         .replace("/", "_")
+                                         .replace("\\", "_"))
+                            dest = staging / f"{safe}.json"
+                            _sh.copy2(src_path, dest)
+                            # Tag the data so the cog label reads
+                            # "Abyss Gears / AbyssGear_1" — name takes
+                            # precedence over filename in the variant
+                            # label builder.
+                            d2 = dict(data)
+                            d2["name"] = label
+                            prefixed_presets.append((dest, d2))
+                        mods_dir = self._game_dir / "CDMods" / "mods"
+                        initial = {prefixed_presets[0][0]}
+                        _original = getattr(
+                            self, "_original_drop_path", None) or path
+                        source_for_name = (
+                            _original
+                            if isinstance(_original, Path)
+                            and _original.exists()
+                            else path)
+                        mv_result = import_multi_variant(
+                            prefixed_presets, source_for_name,
+                            self._game_dir, mods_dir, self._db,
+                            initial_selection=initial)
+                        if (mv_result and hasattr(self, "_activity_log")
+                                and self._activity_log):
+                            self._activity_log.log(
+                                "import",
+                                f"Imported variant mod: "
+                                f"{mv_result['mod_name']}",
+                                f"{len(mv_result['variants'])} "
+                                f"alternatives (1 enabled)")
+                        if mv_result:
+                            self._refresh_all()
+                    except Exception as _amv_e:
+                        logger.error(
+                            "archive-wide import_multi_variant "
+                            "failed: %s", _amv_e, exc_info=True)
+                    # Clean up the pre-extract temp.
+                    if _tmp_extract_for_picker is not None:
+                        import shutil
+                        shutil.rmtree(
+                            _tmp_extract_for_picker,
+                            ignore_errors=True)
+                    self._process_next_import()
+                    return
+
                 # Walk the variant tree. Some mods nest variants (Character
                 # Creator for example ships Female/Male at the top and each
                 # has Goblin/Human/Orc inside). After the user picks a level,

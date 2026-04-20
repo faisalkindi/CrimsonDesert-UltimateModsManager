@@ -102,3 +102,78 @@ def detect_mutex_folder_jsons(
     if len(parsed) < 2:
         return None
     return parsed
+
+
+def collect_archive_mutex_jsons(
+    scan_dir: Path,
+) -> list[tuple[Path, dict, str]] | None:
+    """If the ENTIRE archive (every JSON across every subfolder) is a
+    single mutex set, return a flat list of (path, data, label) tuples
+    suitable for import_multi_variant.
+
+    Label format: ``"<folder> / <filename-stem>"`` so the cog can show
+    the full hierarchy without needing a two-level picker.
+
+    Returns None when:
+      * scan_dir has fewer than 2 subfolders with JSONs (single-folder
+        case is handled by detect_mutex_folder_jsons instead),
+      * any pair of folders targets DISJOINT offsets (truly independent
+        categories — user should get the multi-select checkbox dialog),
+      * scan_dir itself is not a directory or contains no JSONs.
+    """
+    scan_dir = Path(scan_dir)
+    if not scan_dir.is_dir():
+        return None
+
+    # Walk one level down. GildsGear-style: root/<category>/<json>*.
+    folder_jsons: dict[str, list[Path]] = {}
+    for entry in scan_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(".") or entry.name.startswith("_"):
+            continue
+        jsons = sorted(
+            p for p in entry.iterdir()
+            if p.is_file() and p.suffix.lower() == ".json"
+        )
+        if jsons:
+            folder_jsons[entry.name] = jsons
+
+    if len(folder_jsons) < 2:
+        return None
+
+    # Build offset set per folder and confirm EVERY pair overlaps.
+    per_folder_offsets: dict[str, set[tuple[str, int]]] = {}
+    for folder_name, jsons in folder_jsons.items():
+        union: set[tuple[str, int]] = set()
+        for p in jsons:
+            union |= json_offsets(p)
+        if union:
+            per_folder_offsets[folder_name] = union
+
+    if len(per_folder_offsets) < 2:
+        return None
+
+    names = list(per_folder_offsets.keys())
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if not (per_folder_offsets[a] & per_folder_offsets[b]):
+                # Found a disjoint pair — NOT a full archive mutex.
+                return None
+
+    # Every folder pair overlaps → archive-wide mutex. Flatten.
+    result: list[tuple[Path, dict, str]] = []
+    for folder_name in sorted(folder_jsons.keys()):
+        for p in folder_jsons[folder_name]:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                logger.debug("archive mutex: skipping %s (%s)", p, e)
+                continue
+            if not isinstance(data, dict) or "patches" not in data:
+                continue
+            label = f"{folder_name} / {p.stem}"
+            result.append((p, data, label))
+    if len(result) < 2:
+        return None
+    return result
