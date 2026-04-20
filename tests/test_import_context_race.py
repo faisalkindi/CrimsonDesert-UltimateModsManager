@@ -45,7 +45,7 @@ def test_snapshot_clears_fields_on_window_after_capture():
         _configurable_source="X",
         _configurable_labels={"L": True},
         _variant_leaf_rel="V",
-        _original_drop_path=None,
+        _original_drop_path="E:/mods/archive.zip",
     )
     snapshot_and_clear_import_context(win)
     assert win._update_priority is None
@@ -53,6 +53,10 @@ def test_snapshot_clears_fields_on_window_after_capture():
     assert win._configurable_source is None
     assert win._configurable_labels is None
     assert win._variant_leaf_rel is None
+    # C-H3: _original_drop_path must ALSO be cleared so concurrent
+    # launches don't read the prior launch's path.
+    assert win._original_drop_path is None, (
+        "original_drop_path must be cleared too")
 
 
 def test_second_snapshot_is_independent():

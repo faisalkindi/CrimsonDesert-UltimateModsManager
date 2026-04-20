@@ -29,10 +29,11 @@ def snapshot_and_clear_import_context(win) -> dict:
     """Read the import-context fields off `win`, reset them, return the snapshot.
 
     Reads are via getattr with a None default so missing attributes
-    don't raise. Clears every field except `_original_drop_path` —
-    that one is reused by the error reporter across retries, so we
-    don't wipe it from the window (the snapshot still carries the
-    value for the launch that captured it).
+    don't raise. Clears EVERY field including `_original_drop_path`
+    so a later launch can't read a stale value while the first proc
+    is still in flight. Callers that need the original drop path
+    after _on_finished runs must read it from the proc-attached
+    context dict (ctx['original_drop_path']), not self.
     """
     ctx = {k: getattr(win, f"_{k}", None) for k in IMPORT_CONTEXT_KEYS}
     win._update_priority = None
@@ -40,4 +41,5 @@ def snapshot_and_clear_import_context(win) -> dict:
     win._configurable_source = None
     win._configurable_labels = None
     win._variant_leaf_rel = None
+    win._original_drop_path = None
     return ctx
