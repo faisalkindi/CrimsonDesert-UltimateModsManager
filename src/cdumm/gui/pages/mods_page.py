@@ -1955,6 +1955,10 @@ class ModsPage(QWidget):
             menu.addAction(Action(FluentIcon.PENCIL_INK, tr("mods.edit_notes") if mod.get("notes") else tr("mods.add_notes"),
                                   triggered=lambda: self._ctx_notes(mod_id)))
 
+            # Open source files in Explorer
+            menu.addAction(Action(FluentIcon.FOLDER, tr("mod_context.open_source"),
+                                  triggered=lambda: self._ctx_open_source(mod_id, mod)))
+
             # Link to NexusMods
             nexus_id = mod.get("nexus_mod_id")
             if nexus_id:
@@ -2001,6 +2005,38 @@ class ModsPage(QWidget):
     def _ctx_open_nexus(self, nexus_id: int) -> None:
         import webbrowser
         webbrowser.open(f"https://www.nexusmods.com/crimsondesert/mods/{nexus_id}")
+
+    def _ctx_open_source(self, mod_id: int, mod: dict) -> None:
+        """Open the mod's source folder in Windows Explorer.
+
+        Uses os.startfile on the resolved path (Windows default action for a
+        directory = open in Explorer). Shows an InfoBar if no folder exists
+        or if Windows refuses to open it.
+        """
+        import os
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        from cdumm.engine.mod_source_path import resolve_mod_source_path
+
+        if self._game_dir is None:
+            return
+
+        path = resolve_mod_source_path(mod, self._game_dir)
+        if path is None:
+            InfoBar.warning(
+                title=tr("mod_context.open_source_not_found_title"),
+                content=tr("mod_context.open_source_not_found_body"),
+                duration=4000, position=InfoBarPosition.TOP, parent=self.window())
+            return
+
+        try:
+            os.startfile(str(path))
+        except OSError as e:
+            logger.warning("Open source files: os.startfile failed for %s: %s", path, e)
+            InfoBar.error(
+                title=tr("mod_context.open_source_failed_title"),
+                content=tr("mod_context.open_source_failed_body", error=str(e)),
+                duration=4000, position=InfoBarPosition.TOP, parent=self.window())
 
     def _ctx_link_nexus(self, mod_id: int) -> None:
         from PySide6.QtWidgets import QInputDialog
