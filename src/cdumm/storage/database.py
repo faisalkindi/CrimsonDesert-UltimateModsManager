@@ -424,6 +424,16 @@ class Database:
             )
             logger.info("Migrated: added custom_values column to mod_config")
 
+        # Add selected_labels column to mod_config for variant cog
+        # label-pick persistence. DBs created before that feature
+        # shipped don't have this column; inserts/reads would fail
+        # with "no such column" on startup.
+        if "selected_labels" not in mc_cols:
+            self._connection.execute(
+                "ALTER TABLE mod_config ADD COLUMN selected_labels TEXT"
+            )
+            logger.info("Migrated: added selected_labels column to mod_config")
+
         # One-shot backfill: mods imported on master v3.0.1 or earlier have
         # empty mods.version because parse_nexus_filename was a stub. Now
         # that master ships the full parser, retroactively populate the
