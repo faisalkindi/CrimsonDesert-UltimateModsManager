@@ -523,6 +523,16 @@ def fixup_pabgh_after_inserts(pabgh: bytes,
     return bytes(arr)
 
 
+def _intersects_written_ranges(pos: int, length: int,
+                                ranges: list[tuple[int, int]]) -> bool:
+    """Return True if [pos, pos+length) overlaps any (start, end) range."""
+    end = pos + length
+    for start, stop in ranges:
+        if pos < stop and start < end:
+            return True
+    return False
+
+
 def _apply_byte_patches(data: bytearray, changes: list[dict],
                         signature: str | None = None,
                         vanilla_data: bytes | None = None,
@@ -680,6 +690,12 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     # primaries. For each patch, shift is the sum of deltas from writes
     # whose position is strictly BELOW this patch's primary.
     writes: list[tuple[int, int]] = []
+    # Track the ORIGINAL-coord byte ranges this apply pass has written
+    # to. Fallback-offset resolution must skip any candidate that
+    # lands inside one of these ranges — short `original` strings
+    # (2-4 bytes: '00 00', 'FF FF', float sentinels) can incidentally
+    # match at an earlier patch's write zone and silently undo it. E2.
+    written_ranges: list[tuple[int, int]] = []
 
     def _shift_for(pos: int) -> int:
         return sum(d for w_pos, d in writes if w_pos < pos)
@@ -701,6 +717,8 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 if inserts_out is not None:
                     inserts_out.append((original_offset, len(insert_bytes)))
                 writes.append((original_offset, len(insert_bytes)))
+                written_ranges.append(
+                    (original_offset, original_offset + len(insert_bytes)))
                 applied += 1
         else:
             # Replace
@@ -725,6 +743,9 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     if actual_at_patch == patched_bytes:
                         logger.debug("Already patched at %d, keeping as-is", offset)
                         writes.append((original_offset, size_delta))
+                        written_ranges.append(
+                            (original_offset,
+                             original_offset + len(patched_bytes)))
                         applied += 1
                         continue
 
@@ -750,6 +771,9 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             "patched bytes over earlier-patch remnant", offset)
                         data[offset:offset + len(original_bytes)] = patched_bytes
                         writes.append((original_offset, size_delta))
+                        written_ranges.append(
+                            (original_offset,
+                             original_offset + len(original_bytes)))
                         applied += 1
                         continue
 
@@ -757,17 +781,32 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     # exactly one fallback to match (avoid silently patching
                     # the wrong record when short `original` byte strings
                     # recur).
+                    # Also reject fallbacks that would overwrite a region
+                    # this apply pass already wrote to — short `original`
+                    # strings (2-4 bytes like '00 00', 'FF FF', floats)
+                    # can incidentally match at an earlier patch's write
+                    # zone and silently undo it. E2.
                     viable_fbs: list[int] = []
                     for fb_orig in fallback_offsets:
                         fb_off = fb_orig + _shift_for(fb_orig)
                         if fb_off + len(original_bytes) > len(data):
                             continue
                         if data[fb_off:fb_off + len(original_bytes)] == original_bytes:
+                            if _intersects_written_ranges(
+                                    fb_orig, len(original_bytes),
+                                    written_ranges):
+                                logger.debug(
+                                    "Fallback offset 0x%X skipped — lands in "
+                                    "a range this pass already wrote to",
+                                    fb_orig)
+                                continue
                             viable_fbs.append(fb_orig)
                     if len(viable_fbs) == 1:
                         fb_orig = viable_fbs[0]
                         fb_off = fb_orig + _shift_for(fb_orig)
                         data[fb_off:fb_off + len(original_bytes)] = patched_bytes
+                        written_ranges.append(
+                            (fb_orig, fb_orig + len(original_bytes)))
                         logger.info(
                             "Fallback offset 0x%X matched (primary 0x%X missed) "
                             "for entry=%r", fb_orig, original_offset,
@@ -800,6 +839,9 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             # original_offset; the shift tracker needs
                             # to agree with that sort order.
                             writes.append((original_offset, size_delta))
+                            written_ranges.append(
+                                (original_offset,
+                                 original_offset + len(original_bytes)))
                             applied += 1
                             relocated += 1
                             continue
@@ -813,6 +855,8 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             old_len = len(bytes.fromhex(change["original"])) if "original" in change else len(patched_bytes)
             data[offset:offset + old_len] = patched_bytes
             writes.append((original_offset, len(patched_bytes) - old_len))
+            written_ranges.append(
+                (original_offset, original_offset + old_len))
             applied += 1
 
     return applied, mismatched, relocated
