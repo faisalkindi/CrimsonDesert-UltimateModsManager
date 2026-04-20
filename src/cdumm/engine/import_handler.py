@@ -1585,6 +1585,19 @@ def _import_sibling_json_patches(
             # stale sibling manually; we will address this properly
             # with a compound-archive ID once the import worker can
             # thread that lineage through.
+            # Snapshot the current max mod_id BEFORE calling the
+            # importer. If it raises mid-insert, the only orphans to
+            # clean up are rows with id > this watermark. Matching
+            # strictly by name was too broad — any pre-existing mod
+            # with the same display name and zero deltas (a legitimate
+            # in-progress import, or an earlier failed one) got
+            # silently wiped too. GDS + BMAD finding C-H5.
+            try:
+                pre_max_row = db.connection.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM mods").fetchone()
+                pre_max_id = int(pre_max_row[0]) if pre_max_row else 0
+            except Exception:
+                pre_max_id = 0
             try:
                 entr_result = import_json_as_entr(
                     jp_data, game_dir, db, deltas_dir, jp_name,
@@ -1593,17 +1606,15 @@ def _import_sibling_json_patches(
                 logger.warning(
                     "Sibling JSON '%s' import failed: %s",
                     cand.name, e)
-                # Best-effort orphan cleanup: import_json_as_entr may
-                # have inserted the `mods` row before raising, leaving
-                # a name=jp_name row with zero mod_deltas. Find and
-                # remove those so the user doesn't see a ghost entry.
+                # Scope the orphan scan to mods inserted AFTER the
+                # watermark, with name=jp_name and zero deltas.
                 try:
                     from cdumm.engine.mod_manager import ModManager
                     rows = db.connection.execute(
                         "SELECT m.id FROM mods m "
                         "LEFT JOIN mod_deltas d ON d.mod_id = m.id "
-                        "WHERE m.name = ? AND d.id IS NULL",
-                        (jp_name,)).fetchall()
+                        "WHERE m.name = ? AND m.id > ? AND d.id IS NULL",
+                        (jp_name, pre_max_id)).fetchall()
                     mm = ModManager(db, deltas_dir)
                     for (gid,) in rows:
                         try:
