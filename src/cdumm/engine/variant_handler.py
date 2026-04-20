@@ -244,6 +244,7 @@ def synthesize_merged_json(
     mod_dir: Path,
     variants: list[dict],
     base_meta: dict | None = None,
+    label_selections: dict[str, list[str]] | None = None,
 ) -> Path:
     """Write ``<mod_dir>/merged.json`` with patches from every enabled
     variant concatenated. ``mods.json_source`` should point at this file.
@@ -251,6 +252,12 @@ def synthesize_merged_json(
     ``base_meta`` may supply ``name`` / ``description`` / ``author`` /
     ``version`` — otherwise those are drawn from the first enabled
     variant.
+
+    ``label_selections`` optionally narrows each variant's patches to
+    only the labeled changes the user opted into via the per-variant
+    cog dialog. Keyed by the variant's ``filename``; value is the list
+    of labels that should survive. A variant whose filename is absent
+    from the dict keeps ALL its changes (backward-compatible default).
     """
     vdir = mod_dir / "variants"
     enabled = [v for v in variants if v.get("enabled")]
@@ -280,8 +287,26 @@ def synthesize_merged_json(
         for k in ("name", "author", "version", "description"):
             if k not in merged and data.get(k):
                 merged[k] = data[k]
+        selected_set: set[str] | None = None
+        if label_selections is not None:
+            picks = label_selections.get(v["filename"])
+            if picks is not None:
+                selected_set = set(picks)
         for p in data.get("patches", []):
-            merged["patches"].append(p)
+            if selected_set is None:
+                merged["patches"].append(p)
+                continue
+            # Filter changes to keep only those whose label was selected
+            # in the per-variant cog dialog. Changes with no label are
+            # kept unconditionally (can't be toggled off by label).
+            kept = [
+                c for c in p.get("changes", [])
+                if "label" not in c or c.get("label") in selected_set
+            ]
+            if kept:
+                p_copy = dict(p)
+                p_copy["changes"] = kept
+                merged["patches"].append(p_copy)
 
     dest = mod_dir / "merged.json"
     dest.write_text(json.dumps(merged, indent=2), encoding="utf-8")
@@ -387,12 +412,42 @@ def import_multi_variant(
     }
 
 
+def _persist_selected_labels(db, mod_id: int,
+                             effective_labels: dict) -> None:
+    """Upsert ``selected_labels`` on the mod_config row without
+    clobbering sibling columns.
+
+    The previous path used ``INSERT OR REPLACE INTO mod_config
+    (mod_id, selected_labels)`` which — per SQLite semantics — deletes
+    the whole row and recreates it with only the listed columns. Any
+    ``custom_values`` the user had saved earlier silently vanished on
+    every variant Apply. Codex P2 finding.
+
+    The two-step INSERT-then-UPDATE keeps every other column intact
+    while updating just the selected_labels blob.
+    """
+    db.connection.execute(
+        "INSERT OR IGNORE INTO mod_config (mod_id) VALUES (?)",
+        (mod_id,))
+    db.connection.execute(
+        "UPDATE mod_config SET selected_labels = ? WHERE mod_id = ?",
+        (json.dumps(effective_labels), mod_id))
+
+
 def update_variant_selection(
     mod_id: int, selection: list[dict], mods_dir: Path, db,
+    label_selections: dict[str, list[str]] | None = None,
 ) -> None:
     """Called by the cog's Apply button. ``selection`` must mirror the
     variants-row order; only the ``enabled`` field is used here. Radio-
     group exclusivity is enforced: at most one ``enabled=True`` per group.
+
+    ``label_selections`` optionally narrows each variant's internal
+    labeled changes (e.g. Unlimited Dragon Flying's five Ride Duration
+    presets → pick one). Keyed by variant filename; the value is the
+    list of labels the user ticked in the per-variant cog sub-dialog.
+    Persisted to ``mod_config.selected_labels`` so the choice survives
+    across sessions.
     """
     row = db.connection.execute(
         "SELECT variants FROM mods WHERE id = ?", (mod_id,)
@@ -434,17 +489,46 @@ def update_variant_selection(
         "version": merged_meta_row[2] if merged_meta_row else None,
         "description": merged_meta_row[3] if merged_meta_row else None,
     }
-    merged_path = synthesize_merged_json(mod_dir, existing, merged_meta)
+    # Merge any previously-persisted label selections with the ones the
+    # user just picked in this Apply. Only the variants the user touched
+    # this round are replaced; others keep their last saved selection so
+    # re-opening the cog and hitting Apply doesn't wipe untouched
+    # variants back to "all labels enabled".
+    stored_labels: dict[str, list[str]] = {}
+    try:
+        lbl_row = db.connection.execute(
+            "SELECT selected_labels FROM mod_config WHERE mod_id = ?",
+            (mod_id,)).fetchone()
+        if lbl_row and lbl_row[0]:
+            parsed = json.loads(lbl_row[0])
+            if isinstance(parsed, dict):
+                stored_labels = {
+                    str(k): list(v) for k, v in parsed.items()
+                    if isinstance(v, list)
+                }
+    except Exception:
+        pass
+    effective_labels = dict(stored_labels)
+    if label_selections:
+        effective_labels.update(label_selections)
+
+    merged_path = synthesize_merged_json(
+        mod_dir, existing, merged_meta,
+        label_selections=effective_labels if effective_labels else None)
 
     db.connection.execute(
         "UPDATE mods SET variants = ?, json_source = ? WHERE id = ?",
         (json.dumps(existing), str(merged_path), mod_id),
     )
+    if effective_labels:
+        _persist_selected_labels(db, mod_id, effective_labels)
     db.connection.commit()
-    logger.info("variant mod: mod_id=%d updated selection (%d/%d enabled)",
+    logger.info("variant mod: mod_id=%d updated selection (%d/%d enabled%s)",
                 mod_id,
                 sum(1 for v in existing if v["enabled"]),
-                len(existing))
+                len(existing),
+                f", {len(label_selections)} variant(s) with label picks"
+                if label_selections else "")
 
 
 # ── Archive-name guess ───────────────────────────────────────────────

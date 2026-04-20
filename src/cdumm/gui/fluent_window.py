@@ -2992,10 +2992,15 @@ class CdummWindow(FluentWindow):
                         self._db.connection.commit()
                         labels = _ctx.get("configurable_labels")
                         if labels:
-                            import json
-                            self._db.connection.execute(
-                                "INSERT OR REPLACE INTO mod_config (mod_id, selected_labels) VALUES (?, ?)",
-                                (mod_id, json.dumps(labels)))
+                            # Use the upsert helper so any previously-
+                            # saved custom_values on this mod_config row
+                            # survive. INSERT OR REPLACE here would
+                            # delete and recreate the row with only
+                            # selected_labels — wiping custom_values.
+                            from cdumm.engine.variant_handler import (
+                                _persist_selected_labels)
+                            _persist_selected_labels(
+                                self._db, mod_id, labels)
                             self._db.connection.commit()
                 except Exception:
                     pass
