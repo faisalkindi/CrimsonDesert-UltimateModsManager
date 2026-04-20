@@ -714,21 +714,65 @@ def _filter_patches_by_keys(data: dict,
 
     Used by the toggle-mode Apply handler. Index-based keys survive
     deepcopy, JSON round-trips, and GC recycling — unlike id().
+
+    Content-hash tiebreaker: keys may optionally carry a 3rd element
+    — a short hash of the change's (offset, original, patched) tuple
+    captured at pick time. If the hash is present AND doesn't match
+    the change currently at that index, the key is ignored (a silent
+    position mismatch is logged as a warning). Protects against
+    callers re-sorting or re-emitting patches between pick and
+    filter. E5 defensive.
     """
     import copy as _copy
     out = _copy.deepcopy(data)
+    # Split keys into pure-index vs indexed-with-hash so the filter
+    # can validate the hashed ones.
+    index_only: set[tuple[int, int]] = set()
+    index_with_hash: dict[tuple[int, int], str] = {}
+    for k in selected_keys:
+        if len(k) >= 3:
+            index_with_hash[(int(k[0]), int(k[1]))] = str(k[2])
+        else:
+            index_only.add((int(k[0]), int(k[1])))
     kept_patches: list[dict] = []
     for p_idx, patch in enumerate(data.get("patches", [])):
         kept_changes: list[dict] = []
         for c_idx, change in enumerate(patch.get("changes", [])):
-            if (p_idx, c_idx) in selected_keys:
+            key = (p_idx, c_idx)
+            if key in index_only:
                 kept_changes.append(_copy.deepcopy(change))
+            elif key in index_with_hash:
+                expected = index_with_hash[key]
+                actual = _change_content_hash(change)
+                if actual == expected:
+                    kept_changes.append(_copy.deepcopy(change))
+                else:
+                    logger.warning(
+                        "preset filter: change at (%d,%d) content-hash "
+                        "mismatch (expected %s got %s) — skipping. "
+                        "Upstream likely re-sorted the patches list.",
+                        p_idx, c_idx, expected, actual)
         if kept_changes:
             new_patch = _copy.deepcopy(patch)
             new_patch["changes"] = kept_changes
             kept_patches.append(new_patch)
     out["patches"] = kept_patches
     return out
+
+
+def _change_content_hash(change: dict) -> str:
+    """Short stable hash of a change's identity fields.
+
+    Uses offset + original + patched since label can repeat. Not a
+    security primitive; just a tiebreaker for position-key validation.
+    """
+    import hashlib
+    parts = (
+        str(change.get("offset", "")),
+        str(change.get("original", "")),
+        str(change.get("patched", "")),
+    )
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:8]
 
 
 def _common_label_prefix(labels: list[str]) -> str:

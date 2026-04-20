@@ -223,6 +223,44 @@ class ConfigPanel(QWidget):
         self._build_ui()
         self._apply_theme()
 
+        # Theme flip: collapsible section headers bake isDarkTheme()
+        # into their stylesheet at build time, so the arrows and text
+        # keep the OLD colour after a Windows theme flip. Rebuild the
+        # variant view when qconfig.themeChanged fires so the headers
+        # pick up the new colour immediately. GDS #12.
+        try:
+            from qfluentwidgets.common.config import qconfig
+            qconfig.themeChanged.connect(self._on_theme_changed)
+        except Exception as _e_th:
+            logger.debug("themeChanged wiring skipped: %s", _e_th)
+
+    def _on_theme_changed(self, *_a) -> None:
+        """Re-apply theme-aware styles and rebuild the collapsible
+        sections if we're showing a variant mod right now. The section
+        headers inherit colour from the parent stylesheet at build
+        time, so just calling _apply_theme isn't enough — we need
+        to reconstruct the QPushButton stylesheets with the new
+        isDarkTheme() value."""
+        self._apply_theme()
+        if (self._variant_mode and self._variants_meta
+                and getattr(self, "_collapsible_sections", None)):
+            # Re-sync each section header's stylesheet with the
+            # current theme. Cheaper than a full show_variant_mod
+            # rebuild and preserves the user's expand/collapse state.
+            from qfluentwidgets import isDarkTheme
+            _fg = "#E2E8F0" if isDarkTheme() else "#1A202C"
+            for section in self._collapsible_sections:
+                try:
+                    section.header.setStyleSheet(
+                        f"QPushButton {{ text-align: left; padding: 10px 8px; "
+                        f"border: none; background: transparent; color: {_fg}; "
+                        f"font-weight: bold; font-size: 13px; }} "
+                        f"QPushButton:hover {{ background: rgba(128,128,128,0.08); "
+                        f"border-radius: 4px; }}"
+                    )
+                except (AttributeError, RuntimeError):
+                    continue
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------

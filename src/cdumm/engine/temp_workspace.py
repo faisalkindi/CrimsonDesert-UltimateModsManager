@@ -86,10 +86,20 @@ def sweep_stale(max_age_hours: int = 48) -> int:
         if not any(entry.name.startswith(pfx) for pfx in CDUMM_PREFIXES):
             continue
         try:
-            mtime = entry.stat().st_mtime
+            # Use the NEWEST mtime across entry + its contents so a
+            # temp that's still being actively used (worker writing
+            # files into it) isn't swept while in flight. GDS #13.
+            newest = entry.stat().st_mtime
+            for sub in entry.rglob("*"):
+                try:
+                    sub_mtime = sub.stat().st_mtime
+                    if sub_mtime > newest:
+                        newest = sub_mtime
+                except OSError:
+                    continue
         except OSError:
             continue
-        if mtime < cutoff:
+        if newest < cutoff:
             try:
                 shutil.rmtree(entry, ignore_errors=True)
                 removed += 1

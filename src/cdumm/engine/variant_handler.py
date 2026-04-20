@@ -374,7 +374,39 @@ def import_multi_variant(
     if not presets:
         return None
 
-    variants_meta = build_variants_metadata(presets, initial_selection)
+    # Re-import preserving prior selection (A5). When re-importing
+    # over an existing mod, carry the old variants' enabled state
+    # for variants whose filename still exists — the user's pick
+    # survives an update-drop instead of silently resetting to the
+    # first variant.
+    carryover_selection: set[Path] | None = None
+    if existing_mod_id is not None and initial_selection is None:
+        try:
+            old_row = db.connection.execute(
+                "SELECT variants FROM mods WHERE id = ?",
+                (existing_mod_id,)).fetchone()
+            if old_row and old_row[0]:
+                old_variants = json.loads(old_row[0])
+                old_enabled_names = {
+                    v["filename"] for v in old_variants
+                    if isinstance(v, dict) and v.get("enabled")
+                }
+                carryover = {
+                    p for p, _d in presets
+                    if p.name in old_enabled_names
+                }
+                if carryover:
+                    carryover_selection = carryover
+                    logger.info(
+                        "variant re-import: carrying over %d "
+                        "enabled variants from prior mod_id=%d",
+                        len(carryover), existing_mod_id)
+        except Exception as _e:
+            logger.debug(
+                "variant re-import: carryover lookup failed: %s", _e)
+
+    variants_meta = build_variants_metadata(
+        presets, initial_selection or carryover_selection)
     mod_name = derive_mod_name_from_source(source, fallback=presets[0][0].stem)
 
     # Stamp against current game version so the mod can be flagged if the
