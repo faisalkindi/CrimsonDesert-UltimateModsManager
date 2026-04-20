@@ -1530,6 +1530,7 @@ def import_from_zip(
 def _import_sibling_json_patches(
     root: Path, exclude_subdir: Path, game_dir: Path,
     db: Database, deltas_dir: Path,
+    failures_out: list[str] | None = None,
 ) -> None:
     """Import JSON byte-patch siblings that live alongside a CB/loose-file mod.
 
@@ -1606,6 +1607,12 @@ def _import_sibling_json_patches(
                 logger.warning(
                     "Sibling JSON '%s' import failed: %s",
                     cand.name, e)
+                # Surface to caller so the GUI can show an InfoBar
+                # instead of the user seeing the primary succeed with
+                # no visible indication a sibling failed. GDS #7.
+                if failures_out is not None:
+                    failures_out.append(
+                        f"sibling '{cand.name}' failed: {e}")
                 # Scope the orphan scan to mods inserted AFTER the
                 # watermark, with name=jp_name and zero deltas.
                 try:

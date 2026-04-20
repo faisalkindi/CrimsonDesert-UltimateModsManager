@@ -144,6 +144,13 @@ def detect_json_patches_all(path: Path) -> list[dict]:
     one mod row per JSON so the user ends up with everything enabled,
     toggleable per-part, and properly version-tracked.
     """
+    # Cache hit: avoid re-walking + re-parsing if a prior call already
+    # scanned this path. Drop-time detection + sibling-import both
+    # end up here; asset-heavy archives made the walk measurably slow.
+    cached = getattr(path, "_cdumm_json_patches_cache", None)
+    if cached is not None:
+        return cached
+
     candidates: list[Path] = []
     if path.is_file() and path.suffix.lower() == ".json":
         candidates = [path]
@@ -178,6 +185,15 @@ def detect_json_patches_all(path: Path) -> list[dict]:
                 valid.append(data)
         except Exception:
             continue
+
+    # Cache the result on the path object so callers that walk the
+    # same archive twice (e.g. _probe_for_json at drop-time + later
+    # _import_sibling_json_patches inside the worker) don't each
+    # pay an rglob + parse pass on asset-heavy archives. GDS #6.
+    try:
+        path._cdumm_json_patches_cache = valid   # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass
     return valid
 
 
