@@ -2528,7 +2528,16 @@ class CdummWindow(FluentWindow):
                         logger.error(
                             "archive-wide import_multi_variant "
                             "failed: %s", _amv_e, exc_info=True)
-                    # Clean up the pre-extract temp.
+                    # Clean up the pre-extract AND the archive-mutex
+                    # staging temp. Both are needed only until
+                    # import_multi_variant has copied the JSONs into
+                    # CDMods/sources/<id>/variants/; leaking them
+                    # until atexit/sweep was the C-M1 issue.
+                    from cdumm.engine.temp_workspace import release_temp_dir
+                    try:
+                        release_temp_dir(staging)
+                    except Exception:
+                        pass
                     if _tmp_extract_for_picker is not None:
                         import shutil
                         shutil.rmtree(

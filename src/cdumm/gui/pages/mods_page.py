@@ -1456,10 +1456,10 @@ class ModsPage(QWidget):
                     if (sources_root and cl.exists()
                             and (sources_root in cl.parents
                                  or cl == sources_root)):
-                        import tempfile as _tmp
+                        from cdumm.engine.temp_workspace import make_temp_dir
                         import shutil as _sh
-                        staged_root = _P(_tmp.mkdtemp(
-                            prefix=f"cdumm_swap_{mod_id}_"))
+                        staged_root = make_temp_dir(
+                            f"cdumm_swap_{mod_id}_")
                         staged = staged_root / cl.name
                         _sh.copytree(cl, staged)
                         worker_path = staged
@@ -1565,10 +1565,10 @@ class ModsPage(QWidget):
                     if (sources_root and cl.exists()
                             and (sources_root in cl.parents
                                  or cl == sources_root)):
-                        import tempfile as _tmp
+                        from cdumm.engine.temp_workspace import make_temp_dir
                         import shutil as _sh
-                        staged_root = _P(_tmp.mkdtemp(
-                            prefix=f"cdumm_swap_{mod_id}_"))
+                        staged_root = make_temp_dir(
+                            f"cdumm_swap_{mod_id}_")
                         staged = staged_root / cl.name
                         _sh.copytree(cl, staged)
                         worker_path = staged
@@ -1664,8 +1664,8 @@ class ModsPage(QWidget):
             cached = cache[mod_id]
             if cached.exists():
                 return cached
-        import tempfile
-        dest = Path(tempfile.mkdtemp(prefix=f"cdumm_cog_{mod_id}_"))
+        from cdumm.engine.temp_workspace import make_temp_dir
+        dest = make_temp_dir(f"cdumm_cog_{mod_id}_")
         suffix = archive.suffix.lower()
         if suffix == ".zip":
             import zipfile
@@ -1738,10 +1738,10 @@ class ModsPage(QWidget):
                             if (sources_root and vd.exists()
                                     and (sources_root in vd.parents
                                          or vd == sources_root)):
-                                import tempfile as _tmp
+                                from cdumm.engine.temp_workspace import make_temp_dir
                                 import shutil as _sh
-                                staged_root = _P(_tmp.mkdtemp(
-                                    prefix=f"cdumm_swap_{mod_id}_"))
+                                staged_root = make_temp_dir(
+                                    f"cdumm_swap_{mod_id}_")
                                 staged = staged_root / vd.name
                                 _sh.copytree(vd, staged)
                                 worker_path = staged
@@ -1814,10 +1814,10 @@ class ModsPage(QWidget):
                             if (sources_root and fp_path.exists()
                                     and (sources_root in fp_path.parents
                                          or fp_path == sources_root)):
-                                import tempfile as _tmp
+                                from cdumm.engine.temp_workspace import make_temp_dir
                                 import shutil as _sh
-                                staged_root = _P(_tmp.mkdtemp(
-                                    prefix=f"cdumm_preset_{mod_id}_"))
+                                staged_root = make_temp_dir(
+                                    f"cdumm_preset_{mod_id}_")
                                 staged = staged_root / fp_path.name
                                 if fp_path.is_file():
                                     _sh.copy2(fp_path, staged)
