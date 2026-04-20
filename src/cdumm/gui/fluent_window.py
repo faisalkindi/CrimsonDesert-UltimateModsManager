@@ -389,6 +389,7 @@ from cdumm.gui.pages.tool_page import (  # noqa: E402
     VerifyStatePage, CheckModsPage, FindCulpritPage,
     InspectModPage, FixEverythingPage, RescanPage,
 )
+from cdumm.gui.pages.reshade_page import ReshadePage  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +688,9 @@ class CdummWindow(FluentWindow):
         self.rescan_page.set_managers(**tool_kwargs)
         self.rescan_page.rescan_requested.connect(self._on_refresh_snapshot)
 
+        self.reshade_page = ReshadePage(self)
+        self.reshade_page.set_managers(db=self._db, game_dir=self._game_dir)
+
         self.bug_report_page = BugReportPage(self)
         self.bug_report_page.set_managers(
             db=self._db, game_dir=self._game_dir,
@@ -751,6 +755,10 @@ class CdummWindow(FluentWindow):
         )
         self.addSubInterface(
             self.rescan_page, FluentIcon.SYNC, tr("nav.rescan"),
+            position=NavigationItemPosition.SCROLL,
+        )
+        self.addSubInterface(
+            self.reshade_page, FluentIcon.PALETTE, tr("nav.reshade"),
             position=NavigationItemPosition.SCROLL,
         )
 
@@ -3732,6 +3740,8 @@ class CdummWindow(FluentWindow):
             page = getattr(self, page_name, None)
             if page:
                 page.set_managers(**tool_kwargs)
+        if hasattr(self, 'reshade_page') and self.reshade_page:
+            self.reshade_page.set_managers(db=self._db, game_dir=self._game_dir)
 
     # ------------------------------------------------------------------
     # Settings page handlers
