@@ -13,6 +13,48 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.3",
+        "date": "2026-04-20",
+        "notes": [
+            "Same-file conflicts now combine. Two JSON mods editing the same file (Fat Stacks + ExtraSockets) no longer silently drop each other — all enabled JSON mods' patches feed through one patching pass so size-changing inserts work correctly across mod boundaries. After updating, uninstall and re-import any mod pair that modifies the same file.",
+            "Apply no longer hangs at 7%. Thousands of per-byte-overlap INFO log lines were saturating the subprocess pipe; those are now DEBUG.",
+            "Apply no longer crashes on partial-compressed textures. zlib Error -3 while reading PATHC now downgrades to a soft warning with a 'Run Fix Everything' hint instead of killing the whole apply.",
+            "Bug Report stops lying. The byte-verification summary now uses the same counting as the import rejection — no more '0 mismatched' on the report while import says 'N don't match'.",
+            "Silent launch crash catcher. If CDUMM dies before the main window paints, you now get crash-pre-qt.log in %LOCALAPPDATA%\\cdumm or %TEMP% to paste into a bug report.",
+            "Revert button tooltip now spells out that your save games are not touched.",
+            "Cross-layer PAZ + JSON merge. A PAZ-directory mod that ships its own copy of a file now layers correctly with a JSON mod patching the same file.",
+            "'Cdumm Variant XXXX' name leak defense — the prettifier refuses to surface internal temp-dir stems as mod titles.",
+        ],
+    },
+    {
+        "version": "3.1.1",
+        "date": "2026-04-19",
+        "notes": [
+            "Batch import 60% faster thanks to a Rust native module for the hot loops (PAMT parsing, sparse delta scanning, ENTR byte comparison).",
+            "Nested folder-variant mods work end to end. Mods like Character Creator with Female/Male at the top and Goblin/Human/Orc inside now show a second picker, render per-axis radio groups in the cog, and install bundled ASI plugins alongside the picked variant.",
+            "Kliff Wears Damiane-style mods no longer crash the game. Half-patched data tables are now refused at import with a clear 'incompatible with your game version' message.",
+            "ExtraSockets and Rings/Earrings Abyss Sockets work: generic name-offset resolver for iteminfo.pabgb.",
+            "New compatibility: ExtraSockets (1274), Rings and Earrings Abyss Sockets (1379), Character Creator (837), Barber Unlocked 4.0 (591), Vaxis LoD Improvements (733), Faster Vanilla Animations Trimmer (774).",
+            "Cog icon moved next to the mod name, outdated summary tile, NEW badge + auto-sort for freshly imported mods, grid-grouped radio picker for multi-axis variants, follow-Windows-theme live (no restart).",
+            "Brazilian Portuguese translation complete.",
+            "Many smaller fixes: uninstall crash on bare-hex JSON offsets, RAR support in main import, closeEvent crash on exit, PrivateBin bundled so Bug Report uploads actually work.",
+        ],
+    },
+    {
+        "version": "3.0.4",
+        "date": "2026-04-17",
+        "notes": [
+            "JSON mods apply reliably now. Root cause was large vanilla archives (like ~100MB 0008/0.paz) exceeding the backup size threshold — they never got saved so mount-time extraction failed silently while reporting 'apply successful'. CDUMM now dynamically discovers which archives your enabled JSON mods target and always backs those up, with hash-verified live fallback and clear error banners if neither source is usable.",
+            "Texture mods finally work. Barber Unlocked, Character Creator, Stone Floor Textures Overhaul and similar mods now produce a full PAZ + PAMT + PATHC overlay instead of only patching the PATHC index.",
+            "Conflicts dialog redesigned: 'Needs attention' vs 'Auto-resolved' split, in-dialog reordering, tooltips make the #1-wins rule unambiguous, resizable Fluent dialog.",
+            "Import improvements: script mods in zips import without manual extraction, multi-part mods (Trust Me + Pet Abyss Gear) become separate rows, Xbox Game Pass installs under C:/XboxGames/ auto-detect, strict duplicate detection with an Update/Add-as-new/Cancel dialog, clearer 'no recognized game files' errors.",
+            "Version tracking: Nexus filename parser reads versions from both Nexus-formatted names and free-form names; backfills versions for existing mods on first startup.",
+            "Dark mode stays dark on Windows theme changes and wallpaper slideshows.",
+            "Bug reports, mod-list exports and compatibility reports now default to Documents/CDUMM/ instead of the launch folder.",
+            "Fixed startup crash on Python 3.13, Linux launch crash, Steam/Xbox protocol-handler launch.",
+        ],
+    },
+    {
         "version": "3.0.1",
         "date": "2026-04-17",
         "notes": [
