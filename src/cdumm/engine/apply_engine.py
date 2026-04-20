@@ -657,7 +657,8 @@ class ApplyWorker(QObject):
             # the HIGH-precedence (priority=1) mod applies LAST and wins.
             # Use DESC so 10, 9, ..., 1 feeds merge in the correct order.
             json_mods = self._db.connection.execute(
-                "SELECT id, name, json_source, disabled_patches FROM mods "
+                "SELECT id, name, json_source, disabled_patches, priority "
+                "FROM mods "
                 "WHERE enabled = 1 AND json_source IS NOT NULL AND json_source != '' "
                 "ORDER BY priority DESC, id ASC"
             ).fetchall()
@@ -666,7 +667,7 @@ class ApplyWorker(QObject):
                 import json as _json
                 resolver = self._make_vanilla_source_resolver()
                 overlay_count_before = len(self._overlay_entries)
-                for jm_idx, (mod_id, mod_name, json_source, disabled_raw) in enumerate(json_mods):
+                for jm_idx, (mod_id, mod_name, json_source, disabled_raw, mod_priority) in enumerate(json_mods):
                     pct = 55 + int((jm_idx / len(json_mods)) * 5)
                     self.progress_updated.emit(
                         pct, f"Patching {mod_name} from vanilla...")
@@ -691,6 +692,14 @@ class ApplyWorker(QObject):
                         custom_values=custom_vals,
                         vanilla_source_resolver=resolver,
                         errors_out=patch_errors)
+                    # Stamp priority + mod info on each entry so the
+                    # overlay merge can pick the right winner on mixed
+                    # JSON+XML collisions regardless of feed order.
+                    # Lower priority number = CDUMM wins. C-H6.
+                    for _body, _meta in entries:
+                        _meta.setdefault("priority", mod_priority)
+                        _meta.setdefault("mod_id", mod_id)
+                        _meta.setdefault("mod_name", mod_name)
                     self._overlay_entries.extend(entries)
                     if entries:
                         logger.info("Mount-time: %s produced %d overlay entries",
@@ -742,6 +751,32 @@ class ApplyWorker(QObject):
                     for (mod_id, mod_name, kind, dp, fp, prio) in xml_rows
                 ]
                 xml_entries = process_xml_patches_for_overlay(items, self._game_dir)
+                # Stamp CDUMM priority onto each XML overlay entry so
+                # the merge function can resolve mixed JSON+XML
+                # collisions by priority instead of feed order (C-H6).
+                # XML merges every item targeting one file into one
+                # entry; use the MIN CDUMM priority among contributors
+                # (lowest number = CDUMM winner).
+                xml_min_priority_by_target: dict[str, int] = {}
+                for _mod_id, _mod_name, _kind, _dp, fp, prio in xml_rows:
+                    if fp not in xml_min_priority_by_target or \
+                            prio < xml_min_priority_by_target[fp]:
+                        xml_min_priority_by_target[fp] = prio
+                for _body, _meta in xml_entries:
+                    # entry_path may include the 'NNNN/' prefix or not;
+                    # try both shapes for a lookup.
+                    ep = _meta.get("entry_path", "")
+                    pamt_dir = _meta.get("pamt_dir", "")
+                    candidates = {
+                        ep, f"{pamt_dir}/{ep}" if pamt_dir else ep,
+                        ep.split("/", 1)[-1] if "/" in ep else ep,
+                    }
+                    for k in candidates:
+                        if k in xml_min_priority_by_target:
+                            _meta.setdefault(
+                                "priority",
+                                xml_min_priority_by_target[k])
+                            break
                 self._overlay_entries.extend(xml_entries)
                 if xml_entries:
                     logger.info("xml_patch: produced %d overlay entries from %d deltas",
@@ -1653,6 +1688,20 @@ class ApplyWorker(QObject):
         # structural merging; byte-merging its output would undo that.
         # Stick to last-wins (priority-ordered) for everything else.
         _MERGEABLE_EXTS = (".pabgb", ".pabgh", ".pamt")
+        # CDUMM priority: lower number wins. Entries now carry a
+        # 'priority' key in their meta (stamped at the JSON / XML
+        # extend sites). Resolve ties by meta priority instead of
+        # feed order — mixed JSON+XML collisions used to pick the
+        # LAST extend, which always meant XML regardless of the
+        # user's priorities. C-H6.
+        def _winner_idx(idxs: list[int]) -> int:
+            # Lowest priority number wins; fall back to LAST index
+            # (old behaviour) for entries without priority meta.
+            return min(idxs, key=lambda i: (
+                entries[i][1].get("priority", 10_000),
+                -i,   # prefer later feed position on priority tie
+            ))
+
         result: list[tuple[bytes, dict]] = []
         for (pamt_dir, entry_path), indices in grouped.items():
             if len(indices) < 2:
@@ -1660,13 +1709,14 @@ class ApplyWorker(QObject):
                 continue
             ep_lower = entry_path.lower()
             if not ep_lower.endswith(_MERGEABLE_EXTS):
+                winner = _winner_idx(indices)
                 logger.info(
                     "Overlay merge: %s is not a mergeable table type "
-                    "(%d entries) — keeping highest-priority entry only",
-                    entry_path, len(indices))
-                # With ORDER BY priority DESC feeding _overlay_entries,
-                # the LAST index is the HIGHEST-priority (lowest number).
-                result.append(entries[indices[-1]])
+                    "(%d entries) — keeping priority-winning entry "
+                    "(priority=%s)",
+                    entry_path, len(indices),
+                    entries[winner][1].get("priority", "?"))
+                result.append(entries[winner])
                 continue
             # Need a vanilla base for three-way byte merge. The
             # _get_vanilla_entry_content helper expects file_path with a
@@ -1675,11 +1725,12 @@ class ApplyWorker(QObject):
             vanilla = self._get_vanilla_entry_content(
                 f"{pamt_dir}/0.pamt", entry_path)
             if not vanilla:
+                winner = _winner_idx(indices)
                 logger.warning(
                     "Overlay merge: no vanilla for %s, falling back to "
-                    "last-wins (keeping entry %d)",
-                    entry_path, indices[-1])
-                result.append(entries[indices[-1]])
+                    "priority-winner (entry %d)",
+                    entry_path, winner)
+                result.append(entries[winner])
                 continue
             ordered_bodies = [
                 (f"overlay_{i}", entries[i][0]) for i in indices
@@ -1697,14 +1748,11 @@ class ApplyWorker(QObject):
             if size_changed:
                 logger.warning(
                     "Overlay merge: %s has size-changing entries "
-                    "(vanilla=%d, mod lens=%s) — using highest-priority "
-                    "last-wins instead of lossy byte-merge",
+                    "(vanilla=%d, mod lens=%s) — using priority-winning "
+                    "entry instead of lossy byte-merge",
                     entry_path, len(vanilla), size_changed)
-                # Surface to the GUI so the user sees the drop — not
-                # just a log line. Byte-merge can't mix inserts
-                # safely, and the lower-priority mods' changes are
-                # silently gone. C-H4 (GDS + BMAD).
-                kept_mod_meta = entries[indices[-1]][1]
+                winner = _winner_idx(indices)
+                kept_mod_meta = entries[winner][1]
                 kept_name = kept_mod_meta.get(
                     "mod_name", "highest-priority mod")
                 dropped_count = len(indices) - 1
@@ -1719,7 +1767,7 @@ class ApplyWorker(QObject):
                     self.warning.emit(msg)
                 except Exception:
                     pass
-                result.append(entries[indices[-1]])
+                result.append(entries[winner])
                 continue
             try:
                 merged_body, warnings = merge_compiled_mod_files(
