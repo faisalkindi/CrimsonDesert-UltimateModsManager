@@ -122,6 +122,27 @@ def prettify_mod_name(raw: str) -> str:
     import re
     name = raw.strip()
 
+    # #151 last-line defense: if the caller handed us a path stem
+    # coming from one of CDUMM's own mkdtemp() calls, that's always
+    # wrong for a user-facing mod name. Butanokaabii reported
+    # 'Cdumm Variant 2yfxupya' landing on a mod card when the
+    # variant-picker pre-extract at fluent_window.py:2428 leaked to
+    # the worker. Return a generic placeholder so the user sees a
+    # noticeable "please rename me" label instead of the internal
+    # tmp-dir stem. Upstream fix still needed in fluent_window.py;
+    # this guards against any future path that routes here.
+    _CDUMM_TMP_PREFIXES = (
+        "cdumm_variant_", "cdumm_swap_",
+        "cdumm_cfg_", "cdumm_preset_",
+    )
+    _stem_lc = name.lower()
+    if any(_stem_lc.startswith(p) for p in _CDUMM_TMP_PREFIXES):
+        logger.warning(
+            "prettify_mod_name: refusing to surface internal tmp-dir "
+            "stem %r — caller should have passed a real archive name",
+            raw)
+        return "Imported Mod"
+
     # Strip file extensions
     for ext in ('.zip', '.7z', '.rar', '.json', '.bsdiff'):
         if name.lower().endswith(ext):

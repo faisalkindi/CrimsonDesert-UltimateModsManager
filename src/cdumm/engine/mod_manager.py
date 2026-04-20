@@ -146,6 +146,13 @@ class ModManager:
         if delta_dir.exists():
             shutil.rmtree(delta_dir)
 
+        # Delete archived sources folder too — previously left behind,
+        # which caused stale files to accumulate over repeat edit/
+        # re-import cycles and collide with re-imports at the same name.
+        sources_dir = self._deltas_dir.parent / "sources" / str(mod_id)
+        if sources_dir.exists():
+            shutil.rmtree(sources_dir, ignore_errors=True)
+
         # Delete from DB (cascade removes mod_deltas and conflicts)
         self._db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
         self._db.connection.commit()

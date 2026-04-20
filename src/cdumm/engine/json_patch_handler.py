@@ -1357,6 +1357,34 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             (_prettify(mod_name), "paz", priority, author, version, description, game_ver_hash))
         mod_id = cursor.lastrowid
 
+    # #145 Option Y: also archive the source JSON as json_source so the
+    # apply-time aggregator can fold this mod's patches into a single
+    # cross-mod pass. Without this, ENTR-imported mods ship as
+    # pre-patched overlay bodies that can't combine with other mods'
+    # patches when sizes diverge (size-change merge fallback drops one).
+    try:
+        import json as _json_for_archive
+        mod_delta_dir = deltas_dir / str(mod_id)
+        mod_delta_dir.mkdir(parents=True, exist_ok=True)
+        source_json_path = mod_delta_dir / "source.json"
+        # Strip internal detector metadata (_json_path = WindowsPath,
+        # not JSON-serialisable) before archiving.
+        _archivable = {
+            k: v for k, v in patch_data.items()
+            if not k.startswith("_")
+        }
+        source_json_path.write_text(
+            _json_for_archive.dumps(_archivable), encoding="utf-8")
+        db.connection.execute(
+            "UPDATE mods SET json_source = ? WHERE id = ?",
+            (str(source_json_path), mod_id))
+    except Exception as _archive_exc:
+        # If archiving fails (disk full, permissions), the mod still
+        # works via its ENTR deltas — the aggregator just won't see it.
+        logger.warning(
+            "import_json_as_entr: json_source archive failed for mod "
+            "%d: %s", mod_id, _archive_exc)
+
     changed_files = []
     entry_cache: dict[str, PazEntry] = {}
 

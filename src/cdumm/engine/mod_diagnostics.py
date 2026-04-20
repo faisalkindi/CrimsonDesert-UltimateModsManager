@@ -552,6 +552,40 @@ def _verify_json_patch_bytes(data: dict, game_dir: Path,
                 _s(f"  entry names. Ask the author to regenerate it against your build.")
             if v2_resolved:
                 _s(f"  {v2_resolved} v2 entry-anchored change(s) resolved via name index.")
+
+            # #146: reconcile with the real apply-path count. The per-
+            # change loop above checks bytes against vanilla independently
+            # — it misses cases only visible during actual apply:
+            #   * unsupported v2 / missing entry names (currently bucketed
+            #     into v2_name_missing / unsupported_v2)
+            #   * cumulative-delta drift from earlier insert ops shifting
+            #     later offsets
+            #   * ambiguous fallback-offset matches
+            # `_apply_byte_patches` catches all three. Dry-running it on
+            # a throwaway copy lets the Summary report the same number
+            # the importer will reject with, so users don't see the
+            # "13 mismatched" vs "0 mismatched" contradiction.
+            try:
+                from cdumm.engine.json_patch_handler import _apply_byte_patches
+                dry_buf = bytearray(content)
+                _, apply_mismatched, _ = _apply_byte_patches(
+                    dry_buf, changes,
+                    signature=patch.get("signature"),
+                    vanilla_data=bytes(content),
+                    name_offsets=name_offsets)
+                # apply-path is authoritative; the loop's mismatched
+                # count is a strict subset.
+                extra = apply_mismatched - (len(v2_name_missing) + unsupported_v2)
+                if extra > 0:
+                    mismatched += extra
+                    _s(f"  {extra} additional mismatch(es) visible only during "
+                       f"apply (cumulative-offset drift or ambiguous fallbacks).")
+                # Pull v2_name_missing / unsupported_v2 into the
+                # user-visible mismatched count so the Summary agrees
+                # with the import-path rejection message.
+                mismatched += len(v2_name_missing) + unsupported_v2
+            except Exception as e_dry:
+                logger.debug("dry-run apply failed for %s: %s", game_file, e_dry)
         except Exception as e:
             _s(f"  {game_file}: verification error — {e}")
             skipped += 1

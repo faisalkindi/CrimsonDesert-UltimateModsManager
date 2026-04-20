@@ -9,10 +9,54 @@ from logging.handlers import RotatingFileHandler
 
 APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
 
-# Enable faulthandler to dump C-level stack trace on segfault
-APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-_fault_log = open(APP_DATA_DIR / "crash_trace.txt", "w")
-faulthandler.enable(file=_fault_log)
+# Enable faulthandler to dump C-level stack trace on segfault.
+# Defensive: if AppData is read-only / permissions fail (domolinixd1000
+# report: CDUMM.exe closes in 2-3s, can't even produce a bug report),
+# fall back to stderr and keep going. Previously an `open()` failure
+# here would raise at module import time — before `sys.excepthook` is
+# wired — and the user saw a silent exit with no log to inspect.
+_fault_log = None
+try:
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _fault_log = open(APP_DATA_DIR / "crash_trace.txt", "w")
+    faulthandler.enable(file=_fault_log)
+except Exception:
+    # Cascading fallbacks so the process keeps booting even if
+    # AppData is unwritable, locked, or on a non-ASCII path that
+    # breaks Python's stdlib open on some Windows configs.
+    try:
+        import tempfile as _tempfile
+        _fault_log = open(
+            Path(_tempfile.gettempdir()) / "cdumm_crash_trace.txt", "w")
+        faulthandler.enable(file=_fault_log)
+    except Exception:
+        try:
+            faulthandler.enable(file=sys.stderr)
+        except Exception:
+            pass  # give up on faulthandler; process still boots
+
+
+def _emergency_crash_dump(exc: BaseException) -> None:
+    """Last-resort crash writer for failures BEFORE logging is wired.
+
+    Domolinixd1000 reports CDUMM.exe closes within 2-3 seconds with no
+    bug report possible. This path fires when main() raises before the
+    excepthook is installed, writing a plain-text traceback to
+    %LOCALAPPDATA%\\cdumm\\crash-pre-qt.log (or %TEMP% as fallback) so
+    the user has something to paste.
+    """
+    import traceback
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    payload = "".join(tb)
+    for target in (
+            APP_DATA_DIR / "crash-pre-qt.log",
+            Path(os.environ.get("TEMP", ".")) / "cdumm-crash-pre-qt.log"):
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(payload, encoding="utf-8")
+            return
+        except Exception:
+            continue
 
 _lock_fh = None
 
@@ -422,13 +466,20 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Worker subprocess mode: headless, no GUI, JSON output on stdout
-    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
-        from cdumm.worker_process import worker_main
-        worker_main(sys.argv[2:])
-    # CLI mode: if first arg is a known subcommand, skip GUI entirely
-    elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect"}:
-        from cdumm.cli import main as cli_main
-        cli_main()
-    else:
-        sys.exit(main())
+    try:
+        # Worker subprocess mode: headless, no GUI, JSON output on stdout
+        if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+            from cdumm.worker_process import worker_main
+            worker_main(sys.argv[2:])
+        # CLI mode: if first arg is a known subcommand, skip GUI entirely
+        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect"}:
+            from cdumm.cli import main as cli_main
+            cli_main()
+        else:
+            sys.exit(main())
+    except BaseException as _bootstrap_exc:
+        # Everything above went through setup_logging / excepthook; this
+        # catches the nasty pre-logging failures (bad DLL load, missing
+        # Qt plugin, OS-level I/O) that previously vanished silently.
+        _emergency_crash_dump(_bootstrap_exc)
+        raise

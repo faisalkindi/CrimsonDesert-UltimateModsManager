@@ -39,12 +39,275 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+def aggregate_json_mods_into_synthetic_patches(
+    db, overlay_priority_tiebreak: bool = True,
+) -> tuple[dict, list[dict]]:
+    """Collect enabled JSON mods' patches, group by game_file, return
+    a combined patch list suitable for ONE pass through
+    ``process_json_patches_for_overlay``.
+
+    Option Y: when two mods patch the same `.pabgb` but one of them
+    inserts bytes, byte-merging their independent outputs is impossible
+    (offset drift). The fix is to stop processing mods independently
+    and instead feed ALL their patches to ``_apply_byte_patches`` in a
+    single pass — its cumulative-delta tracking then handles inserts
+    across mod boundaries correctly.
+
+    Returns ``(synth_patch_data, per_mod_summary)`` where:
+      * ``synth_patch_data`` is a dict shaped like a JSON-mod source
+        (`{"patches": [...]}`) with one patch entry per game_file and
+        all contributing mods' changes concatenated in priority order.
+      * ``per_mod_summary`` is a list of dicts (one per contributing
+        mod) used for logging / UI — never fed back into the patcher.
+
+    Priority ordering: CDUMM's convention is "lowest priority number
+    wins". To mirror `_apply_byte_patches`'s stable-sort-by-offset
+    behaviour (on offset ties, later-in-list wins), we emit the lowest-
+    priority-number mod's changes LAST so they overwrite on tie.
+    """
+    import json as _json
+
+    rows = db.connection.execute(
+        "SELECT m.id, m.name, m.json_source, m.disabled_patches, "
+        "       m.priority, mc.custom_values "
+        "FROM mods m LEFT JOIN mod_config mc ON mc.mod_id = m.id "
+        "WHERE m.enabled = 1 AND m.json_source IS NOT NULL "
+        "AND m.json_source != '' "
+        "ORDER BY m.priority DESC, m.id ASC"
+    ).fetchall()
+
+    # {game_file: list[change]} — changes concatenated in priority DESC
+    # order (highest priority number first, lowest last).
+    aggregated: dict[str, list[dict]] = {}
+    # {game_file: signature_hex} — first non-empty signature wins
+    # (two mods targeting the same file should ship compatible anchors).
+    signatures: dict[str, str] = {}
+    per_mod_summary: list[dict] = []
+
+    from pathlib import Path as _Path
+    for mod_id, mod_name, json_source, disabled_raw, priority, cv_raw in rows:
+        jp_path = _Path(json_source)
+        if not jp_path.exists():
+            logger.debug(
+                "aggregate: mod %d json_source missing, skipping: %s",
+                mod_id, json_source)
+            continue
+        try:
+            data = _json.loads(jp_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "aggregate: mod %d json parse failed (%s), skipping",
+                mod_id, e)
+            continue
+
+        try:
+            disabled = set(_json.loads(disabled_raw) if disabled_raw else [])
+        except (ValueError, TypeError):
+            disabled = set()
+        try:
+            custom_vals = _json.loads(cv_raw) if cv_raw else None
+        except (ValueError, TypeError):
+            custom_vals = None
+
+        targets_this_mod: set[str] = set()
+        flat_idx = 0
+        for patch in data.get("patches", []):
+            game_file = patch.get("game_file")
+            if not game_file:
+                continue
+            all_changes = patch.get("changes", [])
+            # Per-mod disabled_patches filter (flat indexed across all
+            # of THIS mod's changes, matching how the picker records it).
+            filtered = []
+            for c in all_changes:
+                if flat_idx not in disabled:
+                    filtered.append(c)
+                flat_idx += 1
+            if custom_vals:
+                from cdumm.engine.json_patch_handler import (
+                    apply_custom_values)
+                filtered = apply_custom_values(filtered, custom_vals)
+            if not filtered:
+                continue
+
+            aggregated.setdefault(game_file, []).extend(filtered)
+            if game_file not in signatures and patch.get("signature"):
+                signatures[game_file] = patch["signature"]
+            targets_this_mod.add(game_file)
+
+        per_mod_summary.append({
+            "mod_id": mod_id, "mod_name": mod_name,
+            "priority": priority,
+            "targets": sorted(targets_this_mod),
+            "change_count": flat_idx - len(disabled),
+        })
+
+    synth_patch_data = {
+        "modinfo": {
+            "title": "CDUMM aggregated JSON mods",
+            "description": (
+                "Virtual combined patch produced by Option Y — all "
+                "enabled JSON mods' changes folded into a single "
+                "pass so cumulative-offset tracking works across "
+                "mod boundaries."),
+        },
+        "patches": [
+            {
+                "game_file": gf,
+                "signature": signatures.get(gf),
+                "changes": changes,
+            }
+            for gf, changes in aggregated.items()
+        ],
+    }
+    return synth_patch_data, per_mod_summary
+
+
+def collect_enabled_json_targets(db) -> set[str]:
+    """Return the set of game_files every enabled JSON mod patches.
+
+    Used by cross-layer merge to decide whether a PAZ-dir mod's entry
+    should skip direct staging. If NO enabled JSON mod targets a given
+    logical file, there's no one to layer on top and skipping leaves
+    the game with an orphaned PAMT entry pointing at a missing paz.
+    """
+    import json as _json
+    rows = db.connection.execute(
+        "SELECT json_source FROM mods "
+        "WHERE enabled = 1 AND json_source IS NOT NULL "
+        "AND json_source != ''").fetchall()
+    targets: set[str] = set()
+    for (json_source,) in rows:
+        try:
+            data = _json.loads(json_source)
+        except (ValueError, TypeError):
+            continue
+        for patch in data.get("patches", []):
+            gf = patch.get("game_file")
+            if gf:
+                targets.add(gf)
+    # ENTR-delta JSON mods (imported pre-v3.1) stored their patches
+    # at import time as entry-level deltas rather than keeping
+    # json_source. Their mod_deltas rows carry the entry_path, which
+    # equals the logical game_file for single-target JSON mods.
+    entr_rows = db.connection.execute(
+        "SELECT DISTINCT d.entry_path FROM mod_deltas d "
+        "JOIN mods m ON m.id = d.mod_id "
+        "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
+        "AND d.entry_path IS NOT NULL AND d.entry_path != ''"
+    ).fetchall()
+    for (ep,) in entr_rows:
+        targets.add(ep)
+    return targets
+
+
+def collect_paz_dir_overrides(
+    db, enabled_only: bool = True,
+) -> dict:
+    """Scan enabled PAZ-dir mods, return a map of game_file → override.
+
+    #145 cross-layer merge. When a mod ships ``0036/0.paz`` containing
+    its own ``gamedata/iteminfo.pabgb``, ANOTHER mod's JSON patches on
+    that same logical file would normally land in CDUMM's overlay
+    (0037+) while the PAZ-dir mod stages 0036/0.paz separately. The
+    game then loads one of the two and silently drops the other.
+
+    This helper walks every enabled PAZ-dir mod's stored ``NNNN/0.paz``
+    + ``NNNN/0.pamt`` delta pair and records which logical entries
+    each mod provides, so the JSON-patch resolver can layer on top:
+    use the PAZ-dir mod's bytes as the patch base and emit the
+    combined result to a higher overlay dir where it wins in-game.
+
+    Returns a dict keyed by ``game_file`` (e.g. ``gamedata/iteminfo.pabgb``).
+    Each value is a dict with:
+
+      * ``mod_id``, ``mod_name``, ``priority`` — source mod identity
+      * ``pamt_dir`` — the 4-digit dir the mod claimed (e.g. ``"0036"``)
+      * ``paz_delta_path`` — absolute path to the stored ``NNNN/0.paz``
+      * ``pamt_delta_path`` — absolute path to the stored ``NNNN/0.pamt``
+      * ``entry`` — parsed :class:`PazEntry` rebound to the delta paz
+
+    When multiple enabled mods provide the same game_file the lowest
+    priority number wins (CDUMM convention — priority=1 is top).
+    """
+    from cdumm.archive.paz_parse import parse_pamt
+
+    rows = db.connection.execute(
+        "SELECT d.mod_id, m.name, m.priority, d.file_path, d.delta_path "
+        "FROM mod_deltas d JOIN mods m ON m.id = d.mod_id "
+        "WHERE m.mod_type = 'paz' "
+        + ("AND m.enabled = 1 " if enabled_only else "")
+        + "AND d.file_path LIKE '____/0.paz' "
+        "ORDER BY m.priority ASC, m.id ASC"
+    ).fetchall()
+
+    overrides: dict[str, dict] = {}
+    for mod_id, mod_name, priority, file_path, paz_delta_path in rows:
+        # file_path looks like 'NNNN/0.paz'; sibling PAMT lives at
+        # 'NNNN/0.pamt' in the same mod's deltas.
+        pamt_dir = file_path.split("/", 1)[0]
+        if not (len(pamt_dir) == 4 and pamt_dir.isdigit()):
+            continue
+        pamt_file_path = f"{pamt_dir}/0.pamt"
+        pamt_row = db.connection.execute(
+            "SELECT delta_path FROM mod_deltas "
+            "WHERE mod_id = ? AND file_path = ?",
+            (mod_id, pamt_file_path)).fetchone()
+        if pamt_row is None:
+            continue
+        pamt_delta_path = pamt_row[0]
+
+        # Stored deltas land on disk as ``0036_0.pamt.newfile`` /
+        # ``0036_0.paz.newfile`` — parse_pamt derives the PAZ number
+        # from the filename stem (expects plain ``0.pamt``). Stage
+        # both into a temp workspace with the canonical names first.
+        import tempfile as _tempfile
+        stage_root = Path(
+            _tempfile.mkdtemp(prefix=f"cdumm_xlayer_{pamt_dir}_"))
+        canonical_pamt = stage_root / "0.pamt"
+        canonical_paz = stage_root / "0.paz"
+        try:
+            canonical_pamt.write_bytes(Path(pamt_delta_path).read_bytes())
+            canonical_paz.write_bytes(Path(paz_delta_path).read_bytes())
+            entries = parse_pamt(
+                str(canonical_pamt), paz_dir=str(stage_root))
+        except Exception as e:
+            logger.debug(
+                "collect_paz_dir_overrides: skip mod %d — pamt parse "
+                "failed: %s", mod_id, e)
+            import shutil as _shutil
+            _shutil.rmtree(stage_root, ignore_errors=True)
+            continue
+
+        for entry in entries:
+            key = entry.path
+            # Lower priority number wins — skip if a higher-priority
+            # mod already claimed this game_file.
+            prior = overrides.get(key)
+            if prior is not None and prior["priority"] <= priority:
+                continue
+            # entry.paz_file already points at the canonicalised
+            # stage_root/0.paz so _extract_from_paz reads from there.
+            overrides[key] = {
+                "mod_id": mod_id,
+                "mod_name": mod_name,
+                "priority": priority,
+                "pamt_dir": pamt_dir,
+                "paz_delta_path": paz_delta_path,
+                "pamt_delta_path": pamt_delta_path,
+                "stage_root": stage_root,  # for later cleanup
+                "entry": entry,
+            }
+    return overrides
+
+
 def resolve_vanilla_source(
     game_file: str,
     vanilla_dir: Path,
     game_dir: Path,
     snapshot_mgr,
     warn_callback=None,
+    paz_dir_overrides: dict | None = None,
 ):
     """Return a :class:`PazEntry` pointing at a known-clean PAZ.
 
@@ -67,6 +330,19 @@ def resolve_vanilla_source(
         VanillaSourceUnavailable, _find_pamt_entry,
     )
     from cdumm.engine.snapshot_manager import hash_file
+
+    # #145 cross-layer merge: if an enabled PAZ-dir mod ships this
+    # logical file in its own numbered dir, use its bytes as the base
+    # instead of vanilla. The mod's entry is already bound to its
+    # delta-stored 0.paz so _extract_from_paz will read from there.
+    if paz_dir_overrides is not None and game_file in paz_dir_overrides:
+        ov = paz_dir_overrides[game_file]
+        if warn_callback is not None:
+            warn_callback(
+                f"cross-layer base: {ov['mod_name']!r} "
+                f"(priority={ov['priority']}) provides "
+                f"{game_file} — stacking JSON patches on top")
+        return ov["entry"]
 
     vanilla_entry = _find_pamt_entry(game_file, vanilla_dir)
     if vanilla_entry is not None:
@@ -442,12 +718,31 @@ class ApplyWorker(QObject):
             self._soft_warnings.append(msg)
             self.warning.emit(msg)
 
+        # #145 cross-layer override map was already built at _apply()
+        # start (so Phase 1 can skip direct-staging overridden files).
+        # Read it from self here; don't re-collect.
+        if not hasattr(self, "_paz_dir_overrides"):
+            self._paz_dir_overrides = collect_paz_dir_overrides(self._db)
+
         def resolver(game_file: str):
             return resolve_vanilla_source(
                 game_file, self._vanilla_dir, self._game_dir,
                 snapshot_mgr, warn_callback=_warn,
+                paz_dir_overrides=self._paz_dir_overrides,
             )
         return resolver
+
+    def _paz_dir_file_paths_to_skip(self) -> set[str]:
+        """Return `NNNN/0.paz` + `NNNN/0.pamt` file_paths whose content
+        is being layered via the cross-layer override path and should
+        NOT be staged directly in Phase 1. These mods' entries flow
+        into the overlay with JSON patches applied on top.
+        """
+        to_skip: set[str] = set()
+        for ov in (getattr(self, "_paz_dir_overrides", None) or {}).values():
+            to_skip.add(f"{ov['pamt_dir']}/0.paz")
+            to_skip.add(f"{ov['pamt_dir']}/0.pamt")
+        return to_skip
 
     def _compute_apply_fingerprint(self) -> str:
         """Compute a hash of all inputs that affect Apply output.
@@ -519,7 +814,15 @@ class ApplyWorker(QObject):
         file_deltas, revert_files = self._apply_language_redirect(
             file_deltas, revert_files)
 
-        if not file_deltas and not revert_files:
+        # #145 Option Y: enabled JSON mods with json_source do their
+        # work in Phase 1a via mount-time aggregation, not through
+        # file_deltas. Don't early-exit just because file_deltas is
+        # empty — check for enabled JSON mods too.
+        has_enabled_json = self._db.connection.execute(
+            "SELECT 1 FROM mods WHERE enabled = 1 "
+            "AND json_source IS NOT NULL AND json_source != '' "
+            "LIMIT 1").fetchone() is not None
+        if not file_deltas and not revert_files and not has_enabled_json:
             self.error_occurred.emit("No mod changes to apply or revert.")
             return
 
@@ -589,6 +892,36 @@ class ApplyWorker(QObject):
         txn = TransactionalIO(self._game_dir, staging_dir)
         modified_pamts: dict[str, bytes] = {}
 
+        # #145 cross-layer merge: build the PAZ-dir override map once
+        # upfront so Phase 1 knows which `NNNN/0.paz` file_paths to
+        # skip (their content flows through the overlay instead).
+        # Bug-A fix: only skip staging when an ENABLED JSON mod will
+        # actually patch that file. Skipping without a replacement
+        # leaves an orphaned PAMT pointing at a missing PAZ and the
+        # game crashes on load.
+        self._paz_dir_overrides = collect_paz_dir_overrides(self._db)
+        _json_targets = collect_enabled_json_targets(self._db)
+        _active_overrides = {
+            k: v for k, v in self._paz_dir_overrides.items()
+            if k in _json_targets
+        }
+        # The FULL map stays on self for the resolver (it's safe to
+        # return the override entry even if no JSON mod hits it —
+        # that branch just never fires). But `skip_paz_dir_files`
+        # restricts to ACTIVE overrides only.
+        skip_paz_dir_files: set[str] = set()
+        for ov in _active_overrides.values():
+            skip_paz_dir_files.add(f"{ov['pamt_dir']}/0.paz")
+            skip_paz_dir_files.add(f"{ov['pamt_dir']}/0.pamt")
+        if self._paz_dir_overrides:
+            logger.info(
+                "cross-layer: %d PAZ-dir override(s) available, "
+                "%d active (JSON mod patches the same file): %s",
+                len(self._paz_dir_overrides),
+                len(_active_overrides),
+                sorted(skip_paz_dir_files) or "[none — PAZ-dir mods "
+                "stage normally]")
+
         try:
             file_idx = 0
 
@@ -604,6 +937,18 @@ class ApplyWorker(QObject):
                 if file_path == "meta/0.papgt":
                     continue
                 if file_path.endswith(".pamt"):
+                    continue
+
+                # #145 cross-layer merge: this NNNN/0.paz is being
+                # layered via overlay (a JSON mod is patching its
+                # content). Don't stage it directly — skip here and
+                # let Phase 1a feed its bytes into the overlay as the
+                # JSON-patch base.
+                if file_path in skip_paz_dir_files:
+                    logger.info(
+                        "cross-layer: skipping direct stage of %s — "
+                        "JSON patches will layer onto overlay",
+                        file_path)
                     continue
 
                 # New files: copy from stored full file (last mod wins)
@@ -657,61 +1002,98 @@ class ApplyWorker(QObject):
             # the HIGH-precedence (priority=1) mod applies LAST and wins.
             # Use DESC so 10, 9, ..., 1 feeds merge in the correct order.
             json_mods = self._db.connection.execute(
-                "SELECT id, name, json_source, disabled_patches, priority "
-                "FROM mods "
-                "WHERE enabled = 1 AND json_source IS NOT NULL AND json_source != '' "
-                "ORDER BY priority DESC, id ASC"
+                "SELECT id, name FROM mods "
+                "WHERE enabled = 1 AND json_source IS NOT NULL "
+                "AND json_source != ''"
             ).fetchall()
             if json_mods:
-                from cdumm.engine.json_patch_handler import process_json_patches_for_overlay
+                from cdumm.engine.json_patch_handler import (
+                    process_json_patches_for_overlay,
+                )
                 import json as _json
                 resolver = self._make_vanilla_source_resolver()
                 overlay_count_before = len(self._overlay_entries)
-                for jm_idx, (mod_id, mod_name, json_source, disabled_raw, mod_priority) in enumerate(json_mods):
-                    pct = 55 + int((jm_idx / len(json_mods)) * 5)
+
+                # #145 Option Y — aggregate ALL enabled JSON mods'
+                # patches into ONE combined pass so cumulative-offset
+                # tracking inside _apply_byte_patches works correctly
+                # across mod boundaries. Without this, two mods both
+                # targeting iteminfo.pabgb (e.g. Fat Stacks + Extra
+                # Sockets) produce separate overlay entries that can't
+                # be byte-merged when one mod inserts bytes and the
+                # other doesn't.
+                synth_data, mod_summary = (
+                    aggregate_json_mods_into_synthetic_patches(self._db))
+                logger.info(
+                    "Phase 1a: aggregated %d JSON mod(s) into %d target "
+                    "file(s) for single-pass patching",
+                    len(mod_summary), len(synth_data.get("patches", [])))
+                for m in mod_summary:
+                    logger.info(
+                        "  mod %d '%s' (priority=%d): %d change(s) → %s",
+                        m["mod_id"], m["mod_name"], m["priority"],
+                        m["change_count"], m["targets"])
+
+                if synth_data.get("patches"):
+                    # Write synth JSON to a temp file so
+                    # process_json_patches_for_overlay (which reads
+                    # json_source from disk) can consume it.
+                    import tempfile as _tempfile
+                    synth_temp = Path(
+                        _tempfile.mkdtemp(prefix="cdumm_agg_"))
+                    synth_path = synth_temp / "aggregated.json"
+                    synth_path.write_text(
+                        _json.dumps(synth_data), encoding="utf-8")
+
                     self.progress_updated.emit(
-                        pct, f"Patching {mod_name} from vanilla...")
-                    try:
-                        disabled = _json.loads(disabled_raw) if disabled_raw else None
-                    except (ValueError, TypeError):
-                        disabled = None
-                    # Load custom values for inline editing
-                    custom_vals = None
-                    try:
-                        cv_row = self._db.connection.execute(
-                            "SELECT custom_values FROM mod_config WHERE mod_id = ?",
-                            (mod_id,)).fetchone()
-                        if cv_row and cv_row[0]:
-                            custom_vals = _json.loads(cv_row[0])
-                    except (ValueError, TypeError):
-                        pass
+                        55, f"Patching {len(synth_data['patches'])} "
+                        "target file(s) from vanilla...")
                     patch_errors: list[str] = []
                     entries = process_json_patches_for_overlay(
-                        mod_id, json_source, self._game_dir,
-                        disabled_indices=disabled,
-                        custom_values=custom_vals,
+                        0,  # pseudo mod_id — no single mod owns this
+                        str(synth_path), self._game_dir,
+                        disabled_indices=None,
+                        custom_values=None,
                         vanilla_source_resolver=resolver,
                         errors_out=patch_errors)
-                    # Stamp priority + mod info on each entry so the
-                    # overlay merge can pick the right winner on mixed
-                    # JSON+XML collisions regardless of feed order.
-                    # Lower priority number = CDUMM wins. C-H6.
+                    # Tag each overlay entry with the LOWEST priority
+                    # number among its contributors (lowest = highest
+                    # precedence = CDUMM winner on downstream collisions
+                    # like mixed JSON+XML).
+                    min_priority_per_target = {}
+                    for m in mod_summary:
+                        for gf in m["targets"]:
+                            prior = min_priority_per_target.get(
+                                gf, float("inf"))
+                            if m["priority"] < prior:
+                                min_priority_per_target[gf] = m["priority"]
                     for _body, _meta in entries:
-                        _meta.setdefault("priority", mod_priority)
-                        _meta.setdefault("mod_id", mod_id)
-                        _meta.setdefault("mod_name", mod_name)
+                        ep = _meta.get("entry_path", "")
+                        # derive game_file from entry_path — JSON mods
+                        # target paths that match directly.
+                        for gf, prio in min_priority_per_target.items():
+                            # Match on suffix so "gamedata/iteminfo.pabgb"
+                            # matches entry_paths with folder prefix.
+                            if ep.endswith(gf) or ep == gf:
+                                _meta.setdefault("priority", prio)
+                                break
+                        _meta.setdefault("mod_name", "aggregated JSON")
+                        _meta.setdefault("_aggregated_from",
+                                          len(mod_summary))
                     self._overlay_entries.extend(entries)
                     if entries:
-                        logger.info("Mount-time: %s produced %d overlay entries",
-                                    mod_name, len(entries))
-                    # Bubble partial-apply abort messages (mod built
-                    # for a different game version etc.) up to the GUI
-                    # so the user knows WHY an apply completed but the
-                    # mod's effect is missing in-game.
+                        logger.info(
+                            "Mount-time: aggregated %d JSON mod(s) → "
+                            "%d overlay entries",
+                            len(mod_summary), len(entries))
                     for err in patch_errors:
                         logger.warning("Mount-time abort: %s", err)
                         self._soft_warnings.append(err)
                         self.warning.emit(err)
+
+                    # Keep the temp dir alive until apply finishes;
+                    # Python's tempfile cleanup on process exit is
+                    # adequate for a ~KB synth file.
                 # Task 1.3: loud error when enabled JSON mods produced no
                 # overlay at all — the user thought their mods applied but
                 # mount-time extraction failed silently for every target.
@@ -2736,7 +3118,7 @@ class ApplyWorker(QObject):
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name, "
             "md.is_new, md.entry_path, md.json_patches, m.force_inplace, "
-            "m.game_version_hash, md.byte_end "
+            "m.game_version_hash, md.byte_end, m.json_source "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
@@ -2747,7 +3129,18 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end in cursor.fetchall():
+        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end, json_source in cursor.fetchall():
+            # #145 Option Y: JSON mods with json_source are processed
+            # fresh at Phase 1a (mount-time) from their source JSON
+            # so the cross-mod aggregator can handle size-changing
+            # inserts correctly. Their stored ENTR deltas (created at
+            # import time) are now redundant and would conflict with
+            # the mount-time output. Skip entry_path deltas from these
+            # mods. Whole-file deltas (is_new or non-entry deltas)
+            # still apply — those are PAZ-dir mod contributions like
+            # Fat Stacks' 0036/0.paz that sit alongside JSON patches.
+            if json_source and entry_path:
+                continue
             if delta_path in seen_deltas:
                 continue
             # Skip deltas whose files are missing (zombie entries from old resets)

@@ -545,7 +545,7 @@
   "nav.inspect_mod": "Inspect Mod",
   "nav.fix_everything": "Fix Everything",
   "nav.rescan": "Rescan Game Files",
-  "action_bar.revert_vanilla_tooltip": "Restore all game files to their original unmodded state",
+  "action_bar.revert_vanilla_tooltip": "Restore all game files to their original unmodded state. Your save games are not touched — you can load your latest save and keep playing unmodded.",
   "tools.running": "Running...",
   "tools.starting": "Starting...",
   "tools.another_running": "Another tool is already running. Please wait.",

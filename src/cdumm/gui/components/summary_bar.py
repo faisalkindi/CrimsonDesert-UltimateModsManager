@@ -151,6 +151,10 @@ class SummaryBar(QWidget):
         rf.setWeight(QFont.Weight.Bold)
         self._revert_btn.setFont(rf)
         self._revert_btn.clicked.connect(self.revert_clicked)
+        # Nexus FAQ #157 (Pflomme): users ask whether Revert also
+        # touches their save games. It doesn't — make that obvious.
+        self._revert_btn.setToolTip(
+            tr("action_bar.revert_vanilla_tooltip"))
         setCustomStyleSheet(self._revert_btn,
             "PushButton { background: #F0F4F8; color: #4A5568; border: 1px solid #E2E8F0; border-radius: 20px; padding: 0 28px; }"
             "PushButton:hover { background: #E2E8F0; }"
