@@ -92,6 +92,34 @@ def test_primary_write_below_next_primary_still_shifts_next():
         f"B should have shifted +2: data[0x30:0x36]={data[0x30:0x36].hex()}")
 
 
+def test_pattern_scan_relocation_uses_original_offset_for_shift_tracker():
+    """C-H1 smoke: when a patch relocates via _pattern_scan, the delta
+    tracker must record the write at the ORIGINAL sort-key primary,
+    not at a reconstructed position. Both patches must apply cleanly.
+
+    The previous `approx_orig = new_offset - _shift_for(new_offset)`
+    approximation could point into the middle of a later patch's
+    primary and double-shift it. Using original_offset keeps the
+    shift ledger consistent with the sort-by-primary order.
+    """
+    data = bytearray(b"\xff" * 0x300)
+    # Patch 1 bytes live at 0x120 (drift from primary 0x100)
+    data[0x120:0x122] = b"\xaa\xaa"
+    # Patch 2 bytes live at 0x200 (not drifted)
+    data[0x200:0x202] = b"\xbb\xbb"
+
+    changes = [
+        {"offset": 0x100, "original": "aaaa", "patched": "11112222"},
+        {"offset": 0x200, "original": "bbbb", "patched": "3333"},
+    ]
+    applied, mm, relocated = _apply_byte_patches(data, changes)
+    # Both apply; patch 1 lands where pattern_scan found it (0x120),
+    # patch 2 lands at 0x200 where its bytes actually live.
+    assert applied == 2, f"both must apply, got {applied} mm={mm}"
+    assert data[0x120:0x124] == b"\x11\x11\x22\x22"
+    assert data[0x200:0x202] == b"\x33\x33"
+
+
 def test_fallback_bounds_clamp_uses_cumulative_delta():
     """
     HIGH #9: the fallback bounds-overflow check must use the delta-adjusted

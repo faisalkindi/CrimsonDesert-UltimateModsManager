@@ -791,11 +791,15 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     if new_offset is not None:
                         if data[new_offset:new_offset + len(original_bytes)] == original_bytes:
                             data[new_offset:new_offset + len(patched_bytes)] = patched_bytes
-                            # Convert new_offset (current-data coord) back
-                            # to approx original-coord so the shift-tracker
-                            # applies correctly to future patches.
-                            approx_orig = new_offset - _shift_for(new_offset)
-                            writes.append((approx_orig, size_delta))
+                            # Record the write at the patch's ORIGINAL
+                            # sort-key primary, not a reconstructed
+                            # `new_offset - _shift_for(new_offset)`. The
+                            # approximation could point into the middle
+                            # of a later patch's primary and double-
+                            # shift it. The sort was done by
+                            # original_offset; the shift tracker needs
+                            # to agree with that sort order.
+                            writes.append((original_offset, size_delta))
                             applied += 1
                             relocated += 1
                             continue
