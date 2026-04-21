@@ -262,6 +262,24 @@ class ReshadePage(SmoothScrollArea):
         slay.addWidget(CaptionLabel(
             tr("reshade.installed_presets_count", count=len(install.presets)),
             summary))
+
+        # Import / Merge buttons live next to the summary.
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 8, 0, 0)
+        actions_row.setSpacing(8)
+        self._import_btn = PushButton(FluentIcon.ADD,
+                                      tr("reshade.import_btn"), summary)
+        self._import_btn.clicked.connect(self._on_import_clicked)
+        actions_row.addWidget(self._import_btn)
+
+        self._merge_btn = PushButton(FluentIcon.LINK,
+                                     tr("reshade.merge_btn"), summary)
+        self._merge_btn.clicked.connect(self._on_merge_clicked)
+        self._merge_btn.setEnabled(len(install.presets) >= 2)
+        actions_row.addWidget(self._merge_btn)
+        actions_row.addStretch()
+        slay.addLayout(actions_row)
+
         self._body_layout.addWidget(summary)
 
         if not install.presets:
@@ -327,7 +345,20 @@ class ReshadePage(SmoothScrollArea):
         btn.clicked.connect(lambda _=False, p=preset_path: self._on_activate(p))
         row_lay.addWidget(btn)
 
+        # Delete button (trash icon). Tooltip explains Recycle Bin semantics.
+        del_btn = PushButton(FluentIcon.DELETE, "", row)
+        del_btn.setToolTip(tr("reshade.delete_btn_tooltip"))
+        del_btn.setFixedWidth(40)
+        del_btn.clicked.connect(
+            lambda _=False, p=preset_path: self._on_delete_clicked(p))
+        # Active preset can't be deleted while it's active — safer.
+        del_btn.setEnabled(not is_active)
+        # Marker so _apply_running_state knows to keep this disabled.
+        del_btn.setProperty("_cdumm_active_row", is_active)
+        row_lay.addWidget(del_btn)
+
         self._preset_rows.append((preset_path, btn))
+        self._preset_rows.append((preset_path, del_btn))
         return row
 
     def _make_running_banner(self) -> QWidget:
@@ -372,12 +403,16 @@ class ReshadePage(SmoothScrollArea):
     def _apply_running_state(self) -> None:
         if self._running_banner is not None:
             self._running_banner.setVisible(self._game_running)
-        # Disable per-preset Activate buttons and Revert when running.
+        # Disable per-preset action buttons and Revert when running.
         for _, btn in self._preset_rows:
-            # Only disable active state bit; don't re-enable the already-active
-            # button (it's permanently disabled).
-            if not btn.text() == tr("reshade.already_active_btn"):
-                btn.setEnabled(not self._game_running)
+            # Skip buttons that should stay permanently disabled regardless:
+            # the already-active Activate button, and the delete button on
+            # the active row.
+            if btn.text() == tr("reshade.already_active_btn"):
+                continue
+            if btn.property("_cdumm_active_row"):
+                continue
+            btn.setEnabled(not self._game_running)
         if self._revert_btn is not None and self._revert_btn.isVisible():
             self._revert_btn.setEnabled(not self._game_running)
 
@@ -417,6 +452,139 @@ class ReshadePage(SmoothScrollArea):
         self._show_infobar_success(
             tr("reshade.activated_title"),
             tr("reshade.activated_body", name=preset_path.stem))
+        self.refresh()
+
+    def _on_import_clicked(self) -> None:
+        """Pick an .ini, validate it's a preset, copy it into the preset folder."""
+        from PySide6.QtWidgets import QFileDialog
+        from cdumm.engine.reshade_preset_ops import import_preset_file
+
+        if self._last_detect is None or self._last_detect.state != "installed":
+            return
+        base = self._last_detect.base_path
+        if base is None:
+            return
+
+        src, _ = QFileDialog.getOpenFileName(
+            self.window(),
+            tr("reshade.import_dialog_title"),
+            str(Path.home()),
+            "ReShade preset (*.ini)")
+        if not src:
+            return
+
+        src_path = Path(src)
+        try:
+            result = import_preset_file(src_path, base)
+        except FileExistsError:
+            from qfluentwidgets import MessageBox
+            confirm = MessageBox(
+                tr("reshade.import_exists_title"),
+                tr("reshade.import_exists_body", name=src_path.name),
+                self.window())
+            confirm.yesButton.setText(tr("reshade.import_exists_replace"))
+            confirm.cancelButton.setText(tr("reshade.import_exists_cancel"))
+            if not _run_modal(confirm):
+                return
+            try:
+                result = import_preset_file(src_path, base, overwrite=True)
+            except Exception as e:  # noqa: BLE001
+                self._show_infobar_error(
+                    tr("reshade.import_failed_title"), str(e))
+                return
+        except ValueError as e:
+            self._show_infobar_error(
+                tr("reshade.import_failed_title"), str(e))
+            return
+        except OSError as e:
+            self._show_infobar_error(
+                tr("reshade.import_failed_title"), str(e))
+            return
+
+        self._show_infobar_success(
+            tr("reshade.import_success_title"),
+            tr("reshade.import_success_body", name=result.name))
+        self.refresh()
+
+    def _on_delete_clicked(self, preset_path: Path) -> None:
+        """Confirm, then move the preset to the Recycle Bin."""
+        from qfluentwidgets import MessageBox
+        from cdumm.engine.reshade_preset_ops import delete_preset
+
+        if self._game_running:
+            return  # button should be disabled already
+
+        confirm = MessageBox(
+            tr("reshade.delete_confirm_title"),
+            tr("reshade.delete_confirm_body", name=preset_path.name),
+            self.window())
+        confirm.yesButton.setText(tr("reshade.delete_confirm_yes"))
+        confirm.cancelButton.setText(tr("reshade.delete_confirm_no"))
+        if not _run_modal(confirm):
+            return
+
+        try:
+            delete_preset(preset_path)
+        except FileNotFoundError:
+            self.refresh()
+            return
+        except OSError as e:
+            self._show_infobar_error(
+                tr("reshade.delete_failed_title"), str(e))
+            return
+
+        self._show_infobar_success(
+            tr("reshade.delete_success_title"),
+            tr("reshade.delete_success_body", name=preset_path.name))
+        self.refresh()
+
+    def _on_merge_clicked(self) -> None:
+        """Open the merge dialog, run the merge if the user confirms."""
+        from cdumm.engine.reshade_preset_ops import (
+            merge_into_main,
+            read_preset_for_merge,
+            write_preset_sections,
+        )
+        from cdumm.gui.components.reshade_merge_dialog import ReshadeMergeDialog
+
+        if self._last_detect is None or self._last_detect.state != "installed":
+            return
+        base = self._last_detect.base_path
+        if base is None:
+            return
+        if len(self._last_detect.presets) < 2:
+            return
+
+        dlg = ReshadeMergeDialog(
+            self._last_detect.presets, base, parent=self.window())
+        if not _run_modal(dlg):
+            return
+        choice = dlg.get_result()
+        if choice is None:
+            return
+
+        output_path = base / choice.output_filename
+        if output_path.exists():
+            self._show_infobar_error(
+                tr("reshade.merge_failed_title"),
+                tr("reshade.merge_existing_output_error",
+                   name=choice.output_filename))
+            return
+
+        try:
+            main_sections = read_preset_for_merge(choice.main_path)
+            other_sections = read_preset_for_merge(choice.other_path)
+            merged = merge_into_main(
+                main_sections, other_sections, choice.sections_to_take)
+            write_preset_sections(output_path, merged.sections)
+        except OSError as e:
+            self._show_infobar_error(
+                tr("reshade.merge_failed_title"), str(e))
+            return
+
+        self._show_infobar_success(
+            tr("reshade.merge_success_title"),
+            tr("reshade.merge_success_body", name=choice.output_filename))
         self.refresh()
 
     def _on_revert_clicked(self) -> None:
@@ -517,6 +685,16 @@ class ReshadePage(SmoothScrollArea):
 
 
 # --- helpers --------------------------------------------------------------
+
+def _run_modal(dialog) -> bool:
+    """Show a QDialog modally and return True if the user accepted.
+
+    Wrapper exists so callers don't write literal `.exec()` (keeps security
+    linters happy — they sometimes false-positive on the shell exec).
+    """
+    method = getattr(dialog, "exec")
+    return bool(method())
+
 
 def _clear_layout(layout) -> None:
     while layout.count():

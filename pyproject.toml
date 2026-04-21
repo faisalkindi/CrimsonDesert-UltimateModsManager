@@ -11,6 +11,8 @@ dependencies = [
     "cryptography>=42.0",
     "privatebin>=0.3.0",
     "lxml>=5.0",
+    "psutil>=5.9",
+    "Send2Trash>=1.8",
 ]
 
 [project.optional-dependencies]
