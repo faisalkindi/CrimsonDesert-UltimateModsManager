@@ -50,14 +50,18 @@ class MergeDialogResult:
 
 
 class _CollapsibleSectionGroup(QWidget):
-    """A collapsible group with a header (arrow + title + 'Select all') and
-    a body holding a list of checkboxes. Used by the merge dialog to split
-    the effects picker into 'New' / 'Existing' / 'Advanced' buckets.
+    """A collapsible group with:
+      - Row 1: [arrow] [title]              [Select all button]
+      - Row 2: [small caption subtitle]
+      - Body: checkboxes
+
+    Two rows keep the title short and the Select-all button always visible
+    regardless of how long the context subtitle is.
     """
 
-    def __init__(self, title: str, parent: QWidget | None = None):
+    def __init__(self, title: str, subtitle: str = "",
+                 parent: QWidget | None = None):
         super().__init__(parent)
-        self._title = title
         self._checkboxes: list[CheckBox] = []
         self._expanded = True
 
@@ -65,10 +69,10 @@ class _CollapsibleSectionGroup(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Header row.
+        # Header row — fixed layout so the button never gets pushed off.
         header_wrap = QWidget(self)
         header = QHBoxLayout(header_wrap)
-        header.setContentsMargins(4, 4, 4, 4)
+        header.setContentsMargins(4, 4, 4, 0)
         header.setSpacing(8)
 
         self._arrow_btn = TransparentToolButton(FluentIcon.CHEVRON_RIGHT, header_wrap)
@@ -77,19 +81,34 @@ class _CollapsibleSectionGroup(QWidget):
 
         self._title_label = StrongBodyLabel(title, header_wrap)
         self._title_label.setStyleSheet("QLabel { font-weight: 600; }")
-        # Clicking the title also toggles.
+        # Don't let the label eat all horizontal space — it keeps its natural
+        # size and the stretch goes into the spacer between title and button.
         self._title_label.mousePressEvent = lambda _e: self._toggle()
         self._title_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        header.addWidget(self._title_label, stretch=1)
+        header.addWidget(self._title_label)
 
-        # "Select all" is a real PushButton so the affordance is obvious.
-        # Toggles to "Clear all" once everything in the group is ticked.
+        # Spacer pushes the button to the right edge.
+        header.addStretch(1)
+
+        # "Select all" — a visible PushButton with an icon that swaps to
+        # "Clear all" once everything is ticked.
         self._select_all_btn = PushButton(
             FluentIcon.ACCEPT, tr("reshade.merge_group_select_all"), header_wrap)
         self._select_all_btn.setFixedHeight(28)
         self._select_all_btn.clicked.connect(self._on_select_all_clicked)
         header.addWidget(self._select_all_btn)
         root.addWidget(header_wrap)
+
+        # Subtitle row — small caption text under the header for context
+        # ("Not in the main preset — ticking adds them", etc.). Optional.
+        if subtitle:
+            self._subtitle_label = CaptionLabel(subtitle, self)
+            self._subtitle_label.setWordWrap(True)
+            self._subtitle_label.setStyleSheet(
+                "CaptionLabel { color: rgba(128, 128, 128, 0.9); padding-left: 34px; }")
+            root.addWidget(self._subtitle_label)
+        else:
+            self._subtitle_label = None
 
         # Body: holds checkboxes. Hidden when collapsed.
         self._body = QWidget(self)
@@ -349,15 +368,14 @@ class ReshadeMergeDialog(MessageBoxBase):
             else:
                 new_sections.append(section_name)
 
-        main_stem = main_path.stem
         any_row = False
 
         # Group 1: NEW effects (not in main) -- most common user intent first.
         if new_sections:
             group = _CollapsibleSectionGroup(
-                tr("reshade.merge_group_new",
-                   main=main_stem, count=len(new_sections)),
-                self._section_container)
+                title=tr("reshade.merge_group_new", count=len(new_sections)),
+                subtitle=tr("reshade.merge_group_new_sub"),
+                parent=self._section_container)
             for section_name in new_sections:
                 pretty = section_name.removesuffix(".fx")
                 cb = CheckBox(pretty, group)
@@ -371,9 +389,10 @@ class ReshadeMergeDialog(MessageBoxBase):
         # Group 2: EXISTING effects (would overwrite main's version).
         if existing_sections:
             group = _CollapsibleSectionGroup(
-                tr("reshade.merge_group_existing",
-                   main=main_stem, count=len(existing_sections)),
-                self._section_container)
+                title=tr("reshade.merge_group_existing",
+                         count=len(existing_sections)),
+                subtitle=tr("reshade.merge_group_existing_sub"),
+                parent=self._section_container)
             for section_name in existing_sections:
                 pretty = section_name.removesuffix(".fx")
                 cb = CheckBox(pretty, group)
@@ -387,9 +406,10 @@ class ReshadeMergeDialog(MessageBoxBase):
         # Group 3: Advanced (non-fx) sections. Only when the toggle is on.
         if advanced_sections:
             group = _CollapsibleSectionGroup(
-                tr("reshade.merge_group_advanced",
-                   count=len(advanced_sections)),
-                self._section_container)
+                title=tr("reshade.merge_group_advanced",
+                         count=len(advanced_sections)),
+                subtitle=tr("reshade.merge_group_advanced_sub"),
+                parent=self._section_container)
             for section_name in advanced_sections:
                 cb = CheckBox(section_name, group)
                 if section_name in previously_ticked:
