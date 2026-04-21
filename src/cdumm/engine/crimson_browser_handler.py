@@ -172,6 +172,30 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
             inner_path = "/".join(parts)
             unresolved.append((inner_path, f))
 
+    # GH #28 — CrimsonForge-generated mods (mesh_loose_mod format) put
+    # textures under a sibling directory (e.g. ``Tex/Character/texture/
+    # *.dds``) rather than inside files_dir. Pre-v3.1.4 those silently
+    # dropped because this handler only walked files_dir. Collect any
+    # content in well-known texture-sidecar directories and feed it
+    # through the same basename-resolution + leftover-DDS-overlay
+    # pipeline that files_dir's unresolved bucket already uses.
+    _SIBLING_CONTENT_DIRS = {"tex", "textures", "texture"}
+    for sibling in base_dir.iterdir():
+        if not sibling.is_dir():
+            continue
+        if sibling == files_dir:
+            continue
+        if patches_dir and sibling == patches_dir:
+            continue
+        if sibling.name.lower() not in _SIBLING_CONTENT_DIRS:
+            continue
+        for f in sibling.rglob("*"):
+            if not f.is_file() or f.name.lower() in _SKIP_FILES:
+                continue
+            rel = f.relative_to(sibling)
+            inner_path = "/".join(rel.parts)
+            unresolved.append((inner_path, f))
+
     # Resolve unresolved files by searching PAMTs for matching filenames.
     # Anything still unresolved after basename-lookup that's a .dds file is
     # a NEW texture the mod is introducing — we'll build a texture overlay
