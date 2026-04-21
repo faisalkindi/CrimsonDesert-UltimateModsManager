@@ -172,15 +172,23 @@ def collect_enabled_json_targets(db) -> set[str]:
     the game with an orphaned PAMT entry pointing at a missing paz.
     """
     import json as _json
+    from pathlib import Path as _Path
     rows = db.connection.execute(
         "SELECT json_source FROM mods "
         "WHERE enabled = 1 AND json_source IS NOT NULL "
         "AND json_source != ''").fetchall()
     targets: set[str] = set()
     for (json_source,) in rows:
+        # json_source holds a filesystem path to the archived JSON,
+        # written by import_json_fast / import_json_as_entr. Earlier
+        # code parsed the path string itself, which always failed —
+        # silently masking this whole loop.
+        jp = _Path(json_source)
+        if not jp.exists():
+            continue
         try:
-            data = _json.loads(json_source)
-        except (ValueError, TypeError):
+            data = _json.loads(jp.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
             continue
         for patch in data.get("patches", []):
             gf = patch.get("game_file")
@@ -3130,17 +3138,22 @@ class ApplyWorker(QObject):
         seen_deltas: set[str] = set()
 
         for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end, json_source in cursor.fetchall():
-            # #145 Option Y: JSON mods with json_source are processed
-            # fresh at Phase 1a (mount-time) from their source JSON
-            # so the cross-mod aggregator can handle size-changing
-            # inserts correctly. Their stored ENTR deltas (created at
-            # import time) are now redundant and would conflict with
-            # the mount-time output. Skip entry_path deltas from these
-            # mods. Whole-file deltas (is_new or non-entry deltas)
-            # still apply — those are PAZ-dir mod contributions like
-            # Fat Stacks' 0036/0.paz that sit alongside JSON patches.
-            if json_source and entry_path:
-                continue
+            # #145 Option Y originally hard-skipped ENTR deltas from
+            # mods with json_source, assuming the Phase 1a aggregator
+            # would always cover them. That silently dropped a mod
+            # whenever process_json_patches_for_overlay skipped its
+            # patch (byte identity vs vanilla, mount-time extract
+            # failure, non-data-table mismatch, missing source.json).
+            # SirFapZalot's packed Improved Controller hit that on
+            # v3.1.3 — aggregator drops, ENTR skipped, mod inert.
+            #
+            # Fix: keep the ENTR delta in play. When the aggregator
+            # DOES produce an overlay entry, we end up with two
+            # entries for the same (pamt_dir, entry_path); they
+            # collide in _merge_same_target_overlay_entries, which
+            # picks the priority-winner (aggregator tags its entries
+            # with the lowest priority number among contributors, so
+            # it wins on overlap while the ENTR remains as fallback).
             if delta_path in seen_deltas:
                 continue
             # Skip deltas whose files are missing (zombie entries from old resets)

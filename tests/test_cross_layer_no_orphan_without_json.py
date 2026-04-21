@@ -43,21 +43,29 @@ def test_collect_enabled_json_targets_empty_when_no_json_mods():
         "no JSON mods = no JSON targets; nothing should be in the set")
 
 
-def test_collect_enabled_json_targets_reads_json_source():
+def test_collect_enabled_json_targets_reads_json_source(tmp_path):
+    # json_source holds the PATH to an archived JSON file on disk, not
+    # a JSON blob — same contract as import_json_fast / import_json_as_entr.
+    src = tmp_path / "es.json"
+    src.write_text(
+        '{"patches":[{"game_file":"gamedata/iteminfo.pabgb","changes":[]}]}',
+        encoding="utf-8")
     db = _mk_db()
     db.connection.execute(
-        "INSERT INTO mods VALUES (1, 'ES', 'paz', 1, 1, ?)",
-        ('{"patches":[{"game_file":"gamedata/iteminfo.pabgb","changes":[]}]}',))
+        "INSERT INTO mods VALUES (1, 'ES', 'paz', 1, 1, ?)", (str(src),))
     db.connection.commit()
     targets = collect_enabled_json_targets(db)
     assert "gamedata/iteminfo.pabgb" in targets
 
 
-def test_collect_enabled_json_targets_skips_disabled():
+def test_collect_enabled_json_targets_skips_disabled(tmp_path):
+    src = tmp_path / "es.json"
+    src.write_text(
+        '{"patches":[{"game_file":"gamedata/iteminfo.pabgb","changes":[]}]}',
+        encoding="utf-8")
     db = _mk_db()
     db.connection.execute(
-        "INSERT INTO mods VALUES (1, 'ES', 'paz', 0, 1, ?)",
-        ('{"patches":[{"game_file":"gamedata/iteminfo.pabgb","changes":[]}]}',))
+        "INSERT INTO mods VALUES (1, 'ES', 'paz', 0, 1, ?)", (str(src),))
     db.connection.commit()
     assert collect_enabled_json_targets(db) == set(), (
         "disabled mod should not contribute targets")
