@@ -145,10 +145,17 @@ class ReshadePage(SmoothScrollArea):
         self.setWidget(self._container)
 
     def set_managers(self, **kwargs) -> None:
+        """Wire the page's managers. Detection does NOT run synchronously —
+        it would block the main window during startup (the scan reads every
+        preset file to classify it). Instead, we queue the first refresh
+        behind a 0ms timer so the window paints first, THEN we scan. On Qt,
+        `QTimer.singleShot(0, ...)` posts the call to the end of the event
+        queue so UI responsiveness stays intact.
+        """
         self._db = kwargs.get("db", self._db)
         self._game_dir = kwargs.get("game_dir", self._game_dir)
         if self._game_dir is not None:
-            self.refresh()
+            QTimer.singleShot(0, self.refresh)
 
     # ── Detection + rebuild --------------------------------------------
 

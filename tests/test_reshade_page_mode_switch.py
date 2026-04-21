@@ -145,8 +145,12 @@ def test_refresh_is_noop_without_game_dir(qtbot):
     assert page._body_layout.count() == 0
 
 
-def test_set_managers_triggers_initial_detect(qtbot, tmp_path):
-    """First set_managers call with a game_dir should run detection."""
+def test_set_managers_triggers_deferred_initial_detect(qtbot, tmp_path):
+    """First set_managers call with a game_dir schedules detection via
+    QTimer.singleShot(0) so the scan runs AFTER the window paints. This
+    keeps startup responsive — syncing would block the splash screen on
+    users with large preset packs.
+    """
     from cdumm.gui.pages.reshade_page import ReshadePage
     page = ReshadePage()
     qtbot.addWidget(page)
@@ -154,5 +158,10 @@ def test_set_managers_triggers_initial_detect(qtbot, tmp_path):
     with patch("cdumm.gui.pages.reshade_page.detect_reshade_install",
                return_value=_not_installed_result()) as m:
         page.set_managers(game_dir=tmp_path)
-    m.assert_called_once()
+        # Detection is deferred; call hasn't happened yet.
+        assert m.call_count == 0
+        # Let the event loop process the singleShot(0) post.
+        qtbot.wait(20)
+        # Now detection should have fired.
+        assert m.call_count == 1
     assert page.current_state == "not_installed"

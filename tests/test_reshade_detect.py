@@ -195,34 +195,57 @@ def test_detect_quoted_base_path_is_stripped(tmp_path: Path) -> None:
     assert result.base_path == (game_dir / "bin64" / "my_shaders").resolve(strict=False)
 
 
-def test_detect_enumerates_presets_in_subfolders(tmp_path: Path) -> None:
-    """ReShade supports subfolder-organized presets (verified via crosire's
-    own sub-folder tutorial). Enumeration must recurse."""
+def test_detect_scans_presets_flat_only_not_subfolders(tmp_path: Path) -> None:
+    """Detection is intentionally FLAT — it does not recurse into subfolders
+    of `bin64/`. A real user's `bin64/` often contains extracted mod packs
+    with hundreds of thousands of files; walking them would block the UI
+    thread for ~15 seconds during startup.
+
+    Users who organize presets into a pack folder are expected to set
+    ReShade's `[INSTALL] BasePath=` to point at that folder — the scan then
+    targets the pack folder itself and picks up its top-level presets.
+    """
     bin64 = tmp_path / "bin64"
     bin64.mkdir()
     (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
     (bin64 / "dxgi.dll").write_bytes(b"\x00")
     (bin64 / "ReShade.ini").write_text("[GENERAL]\nPresetPath=\n")
-    # Top-level preset
+    # Top-level preset (found)
     (bin64 / "Top.ini").write_text("Techniques=Bloom\n[Bloom.fx]\na=1\n")
-    # Nested preset pack
+    # Nested preset (NOT found — flat scan only)
     pack = bin64 / "CinematicPack"
     pack.mkdir()
     (pack / "Cinematic.ini").write_text("Techniques=SMAA\n[SMAA.fx]\nb=2\n")
+
+    result = detect_reshade_install(tmp_path)
+    names = [p.name for p in result.presets]
+    assert names == ["Top.ini"]
+    assert "Cinematic.ini" not in names
+
+
+def test_detect_scans_custom_base_path_flat(tmp_path: Path) -> None:
+    """When BasePath points at a dedicated pack folder, flat-scanning that
+    folder picks up every preset at its top level."""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    pack = tmp_path / "ReShadePack"
+    pack.mkdir()
+    (pack / "Cinematic.ini").write_text("Techniques=SMAA\n[SMAA.fx]\nb=2\n")
     (pack / "Noir.ini").write_text("Techniques=HDR\n[HDR.fx]\nc=3\n")
-    # Deeper subfolder
-    deep = pack / "More"
-    deep.mkdir()
-    (deep / "Extra.ini").write_text("Techniques=DOF\n[DOF.fx]\nd=4\n")
+    (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
+    (bin64 / "dxgi.dll").write_bytes(b"\x00")
+    (bin64 / "ReShade.ini").write_text(
+        "[GENERAL]\nPresetPath=\n"
+        f"[INSTALL]\nBasePath={pack}\n")
 
     result = detect_reshade_install(tmp_path)
     names = sorted(p.name for p in result.presets)
-    assert names == ["Cinematic.ini", "Extra.ini", "Noir.ini", "Top.ini"]
+    assert names == ["Cinematic.ini", "Noir.ini"]
 
 
-def test_detect_skips_reshade_shaders_folder(tmp_path: Path) -> None:
-    """Don't recurse into `reshade-shaders/` -- it contains thousands of
-    per-shader config files that aren't presets."""
+def test_detect_ignores_ini_files_in_subfolders(tmp_path: Path) -> None:
+    """Flat scan means reshade-shaders/ and every other subfolder is ignored
+    for free -- no per-subfolder exclusion logic needed."""
     bin64 = tmp_path / "bin64"
     bin64.mkdir()
     (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
@@ -230,9 +253,12 @@ def test_detect_skips_reshade_shaders_folder(tmp_path: Path) -> None:
     (bin64 / "ReShade.ini").write_text("[GENERAL]\nPresetPath=\n")
     shaders = bin64 / "reshade-shaders"
     shaders.mkdir()
-    # File inside reshade-shaders that LOOKS like a preset by content but must be skipped.
     (shaders / "ShaderConfig.ini").write_text(
         "Techniques=Bloom\n[Bloom.fx]\nx=1\n")
+    random_subdir = bin64 / "SomeModDump"
+    random_subdir.mkdir()
+    (random_subdir / "random.ini").write_text(
+        "Techniques=X\n[X.fx]\nx=1\n")
     (bin64 / "RealPreset.ini").write_text(
         "Techniques=Bloom\n[Bloom.fx]\nx=1\n")
 

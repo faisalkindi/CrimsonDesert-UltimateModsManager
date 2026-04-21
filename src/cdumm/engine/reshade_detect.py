@@ -116,53 +116,41 @@ def _is_preset_file(p: Path) -> bool:
     return False
 
 
-_PRESET_RECURSE_MAX_DEPTH = 4  # sensible cap; users don't nest deeper
-
-
 def _enumerate_presets(search_dir: Path, ini_path: Path | None) -> list[Path]:
-    """Return sorted list of preset .ini files under `search_dir`, recursing
-    into subdirectories up to `_PRESET_RECURSE_MAX_DEPTH` levels deep.
+    """Return sorted list of preset .ini files directly inside `search_dir`.
 
-    ReShade supports subfolder-organized preset packs (verified via crosire's
-    own tutorial on sub-folder presets). Flat-scan-only would miss them.
+    Flat scan only — intentionally does NOT recurse into subdirectories. On a
+    user's real install, `bin64/` frequently contains extracted mod packs or
+    tool output directories with hundreds of thousands of unrelated files;
+    walking that on the UI thread blocks the main window for ~15 seconds.
 
-    ReShade.ini (the main config) is excluded wherever it appears in the tree.
-    Presets are sorted by path so the display order is stable.
+    ReShade supports subfolder-organized preset packs, but the convention is
+    to point ReShade's `[INSTALL] BasePath=` at the pack folder. When a user
+    does that, `search_dir` already IS the pack folder and the flat scan
+    picks up the pack's presets correctly.
+
+    ReShade.ini (the main config) is excluded.
     """
     if not search_dir.is_dir():
         return []
     results: list[Path] = []
     ini_resolved = ini_path.resolve() if ini_path and ini_path.exists() else None
 
-    def _walk(directory: Path, depth: int) -> None:
-        if depth > _PRESET_RECURSE_MAX_DEPTH:
-            return
-        try:
-            entries = sorted(directory.iterdir())
-        except OSError as e:
-            logger.debug("_enumerate_presets: iterdir failed %s: %s", directory, e)
-            return
-        for entry in entries:
-            if entry.is_dir():
-                # Skip ReShade's own shader directory to avoid scanning thousands
-                # of .ini files users don't care about as "presets".
-                if entry.name.lower() in ("reshade-shaders", "reshade-addons"):
-                    continue
-                _walk(entry, depth + 1)
-                continue
-            if entry.suffix.lower() != ".ini":
-                continue
-            if ini_resolved is not None:
-                try:
-                    if entry.resolve() == ini_resolved:
-                        continue
-                except OSError:
-                    pass
-            if _is_preset_file(entry):
-                results.append(entry)
+    try:
+        entries = sorted(search_dir.glob("*.ini"))
+    except OSError as e:
+        logger.debug("_enumerate_presets: glob failed %s: %s", search_dir, e)
+        return []
 
-    _walk(search_dir, 0)
-    results.sort()
+    for entry in entries:
+        if ini_resolved is not None:
+            try:
+                if entry.resolve() == ini_resolved:
+                    continue
+            except OSError:
+                pass
+        if _is_preset_file(entry):
+            results.append(entry)
     return results
 
 

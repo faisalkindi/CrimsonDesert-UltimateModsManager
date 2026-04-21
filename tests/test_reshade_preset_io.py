@@ -266,40 +266,19 @@ def test_is_game_running_returns_false_when_absent() -> None:
         assert is_game_running() is False
 
 
-def test_is_game_running_matches_exe_path_when_bin64_given(tmp_path: Path) -> None:
-    """If bin64_dir is provided, a process whose exe path lives inside that
-    dir counts as the game -- even when the exe NAME is different (this is
-    the Xbox Game Pass + Epic variant case)."""
-    bin64 = tmp_path / "bin64"
-    bin64.mkdir()
-    # Xbox variant: exe lives in bin64 but with an unexpected name.
-    xbox_exe = str(bin64 / "CrimsonDesertXbox.exe")
-
+def test_is_game_running_ignores_bin64_dir_param(tmp_path: Path) -> None:
+    """The bin64_dir param is accepted for call-site compatibility but does
+    not influence detection — we intentionally dropped exe-path matching
+    because `psutil.process_iter(['name', 'exe'])` is catastrophically slow
+    on non-admin Windows sessions (10-200x slower than name-only per
+    psutil issue #2366). Name-only is imperfect but cheap."""
     fake_processes = [
-        SimpleNamespace(info={"name": "chrome.exe", "exe": "C:/chrome.exe"}),
-        SimpleNamespace(info={"name": "CrimsonDesertXbox.exe", "exe": xbox_exe}),
+        SimpleNamespace(info={"name": "CrimsonDesert.exe"}),
     ]
     with patch("psutil.process_iter", return_value=fake_processes):
-        assert is_game_running(bin64_dir=bin64) is True
-
-
-def test_is_game_running_path_match_rejects_unrelated_cd_process(tmp_path: Path) -> None:
-    """A process NAMED `CrimsonDesert.exe` that lives outside bin64 shouldn't
-    fool the guard when bin64_dir is supplied. (E.g. an unrelated binary
-    coincidentally with the same name.)"""
-    bin64 = tmp_path / "bin64"
-    bin64.mkdir()
-    # Wrong-location binary.
-    fake_processes = [
-        SimpleNamespace(info={
-            "name": "CrimsonDesert.exe",
-            "exe": str(tmp_path / "somewhere_else" / "CrimsonDesert.exe"),
-        }),
-    ]
-    # With bin64_dir supplied, path check fails; fallback name check matches,
-    # so it still returns True. Path check is an additive signal, not a filter.
-    with patch("psutil.process_iter", return_value=fake_processes):
-        assert is_game_running(bin64_dir=bin64) is True
+        assert is_game_running(bin64_dir=tmp_path) is True
+        # Passing nothing is the same.
+        assert is_game_running() is True
 
 
 def test_is_game_running_tolerates_process_lookup_errors() -> None:

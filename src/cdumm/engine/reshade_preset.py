@@ -195,32 +195,24 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def is_game_running(
     game_exe_name: str = GAME_EXE_DEFAULT,
-    bin64_dir: Path | None = None,
+    bin64_dir: Path | None = None,  # kept for call-site compatibility; unused
 ) -> bool:
-    """Return True if the game appears to be running.
+    """Return True if any running process name matches `game_exe_name`
+    (case-insensitive).
 
-    Matching is best-effort and supports three scenarios:
-      1. If `bin64_dir` is given, any running process whose executable path
-         starts with `bin64_dir` counts as "the game" — this catches both the
-         Steam `CrimsonDesert.exe` and the Xbox Game Pass variant (which may
-         use a different exe name inside `WindowsApps\\...\\bin64\\`).
-      2. Fallback: case-insensitive name match against `game_exe_name`.
-      3. If psutil itself fails (rare, some sandboxed environments), return
-         False so the UI is lenient rather than blocking all writes.
+    Deliberately uses ONLY `psutil.process_iter(['name'])` — the name-only
+    request hits psutil's fast kernel enumeration path on Windows. Requesting
+    any other attribute (like `exe`) forces psutil into a much slower
+    per-process query path that can take 5-60 seconds on non-admin sessions
+    with 300+ processes (psutil GitHub issue #2366). Since this function runs
+    on the UI thread every 3s, cheap-and-imperfect beats accurate-and-hanging.
 
-    Tolerates per-process lookup failures — a process we can't inspect just
-    means that one process wasn't readable, not that the scan should fail.
+    Tolerates per-process lookup failures; tolerates psutil itself failing
+    (returns False = "not running" which is lenient, not blocking).
     """
     target_name = game_exe_name.lower()
-    target_dir: str | None = None
-    if bin64_dir is not None:
-        try:
-            target_dir = os.path.normcase(os.path.normpath(str(bin64_dir.resolve(strict=False))))
-        except Exception:  # noqa: BLE001
-            target_dir = None
-
     try:
-        iterator = psutil.process_iter(["name", "exe"])
+        iterator = psutil.process_iter(["name"])
     except Exception as e:  # noqa: BLE001 — psutil edge cases on some systems
         logger.debug("is_game_running: process_iter failed: %s", e)
         return False
@@ -232,25 +224,10 @@ def is_game_running(
             continue
         except Exception:  # noqa: BLE001
             continue
-
         name = info.get("name") or ""
-        exe = info.get("exe") or ""
-
-        # Preferred match: the process's exe lives inside bin64_dir.
-        if target_dir and exe:
-            try:
-                exe_norm = os.path.normcase(os.path.normpath(exe))
-                if exe_norm.startswith(target_dir + os.sep) or exe_norm == target_dir:
-                    logger.debug("is_game_running: process in bin64: %s", exe)
-                    return True
-            except Exception:  # noqa: BLE001
-                pass
-
-        # Fallback match: name equality.
         if name and name.lower() == target_name:
             logger.debug("is_game_running: name match: %s", name)
             return True
-
     return False
 
 
