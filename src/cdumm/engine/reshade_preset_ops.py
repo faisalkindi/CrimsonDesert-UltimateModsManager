@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # ---- Import --------------------------------------------------------------
 
+RESERVED_FILENAMES = {"reshade.ini"}  # case-insensitive compare
+
+
 def import_preset_file(
     src: Path,
     base_path: Path,
@@ -35,12 +38,20 @@ def import_preset_file(
     actually a preset first.
 
     Raises:
-      ValueError       if src doesn't have .ini extension or isn't a preset file
+      ValueError       if src isn't a .ini, isn't a preset, or is named like
+                       a ReShade config file (`ReShade.ini`). Rejecting the
+                       reserved name prevents accidentally wiping the user's
+                       ReShade config by importing a preset pack that happens
+                       to include its own ReShade.ini.
       FileNotFoundError if src doesn't exist
       FileExistsError  if the destination exists and overwrite=False
     """
     if src.suffix.lower() != ".ini":
         raise ValueError(f"Expected a .ini file, got {src.name!r}")
+    if src.name.lower() in RESERVED_FILENAMES:
+        raise ValueError(
+            f"Refusing to import {src.name!r}: that name is reserved for "
+            "ReShade's own config file. Rename the preset and try again.")
     if not src.exists():
         raise FileNotFoundError(f"Source file doesn't exist: {src}")
     if not _is_preset_file(src):
@@ -70,23 +81,60 @@ def _canonical_path(p: Path | str) -> str:
     return os.path.normcase(os.path.normpath(s))
 
 
+def relative_to_base(preset: Path, base_path: Path) -> str:
+    """Return a preset's path expressed relative to base_path when possible,
+    else the absolute path. Uses forward slashes for stability across systems.
+
+    Storing hidden/identifier paths relative to base_path means the state
+    survives moving the game directory -- the filenames and substructure
+    stay stable even if the root moves.
+    """
+    try:
+        rel = preset.resolve(strict=False).relative_to(
+            base_path.resolve(strict=False))
+        return str(rel).replace("\\", "/")
+    except (ValueError, OSError):
+        return str(preset)
+
+
 def filter_visible_presets(
     presets: list[Path],
     hidden: set[str],
+    base_path: Path | None = None,
 ) -> list[Path]:
     """Drop paths in `hidden` from `presets`, preserving order of the rest.
 
-    Matching is case-insensitive and separator-tolerant (Windows-safe). Stale
-    hidden entries that don't correspond to any current preset are silently
-    ignored.
+    Each entry in `hidden` can be either:
+      - an absolute path (legacy / cross-install user), OR
+      - a path relative to `base_path` (preferred new format).
 
-    `hidden` is a set of path strings as stored in the Config KV — typically
-    the absolute path of each hidden preset.
+    Both forms are normalized and compared case-insensitively so a single
+    hidden-list can match regardless of which form was saved.
+
+    Stale entries that don't correspond to any current preset are silently
+    ignored -- this is fail-safe: if the user's game dir moved and the hidden
+    list is stale, presets re-appear rather than staying orphaned.
     """
     if not hidden:
         return list(presets)
-    hidden_canonical = {_canonical_path(h) for h in hidden}
-    return [p for p in presets if _canonical_path(p) not in hidden_canonical]
+
+    # Build the comparison set: canonical absolute path + canonical relative path.
+    comparison_set: set[str] = set()
+    for h in hidden:
+        comparison_set.add(_canonical_path(h))
+        if base_path is not None and not Path(h).is_absolute():
+            comparison_set.add(_canonical_path(base_path / h))
+
+    def _matches_hidden(preset: Path) -> bool:
+        if _canonical_path(preset) in comparison_set:
+            return True
+        if base_path is not None:
+            rel = relative_to_base(preset, base_path)
+            if _canonical_path(rel) in comparison_set:
+                return True
+        return False
+
+    return [p for p in presets if not _matches_hidden(p)]
 
 
 # ---- Merge ---------------------------------------------------------------
@@ -153,31 +201,20 @@ def write_preset_sections(
 ) -> None:
     """Serialize a {section: {key: value}} dict to `path` as a ReShade preset.
 
-    Adds a `Techniques=` line if any [*.fx] sections are present but no
-    Techniques= key exists — ReShade needs this to know which effects to
-    actually run.
+    Writes sections exactly as given — no synthesis of Techniques= or any
+    other key. If the merged dict has no Techniques= line, ReShade will
+    initialize with no effects enabled, which is the correct fail-safe
+    behavior. (Silently enabling every merged shader with a synthetic
+    Techniques= line could overwhelm a user and isn't something either
+    source preset asked for.)
     """
     parser = configparser.RawConfigParser(interpolation=None)
     parser.optionxform = str
-
-    # ReShade requires a Techniques= line or at least one [*.fx] section
-    # for the file to register as a preset. We write out sections as-is and
-    # synthesize a Techniques= line in a generic section if missing.
-    has_techniques = any("Techniques" in values for values in sections.values())
-    fx_sections = [sec for sec in sections if sec.lower().endswith(".fx")]
 
     for section, values in sections.items():
         parser.add_section(section)
         for key, value in values.items():
             parser.set(section, key, value)
-
-    if not has_techniques and fx_sections:
-        # Inject a minimal generic section with Techniques= listing every fx.
-        generic = "GENERAL"
-        if not parser.has_section(generic):
-            parser.add_section(generic)
-        parser.set(generic, "Techniques",
-                   ",".join(sec.removesuffix(".fx") for sec in fx_sections))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

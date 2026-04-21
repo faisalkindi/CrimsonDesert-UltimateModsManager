@@ -17,6 +17,8 @@ from __future__ import annotations
 import configparser
 import logging
 import os
+import re
+import tempfile
 from pathlib import Path
 
 import psutil
@@ -26,6 +28,14 @@ from cdumm.engine.ini_line_editor import replace_key_in_section
 logger = logging.getLogger(__name__)
 
 GAME_EXE_DEFAULT = "CrimsonDesert.exe"
+
+
+def _strip_quotes(value: str) -> str:
+    """Strip matching leading/trailing quotes from an INI value."""
+    s = value.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
 
 
 # ---- Path resolution ------------------------------------------------------
@@ -39,8 +49,10 @@ def resolve_preset_path(
 
     Mirrors ReShade's own rule: absolute paths are returned as-is; relative
     paths resolve against `[INSTALL] BasePath=` (or `bin64_dir` if unset).
+    Handles defensively-quoted values like `PresetPath="C:/presets/foo.ini"`.
     """
-    p = Path(value)
+    stripped = _strip_quotes(value)
+    p = Path(stripped)
     if p.is_absolute():
         return p
     base = base_path if base_path is not None else bin64_dir
@@ -49,19 +61,44 @@ def resolve_preset_path(
 
 # ---- Reading --------------------------------------------------------------
 
+_PRESETPATH_LINE = re.compile(
+    r"^\s*PresetPath\s*=\s*(?P<value>.*?)\s*(?:\r?\n|\r|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_GENERAL_HEADER = re.compile(r"^\s*\[\s*GENERAL\s*\]\s*$",
+                              re.IGNORECASE | re.MULTILINE)
+_ANY_HEADER = re.compile(r"^\s*\[[^\]]+\]\s*$", re.MULTILINE)
+
+
 def read_active_preset_raw(ini_path: Path) -> str | None:
-    """Return the raw text value of `[GENERAL] PresetPath=` as configparser sees
-    it (whitespace-trimmed), or None if missing / file unreadable."""
-    parser = configparser.RawConfigParser(strict=False, interpolation=None)
+    """Return the raw text value of `[GENERAL] PresetPath=` exactly as written
+    (trailing whitespace stripped, but internal characters preserved),
+    or None if missing / file unreadable.
+
+    We bypass configparser for this read so that line-precise fidelity is
+    preserved — the value we return is what `set_active_preset` will write
+    back during Revert, so it needs to be exact.
+    """
     try:
-        parser.read(ini_path, encoding="utf-8")
-    except (OSError, configparser.Error) as e:
-        logger.debug("read_active_preset_raw: parse failed: %s", e)
+        text = ini_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        logger.debug("read_active_preset_raw: read failed: %s", e)
         return None
-    value = parser.get("GENERAL", "PresetPath", fallback=None)
-    if value is None:
+
+    # Find the [GENERAL] section bounds.
+    gen_header = _GENERAL_HEADER.search(text)
+    if gen_header is None:
         return None
-    return value
+    section_start = gen_header.end()
+    # Section ends at next [header] or EOF.
+    next_header = _ANY_HEADER.search(text, pos=section_start)
+    section_end = next_header.start() if next_header else len(text)
+    section_text = text[section_start:section_end]
+
+    match = _PRESETPATH_LINE.search(section_text)
+    if match is None:
+        return None
+    return match.group("value")
 
 
 def read_active_preset(
@@ -99,6 +136,8 @@ def set_active_preset(ini_path: Path, preset_value: str) -> str:
     Returns the previous raw string (empty string if the key didn't exist yet).
 
     Line-surgical: comments, blank lines, and other keys are preserved.
+    Atomic: writes to a sibling temp file and then renames over the target,
+    so power loss mid-write can't leave a half-written ReShade.ini.
     Logs the transition at INFO level for bug-report traceability.
     """
     previous = read_active_preset_raw(ini_path) or ""
@@ -111,41 +150,108 @@ def set_active_preset(ini_path: Path, preset_value: str) -> str:
         raise  # propagate to caller (e.g. PermissionError on read-only ini)
 
     new_text = replace_key_in_section(text, "GENERAL", "PresetPath", preset_value)
-    ini_path.write_text(new_text, encoding="utf-8")
+    _atomic_write_text(ini_path, new_text)
     logger.info("ReShade preset switched: %r -> %r (ini=%s)",
                 previous, preset_value, ini_path)
     return previous
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` via a temp file + rename.
+
+    Steps:
+      1. Write to `<path>.<random>.tmp` in the same directory (same filesystem
+         guarantees the rename is atomic on Windows/NTFS and POSIX).
+      2. Flush + fsync so the bytes hit the disk before we rename.
+      3. `os.replace` to atomically swap the new file into place.
+
+    If any step raises, the original file is untouched.
+    """
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # NamedTemporaryFile with delete=False so we can close and rename it.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                # fsync isn't critical; best-effort.
+                pass
+        os.replace(tmp_name, str(path))
+    except Exception:
+        # Clean up the temp file on any failure.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 # ---- Running-game guard ---------------------------------------------------
 
-def is_game_running(game_exe_name: str = GAME_EXE_DEFAULT) -> bool:
-    """Return True if any running process matches `game_exe_name` (case-insensitive).
+def is_game_running(
+    game_exe_name: str = GAME_EXE_DEFAULT,
+    bin64_dir: Path | None = None,
+) -> bool:
+    """Return True if the game appears to be running.
 
-    Tolerates per-process lookup failures (NoSuchProcess, AccessDenied) — those
-    just mean that one process wasn't readable, not that the scan should fail.
+    Matching is best-effort and supports three scenarios:
+      1. If `bin64_dir` is given, any running process whose executable path
+         starts with `bin64_dir` counts as "the game" — this catches both the
+         Steam `CrimsonDesert.exe` and the Xbox Game Pass variant (which may
+         use a different exe name inside `WindowsApps\\...\\bin64\\`).
+      2. Fallback: case-insensitive name match against `game_exe_name`.
+      3. If psutil itself fails (rare, some sandboxed environments), return
+         False so the UI is lenient rather than blocking all writes.
+
+    Tolerates per-process lookup failures — a process we can't inspect just
+    means that one process wasn't readable, not that the scan should fail.
     """
-    target = game_exe_name.lower()
-    running = False
+    target_name = game_exe_name.lower()
+    target_dir: str | None = None
+    if bin64_dir is not None:
+        try:
+            target_dir = os.path.normcase(os.path.normpath(str(bin64_dir.resolve(strict=False))))
+        except Exception:  # noqa: BLE001
+            target_dir = None
+
     try:
-        iterator = psutil.process_iter(["name"])
+        iterator = psutil.process_iter(["name", "exe"])
     except Exception as e:  # noqa: BLE001 — psutil edge cases on some systems
         logger.debug("is_game_running: process_iter failed: %s", e)
         return False
 
     for proc in iterator:
         try:
-            name = proc.info.get("name", "") if isinstance(proc.info, dict) else ""
+            info = proc.info if isinstance(proc.info, dict) else {}
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
         except Exception:  # noqa: BLE001
             continue
-        if name and name.lower() == target:
-            running = True
-            break
-    if running:
-        logger.debug("is_game_running: %s detected", game_exe_name)
-    return running
+
+        name = info.get("name") or ""
+        exe = info.get("exe") or ""
+
+        # Preferred match: the process's exe lives inside bin64_dir.
+        if target_dir and exe:
+            try:
+                exe_norm = os.path.normcase(os.path.normpath(exe))
+                if exe_norm.startswith(target_dir + os.sep) or exe_norm == target_dir:
+                    logger.debug("is_game_running: process in bin64: %s", exe)
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Fallback match: name equality.
+        if name and name.lower() == target_name:
+            logger.debug("is_game_running: name match: %s", name)
+            return True
+
+    return False
 
 
 # ---- Path comparison ------------------------------------------------------

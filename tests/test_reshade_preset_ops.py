@@ -16,6 +16,7 @@ from cdumm.engine.reshade_preset_ops import (
     import_preset_file,
     merge_into_main,
     read_preset_for_merge,
+    relative_to_base,
     write_preset_sections,
 )
 
@@ -88,6 +89,29 @@ def test_import_creates_base_if_missing(tmp_path: Path) -> None:
     assert base.is_dir()
 
 
+def test_import_rejects_reshade_ini_as_reserved_name(tmp_path: Path) -> None:
+    """Importing a file named ReShade.ini would overwrite the user's config.
+    Refuse it regardless of the overwrite flag."""
+    src = tmp_path / "ReShade.ini"
+    src.write_text("Techniques=X\n[X.fx]\nfoo=1\n")
+    base = tmp_path / "base"
+    base.mkdir()
+
+    with pytest.raises(ValueError, match="reserved"):
+        import_preset_file(src, base)
+
+
+def test_import_rejects_reshade_ini_case_insensitive(tmp_path: Path) -> None:
+    """`reshade.ini` (lowercase) is the same file on Windows -- reject it."""
+    src = tmp_path / "reshade.ini"
+    src.write_text("Techniques=X\n[X.fx]\nfoo=1\n")
+    base = tmp_path / "base"
+    base.mkdir()
+
+    with pytest.raises(ValueError, match="reserved"):
+        import_preset_file(src, base)
+
+
 # ---- Hide (soft-delete; filter from CDUMM view only) ---------------------
 
 def test_filter_visible_returns_all_when_nothing_hidden(tmp_path: Path) -> None:
@@ -119,6 +143,67 @@ def test_filter_visible_ignores_stale_hidden_entries(tmp_path: Path) -> None:
     a = tmp_path / "a.ini"
     result = filter_visible_presets([a], hidden={str(tmp_path / "gone.ini")})
     assert result == [a]
+
+
+def test_filter_visible_matches_relative_hidden_paths(tmp_path: Path) -> None:
+    """New format: hidden entries stored relative to base_path survive
+    moving the game directory."""
+    base = tmp_path / "presets"
+    base.mkdir()
+    preset = base / "Cinematic.ini"
+    preset.write_text("x")
+    # Relative-to-base hidden entry.
+    hidden = {"Cinematic.ini"}
+    result = filter_visible_presets([preset], hidden, base_path=base)
+    assert result == []
+
+
+def test_filter_visible_matches_relative_hidden_path_in_subfolder(tmp_path: Path) -> None:
+    """Hidden entry for a preset in a subfolder of base_path."""
+    base = tmp_path / "presets"
+    base.mkdir()
+    subdir = base / "Cinematic"
+    subdir.mkdir()
+    preset = subdir / "Cinematic.ini"
+    preset.write_text("x")
+    hidden = {"Cinematic/Cinematic.ini"}
+    result = filter_visible_presets([preset], hidden, base_path=base)
+    assert result == []
+
+
+def test_filter_visible_absolute_and_relative_hidden_entries_coexist(tmp_path: Path) -> None:
+    """Legacy absolute entries still work alongside new relative entries."""
+    base = tmp_path / "presets"
+    base.mkdir()
+    a = base / "A.ini"
+    a.write_text("x")
+    b = base / "B.ini"
+    b.write_text("x")
+    hidden = {"A.ini", str(b)}  # relative + absolute
+    result = filter_visible_presets([a, b], hidden, base_path=base)
+    assert result == []
+
+
+def test_relative_to_base_inside_base(tmp_path: Path) -> None:
+    base = tmp_path / "presets"
+    base.mkdir()
+    preset = base / "sub" / "foo.ini"
+    preset.parent.mkdir()
+    preset.write_text("x")
+    assert relative_to_base(preset, base) == "sub/foo.ini"
+
+
+def test_relative_to_base_outside_returns_absolute(tmp_path: Path) -> None:
+    """Preset lives outside base_path -> use absolute path (fail-safe)."""
+    base = tmp_path / "presets"
+    base.mkdir()
+    outside = tmp_path / "somewhere_else" / "external.ini"
+    outside.parent.mkdir()
+    outside.write_text("x")
+    result = relative_to_base(outside, base)
+    # Not a simple relative name; the absolute path is returned.
+    assert "external.ini" in result
+    assert ":" in result or result.startswith("/")
 
 
 # ---- Merge: reading ------------------------------------------------------

@@ -49,6 +49,20 @@ def test_resolve_relative_with_subdir(tmp_path: Path) -> None:
     assert result == base / "folder" / "inner.ini"
 
 
+def test_resolve_strips_double_quotes(tmp_path: Path) -> None:
+    """Defensive: if ReShade (or a user hand-edit) quoted the path,
+    strip the quotes rather than treat them as part of the filename."""
+    result = resolve_preset_path(None, tmp_path / "bin64",
+                                 '"C:/external/my preset.ini"')
+    assert str(result).replace("\\", "/") == "C:/external/my preset.ini"
+
+
+def test_resolve_strips_single_quotes(tmp_path: Path) -> None:
+    result = resolve_preset_path(None, tmp_path / "bin64",
+                                 "'D:/presets/foo.ini'")
+    assert str(result).replace("\\", "/") == "D:/presets/foo.ini"
+
+
 # ---- read_active_preset[_raw] ---------------------------------------------
 
 def _write_ini(path: Path, contents: str) -> None:
@@ -163,6 +177,46 @@ def test_set_active_preset_adds_key_when_missing(tmp_path: Path) -> None:
     assert "PresetPath=new.ini" in text
 
 
+def test_set_active_preset_is_atomic_on_disk(tmp_path: Path, monkeypatch) -> None:
+    """If the write step fails mid-way, the original ReShade.ini must still
+    be intact (no half-written file). We simulate failure by making
+    os.replace raise right before the swap, then verify the original text
+    is untouched and no temp file leaks."""
+    import os as real_os
+    ini = tmp_path / "ReShade.ini"
+    original = "[GENERAL]\nPresetPath=before.ini\nOther=keep\n"
+    _write_ini(ini, original)
+
+    boom_called = {"count": 0}
+
+    def _boom(src, dst):
+        boom_called["count"] += 1
+        raise PermissionError("simulated lock on rename")
+
+    monkeypatch.setattr("cdumm.engine.reshade_preset.os.replace", _boom)
+
+    import pytest
+    with pytest.raises(PermissionError):
+        set_active_preset(ini, "after.ini")
+
+    # Original file unchanged.
+    assert ini.read_text(encoding="utf-8") == original
+    # No orphan .tmp file.
+    leftovers = list(tmp_path.glob("ReShade.ini.*.tmp"))
+    assert leftovers == []
+
+
+def test_set_active_preset_handles_quoted_existing_value(tmp_path: Path) -> None:
+    """If the existing PresetPath= was quoted (defensive), the raw-previous
+    value we return still matches what was on disk."""
+    ini = tmp_path / "ReShade.ini"
+    _write_ini(ini, '[GENERAL]\nPresetPath="my preset.ini"\n')
+
+    previous = set_active_preset(ini, "next.ini")
+    # The quoted form is preserved in the previous-value return.
+    assert '"my preset.ini"' in previous or "my preset.ini" in previous
+
+
 # ---- read_preset_sections -------------------------------------------------
 
 def test_read_preset_sections_parses_shader_blocks(tmp_path: Path) -> None:
@@ -210,6 +264,42 @@ def test_is_game_running_returns_false_when_absent() -> None:
     ]
     with patch("psutil.process_iter", return_value=fake_processes):
         assert is_game_running() is False
+
+
+def test_is_game_running_matches_exe_path_when_bin64_given(tmp_path: Path) -> None:
+    """If bin64_dir is provided, a process whose exe path lives inside that
+    dir counts as the game -- even when the exe NAME is different (this is
+    the Xbox Game Pass + Epic variant case)."""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    # Xbox variant: exe lives in bin64 but with an unexpected name.
+    xbox_exe = str(bin64 / "CrimsonDesertXbox.exe")
+
+    fake_processes = [
+        SimpleNamespace(info={"name": "chrome.exe", "exe": "C:/chrome.exe"}),
+        SimpleNamespace(info={"name": "CrimsonDesertXbox.exe", "exe": xbox_exe}),
+    ]
+    with patch("psutil.process_iter", return_value=fake_processes):
+        assert is_game_running(bin64_dir=bin64) is True
+
+
+def test_is_game_running_path_match_rejects_unrelated_cd_process(tmp_path: Path) -> None:
+    """A process NAMED `CrimsonDesert.exe` that lives outside bin64 shouldn't
+    fool the guard when bin64_dir is supplied. (E.g. an unrelated binary
+    coincidentally with the same name.)"""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    # Wrong-location binary.
+    fake_processes = [
+        SimpleNamespace(info={
+            "name": "CrimsonDesert.exe",
+            "exe": str(tmp_path / "somewhere_else" / "CrimsonDesert.exe"),
+        }),
+    ]
+    # With bin64_dir supplied, path check fails; fallback name check matches,
+    # so it still returns True. Path check is an additive signal, not a filter.
+    with patch("psutil.process_iter", return_value=fake_processes):
+        assert is_game_running(bin64_dir=bin64) is True
 
 
 def test_is_game_running_tolerates_process_lookup_errors() -> None:

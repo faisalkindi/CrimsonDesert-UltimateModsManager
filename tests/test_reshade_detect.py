@@ -159,6 +159,88 @@ def test_detect_io_exception_returns_error_state(tmp_path: Path) -> None:
     assert "PermissionError" in result.error
 
 
+def test_detect_relative_base_path_resolves_against_bin64(tmp_path: Path) -> None:
+    """If BasePath is relative (e.g. 'my_shaders'), it should resolve against
+    bin64 -- not against the current working directory."""
+    game_dir = tmp_path
+    bin64 = game_dir / "bin64"
+    bin64.mkdir()
+    (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
+    (bin64 / "dxgi.dll").write_bytes(b"\x00")
+    # Relative path in BasePath=.
+    (bin64 / "ReShade.ini").write_text(
+        "[GENERAL]\nPresetPath=foo.ini\n"
+        "[INSTALL]\nBasePath=my_shaders\n")
+    # Create the actual directory the relative path should resolve to.
+    (bin64 / "my_shaders").mkdir()
+    (bin64 / "my_shaders" / "Preset.ini").write_text(
+        "Techniques=Bloom\n[Bloom.fx]\na=1\n")
+
+    result = detect_reshade_install(game_dir)
+    # The resolved base_path should live inside bin64, not the CWD.
+    assert result.base_path == (bin64 / "my_shaders").resolve(strict=False)
+    assert len(result.presets) == 1
+    assert result.presets[0].name == "Preset.ini"
+
+
+def test_detect_quoted_base_path_is_stripped(tmp_path: Path) -> None:
+    """ReShade.ini with BasePath=\"my_shaders\" (quoted) should resolve the
+    same as the unquoted form."""
+    game_dir = _make_game_dir(
+        tmp_path, with_dxgi=True, with_ini=True,
+        ini_contents='[GENERAL]\nPresetPath=\n[INSTALL]\nBasePath="my_shaders"\n')
+    (game_dir / "bin64" / "my_shaders").mkdir()
+
+    result = detect_reshade_install(game_dir)
+    assert result.base_path == (game_dir / "bin64" / "my_shaders").resolve(strict=False)
+
+
+def test_detect_enumerates_presets_in_subfolders(tmp_path: Path) -> None:
+    """ReShade supports subfolder-organized presets (verified via crosire's
+    own sub-folder tutorial). Enumeration must recurse."""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
+    (bin64 / "dxgi.dll").write_bytes(b"\x00")
+    (bin64 / "ReShade.ini").write_text("[GENERAL]\nPresetPath=\n")
+    # Top-level preset
+    (bin64 / "Top.ini").write_text("Techniques=Bloom\n[Bloom.fx]\na=1\n")
+    # Nested preset pack
+    pack = bin64 / "CinematicPack"
+    pack.mkdir()
+    (pack / "Cinematic.ini").write_text("Techniques=SMAA\n[SMAA.fx]\nb=2\n")
+    (pack / "Noir.ini").write_text("Techniques=HDR\n[HDR.fx]\nc=3\n")
+    # Deeper subfolder
+    deep = pack / "More"
+    deep.mkdir()
+    (deep / "Extra.ini").write_text("Techniques=DOF\n[DOF.fx]\nd=4\n")
+
+    result = detect_reshade_install(tmp_path)
+    names = sorted(p.name for p in result.presets)
+    assert names == ["Cinematic.ini", "Extra.ini", "Noir.ini", "Top.ini"]
+
+
+def test_detect_skips_reshade_shaders_folder(tmp_path: Path) -> None:
+    """Don't recurse into `reshade-shaders/` -- it contains thousands of
+    per-shader config files that aren't presets."""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
+    (bin64 / "dxgi.dll").write_bytes(b"\x00")
+    (bin64 / "ReShade.ini").write_text("[GENERAL]\nPresetPath=\n")
+    shaders = bin64 / "reshade-shaders"
+    shaders.mkdir()
+    # File inside reshade-shaders that LOOKS like a preset by content but must be skipped.
+    (shaders / "ShaderConfig.ini").write_text(
+        "Techniques=Bloom\n[Bloom.fx]\nx=1\n")
+    (bin64 / "RealPreset.ini").write_text(
+        "Techniques=Bloom\n[Bloom.fx]\nx=1\n")
+
+    result = detect_reshade_install(tmp_path)
+    names = [p.name for p in result.presets]
+    assert names == ["RealPreset.ini"]
+
+
 def test_detect_enumerates_presets_from_custom_base_path(tmp_path: Path) -> None:
     """When BasePath= points elsewhere, presets are enumerated from there,
     not from bin64."""

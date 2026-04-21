@@ -92,7 +92,10 @@ class ReshadePage(SmoothScrollArea):
         # Dynamic widgets (created/destroyed on mode switch).
         self._running_banner: QWidget | None = None
         self._revert_btn: PushButton | None = None
-        self._preset_rows: list[tuple[Path, PushButton]] = []
+        # Rows collect both PushButton (activate) and TransparentToolButton
+        # (hide); use the common QAbstractButton base in the type.
+        from PySide6.QtWidgets import QAbstractButton
+        self._preset_rows: list[tuple[Path, QAbstractButton]] = []
 
         self._build_shell()
         self.enableTransparentBackground()
@@ -251,7 +254,8 @@ class ReshadePage(SmoothScrollArea):
         hidden = self._get_hidden_presets()
         active = self._compute_active_preset(install)
         from cdumm.engine.reshade_preset_ops import filter_visible_presets
-        visible_presets = filter_visible_presets(install.presets, hidden)
+        visible_presets = filter_visible_presets(
+            install.presets, hidden, base_path=install.base_path)
         if active is not None:
             # Ensure active preset is always shown even if somehow hidden.
             from cdumm.engine.reshade_preset import same_preset as _sp
@@ -303,7 +307,10 @@ class ReshadePage(SmoothScrollArea):
         self._merge_btn = PushButton(FluentIcon.LINK,
                                      tr("reshade.merge_btn"), summary)
         self._merge_btn.clicked.connect(self._on_merge_clicked)
-        self._merge_btn.setEnabled(len(visible_presets) >= 2)
+        # Enable when there are 2+ presets total (including hidden) because
+        # the merge dialog lets users pick from every preset on disk, not
+        # only visible ones. Keeps button state consistent with dialog contents.
+        self._merge_btn.setEnabled(len(install.presets) >= 2)
         actions_row.addWidget(self._merge_btn)
         actions_row.addStretch()
         slay.addLayout(actions_row)
@@ -435,7 +442,10 @@ class ReshadePage(SmoothScrollArea):
         self._game_poll_timer.stop()
 
     def _poll_game_running(self) -> None:
-        new_state = is_game_running()
+        bin64 = (self._last_detect.dll_path.parent
+                 if self._last_detect and self._last_detect.dll_path
+                 else (self._game_dir / "bin64" if self._game_dir else None))
+        new_state = is_game_running(bin64_dir=bin64)
         if new_state != self._game_running:
             self._game_running = new_state
             self._apply_running_state()
@@ -548,9 +558,19 @@ class ReshadePage(SmoothScrollArea):
 
     def _on_hide_clicked(self, preset_path: Path) -> None:
         """Soft-hide a preset: filter it out of CDUMM's list. The file stays
-        on disk so users can unhide later or pick it up outside CDUMM."""
+        on disk so users can unhide later or pick it up outside CDUMM.
+
+        Stores the path relative to base_path so the hidden state survives
+        the user moving their game directory. Falls back to absolute if the
+        preset lives outside base_path.
+        """
+        from cdumm.engine.reshade_preset_ops import relative_to_base
         hidden = self._get_hidden_presets()
-        hidden.add(str(preset_path))
+        base = self._last_detect.base_path if self._last_detect else None
+        if base is not None:
+            hidden.add(relative_to_base(preset_path, base))
+        else:
+            hidden.add(str(preset_path))
         self._save_hidden_presets(hidden)
 
         self._show_infobar_success(

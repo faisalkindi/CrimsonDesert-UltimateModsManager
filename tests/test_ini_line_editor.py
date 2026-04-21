@@ -108,3 +108,30 @@ def test_replace_file_without_trailing_newline() -> None:
     src = "[GENERAL]\nPresetPath=old.ini"  # no trailing \n
     out = replace_key_in_section(src, "GENERAL", "PresetPath", "new.ini")
     assert "PresetPath=new.ini" in out
+
+
+def test_replace_preserves_original_key_casing() -> None:
+    """If the file has 'presetpath=' (lowercase), rewrite keeps lowercase --
+    don't silently change the user's casing choice."""
+    src = "[GENERAL]\npresetpath=old.ini\n"
+    out = replace_key_in_section(src, "GENERAL", "PresetPath", "new.ini")
+    assert "presetpath=new.ini" in out
+    assert "PresetPath=" not in out
+
+
+def test_replace_preserves_leading_whitespace() -> None:
+    """Indented keys (unusual but possible) keep their indentation."""
+    src = "[GENERAL]\n    PresetPath=old.ini\n"
+    out = replace_key_in_section(src, "GENERAL", "PresetPath", "new.ini")
+    assert "    PresetPath=new.ini" in out
+
+
+def test_replace_rewrites_last_duplicate_key_if_section_has_dupes() -> None:
+    """Malformed INI with duplicate keys: rewrite the LAST one so users who
+    edit via a tool that appends-wins see their latest value replaced."""
+    src = "[GENERAL]\nPresetPath=a.ini\nPresetPath=b.ini\n"
+    out = replace_key_in_section(src, "GENERAL", "PresetPath", "new.ini")
+    # Only the second (last) one is rewritten; the first stays as-is.
+    assert out.count("PresetPath=") == 2
+    assert "PresetPath=a.ini" in out
+    assert "PresetPath=new.ini" in out

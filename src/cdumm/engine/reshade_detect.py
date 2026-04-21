@@ -68,21 +68,34 @@ def _dll_path(bin64: Path) -> Path | None:
     return None
 
 
+def _strip_quotes(value: str) -> str:
+    """Strip matching leading/trailing quotes from an INI value."""
+    s = value.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
+
 def _read_base_path(ini_path: Path, bin64: Path) -> Path:
     """Read [INSTALL] BasePath= from ReShade.ini. Falls back to bin64.
 
     ReShade's documented fallback is the application exe directory — which
-    for Crimson Desert is bin64/.
+    for Crimson Desert is bin64/. Relative BasePath values are resolved
+    against bin64 (ReShade's own convention for relative paths is the exe
+    directory as the base).
     """
     parser = configparser.RawConfigParser(strict=False, interpolation=None)
     try:
         parser.read(ini_path, encoding="utf-8")
     except (OSError, configparser.Error):
         return bin64
-    base = parser.get("INSTALL", "BasePath", fallback="").strip()
+    base = _strip_quotes(parser.get("INSTALL", "BasePath", fallback=""))
     if not base:
         return bin64
-    return Path(base)
+    base_path = Path(base)
+    if not base_path.is_absolute():
+        base_path = (bin64 / base_path).resolve(strict=False)
+    return base_path
 
 
 def _is_preset_file(p: Path) -> bool:
@@ -103,19 +116,53 @@ def _is_preset_file(p: Path) -> bool:
     return False
 
 
+_PRESET_RECURSE_MAX_DEPTH = 4  # sensible cap; users don't nest deeper
+
+
 def _enumerate_presets(search_dir: Path, ini_path: Path | None) -> list[Path]:
-    """Return sorted list of preset .ini files in search_dir, excluding
-    ReShade.ini itself."""
+    """Return sorted list of preset .ini files under `search_dir`, recursing
+    into subdirectories up to `_PRESET_RECURSE_MAX_DEPTH` levels deep.
+
+    ReShade supports subfolder-organized preset packs (verified via crosire's
+    own tutorial on sub-folder presets). Flat-scan-only would miss them.
+
+    ReShade.ini (the main config) is excluded wherever it appears in the tree.
+    Presets are sorted by path so the display order is stable.
+    """
     if not search_dir.is_dir():
         return []
     results: list[Path] = []
     ini_resolved = ini_path.resolve() if ini_path and ini_path.exists() else None
-    for candidate in sorted(search_dir.glob("*.ini")):
-        # Skip the main config file even if it happens to be in the search dir.
-        if ini_resolved is not None and candidate.resolve() == ini_resolved:
-            continue
-        if _is_preset_file(candidate):
-            results.append(candidate)
+
+    def _walk(directory: Path, depth: int) -> None:
+        if depth > _PRESET_RECURSE_MAX_DEPTH:
+            return
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError as e:
+            logger.debug("_enumerate_presets: iterdir failed %s: %s", directory, e)
+            return
+        for entry in entries:
+            if entry.is_dir():
+                # Skip ReShade's own shader directory to avoid scanning thousands
+                # of .ini files users don't care about as "presets".
+                if entry.name.lower() in ("reshade-shaders", "reshade-addons"):
+                    continue
+                _walk(entry, depth + 1)
+                continue
+            if entry.suffix.lower() != ".ini":
+                continue
+            if ini_resolved is not None:
+                try:
+                    if entry.resolve() == ini_resolved:
+                        continue
+                except OSError:
+                    pass
+            if _is_preset_file(entry):
+                results.append(entry)
+
+    _walk(search_dir, 0)
+    results.sort()
     return results
 
 

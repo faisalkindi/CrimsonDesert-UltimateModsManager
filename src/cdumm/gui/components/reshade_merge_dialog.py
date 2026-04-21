@@ -57,6 +57,8 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._section_container: QWidget | None = None
         self._main_sections: dict[str, dict[str, str]] = {}
         self._other_sections: dict[str, dict[str, str]] = {}
+        self._include_non_fx = False
+        self._error_label: CaptionLabel | None = None
 
         self._build_ui()
         self._refresh_sections()
@@ -109,6 +111,15 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._section_container_layout.setSpacing(6)
         scroll.setWidget(self._section_container)
         self.viewLayout.addWidget(scroll)
+
+        # Advanced toggle: include non-fx sections (GENERAL, DEPTH, etc.).
+        self._include_non_fx_cb = CheckBox(
+            tr("reshade.merge_include_advanced"), self)
+        self._include_non_fx_cb.setToolTip(
+            tr("reshade.merge_include_advanced_tooltip"))
+        self._include_non_fx_cb.stateChanged.connect(
+            self._on_include_advanced_toggled)
+        self.viewLayout.addWidget(self._include_non_fx_cb)
         self.viewLayout.addSpacing(8)
 
         # Output filename
@@ -116,6 +127,13 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._name_edit = LineEdit(self)
         self._name_edit.setPlaceholderText("MergedPreset.ini")
         self.viewLayout.addWidget(self._name_edit)
+
+        # Error label — shown when validate() returns False so users know why
+        # OK didn't close the dialog.
+        self._error_label = CaptionLabel("", self)
+        self._error_label.setStyleSheet("color: #C4314B;")
+        self._error_label.setVisible(False)
+        self.viewLayout.addWidget(self._error_label)
 
         # OK / Cancel — override button text (MessageBoxBase provides them)
         self.yesButton.setText(tr("reshade.merge_ok"))
@@ -152,20 +170,33 @@ class ReshadeMergeDialog(MessageBoxBase):
             self._section_container_layout.addWidget(label)
             return
 
-        # Display every section from Other. For each: checkbox + overwrite/add hint.
+        # Display sections from Other. Effect (.fx) sections always show;
+        # non-fx sections (e.g. [GENERAL], [DEPTH]) only when the advanced
+        # toggle is on — those are power-user territory and most users just
+        # want to combine effects between presets.
+        any_row = False
         for section_name in self._other_sections:
-            # Hide [GENERAL] / [DEPTH] and other non-fx sections to keep the list
-            # focused on user-meaningful effects.
-            if not section_name.lower().endswith(".fx"):
+            is_fx = section_name.lower().endswith(".fx")
+            if not is_fx and not self._include_non_fx:
                 continue
-            pretty = section_name.removesuffix(".fx")
+            pretty = section_name if not is_fx else section_name.removesuffix(".fx")
             overwrites = section_name in self._main_sections
             hint = tr("reshade.merge_will_overwrite") if overwrites \
                 else tr("reshade.merge_will_add")
             cb = CheckBox(f"{pretty}  {hint}", self._section_container)
             self._section_container_layout.addWidget(cb)
             self._section_checks.append((section_name, cb))
+            any_row = True
+
+        if not any_row:
+            self._section_container_layout.addWidget(
+                CaptionLabel(tr("reshade.merge_nothing_to_take"),
+                             self._section_container))
         self._section_container_layout.addStretch()
+
+    def _on_include_advanced_toggled(self, _state: int) -> None:
+        self._include_non_fx = self._include_non_fx_cb.isChecked()
+        self._refresh_sections()
 
     # ── Result -------------------------------------------------------------
 
@@ -193,11 +224,34 @@ class ReshadeMergeDialog(MessageBoxBase):
         )
 
     def validate(self) -> bool:
-        """Overrides MessageBoxBase validate; returning False keeps the dialog open."""
-        result = self.get_result()
-        if result is None:
+        """Overrides MessageBoxBase validate; returning False keeps the dialog
+        open AND shows a specific error label so the user knows why OK didn't
+        close the dialog."""
+        main_path = self._main_combo.currentData()
+        other_path = self._other_combo.currentData()
+        name = self._name_edit.text().strip()
+
+        if main_path is not None and other_path is not None and main_path == other_path:
+            self._show_error(tr("reshade.merge_same_preset_error"))
             return False
-        # Check for output filename collision.
-        if (self._base_path / result.output_filename).exists():
+        if not name:
+            self._show_error(tr("reshade.merge_empty_name_error"))
             return False
+
+        normalized_name = name if name.lower().endswith(".ini") else name + ".ini"
+        if (self._base_path / normalized_name).exists():
+            self._show_error(
+                tr("reshade.merge_existing_output_error", name=normalized_name))
+            return False
+
+        self._hide_error()
         return True
+
+    def _show_error(self, message: str) -> None:
+        if self._error_label is not None:
+            self._error_label.setText(message)
+            self._error_label.setVisible(True)
+
+    def _hide_error(self) -> None:
+        if self._error_label is not None:
+            self._error_label.setVisible(False)
