@@ -24,6 +24,7 @@ from qfluentwidgets import (
     SettingCardGroup,
     SmoothScrollArea,
     SubtitleLabel,
+    SwitchButton,
 )
 
 from cdumm.i18n import tr
@@ -102,6 +103,25 @@ class SettingsPage(SmoothScrollArea):
         )
         self._game_dir_card.button.setMinimumWidth(140)
         self._game_group.addSettingCard(self._game_dir_card)
+
+        # ASI loader auto-install toggle. Default ON — matches pre-v3.1.4
+        # behaviour where CDUMM ships its own winmm.dll proxy and keeps
+        # it current on every ASI page refresh. Users running OptiScaler
+        # (or another tool) with its own winmm loader turn this OFF so
+        # CDUMM stops stomping on it. Reported by UNIVERSE69 on Nexus.
+        self._asi_loader_card = SettingCard(
+            FluentIcon.DEVELOPER_TOOLS,
+            tr("settings.asi_auto_install_loader"),
+            tr("settings.asi_auto_install_loader_desc"),
+            self._game_group,
+        )
+        self._asi_loader_switch = SwitchButton()
+        self._asi_loader_switch.setOnText("")
+        self._asi_loader_switch.setOffText("")
+        self._asi_loader_card.hBoxLayout.addWidget(
+            self._asi_loader_switch, 0, Qt.AlignmentFlag.AlignRight)
+        self._asi_loader_card.hBoxLayout.addSpacing(16)
+        self._game_group.addSettingCard(self._asi_loader_card)
 
         self._layout.addWidget(self._game_group)
 
@@ -192,6 +212,8 @@ class SettingsPage(SmoothScrollArea):
         self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         self._lang_combo.currentIndexChanged.connect(self._on_language_changed)
         self._game_dir_card.clicked.connect(self._on_game_dir_browse)
+        self._asi_loader_switch.checkedChanged.connect(
+            self._on_asi_loader_toggle_changed)
         self._manage_profiles_card.clicked.connect(self.profile_manage_requested.emit)
         self._export_list_card.clicked.connect(self.export_list_requested.emit)
         self._import_list_card.clicked.connect(self.import_list_requested.emit)
@@ -244,6 +266,9 @@ class SettingsPage(SmoothScrollArea):
         self._game_group.titleLabel.setText(tr("settings.game"))
         self._game_dir_card.setTitle(tr("settings.game_dir"))
         self._game_dir_card.button.setText(tr("settings.browse"))
+        self._asi_loader_card.setTitle(tr("settings.asi_auto_install_loader"))
+        self._asi_loader_card.setContent(
+            tr("settings.asi_auto_install_loader_desc"))
         self._profiles_group.titleLabel.setText(tr("settings.profiles"))
         self._manage_profiles_card.setTitle(tr("settings.manage_profiles"))
         self._manage_profiles_card.setContent(tr("settings.manage_profiles_desc"))
@@ -287,6 +312,14 @@ class SettingsPage(SmoothScrollArea):
         elif self._game_dir:
             self._game_dir_card.setContent(str(self._game_dir))
             self._game_dir_card.setToolTip(str(self._game_dir))
+
+        # ASI loader auto-install — unset defaults to "true" to preserve
+        # existing behaviour for users who never touch the toggle.
+        auto_install = self._config.get("asi_auto_install_loader")
+        checked = auto_install != "false"
+        self._asi_loader_switch.blockSignals(True)
+        self._asi_loader_switch.setChecked(checked)
+        self._asi_loader_switch.blockSignals(False)
 
         # PrivateBin
         if hasattr(self, '_privatebin_instance_input'):
@@ -372,6 +405,15 @@ class SettingsPage(SmoothScrollArea):
             duration=3000, position=InfoBarPosition.TOP, parent=self.window(),
         )
         logger.info("Language changed to %s", code)
+
+    def _on_asi_loader_toggle_changed(self, checked: bool) -> None:
+        """Persist the ASI-loader auto-install preference."""
+        if self._config is None:
+            return
+        self._config.set(
+            "asi_auto_install_loader", "true" if checked else "false")
+        logger.info(
+            "ASI loader auto-install %s", "enabled" if checked else "disabled")
 
     def _on_game_dir_browse(self) -> None:
         """Open a folder browser to change the game directory."""

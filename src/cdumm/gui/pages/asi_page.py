@@ -1723,6 +1723,24 @@ class AsiPluginsPage(QWidget):
         if not self._asi_manager:
             return
 
+        # UNIVERSE69 (Nexus): OptiScaler ships its own winmm.dll proxy.
+        # CDUMM's auto-refresh kept overwriting it, breaking OptiScaler.
+        # When the user sets asi_auto_install_loader=false we stay out
+        # of winmm.dll entirely; ASI detection still works against
+        # whatever proxy the user brought (dsound/dinput8/version/winmm).
+        if self._db is not None:
+            try:
+                from cdumm.storage.config import Config
+                if Config(self._db).get("asi_auto_install_loader") == "false":
+                    logger.info(
+                        "ASI loader auto-install disabled by user setting "
+                        "— skipping bundled winmm.dll install")
+                    return
+            except Exception as e:
+                logger.debug(
+                    "asi_auto_install_loader lookup failed (%s), "
+                    "falling through to install", e)
+
         if getattr(sys, "frozen", False):
             bundled = Path(sys._MEIPASS) / "asi_loader" / "winmm.dll"
         else:

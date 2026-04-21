@@ -596,6 +596,8 @@
   "settings.game_dir": "Game Directory",
   "settings.game_dir_not_configured": "Not configured",
   "settings.browse": "Browse",
+  "settings.asi_auto_install_loader": "Manage ASI loader (winmm.dll)",
+  "settings.asi_auto_install_loader_desc": "Keep CDUMM's bundled ASI loader current in bin64. Turn off if OptiScaler or another tool already ships its own winmm.dll.",
   "settings.profiles": "Profiles",
   "settings.manage_profiles": "Mod Profiles",
   "settings.manage_profiles_desc": "Save and load mod configurations",
