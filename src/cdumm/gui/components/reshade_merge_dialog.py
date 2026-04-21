@@ -29,9 +29,9 @@ from qfluentwidgets import (
     CheckBox,
     ComboBox,
     FluentIcon,
-    HyperlinkButton,
     LineEdit,
     MessageBoxBase,
+    PushButton,
     SmoothScrollArea,
     StrongBodyLabel,
     TransparentToolButton,
@@ -82,8 +82,11 @@ class _CollapsibleSectionGroup(QWidget):
         self._title_label.setCursor(Qt.CursorShape.PointingHandCursor)
         header.addWidget(self._title_label, stretch=1)
 
-        self._select_all_btn = HyperlinkButton("", tr("reshade.merge_group_select_all"),
-                                               header_wrap)
+        # "Select all" is a real PushButton so the affordance is obvious.
+        # Toggles to "Clear all" once everything in the group is ticked.
+        self._select_all_btn = PushButton(
+            FluentIcon.ACCEPT, tr("reshade.merge_group_select_all"), header_wrap)
+        self._select_all_btn.setFixedHeight(28)
         self._select_all_btn.clicked.connect(self._on_select_all_clicked)
         header.addWidget(self._select_all_btn)
         root.addWidget(header_wrap)
@@ -141,9 +144,14 @@ class _CollapsibleSectionGroup(QWidget):
             return
         self._select_all_btn.setEnabled(True)
         all_checked = all(cb.isChecked() for cb in self._checkboxes)
-        self._select_all_btn.setText(
-            tr("reshade.merge_group_clear_all") if all_checked
-            else tr("reshade.merge_group_select_all"))
+        # Toggle both the label AND the icon so the button state is
+        # obvious without reading the text.
+        if all_checked:
+            self._select_all_btn.setText(tr("reshade.merge_group_clear_all"))
+            self._select_all_btn.setIcon(FluentIcon.REMOVE)
+        else:
+            self._select_all_btn.setText(tr("reshade.merge_group_select_all"))
+            self._select_all_btn.setIcon(FluentIcon.ACCEPT)
 
 
 class ReshadeMergeDialog(MessageBoxBase):
