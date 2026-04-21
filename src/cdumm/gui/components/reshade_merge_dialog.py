@@ -73,37 +73,41 @@ class ReshadeMergeDialog(MessageBoxBase):
         self.viewLayout.addWidget(title)
         self.viewLayout.addSpacing(8)
 
+        # Error label lives UNDER the title so validation failures are
+        # impossible to miss (previously at the bottom, users never saw them).
+        self._error_label = CaptionLabel("", self)
+        self._error_label.setWordWrap(True)
+        self._error_label.setStyleSheet(
+            "QLabel { background-color: rgba(196, 49, 75, 0.15);"
+            " color: #C4314B; padding: 6px 10px; border-radius: 4px;"
+            " font-weight: 600; }")
+        self._error_label.setVisible(False)
+        self.viewLayout.addWidget(self._error_label)
+
         # Main preset
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_main_label"), self))
         self._main_combo = ComboBox(self)
         for p in self._presets:
             self._main_combo.addItem(p.stem, userData=p)
-        self._main_combo.currentIndexChanged.connect(self._refresh_sections)
+        self._main_combo.currentIndexChanged.connect(self._on_main_changed)
         self.viewLayout.addWidget(self._main_combo)
         self.viewLayout.addSpacing(8)
 
-        # Other preset
+        # Other preset -- dropdown excludes whatever's currently selected
+        # as the main. This structurally prevents same-preset merges.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_other_label"), self))
         self._other_combo = ComboBox(self)
-        for p in self._presets:
-            self._other_combo.addItem(p.stem, userData=p)
-        # Default: pick the second preset if there are 2+, else same as main.
-        if len(self._presets) >= 2:
-            self._other_combo.setCurrentIndex(1)
-        self._other_combo.currentIndexChanged.connect(self._refresh_sections)
+        self._other_combo.currentIndexChanged.connect(self._on_other_changed)
         self.viewLayout.addWidget(self._other_combo)
         self.viewLayout.addSpacing(8)
 
-        # Sections picker -- SmoothScrollArea with transparent background so
-        # the scroll region picks up the dialog theme instead of rendering black.
+        # Sections picker -- SmoothScrollArea with transparent background.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_sections_label"), self))
         scroll = SmoothScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(200)
         scroll.enableTransparentBackground()
         self._section_container = QWidget()
-        # Make the container itself transparent so the scroll area's theme
-        # bleeds through.
         self._section_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self._section_container.setStyleSheet("background: transparent;")
         self._section_container_layout = QVBoxLayout(self._section_container)
@@ -122,25 +126,69 @@ class ReshadeMergeDialog(MessageBoxBase):
         self.viewLayout.addWidget(self._include_non_fx_cb)
         self.viewLayout.addSpacing(8)
 
-        # Output filename
+        # Output filename -- auto-populated with a sensible default.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_output_label"), self))
         self._name_edit = LineEdit(self)
         self._name_edit.setPlaceholderText("MergedPreset.ini")
+        self._name_edit.textEdited.connect(lambda _=None: self._hide_error())
         self.viewLayout.addWidget(self._name_edit)
-
-        # Error label — shown when validate() returns False so users know why
-        # OK didn't close the dialog.
-        self._error_label = CaptionLabel("", self)
-        self._error_label.setStyleSheet("color: #C4314B;")
-        self._error_label.setVisible(False)
-        self.viewLayout.addWidget(self._error_label)
 
         # OK / Cancel — override button text (MessageBoxBase provides them)
         self.yesButton.setText(tr("reshade.merge_ok"))
         self.cancelButton.setText(tr("reshade.merge_cancel"))
 
+        # Populate "Add from" for the default main selection, and prefill
+        # the output filename.
+        self._repopulate_other_combo()
+        self._autofill_output_name()
+
         # Wider dialog for the scroll area to breathe.
         self.widget.setMinimumWidth(520)
+
+    def _on_main_changed(self) -> None:
+        """Main preset changed: rebuild 'Add from' list (excluding the new
+        main), re-fill the output filename, refresh sections."""
+        self._hide_error()
+        self._repopulate_other_combo()
+        self._autofill_output_name()
+        self._refresh_sections()
+
+    def _on_other_changed(self) -> None:
+        self._hide_error()
+        self._autofill_output_name()
+        self._refresh_sections()
+
+    def _repopulate_other_combo(self) -> None:
+        """Fill the 'Add from' dropdown with every preset EXCEPT the main
+        one. Structurally prevents merging a preset with itself."""
+        main_path = self._main_combo.currentData()
+        # Block signals while we rebuild so _refresh_sections only fires once.
+        self._other_combo.blockSignals(True)
+        self._other_combo.clear()
+        for p in self._presets:
+            if main_path is not None and p == main_path:
+                continue
+            self._other_combo.addItem(p.stem, userData=p)
+        self._other_combo.blockSignals(False)
+
+    def _autofill_output_name(self) -> None:
+        """Pre-fill the output filename with a sensible default.
+
+        Leaves the user's typing alone once they've actually edited the field
+        (we can tell via isModified()). Default format:
+        `<Main> + <Other>.ini`.
+        """
+        if self._name_edit.isModified():
+            return
+        main_path = self._main_combo.currentData()
+        other_path = self._other_combo.currentData()
+        if main_path is None or other_path is None:
+            return
+        suggested = f"{main_path.stem} + {other_path.stem}.ini"
+        self._name_edit.setText(suggested)
+        # Clear modified so further combo changes keep refreshing until the
+        # user actually types something.
+        self._name_edit.setModified(False)
 
     def _refresh_sections(self) -> None:
         """Reload the section checkboxes when main or other dropdown changes."""
@@ -163,12 +211,6 @@ class ReshadeMergeDialog(MessageBoxBase):
         # Reading can be slow-ish on huge presets but these are KB-sized files.
         self._main_sections = read_preset_for_merge(main_path)
         self._other_sections = read_preset_for_merge(other_path)
-
-        if main_path == other_path:
-            label = CaptionLabel(tr("reshade.merge_same_preset_error"),
-                                 self._section_container)
-            self._section_container_layout.addWidget(label)
-            return
 
         # Display sections from Other. Effect (.fx) sections always show;
         # non-fx sections (e.g. [GENERAL], [DEPTH]) only when the advanced
@@ -224,14 +266,20 @@ class ReshadeMergeDialog(MessageBoxBase):
         )
 
     def validate(self) -> bool:
-        """Overrides MessageBoxBase validate; returning False keeps the dialog
-        open AND shows a specific error label so the user knows why OK didn't
-        close the dialog."""
+        """MessageBoxBase validate hook: returning False keeps the dialog
+        open AND shows a specific error label (at the TOP of the dialog,
+        not the bottom) so the user sees immediately why OK didn't work.
+
+        Same-preset check is unnecessary here because the UI excludes the
+        main preset from the 'Add from' dropdown.
+        """
         main_path = self._main_combo.currentData()
         other_path = self._other_combo.currentData()
         name = self._name_edit.text().strip()
 
-        if main_path is not None and other_path is not None and main_path == other_path:
+        if main_path is None or other_path is None:
+            # Can only happen if there are fewer than 2 presets — the page
+            # already guards against opening the dialog in that case.
             self._show_error(tr("reshade.merge_same_preset_error"))
             return False
         if not name:

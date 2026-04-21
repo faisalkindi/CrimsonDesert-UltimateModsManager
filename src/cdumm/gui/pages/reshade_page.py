@@ -637,10 +637,67 @@ class ReshadePage(SmoothScrollArea):
                 tr("reshade.merge_failed_title"), str(e))
             return
 
-        self._show_infobar_success(
-            tr("reshade.merge_success_title"),
-            tr("reshade.merge_success_body", name=choice.output_filename))
+        logger.info(
+            "ReShade merge: main=%s other=%s added=%s overwrote=%s -> %s",
+            choice.main_path.name, choice.other_path.name,
+            merged.added, merged.overwrote, output_path)
+
         self.refresh()
+        self._show_merge_result_dialog(
+            output_path=output_path,
+            main_name=choice.main_path.stem,
+            other_name=choice.other_path.stem,
+            added=merged.added,
+            overwrote=merged.overwrote,
+        )
+
+    def _show_merge_result_dialog(
+        self,
+        output_path: Path,
+        main_name: str,
+        other_name: str,
+        added: list[str],
+        overwrote: list[str],
+    ) -> None:
+        """Post-merge confirmation: tell the user EXACTLY what happened
+        (where the file went, which effects were added, which were replaced)
+        and offer to open the folder in Explorer so they can see it."""
+        from qfluentwidgets import MessageBox
+
+        def _pretty(name: str) -> str:
+            return name.removesuffix(".fx") if name.lower().endswith(".fx") else name
+
+        summary_parts: list[str] = []
+        if added:
+            summary_parts.append(tr(
+                "reshade.merge_result_added",
+                count=len(added),
+                names=", ".join(_pretty(n) for n in added)))
+        if overwrote:
+            summary_parts.append(tr(
+                "reshade.merge_result_overwrote",
+                count=len(overwrote),
+                main=main_name,
+                other=other_name,
+                names=", ".join(_pretty(n) for n in overwrote)))
+        if not added and not overwrote:
+            summary_parts.append(tr(
+                "reshade.merge_result_no_changes", main=main_name))
+        body = tr("reshade.merge_result_body",
+                  path=str(output_path),
+                  added=summary_parts[0] if len(summary_parts) > 0 else "",
+                  overwrote=summary_parts[1] if len(summary_parts) > 1 else "")
+
+        dlg = MessageBox(tr("reshade.merge_result_title"), body, self.window())
+        dlg.yesButton.setText(tr("reshade.merge_result_open_folder"))
+        dlg.cancelButton.setText(tr("reshade.merge_result_close"))
+        if _run_modal(dlg):
+            # "Open folder" chosen -> Explorer on the parent directory.
+            import os
+            try:
+                os.startfile(str(output_path.parent))
+            except OSError as e:
+                logger.warning("open merged preset folder failed: %s", e)
 
     def _on_revert_clicked(self) -> None:
         if self._game_running:
