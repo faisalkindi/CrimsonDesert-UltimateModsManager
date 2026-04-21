@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>The only mod manager you need for Crimson Desert.</b><br>
-  Every format. Every platform. One click.
+  Every mod format. Every store (Steam, Epic, Xbox). One click.
 </p>
 
 <p align="center">
@@ -110,13 +110,12 @@ pyinstaller cdumm.spec --noconfirm
 
 ## Requirements
 
-- Windows 10/11
-- Crimson Desert (Steam, Epic Games Store, or Xbox Game Pass)
+- Windows 10/11 (or Linux via Wine 11 — see [LINUX.md](LINUX.md))
+- Crimson Desert from Steam, Epic Games Store, or Xbox Game Pass
 
-### Linux (via Wine)
-
-CDUMM runs on Linux through Wine 11 stable. See [LINUX.md](LINUX.md) for
-the one-command launcher and manual setup.
+> **No native macOS build.** CDUMM is a Windows executable. Linux users can
+> run it under Wine via the bundled launcher; macOS isn't currently
+> supported.
 
 ---
 

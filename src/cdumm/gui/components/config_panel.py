@@ -487,28 +487,12 @@ class ConfigPanel(QWidget):
     def _add_config_row(self, index: int, label: str, description: str, enabled: bool) -> None:
         row = QHBoxLayout()
         row.setContentsMargins(0, 8, 0, 8)
+        row.setSpacing(10)
 
-        # Label + description column
-        text_col = QVBoxLayout()
-        text_col.setSpacing(2)
-        name_lbl = CaptionLabel(label)
-        name_lbl.setWordWrap(True)
-        nf = name_lbl.font()
-        nf.setPixelSize(13)
-        from PySide6.QtGui import QFont
-        nf.setWeight(QFont.Weight.DemiBold)
-        name_lbl.setFont(nf)
-        text_col.addWidget(name_lbl)
-        if description:
-            desc_lbl = CaptionLabel(description)
-            desc_lbl.setWordWrap(True)
-            df = desc_lbl.font()
-            df.setPixelSize(11)
-            desc_lbl.setFont(df)
-            text_col.addWidget(desc_lbl)
-        row.addLayout(text_col, 1)
-
-        # Toggle checkbox
+        # Toggle checkbox — placed FIRST so it stays visible when the panel
+        # gets clipped by a narrow main window. Right-aligned toggles used
+        # to slide off-screen for users with small windows (vanishdark on
+        # Nexus #26 — labels wrapped, indicator vanished).
         toggle = QCheckBox()
         toggle.setChecked(enabled)
         unchecked_border = "#5A6270" if isDarkTheme() else "#9CA3AF"
@@ -518,7 +502,29 @@ class ConfigPanel(QWidget):
             f"QCheckBox::indicator:unchecked {{ background: transparent; border: 2px solid {unchecked_border}; border-radius: 4px; }}"
         )
         toggle.toggled.connect(self._on_toggle_changed)
-        row.addWidget(toggle, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(toggle, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Label + description column (wraps to fit available width)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        name_lbl = CaptionLabel(label)
+        name_lbl.setWordWrap(True)
+        name_lbl.setMinimumWidth(1)
+        nf = name_lbl.font()
+        nf.setPixelSize(13)
+        from PySide6.QtGui import QFont
+        nf.setWeight(QFont.Weight.DemiBold)
+        name_lbl.setFont(nf)
+        text_col.addWidget(name_lbl)
+        if description:
+            desc_lbl = CaptionLabel(description)
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setMinimumWidth(1)
+            df = desc_lbl.font()
+            df.setPixelSize(11)
+            desc_lbl.setFont(df)
+            text_col.addWidget(desc_lbl)
+        row.addLayout(text_col, 1)
 
         self._toggles[index] = toggle
         self._labels[index] = label
@@ -953,7 +959,12 @@ class ConfigPanel(QWidget):
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 10, 0, 10)
-        row.setSpacing(8)
+        row.setSpacing(10)
+
+        # Indicator FIRST so it stays visible when the panel slides
+        # over a narrow main window (Nexus #26).
+        # Indicator styling and addition handled below — we add it
+        # to the row before the label column.
 
         # Label column (wraps)
         text_col = QVBoxLayout()
@@ -983,8 +994,6 @@ class ConfigPanel(QWidget):
             mf.setPixelSize(11)
             meta_lbl.setFont(mf)
             text_col.addWidget(meta_lbl)
-
-        row.addLayout(text_col, 1)
 
         # Indicator-only widget (no built-in text — the label column handles it).
         # Suppress Qt's default focus frame / background so the widget shows
@@ -1016,8 +1025,10 @@ class ConfigPanel(QWidget):
             f"  background: {accent}; border: 2px solid {accent}; "
             f"}}"
         )
-        row.addWidget(indicator, 0,
-                      Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Indicator goes at index 0 so it renders to the LEFT of the
+        # label column (added after this with stretch=1).
+        row.insertWidget(0, indicator, 0, Qt.AlignmentFlag.AlignTop)
+        row.addLayout(text_col, 1)
 
         # When the variant ships internal labeled changes (e.g. Unlimited
         # Dragon Flying's mutex Ride Duration presets), append a
