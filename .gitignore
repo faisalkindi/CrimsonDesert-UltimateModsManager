@@ -16,3 +16,10 @@ venv/
 native/target/
 *.pyd
 *.pdb
+
+# Claude Code project-local permission file
+.claude/
+
+# Local investigation scratch
+.tmp_*
+reviewcode_diff.patch
