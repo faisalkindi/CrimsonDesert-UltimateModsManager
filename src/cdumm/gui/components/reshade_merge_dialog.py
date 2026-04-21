@@ -28,10 +28,13 @@ from qfluentwidgets import (
     CaptionLabel,
     CheckBox,
     ComboBox,
+    FluentIcon,
+    HyperlinkButton,
     LineEdit,
     MessageBoxBase,
     SmoothScrollArea,
     StrongBodyLabel,
+    TransparentToolButton,
 )
 
 from cdumm.engine.reshade_preset_ops import read_preset_for_merge
@@ -44,6 +47,103 @@ class MergeDialogResult:
     other_path: Path
     sections_to_take: list[str]
     output_filename: str   # just the filename (no path); dialog appends .ini
+
+
+class _CollapsibleSectionGroup(QWidget):
+    """A collapsible group with a header (arrow + title + 'Select all') and
+    a body holding a list of checkboxes. Used by the merge dialog to split
+    the effects picker into 'New' / 'Existing' / 'Advanced' buckets.
+    """
+
+    def __init__(self, title: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._title = title
+        self._checkboxes: list[CheckBox] = []
+        self._expanded = True
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header row.
+        header_wrap = QWidget(self)
+        header = QHBoxLayout(header_wrap)
+        header.setContentsMargins(4, 4, 4, 4)
+        header.setSpacing(8)
+
+        self._arrow_btn = TransparentToolButton(FluentIcon.CHEVRON_RIGHT, header_wrap)
+        self._arrow_btn.clicked.connect(self._toggle)
+        header.addWidget(self._arrow_btn)
+
+        self._title_label = StrongBodyLabel(title, header_wrap)
+        self._title_label.setStyleSheet("QLabel { font-weight: 600; }")
+        # Clicking the title also toggles.
+        self._title_label.mousePressEvent = lambda _e: self._toggle()
+        self._title_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.addWidget(self._title_label, stretch=1)
+
+        self._select_all_btn = HyperlinkButton("", tr("reshade.merge_group_select_all"),
+                                               header_wrap)
+        self._select_all_btn.clicked.connect(self._on_select_all_clicked)
+        header.addWidget(self._select_all_btn)
+        root.addWidget(header_wrap)
+
+        # Body: holds checkboxes. Hidden when collapsed.
+        self._body = QWidget(self)
+        self._body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._body.setStyleSheet("background: transparent;")
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(28, 0, 4, 6)
+        self._body_layout.setSpacing(4)
+        root.addWidget(self._body)
+
+        # Start expanded.
+        self._apply_expanded()
+
+    # ── Public surface ──────────────────────────────────────────
+
+    def add_checkbox(self, cb: CheckBox) -> None:
+        self._checkboxes.append(cb)
+        self._body_layout.addWidget(cb)
+        cb.stateChanged.connect(self._refresh_select_all_label)
+        self._refresh_select_all_label()
+
+    def checkboxes(self) -> list[CheckBox]:
+        return list(self._checkboxes)
+
+    def set_title(self, title: str) -> None:
+        self._title = title
+        self._title_label.setText(title)
+
+    # ── Internals ───────────────────────────────────────────────
+
+    def _toggle(self) -> None:
+        self._expanded = not self._expanded
+        self._apply_expanded()
+
+    def _apply_expanded(self) -> None:
+        self._body.setVisible(self._expanded)
+        self._arrow_btn.setIcon(
+            FluentIcon.CHEVRON_DOWN_MED if self._expanded
+            else FluentIcon.CHEVRON_RIGHT_MED)
+
+    def _on_select_all_clicked(self) -> None:
+        # If all are already checked, toggle to clear. Otherwise check all.
+        all_checked = all(cb.isChecked() for cb in self._checkboxes)
+        new_state = not all_checked
+        for cb in self._checkboxes:
+            cb.setChecked(new_state)
+        self._refresh_select_all_label()
+
+    def _refresh_select_all_label(self) -> None:
+        if not self._checkboxes:
+            self._select_all_btn.setEnabled(False)
+            return
+        self._select_all_btn.setEnabled(True)
+        all_checked = all(cb.isChecked() for cb in self._checkboxes)
+        self._select_all_btn.setText(
+            tr("reshade.merge_group_clear_all") if all_checked
+            else tr("reshade.merge_group_select_all"))
 
 
 class ReshadeMergeDialog(MessageBoxBase):
@@ -191,10 +291,20 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._name_edit.setModified(False)
 
     def _refresh_sections(self) -> None:
-        """Reload the section checkboxes when main or other dropdown changes."""
+        """Rebuild the section picker, split into collapsible groups by
+        overwrite/add/advanced category. PRESERVES the user's existing tick
+        state across rebuilds -- toggling 'Include advanced' or switching
+        presets used to wipe everything, losing the user's work.
+        """
         assert self._section_container is not None
 
-        # Clear existing checkboxes.
+        # Capture what's currently ticked BEFORE we destroy the widgets so
+        # we can re-apply the state after rebuilding.
+        previously_ticked = {
+            name for name, cb in self._section_checks if cb.isChecked()
+        }
+
+        # Clear existing content.
         while self._section_container_layout.count():
             item = self._section_container_layout.takeAt(0)
             w = item.widget()
@@ -208,26 +318,77 @@ class ReshadeMergeDialog(MessageBoxBase):
         if main_path is None or other_path is None:
             return
 
-        # Reading can be slow-ish on huge presets but these are KB-sized files.
         self._main_sections = read_preset_for_merge(main_path)
         self._other_sections = read_preset_for_merge(other_path)
 
-        # Display sections from Other. Effect (.fx) sections always show;
-        # non-fx sections (e.g. [GENERAL], [DEPTH]) only when the advanced
-        # toggle is on — those are power-user territory and most users just
-        # want to combine effects between presets.
-        any_row = False
+        # Bucket sections: existing (overwrite), new (add), advanced (non-fx).
+        # Skip the synthetic __preamble__ section entirely -- the user doesn't
+        # want to see it as a merge candidate, it's a parser artifact.
+        from cdumm.engine.reshade_preset_ops import _PREAMBLE_SECTION
+        new_sections: list[str] = []
+        existing_sections: list[str] = []
+        advanced_sections: list[str] = []
         for section_name in self._other_sections:
-            is_fx = section_name.lower().endswith(".fx")
-            if not is_fx and not self._include_non_fx:
+            if section_name == _PREAMBLE_SECTION:
                 continue
-            pretty = section_name if not is_fx else section_name.removesuffix(".fx")
-            overwrites = section_name in self._main_sections
-            hint = tr("reshade.merge_will_overwrite") if overwrites \
-                else tr("reshade.merge_will_add")
-            cb = CheckBox(f"{pretty}  {hint}", self._section_container)
-            self._section_container_layout.addWidget(cb)
-            self._section_checks.append((section_name, cb))
+            is_fx = section_name.lower().endswith(".fx")
+            if not is_fx:
+                if self._include_non_fx:
+                    advanced_sections.append(section_name)
+                continue
+            if section_name in self._main_sections:
+                existing_sections.append(section_name)
+            else:
+                new_sections.append(section_name)
+
+        main_stem = main_path.stem
+        any_row = False
+
+        # Group 1: NEW effects (not in main) -- most common user intent first.
+        if new_sections:
+            group = _CollapsibleSectionGroup(
+                tr("reshade.merge_group_new",
+                   main=main_stem, count=len(new_sections)),
+                self._section_container)
+            for section_name in new_sections:
+                pretty = section_name.removesuffix(".fx")
+                cb = CheckBox(pretty, group)
+                if section_name in previously_ticked:
+                    cb.setChecked(True)
+                group.add_checkbox(cb)
+                self._section_checks.append((section_name, cb))
+            self._section_container_layout.addWidget(group)
+            any_row = True
+
+        # Group 2: EXISTING effects (would overwrite main's version).
+        if existing_sections:
+            group = _CollapsibleSectionGroup(
+                tr("reshade.merge_group_existing",
+                   main=main_stem, count=len(existing_sections)),
+                self._section_container)
+            for section_name in existing_sections:
+                pretty = section_name.removesuffix(".fx")
+                cb = CheckBox(pretty, group)
+                if section_name in previously_ticked:
+                    cb.setChecked(True)
+                group.add_checkbox(cb)
+                self._section_checks.append((section_name, cb))
+            self._section_container_layout.addWidget(group)
+            any_row = True
+
+        # Group 3: Advanced (non-fx) sections. Only when the toggle is on.
+        if advanced_sections:
+            group = _CollapsibleSectionGroup(
+                tr("reshade.merge_group_advanced",
+                   count=len(advanced_sections)),
+                self._section_container)
+            for section_name in advanced_sections:
+                cb = CheckBox(section_name, group)
+                if section_name in previously_ticked:
+                    cb.setChecked(True)
+                group.add_checkbox(cb)
+                self._section_checks.append((section_name, cb))
+            self._section_container_layout.addWidget(group)
             any_row = True
 
         if not any_row:
