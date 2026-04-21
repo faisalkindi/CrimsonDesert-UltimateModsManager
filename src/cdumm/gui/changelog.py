@@ -13,6 +13,25 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.4",
+        "date": "2026-04-22",
+        "notes": [
+            "ReShade integration — new sidebar page detects whether ReShade is installed next to CrimsonDesert.exe. Distinguishes ReShade vs ReShade + Add-on Support, detects addons like RenoDX.",
+            "ReShade preset picker — activate, revert last switch, import preset from disk, soft-hide presets from the list. Blocks activation while the game is running so ReShade doesn't overwrite your change on exit.",
+            "ReShade preset merging — pick a main preset and layer pieces from another. Categorised UI (New / Existing / Advanced), collapsible groups, Select-all per category, tick preservation across 'Include advanced' rebuilds.",
+            "Right-click 'Open source files' on any mod card opens its source folder in Explorer.",
+            "Linux support via Wine (BETA — needs more testing). Bundled launcher script scripts/cdumm-linux.sh and LINUX.md install guide. Smoke-tested on Ubuntu 24.04 with Wine 11 + vcrun2022 + corefonts. Please report what works.",
+            "Settings → Game → Manage ASI loader (winmm.dll) toggle. Default on. Turn off if OptiScaler or another tool already ships its own winmm proxy so CDUMM stops stomping on it.",
+            "Packed JSON mod regression fix. v3.1.3 could silently drop zip-imported JSON mods when the cross-mod aggregator couldn't cover them. The ENTR delta now stays in play as a fallback so the mod applies either way.",
+            "Crimson Browser handler now walks sibling Tex/ directories. CrimsonForge-generated mesh mods (Berserk Dragon Slayer, etc.) ship textures in Tex/ outside files/ — previously silently dropped.",
+            "Config panel indicator moved left of label so the checkbox stays visible when the side panel gets clipped on narrow windows.",
+            "ReShade merge dialog polish — scroll overflow, background bleed, category headers, Select-all button, tick preservation across toggle rebuilds, wider/taller default.",
+            "15-second ReShade page startup hang fixed on installs with huge bin64 subdirectories. Flat-scan preset enumeration plus name-only process detection (10–200× faster).",
+            "ReShade audit fixes — atomic preset writes, subfolder preset support, relative BasePath resolution, Windows-safe hidden state, INI key casing preserved.",
+            "README clarifies 'every platform' means every store (Steam / Epic / Xbox), not every OS. macOS isn't supported natively.",
+        ],
+    },
+    {
         "version": "3.1.3",
         "date": "2026-04-20",
         "notes": [
