@@ -18,6 +18,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QScrollArea,
     QVBoxLayout,
@@ -27,7 +28,6 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CardWidget,
     CheckBox,
     ComboBox,
     FluentIcon,
@@ -50,15 +50,17 @@ class MergeDialogResult:
     output_filename: str   # just the filename (no path); dialog appends .ini
 
 
-class _CollapsibleSectionGroup(CardWidget):
-    """A collapsible group inside a Fluent CardWidget:
+class _CollapsibleSectionGroup(QWidget):
+    """A collapsible group:
       - Row 1: [arrow] [title]              [Select all button]
       - Row 2: [small caption subtitle]
+      - Row 3: a thin 1px divider below the subtitle (theme-agnostic)
       - Body: checkboxes
 
-    CardWidget handles the card background/border natively in both themes
-    — hand-rolled stylesheets on a plain QWidget caused layout bleeding
-    into sibling widgets on some systems.
+    No card-style background — previous versions painted a CardWidget
+    background that, in some Qt + HiDPI combinations, extended past the
+    widget's own rect and visually leaked over siblings. This plain-widget
+    implementation uses spacing + a thin divider line for group separation.
     """
 
     def __init__(self, title: str, subtitle: str = "",
@@ -68,7 +70,7 @@ class _CollapsibleSectionGroup(CardWidget):
         self._expanded = True
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 10, 10)
+        root.setContentsMargins(4, 6, 4, 6)
         root.setSpacing(4)
 
         # Header row — fixed layout so the button never gets pushed off.
@@ -106,17 +108,31 @@ class _CollapsibleSectionGroup(CardWidget):
         if subtitle:
             self._subtitle_label = CaptionLabel(subtitle, self)
             self._subtitle_label.setWordWrap(True)
-            self._subtitle_label.setContentsMargins(38, 0, 4, 0)
+            self._subtitle_label.setContentsMargins(38, 0, 4, 4)
             root.addWidget(self._subtitle_label)
         else:
             self._subtitle_label = None
 
+        # Thin 1px divider line between the header area and the checkbox body,
+        # indented to match. A plain HLine QFrame takes its color from the
+        # current Qt palette so it works in both light and dark themes.
+        divider = QFrame(self)
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFrameShadow(QFrame.Shadow.Plain)
+        divider.setStyleSheet("QFrame { color: rgba(128, 128, 128, 0.25); }")
+        divider.setFixedHeight(1)
+        divider.setContentsMargins(38, 0, 8, 0)
+        root.addWidget(divider)
+
         # Body: holds checkboxes. Hidden when collapsed.
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(38, 6, 8, 2)
+        self._body_layout.setContentsMargins(38, 8, 8, 4)
         self._body_layout.setSpacing(8)
         root.addWidget(self._body)
+
+        # Keep divider's visibility tied to expansion state.
+        self._divider = divider
 
         # Start expanded.
         self._apply_expanded()
@@ -144,6 +160,9 @@ class _CollapsibleSectionGroup(CardWidget):
 
     def _apply_expanded(self) -> None:
         self._body.setVisible(self._expanded)
+        # Hide the divider when collapsed too, so collapsed groups are compact.
+        if hasattr(self, "_divider") and self._divider is not None:
+            self._divider.setVisible(self._expanded)
         self._arrow_btn.setIcon(
             FluentIcon.CHEVRON_DOWN_MED if self._expanded
             else FluentIcon.CHEVRON_RIGHT_MED)
@@ -238,10 +257,9 @@ class ReshadeMergeDialog(MessageBoxBase):
         self.viewLayout.addSpacing(18)
 
         # Sections picker — plain QScrollArea with explicit vertical scrollbar
-        # policy. qfluentwidgets' SmoothScrollArea + enableTransparentBackground
-        # had a bug where the scrollbar stayed hidden even when content
-        # overflowed, causing checkboxes to render OUTSIDE the viewport and
-        # overlap widgets below. Plain QScrollArea clips correctly.
+        # policy (tested to correctly clip the viewport) and a transparent
+        # background so the scroll area inherits the dialog's paper color
+        # instead of Qt's unstyled dark widget background.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_sections_label"), self))
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -249,7 +267,16 @@ class ReshadeMergeDialog(MessageBoxBase):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The scroll area itself AND its viewport need transparent bg so the
+        # dialog's native paper color shows through. Qt's default QScrollArea
+        # background is a mid/dark gray on Windows without theme styling.
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        scroll.viewport().setAutoFillBackground(False)
         self._section_container = QWidget()
+        self._section_container.setAutoFillBackground(False)
         self._section_container_layout = QVBoxLayout(self._section_container)
         self._section_container_layout.setContentsMargins(4, 6, 4, 6)
         self._section_container_layout.setSpacing(12)
