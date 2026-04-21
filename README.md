@@ -113,6 +113,11 @@ pyinstaller cdumm.spec --noconfirm
 - Windows 10/11
 - Crimson Desert (Steam, Epic Games Store, or Xbox Game Pass)
 
+### Linux (via Wine)
+
+CDUMM runs on Linux through Wine 11 stable. See [LINUX.md](LINUX.md) for
+the one-command launcher and manual setup.
+
 ---
 
 ## For Mod Authors
