@@ -19,6 +19,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -33,7 +34,6 @@ from qfluentwidgets import (
     LineEdit,
     MessageBoxBase,
     PushButton,
-    SmoothScrollArea,
     StrongBodyLabel,
     TransparentToolButton,
 )
@@ -237,22 +237,24 @@ class ReshadeMergeDialog(MessageBoxBase):
         self.viewLayout.addWidget(self._other_combo)
         self.viewLayout.addSpacing(18)
 
-        # Sections picker — SmoothScrollArea with transparent background.
-        # Minimum + maximum height bound it so it never pushes the rest of
-        # the dialog off-screen, yet still shows ~6 effects at once.
+        # Sections picker — plain QScrollArea with explicit vertical scrollbar
+        # policy. qfluentwidgets' SmoothScrollArea + enableTransparentBackground
+        # had a bug where the scrollbar stayed hidden even when content
+        # overflowed, causing checkboxes to render OUTSIDE the viewport and
+        # overlap widgets below. Plain QScrollArea clips correctly.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_sections_label"), self))
-        scroll = SmoothScrollArea(self)
+        scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(260)
-        scroll.enableTransparentBackground()
+        scroll.setFixedHeight(280)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._section_container = QWidget()
         self._section_container_layout = QVBoxLayout(self._section_container)
-        # Generous vertical gap between cards so New / Existing / Advanced
-        # read as distinct blocks instead of a wall.
         self._section_container_layout.setContentsMargins(4, 6, 4, 6)
         self._section_container_layout.setSpacing(12)
         scroll.setWidget(self._section_container)
-        self.viewLayout.addWidget(scroll, stretch=1)
+        self.viewLayout.addWidget(scroll)
         self.viewLayout.addSpacing(10)
 
         # Advanced toggle: include non-fx sections (GENERAL, DEPTH, etc.).
