@@ -260,16 +260,21 @@ class ReshadeMergeDialog(MessageBoxBase):
         # policy (tested to correctly clip the viewport) and a transparent
         # background so the scroll area inherits the dialog's paper color
         # instead of Qt's unstyled dark widget background.
+        #
+        # CRITICAL: use setMinimumHeight + stretch=1 (NOT setFixedHeight). A
+        # fixed height forces the scroll area to be that tall regardless of
+        # available space in the dialog. On smaller windows the dialog card
+        # gets squeezed but the scroll area refuses to shrink, so widgets
+        # below it (Include advanced, Save-as label/input) overlap with the
+        # scroll area's content. With min+stretch the scroll area gives up
+        # space when crowded but expands to fill free space when available.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_sections_label"), self))
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setFixedHeight(280)
+        scroll.setMinimumHeight(180)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # The scroll area itself AND its viewport need transparent bg so the
-        # dialog's native paper color shows through. Qt's default QScrollArea
-        # background is a mid/dark gray on Windows without theme styling.
         scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
             "QScrollArea > QWidget > QWidget { background: transparent; }"
@@ -281,7 +286,10 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._section_container_layout.setContentsMargins(4, 6, 4, 6)
         self._section_container_layout.setSpacing(12)
         scroll.setWidget(self._section_container)
-        self.viewLayout.addWidget(scroll)
+        # stretch=1 gives the scroll area all leftover vertical space. Every
+        # other widget in viewLayout is pinned to its sizeHint, so the scroll
+        # area alone absorbs the dialog's vertical dimension.
+        self.viewLayout.addWidget(scroll, stretch=1)
         self.viewLayout.addSpacing(10)
 
         # Advanced toggle: include non-fx sections (GENERAL, DEPTH, etc.).
