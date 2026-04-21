@@ -41,12 +41,33 @@ class ReshadeInstall:
     shaders_dir: Path | None
     presets: list[Path] = field(default_factory=list)
     base_path: Path | None = None
+    # List of ReShade add-on files found next to the proxy DLL. These are
+    # `.addon32` / `.addon64` / `.addon` files — third-party extensions
+    # like RenoDX, Ultra Limiter, Display Commander, etc. Their presence
+    # means the user installed ReShade with Add-On Support (basic ReShade
+    # won't load them).
+    addons: list[Path] = field(default_factory=list)
     error: str | None = None
 
     @property
     def installed(self) -> bool:
         """Convenience for callers that don't care about error vs not_installed."""
         return self.state == "installed"
+
+    @property
+    def has_addon_support(self) -> bool:
+        """True if the install has any ReShade add-on files present.
+
+        Reliable signal (not a guess): basic ReShade (built without add-on
+        support) doesn't load these files at all, so users who have them
+        either:
+          (a) installed ReShade via the Add-On Support setup exe, or
+          (b) dropped the files in hoping they'd work on basic ReShade,
+              in which case ReShade ignores them.
+        Either way, surfacing "Add-ons detected" helps the user understand
+        what's in their install.
+        """
+        return bool(self.addons)
 
 
 # --- internals -------------------------------------------------------------
@@ -66,6 +87,30 @@ def _dll_path(bin64: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _enumerate_addons(bin64: Path) -> list[Path]:
+    """Return sorted list of ReShade add-on files next to the DLL.
+
+    Per the ReShade add-on docs (Marty's Mods "Manually Installing Addons"),
+    addon files live in the same directory as the ReShade DLL and use the
+    `.addon64` extension on 64-bit games (or `.addon32` / `.addon` for older
+    or 32-bit installs). We match all three extensions.
+    """
+    if not bin64.is_dir():
+        return []
+    results: list[Path] = []
+    try:
+        for entry in sorted(bin64.iterdir()):
+            if not entry.is_file():
+                continue
+            ext = entry.suffix.lower()
+            if ext in (".addon64", ".addon32", ".addon"):
+                results.append(entry)
+    except OSError as e:
+        logger.debug("_enumerate_addons: iterdir failed: %s", e)
+        return []
+    return results
 
 
 def _strip_quotes(value: str) -> str:
@@ -190,12 +235,14 @@ def detect_reshade_install(game_dir: Path) -> ReshadeInstall:
         logger.debug("reshade_detect: base_path=%s", base_path)
 
         presets = _enumerate_presets(base_path, ini_path)
-        logger.debug("reshade_detect: found %d preset(s)", len(presets))
+        addons = _enumerate_addons(bin64)
+        logger.debug("reshade_detect: %d preset(s), %d addon(s)",
+                     len(presets), len(addons))
 
         return ReshadeInstall(
             state="installed",
             dll_path=dll, ini_path=ini_path, shaders_dir=shaders_dir,
-            presets=presets, base_path=base_path, error=None)
+            presets=presets, base_path=base_path, addons=addons, error=None)
 
     except Exception as e:  # noqa: BLE001 — intentional catch-all for UI safety
         msg = f"{type(e).__name__}: {e}"

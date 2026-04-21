@@ -223,6 +223,89 @@ def test_read_preset_for_merge_returns_section_dict(tmp_path: Path) -> None:
     assert "SMAA.fx" in sections
 
 
+def test_read_preset_for_merge_handles_reshade_preamble_layout(tmp_path: Path) -> None:
+    """ReShade's real presets start with keys BEFORE any [section] header.
+    These preamble keys must be captured, not silently dropped -- otherwise
+    merging produces an empty file."""
+    preset = tmp_path / "real_reshade.ini"
+    # Mirror the actual user preset from the field report:
+    preset.write_text(
+        "KeyBorder@Border.fx=191,0,0,0\n"
+        "PreprocessorDefinitions=INFINITE_BOUNCES=1\n"
+        "Techniques=Bloom@Bloom.fx,SMAA@SMAA.fx\n"
+        "\n"
+        "[Bloom.fx]\nThreshold=0.5\n"
+    )
+    sections = read_preset_for_merge(preset)
+    # Preamble is preserved under the synthetic section.
+    assert "__preamble__" in sections
+    assert sections["__preamble__"]["Techniques"] == "Bloom@Bloom.fx,SMAA@SMAA.fx"
+    assert sections["__preamble__"]["KeyBorder@Border.fx"] == "191,0,0,0"
+    # Regular sections still work.
+    assert "Bloom.fx" in sections
+
+
+def test_write_preset_emits_preamble_without_section_header(tmp_path: Path) -> None:
+    """When a preset has a __preamble__ section (from ReShade's top-level
+    keys layout), write it back as BARE KEYS at the top — not under a
+    [__preamble__] header which would confuse ReShade."""
+    from cdumm.engine.reshade_preset_ops import _PREAMBLE_SECTION
+    output = tmp_path / "out.ini"
+    sections = {
+        _PREAMBLE_SECTION: {"Techniques": "Bloom@Bloom.fx", "Extra": "1"},
+        "Bloom.fx": {"Threshold": "0.5"},
+    }
+    write_preset_sections(output, sections)
+
+    content = output.read_text(encoding="utf-8")
+    # The synthetic section name must NEVER appear in the output.
+    assert "__preamble__" not in content
+    # The keys appear at the top.
+    assert content.startswith("Techniques=Bloom@Bloom.fx\n") or \
+        content.startswith("Techniques=Bloom@Bloom.fx\nExtra=1\n")
+    assert "[Bloom.fx]" in content
+    # The written file is recognizable as a preset by our own check.
+    from cdumm.engine.reshade_detect import _is_preset_file
+    assert _is_preset_file(output)
+
+
+def test_merge_of_reshade_real_format_produces_valid_preset(tmp_path: Path) -> None:
+    """End-to-end: two ReShade-style presets (top-level preamble keys plus
+    [*.fx] sections) merge into a non-empty file that our own detection
+    accepts as a preset."""
+    a = tmp_path / "A.ini"
+    b = tmp_path / "B.ini"
+    a.write_text(
+        "Techniques=Bloom@Bloom.fx\n"
+        "PreprocessorDefinitions=X=1\n"
+        "[Bloom.fx]\nThreshold=0.3\n"
+    )
+    b.write_text(
+        "Techniques=HDR@HDR.fx\n"
+        "[HDR.fx]\nExposure=2.0\n"
+        "[DOF.fx]\nNearPlane=5\n"
+    )
+
+    main = read_preset_for_merge(a)
+    other = read_preset_for_merge(b)
+    assert main and other  # neither parsed empty
+
+    result = merge_into_main(main, other, sections_to_take=["HDR.fx", "DOF.fx"])
+    output = tmp_path / "merged.ini"
+    write_preset_sections(output, result.sections)
+
+    assert output.exists()
+    assert output.stat().st_size > 0
+    from cdumm.engine.reshade_detect import _is_preset_file
+    assert _is_preset_file(output), output.read_text()
+    # Merged content has both main's preamble + added sections.
+    content = output.read_text(encoding="utf-8")
+    assert "Techniques=Bloom@Bloom.fx" in content
+    assert "[HDR.fx]" in content
+    assert "[DOF.fx]" in content
+    assert "[Bloom.fx]" in content
+
+
 # ---- Merge: logic --------------------------------------------------------
 
 def _example_main() -> dict[str, dict[str, str]]:

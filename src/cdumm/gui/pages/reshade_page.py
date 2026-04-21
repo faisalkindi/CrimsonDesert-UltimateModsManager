@@ -276,7 +276,13 @@ class ReshadePage(SmoothScrollArea):
         slay.setContentsMargins(32, 20, 32, 20)
         slay.setSpacing(6)
 
-        title = StrongBodyLabel(tr("reshade.installed_title"), summary)
+        # Title varies based on whether add-ons are present — "ReShade" vs
+        # "ReShade + Add-on Support". The distinction matters for users who
+        # want RenoDX / Ultra Limiter / etc. to work.
+        title_key = ("reshade.installed_title_with_addons"
+                     if install.has_addon_support
+                     else "reshade.installed_title")
+        title = StrongBodyLabel(tr(title_key), summary)
         tf = title.font()
         tf.setPixelSize(18)
         title.setFont(tf)
@@ -289,6 +295,19 @@ class ReshadePage(SmoothScrollArea):
         slay.addWidget(CaptionLabel(
             tr("reshade.installed_presets_count", count=len(visible_presets)),
             summary))
+
+        # Add-on surface: list the .addon64 / .addon32 files, or note their
+        # absence. Helps users confirm RenoDX et al. are in place.
+        if install.addons:
+            addon_names = ", ".join(p.name for p in install.addons)
+            slay.addWidget(CaptionLabel(
+                tr("reshade.installed_addons_count",
+                   count=len(install.addons), names=addon_names),
+                summary))
+        elif install.dll_path:
+            slay.addWidget(CaptionLabel(
+                tr("reshade.installed_no_addons", dll=install.dll_path.name),
+                summary))
 
         # "Show all" link appears only when something is hidden.
         if hidden_count > 0:

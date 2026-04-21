@@ -296,6 +296,60 @@ def test_detect_missing_bin64_dir_returns_not_installed(tmp_path: Path) -> None:
     assert result.dll_path is None
 
 
+def test_detect_enumerates_addon_files(tmp_path: Path) -> None:
+    """RenoDX and other ReShade add-ons land next to the DLL as .addon64 /
+    .addon32 files. Detection must surface them so the UI can show 'ReShade
+    + Add-on Support' and list what's installed."""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
+    (bin64 / "dxgi.dll").write_bytes(b"\x00")
+    (bin64 / "ReShade.ini").write_text("[GENERAL]\nPresetPath=\n")
+    (bin64 / "renodx-deathstranding2.addon64").write_bytes(b"\x00")
+    (bin64 / "ultra_limiter.addon64").write_bytes(b"\x00")
+    (bin64 / "legacy.addon32").write_bytes(b"\x00")
+    # Ignored (not an addon file).
+    (bin64 / "readme.txt").write_text("hi")
+
+    result = detect_reshade_install(tmp_path)
+    names = sorted(p.name for p in result.addons)
+    assert names == ["legacy.addon32",
+                     "renodx-deathstranding2.addon64",
+                     "ultra_limiter.addon64"]
+    assert result.has_addon_support is True
+
+
+def test_detect_has_addon_support_false_when_no_addons(tmp_path: Path) -> None:
+    """Plain ReShade install (no add-on files) -> has_addon_support = False.
+    We can't reliably tell 'basic ReShade' from 'add-on-capable ReShade
+    without any addons installed yet' without PE parsing, so we just report
+    based on observed files."""
+    game_dir = _make_game_dir(tmp_path, with_dxgi=True, with_ini=True)
+    result = detect_reshade_install(game_dir)
+
+    assert result.addons == []
+    assert result.has_addon_support is False
+
+
+def test_detect_ignores_addons_inside_subfolders(tmp_path: Path) -> None:
+    """Addons must be AT bin64/ top level (same dir as the DLL) -- this is
+    ReShade's documented load location. Anything nested is ignored."""
+    bin64 = tmp_path / "bin64"
+    bin64.mkdir()
+    (bin64 / "CrimsonDesert.exe").write_bytes(b"\x00")
+    (bin64 / "dxgi.dll").write_bytes(b"\x00")
+    # Addon at top-level (included).
+    (bin64 / "renodx.addon64").write_bytes(b"\x00")
+    # Addon in a subfolder (ignored).
+    nested = bin64 / "backup"
+    nested.mkdir()
+    (nested / "extra.addon64").write_bytes(b"\x00")
+
+    result = detect_reshade_install(tmp_path)
+    names = [p.name for p in result.addons]
+    assert names == ["renodx.addon64"]
+
+
 def test_dataclass_has_installed_convenience_property() -> None:
     """Convenience property for callers that don't want to check state."""
     inst = ReshadeInstall(state="installed", dll_path=None, ini_path=None,

@@ -147,6 +147,16 @@ class MergeResult:
     overwrote: list[str] = field(default_factory=list)
 
 
+# Special section name used internally to hold keys that appear at the top
+# of a preset file BEFORE any [section] header. ReShade's own preset files
+# often start with Techniques=, PreprocessorDefinitions=, and shader-binding
+# keys at the top level — there's no section header for these. configparser
+# can't parse that layout (MissingSectionHeaderError), so we stash them in
+# this synthetic section for merging and emit them back without the header
+# on write.
+_PREAMBLE_SECTION = "__preamble__"
+
+
 def read_preset_for_merge(preset_path: Path) -> dict[str, dict[str, str]]:
     """Parse a preset into {section_name: {key: raw_value}}.
 
@@ -154,15 +164,46 @@ def read_preset_for_merge(preset_path: Path) -> dict[str, dict[str, str]]:
     look similar to what ReShade itself generates (ReShade uses PascalCase:
     `Threshold=`, `Intensity=`, etc.). Standard configparser lowercases keys
     — we bypass that via `optionxform = str`.
+
+    Handles the ReShade-specific preset layout where `Techniques=` and
+    other keys appear at the top of the file BEFORE any `[section]` header:
+    those keys are stashed under a synthetic `__preamble__` section so they
+    survive parsing, merging, and writing.
     """
-    parser = configparser.RawConfigParser(strict=False, interpolation=None)
-    parser.optionxform = str  # preserve case of keys
     try:
-        parser.read(preset_path, encoding="utf-8")
-    except (OSError, configparser.Error) as e:
-        logger.debug("read_preset_for_merge: %s", e)
+        raw_text = preset_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        logger.debug("read_preset_for_merge: read failed %s: %s", preset_path, e)
+        return {}
+
+    # Check if the file starts with keys before the first section header.
+    # If so, prepend a synthetic section so configparser accepts the file.
+    text_for_parser = raw_text
+    first_header_idx = _find_first_section_header(raw_text)
+    if first_header_idx != 0:
+        text_for_parser = f"[{_PREAMBLE_SECTION}]\n{raw_text}"
+
+    parser = configparser.RawConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str
+    try:
+        parser.read_string(text_for_parser)
+    except configparser.Error as e:
+        logger.debug("read_preset_for_merge: parse failed %s: %s", preset_path, e)
         return {}
     return {sec: dict(parser.items(sec)) for sec in parser.sections()}
+
+
+def _find_first_section_header(text: str) -> int:
+    """Return the char index where the first `[section]` header begins, or
+    0 if the file starts with a section, or -1 if no header exists.
+
+    Lines before the first header that contain `=` signs (keys with no
+    section) are what we need to handle specially.
+    """
+    import re
+    for match in re.finditer(r"^\s*\[[^\]]+\]\s*$", text, re.MULTILINE):
+        return match.start()
+    return -1
 
 
 def merge_into_main(
@@ -201,22 +242,36 @@ def write_preset_sections(
 ) -> None:
     """Serialize a {section: {key: value}} dict to `path` as a ReShade preset.
 
-    Writes sections exactly as given — no synthesis of Techniques= or any
-    other key. If the merged dict has no Techniques= line, ReShade will
-    initialize with no effects enabled, which is the correct fail-safe
-    behavior. (Silently enabling every merged shader with a synthetic
-    Techniques= line could overwhelm a user and isn't something either
-    source preset asked for.)
+    The synthetic `__preamble__` section (if present) is emitted FIRST as
+    bare top-level keys with no section header — this is the ReShade layout
+    that put them in __preamble__ in the first place, so round-tripping
+    produces a file ReShade can read.
+
+    Other sections are written as standard `[section]` blocks. No synthesis
+    of Techniques= or any other key — if the merged dict has no Techniques=
+    line, ReShade initializes with no effects enabled, which is safe.
     """
-    parser = configparser.RawConfigParser(interpolation=None)
-    parser.optionxform = str
-
-    for section, values in sections.items():
-        parser.add_section(section)
-        for key, value in values.items():
-            parser.set(section, key, value)
-
     path.parent.mkdir(parents=True, exist_ok=True)
+    preamble = sections.get(_PREAMBLE_SECTION, {})
+    regular = {k: v for k, v in sections.items() if k != _PREAMBLE_SECTION}
+
     with open(path, "w", encoding="utf-8") as f:
+        # Preamble: bare keys at the top of the file (ReShade's own format).
+        for key, value in preamble.items():
+            f.write(f"{key}={value}\n")
+
+        # Regular sections, separated by a blank line.
+        if preamble and regular:
+            f.write("\n")
+        parser = configparser.RawConfigParser(interpolation=None)
+        parser.optionxform = str
+        for section, values in regular.items():
+            parser.add_section(section)
+            for key, value in values.items():
+                parser.set(section, key, value)
         parser.write(f, space_around_delimiters=False)
-    logger.info("Wrote merged preset: %s (%d sections)", path, len(sections))
+
+    total = len(preamble) + sum(len(v) for v in regular.values())
+    logger.info(
+        "Wrote merged preset: %s (%d sections, %d keys including preamble)",
+        path, len(regular), total)
