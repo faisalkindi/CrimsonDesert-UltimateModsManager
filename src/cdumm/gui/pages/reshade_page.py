@@ -37,11 +37,13 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     FluentIcon,
+    HyperlinkButton,
     PrimaryPushButton,
     PushButton,
     SmoothScrollArea,
     StrongBodyLabel,
     TitleLabel,
+    TransparentToolButton,
     isDarkTheme,
 )
 
@@ -60,6 +62,7 @@ logger = logging.getLogger(__name__)
 _REFRESH_DEBOUNCE_MS = 500
 _GAME_POLL_MS = 3000
 _RESHADE_LAST_PRESET_KEY = "reshade_last_preset"
+_RESHADE_HIDDEN_PRESETS_KEY = "reshade_hidden_presets"
 
 
 class ReshadePage(SmoothScrollArea):
@@ -243,6 +246,19 @@ class ReshadePage(SmoothScrollArea):
         self._running_banner.setVisible(False)
         self._body_layout.addWidget(self._running_banner)
 
+        # Apply the hidden-list filter for the display. The active preset
+        # always stays visible — hiding the active one would be confusing.
+        hidden = self._get_hidden_presets()
+        active = self._compute_active_preset(install)
+        from cdumm.engine.reshade_preset_ops import filter_visible_presets
+        visible_presets = filter_visible_presets(install.presets, hidden)
+        if active is not None:
+            # Ensure active preset is always shown even if somehow hidden.
+            from cdumm.engine.reshade_preset import same_preset as _sp
+            if not any(_sp(p, active) for p in visible_presets):
+                visible_presets.append(active)
+        hidden_count = len(install.presets) - len(visible_presets)
+
         # Summary card.
         summary = CardWidget(self._container)
         slay = QVBoxLayout(summary)
@@ -260,8 +276,20 @@ class ReshadePage(SmoothScrollArea):
                 tr("reshade.installed_location", dll=install.dll_path.name),
                 summary))
         slay.addWidget(CaptionLabel(
-            tr("reshade.installed_presets_count", count=len(install.presets)),
+            tr("reshade.installed_presets_count", count=len(visible_presets)),
             summary))
+
+        # "Show all" link appears only when something is hidden.
+        if hidden_count > 0:
+            hidden_row = QHBoxLayout()
+            hidden_row.setSpacing(6)
+            hidden_row.addWidget(CaptionLabel(
+                tr("reshade.hidden_count_label", count=hidden_count), summary))
+            link = HyperlinkButton("", tr("reshade.show_hidden_link"), summary)
+            link.clicked.connect(self._on_show_hidden_clicked)
+            hidden_row.addWidget(link)
+            hidden_row.addStretch()
+            slay.addLayout(hidden_row)
 
         # Import / Merge buttons live next to the summary.
         actions_row = QHBoxLayout()
@@ -275,12 +303,23 @@ class ReshadePage(SmoothScrollArea):
         self._merge_btn = PushButton(FluentIcon.LINK,
                                      tr("reshade.merge_btn"), summary)
         self._merge_btn.clicked.connect(self._on_merge_clicked)
-        self._merge_btn.setEnabled(len(install.presets) >= 2)
+        self._merge_btn.setEnabled(len(visible_presets) >= 2)
         actions_row.addWidget(self._merge_btn)
         actions_row.addStretch()
         slay.addLayout(actions_row)
 
         self._body_layout.addWidget(summary)
+
+        # Keep install.presets for the rest of the function by rewriting it.
+        install = ReshadeInstall(
+            state=install.state,
+            dll_path=install.dll_path,
+            ini_path=install.ini_path,
+            shaders_dir=install.shaders_dir,
+            presets=visible_presets,
+            base_path=install.base_path,
+            error=install.error,
+        )
 
         if not install.presets:
             empty = CardWidget(self._container)
@@ -296,8 +335,9 @@ class ReshadePage(SmoothScrollArea):
             self._body_layout.addWidget(empty)
             return
 
-        # Preset list card: one row per preset.
-        active = self._compute_active_preset(install)
+        # Preset list card: one row per visible preset. `active` was computed
+        # earlier (before we filtered) so highlighting stays correct even if
+        # the active preset was somehow on the hidden list.
         list_card = CardWidget(self._container)
         llay = QVBoxLayout(list_card)
         llay.setContentsMargins(8, 8, 8, 8)
@@ -345,20 +385,20 @@ class ReshadePage(SmoothScrollArea):
         btn.clicked.connect(lambda _=False, p=preset_path: self._on_activate(p))
         row_lay.addWidget(btn)
 
-        # Delete button (trash icon). Tooltip explains Recycle Bin semantics.
-        del_btn = PushButton(FluentIcon.DELETE, "", row)
-        del_btn.setToolTip(tr("reshade.delete_btn_tooltip"))
-        del_btn.setFixedWidth(40)
-        del_btn.clicked.connect(
-            lambda _=False, p=preset_path: self._on_delete_clicked(p))
-        # Active preset can't be deleted while it's active — safer.
-        del_btn.setEnabled(not is_active)
+        # Hide button (trash icon, themed TransparentToolButton).
+        # Soft-hide from CDUMM's list; file stays on disk.
+        hide_btn = TransparentToolButton(FluentIcon.DELETE, row)
+        hide_btn.setToolTip(tr("reshade.hide_btn_tooltip"))
+        hide_btn.clicked.connect(
+            lambda _=False, p=preset_path: self._on_hide_clicked(p))
+        # Active preset can't be hidden (you'd lose sight of what's active).
+        hide_btn.setEnabled(not is_active)
         # Marker so _apply_running_state knows to keep this disabled.
-        del_btn.setProperty("_cdumm_active_row", is_active)
-        row_lay.addWidget(del_btn)
+        hide_btn.setProperty("_cdumm_active_row", is_active)
+        row_lay.addWidget(hide_btn)
 
         self._preset_rows.append((preset_path, btn))
-        self._preset_rows.append((preset_path, del_btn))
+        self._preset_rows.append((preset_path, hide_btn))
         return row
 
     def _make_running_banner(self) -> QWidget:
@@ -506,36 +546,24 @@ class ReshadePage(SmoothScrollArea):
             tr("reshade.import_success_body", name=result.name))
         self.refresh()
 
-    def _on_delete_clicked(self, preset_path: Path) -> None:
-        """Confirm, then move the preset to the Recycle Bin."""
-        from qfluentwidgets import MessageBox
-        from cdumm.engine.reshade_preset_ops import delete_preset
-
-        if self._game_running:
-            return  # button should be disabled already
-
-        confirm = MessageBox(
-            tr("reshade.delete_confirm_title"),
-            tr("reshade.delete_confirm_body", name=preset_path.name),
-            self.window())
-        confirm.yesButton.setText(tr("reshade.delete_confirm_yes"))
-        confirm.cancelButton.setText(tr("reshade.delete_confirm_no"))
-        if not _run_modal(confirm):
-            return
-
-        try:
-            delete_preset(preset_path)
-        except FileNotFoundError:
-            self.refresh()
-            return
-        except OSError as e:
-            self._show_infobar_error(
-                tr("reshade.delete_failed_title"), str(e))
-            return
+    def _on_hide_clicked(self, preset_path: Path) -> None:
+        """Soft-hide a preset: filter it out of CDUMM's list. The file stays
+        on disk so users can unhide later or pick it up outside CDUMM."""
+        hidden = self._get_hidden_presets()
+        hidden.add(str(preset_path))
+        self._save_hidden_presets(hidden)
 
         self._show_infobar_success(
-            tr("reshade.delete_success_title"),
-            tr("reshade.delete_success_body", name=preset_path.name))
+            tr("reshade.hide_success_title"),
+            tr("reshade.hide_success_body", name=preset_path.name))
+        self.refresh()
+
+    def _on_show_hidden_clicked(self) -> None:
+        """Clear the hidden list so every preset is visible again."""
+        self._save_hidden_presets(set())
+        self._show_infobar_success(
+            tr("reshade.unhide_success_title"),
+            tr("reshade.unhide_success_body"))
         self.refresh()
 
     def _on_merge_clicked(self) -> None:
@@ -644,6 +672,37 @@ class ReshadePage(SmoothScrollArea):
             self._db.connection.commit()
         except Exception as e:  # noqa: BLE001
             logger.debug("clear_last_preset failed: %s", e)
+
+    def _get_hidden_presets(self) -> set[str]:
+        """Load the hidden-presets set from Config KV. Returns empty set on
+        any failure (best-effort; hidden state is cosmetic, not critical)."""
+        if self._db is None:
+            return set()
+        try:
+            import json
+            from cdumm.storage.config import Config
+            raw = Config(self._db).get(_RESHADE_HIDDEN_PRESETS_KEY)
+            if not raw:
+                return set()
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return set(str(x) for x in data)
+            return set()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("get_hidden_presets failed: %s", e)
+            return set()
+
+    def _save_hidden_presets(self, hidden: set[str]) -> None:
+        if self._db is None:
+            return
+        try:
+            import json
+            from cdumm.storage.config import Config
+            Config(self._db).set(
+                _RESHADE_HIDDEN_PRESETS_KEY,
+                json.dumps(sorted(hidden)))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("save_hidden_presets failed: %s", e)
 
     # ── UX helpers -----------------------------------------------------
 

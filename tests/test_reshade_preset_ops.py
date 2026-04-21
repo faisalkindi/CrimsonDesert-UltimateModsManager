@@ -12,7 +12,7 @@ import pytest
 
 from cdumm.engine.reshade_preset_ops import (
     MergeResult,
-    delete_preset,
+    filter_visible_presets,
     import_preset_file,
     merge_into_main,
     read_preset_for_merge,
@@ -88,21 +88,37 @@ def test_import_creates_base_if_missing(tmp_path: Path) -> None:
     assert base.is_dir()
 
 
-# ---- Delete --------------------------------------------------------------
+# ---- Hide (soft-delete; filter from CDUMM view only) ---------------------
 
-def test_delete_uses_send2trash(tmp_path: Path) -> None:
-    """Verify delete goes through send2trash (Recycle Bin) -- users can recover."""
-    preset = tmp_path / "preset.ini"
-    preset.write_text("Techniques=X\n[X.fx]\na=1\n")
-
-    with patch("cdumm.engine.reshade_preset_ops.send2trash") as mock_send:
-        delete_preset(preset)
-    mock_send.assert_called_once_with(str(preset))
+def test_filter_visible_returns_all_when_nothing_hidden(tmp_path: Path) -> None:
+    """Empty hidden set -> every preset is visible."""
+    presets = [tmp_path / "a.ini", tmp_path / "b.ini"]
+    assert filter_visible_presets(presets, hidden=set()) == presets
 
 
-def test_delete_missing_file_raises(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError):
-        delete_preset(tmp_path / "nonexistent.ini")
+def test_filter_visible_excludes_hidden_paths(tmp_path: Path) -> None:
+    """Hidden paths are removed, order preserved for the rest."""
+    a = tmp_path / "a.ini"
+    b = tmp_path / "b.ini"
+    c = tmp_path / "c.ini"
+    result = filter_visible_presets([a, b, c], hidden={str(b)})
+    assert result == [a, c]
+
+
+def test_filter_visible_handles_case_insensitive_paths(tmp_path: Path) -> None:
+    """Windows: hidden path stored as 'C:/Foo/a.ini' should match 'c:/foo/a.ini'."""
+    preset = tmp_path / "a.ini"
+    hidden = {str(preset).upper()}
+    result = filter_visible_presets([preset], hidden=hidden)
+    assert result == []
+
+
+def test_filter_visible_ignores_stale_hidden_entries(tmp_path: Path) -> None:
+    """If a hidden path no longer matches any preset, it's silently ignored.
+    (The preset was deleted elsewhere; stale Config entry shouldn't crash.)"""
+    a = tmp_path / "a.ini"
+    result = filter_visible_presets([a], hidden={str(tmp_path / "gone.ini")})
+    assert result == [a]
 
 
 # ---- Merge: reading ------------------------------------------------------

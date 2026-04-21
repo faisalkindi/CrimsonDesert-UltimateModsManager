@@ -18,11 +18,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -31,9 +27,10 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CheckBox,
+    ComboBox,
+    LineEdit,
     MessageBoxBase,
-    PrimaryPushButton,
-    PushButton,
+    SmoothScrollArea,
     StrongBodyLabel,
 )
 
@@ -76,7 +73,7 @@ class ReshadeMergeDialog(MessageBoxBase):
 
         # Main preset
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_main_label"), self))
-        self._main_combo = QComboBox(self)
+        self._main_combo = ComboBox(self)
         for p in self._presets:
             self._main_combo.addItem(p.stem, userData=p)
         self._main_combo.currentIndexChanged.connect(self._refresh_sections)
@@ -85,7 +82,7 @@ class ReshadeMergeDialog(MessageBoxBase):
 
         # Other preset
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_other_label"), self))
-        self._other_combo = QComboBox(self)
+        self._other_combo = ComboBox(self)
         for p in self._presets:
             self._other_combo.addItem(p.stem, userData=p)
         # Default: pick the second preset if there are 2+, else same as main.
@@ -95,12 +92,18 @@ class ReshadeMergeDialog(MessageBoxBase):
         self.viewLayout.addWidget(self._other_combo)
         self.viewLayout.addSpacing(8)
 
-        # Sections picker
+        # Sections picker -- SmoothScrollArea with transparent background so
+        # the scroll region picks up the dialog theme instead of rendering black.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_sections_label"), self))
-        scroll = QScrollArea(self)
+        scroll = SmoothScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(200)
+        scroll.enableTransparentBackground()
         self._section_container = QWidget()
+        # Make the container itself transparent so the scroll area's theme
+        # bleeds through.
+        self._section_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._section_container.setStyleSheet("background: transparent;")
         self._section_container_layout = QVBoxLayout(self._section_container)
         self._section_container_layout.setContentsMargins(8, 8, 8, 8)
         self._section_container_layout.setSpacing(6)
@@ -110,7 +113,7 @@ class ReshadeMergeDialog(MessageBoxBase):
 
         # Output filename
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_output_label"), self))
-        self._name_edit = QLineEdit(self)
+        self._name_edit = LineEdit(self)
         self._name_edit.setPlaceholderText("MergedPreset.ini")
         self.viewLayout.addWidget(self._name_edit)
 

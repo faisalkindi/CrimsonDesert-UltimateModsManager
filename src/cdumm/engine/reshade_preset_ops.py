@@ -1,10 +1,11 @@
 """Preset CRUD operations for CDUMM's ReShade tab.
 
-  - `import_preset_file`   copy a .ini from anywhere into the preset folder
-  - `delete_preset`        safe delete (Recycle Bin via send2trash)
-  - `read_preset_for_merge`    parse into {section: {key: value}}
-  - `merge_into_main`      asymmetric merge: main + picked sections from other
-  - `write_preset_sections`    serialize a merged dict back to .ini
+  - `import_preset_file`      copy a .ini from anywhere into the preset folder
+  - `filter_visible_presets`  drop hidden paths from a preset list (soft-hide
+                              from CDUMM's view; the .ini file stays on disk)
+  - `read_preset_for_merge`   parse into {section: {key: value}}
+  - `merge_into_main`         asymmetric merge: main + picked sections from other
+  - `write_preset_sections`   serialize a merged dict back to .ini
 
 Pure logic; no Qt.
 """
@@ -12,11 +13,10 @@ from __future__ import annotations
 
 import configparser
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from send2trash import send2trash
 
 from cdumm.engine.reshade_detect import _is_preset_file
 
@@ -61,20 +61,32 @@ def import_preset_file(
     return dest
 
 
-# ---- Delete --------------------------------------------------------------
+# ---- Hide (soft-delete) ---------------------------------------------------
 
-def delete_preset(preset_path: Path) -> None:
-    """Move a preset file to the system Recycle Bin.
+def _canonical_path(p: Path | str) -> str:
+    """Normalize a path for comparison (case-insensitive on Windows,
+    collapses mixed separators and ./ segments)."""
+    s = str(p)
+    return os.path.normcase(os.path.normpath(s))
 
-    Uses send2trash so the user can recover if they delete by mistake.
 
-    Raises:
-      FileNotFoundError if the preset doesn't exist.
+def filter_visible_presets(
+    presets: list[Path],
+    hidden: set[str],
+) -> list[Path]:
+    """Drop paths in `hidden` from `presets`, preserving order of the rest.
+
+    Matching is case-insensitive and separator-tolerant (Windows-safe). Stale
+    hidden entries that don't correspond to any current preset are silently
+    ignored.
+
+    `hidden` is a set of path strings as stored in the Config KV — typically
+    the absolute path of each hidden preset.
     """
-    if not preset_path.exists():
-        raise FileNotFoundError(f"Preset doesn't exist: {preset_path}")
-    send2trash(str(preset_path))
-    logger.info("Deleted preset (to Recycle Bin): %s", preset_path)
+    if not hidden:
+        return list(presets)
+    hidden_canonical = {_canonical_path(h) for h in hidden}
+    return [p for p in presets if _canonical_path(p) not in hidden_canonical]
 
 
 # ---- Merge ---------------------------------------------------------------
