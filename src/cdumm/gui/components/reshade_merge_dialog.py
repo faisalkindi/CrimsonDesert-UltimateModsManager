@@ -65,21 +65,32 @@ class _CollapsibleSectionGroup(QWidget):
         self._checkboxes: list[CheckBox] = []
         self._expanded = True
 
+        # Card-style visual grouping with a subtle border so the New /
+        # Existing / Advanced buckets read as distinct blocks.
+        self.setStyleSheet(
+            "_CollapsibleSectionGroup { background: rgba(128, 128, 128, 0.06);"
+            " border: 1px solid rgba(128, 128, 128, 0.18); border-radius: 8px; }")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(8, 8, 8, 10)
         root.setSpacing(0)
 
         # Header row — fixed layout so the button never gets pushed off.
         header_wrap = QWidget(self)
+        header_wrap.setStyleSheet("background: transparent;")
         header = QHBoxLayout(header_wrap)
         header.setContentsMargins(4, 4, 4, 0)
-        header.setSpacing(8)
+        header.setSpacing(10)
 
         self._arrow_btn = TransparentToolButton(FluentIcon.CHEVRON_RIGHT, header_wrap)
         self._arrow_btn.clicked.connect(self._toggle)
         header.addWidget(self._arrow_btn)
 
         self._title_label = StrongBodyLabel(title, header_wrap)
+        tf = self._title_label.font()
+        tf.setPixelSize(15)
+        self._title_label.setFont(tf)
         self._title_label.setStyleSheet("QLabel { font-weight: 600; }")
         # Don't let the label eat all horizontal space — it keeps its natural
         # size and the stretch goes into the spacer between title and button.
@@ -94,18 +105,18 @@ class _CollapsibleSectionGroup(QWidget):
         # "Clear all" once everything is ticked.
         self._select_all_btn = PushButton(
             FluentIcon.ACCEPT, tr("reshade.merge_group_select_all"), header_wrap)
-        self._select_all_btn.setFixedHeight(28)
+        self._select_all_btn.setFixedHeight(30)
         self._select_all_btn.clicked.connect(self._on_select_all_clicked)
         header.addWidget(self._select_all_btn)
         root.addWidget(header_wrap)
 
-        # Subtitle row — small caption text under the header for context
-        # ("Not in the main preset — ticking adds them", etc.). Optional.
+        # Subtitle row — small caption text under the header for context.
         if subtitle:
             self._subtitle_label = CaptionLabel(subtitle, self)
             self._subtitle_label.setWordWrap(True)
             self._subtitle_label.setStyleSheet(
-                "CaptionLabel { color: rgba(128, 128, 128, 0.9); padding-left: 34px; }")
+                "CaptionLabel { color: rgba(128, 128, 128, 0.9);"
+                " padding: 0 4px 6px 38px; background: transparent; }")
             root.addWidget(self._subtitle_label)
         else:
             self._subtitle_label = None
@@ -115,8 +126,8 @@ class _CollapsibleSectionGroup(QWidget):
         self._body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self._body.setStyleSheet("background: transparent;")
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(28, 0, 4, 6)
-        self._body_layout.setSpacing(4)
+        self._body_layout.setContentsMargins(38, 4, 8, 4)
+        self._body_layout.setSpacing(8)
         root.addWidget(self._body)
 
         # Start expanded.
@@ -193,12 +204,17 @@ class ReshadeMergeDialog(MessageBoxBase):
     # ── UI --------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        # Give the whole view more breathing room. MessageBoxBase's default
+        # viewLayout spacing is 12; bumping to 14 + tighter-but-deliberate
+        # section gaps gives a cleaner feel without wasting vertical space.
+        self.viewLayout.setSpacing(10)
+
         title = StrongBodyLabel(tr("reshade.merge_dialog_title"), self)
         tf = title.font()
-        tf.setPixelSize(20)
+        tf.setPixelSize(22)
         title.setFont(tf)
         self.viewLayout.addWidget(title)
-        self.viewLayout.addSpacing(8)
+        self.viewLayout.addSpacing(12)
 
         # Error label lives UNDER the title so validation failures are
         # impossible to miss (previously at the bottom, users never saw them).
@@ -206,42 +222,52 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._error_label.setWordWrap(True)
         self._error_label.setStyleSheet(
             "QLabel { background-color: rgba(196, 49, 75, 0.15);"
-            " color: #C4314B; padding: 6px 10px; border-radius: 4px;"
+            " color: #C4314B; padding: 10px 14px; border-radius: 6px;"
             " font-weight: 600; }")
         self._error_label.setVisible(False)
         self.viewLayout.addWidget(self._error_label)
 
-        # Main preset
+        # Two presets side-by-side would crowd on narrower widths; stacked
+        # layout with clear label-above-field gives each combo its own row
+        # and readable label. Each combo gets a fixed taller height so the
+        # dropdown area feels solid.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_main_label"), self))
         self._main_combo = ComboBox(self)
+        self._main_combo.setFixedHeight(36)
         for p in self._presets:
             self._main_combo.addItem(p.stem, userData=p)
         self._main_combo.currentIndexChanged.connect(self._on_main_changed)
         self.viewLayout.addWidget(self._main_combo)
-        self.viewLayout.addSpacing(8)
+        self.viewLayout.addSpacing(14)
 
-        # Other preset -- dropdown excludes whatever's currently selected
-        # as the main. This structurally prevents same-preset merges.
+        # Other preset — dropdown excludes whatever's currently selected
+        # as the main. Structurally prevents same-preset merges.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_other_label"), self))
         self._other_combo = ComboBox(self)
+        self._other_combo.setFixedHeight(36)
         self._other_combo.currentIndexChanged.connect(self._on_other_changed)
         self.viewLayout.addWidget(self._other_combo)
-        self.viewLayout.addSpacing(8)
+        self.viewLayout.addSpacing(18)
 
-        # Sections picker -- SmoothScrollArea with transparent background.
+        # Sections picker — SmoothScrollArea with transparent background.
+        # Taller minimum height so at least ~8 checkboxes fit without a
+        # scrollbar for the common case (a preset with 5-10 effects).
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_sections_label"), self))
         scroll = SmoothScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(200)
+        scroll.setMinimumHeight(340)
         scroll.enableTransparentBackground()
         self._section_container = QWidget()
         self._section_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self._section_container.setStyleSheet("background: transparent;")
         self._section_container_layout = QVBoxLayout(self._section_container)
-        self._section_container_layout.setContentsMargins(8, 8, 8, 8)
-        self._section_container_layout.setSpacing(6)
+        # More horizontal padding and generous vertical gap between groups
+        # so the "New" / "Existing" / "Advanced" cards feel distinct.
+        self._section_container_layout.setContentsMargins(12, 10, 12, 10)
+        self._section_container_layout.setSpacing(16)
         scroll.setWidget(self._section_container)
         self.viewLayout.addWidget(scroll)
+        self.viewLayout.addSpacing(12)
 
         # Advanced toggle: include non-fx sections (GENERAL, DEPTH, etc.).
         self._include_non_fx_cb = CheckBox(
@@ -251,11 +277,12 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._include_non_fx_cb.stateChanged.connect(
             self._on_include_advanced_toggled)
         self.viewLayout.addWidget(self._include_non_fx_cb)
-        self.viewLayout.addSpacing(8)
+        self.viewLayout.addSpacing(16)
 
-        # Output filename -- auto-populated with a sensible default.
+        # Output filename — auto-populated with a sensible default.
         self.viewLayout.addWidget(BodyLabel(tr("reshade.merge_output_label"), self))
         self._name_edit = LineEdit(self)
+        self._name_edit.setFixedHeight(36)
         self._name_edit.setPlaceholderText("MergedPreset.ini")
         self._name_edit.textEdited.connect(lambda _=None: self._hide_error())
         self.viewLayout.addWidget(self._name_edit)
@@ -269,8 +296,10 @@ class ReshadeMergeDialog(MessageBoxBase):
         self._repopulate_other_combo()
         self._autofill_output_name()
 
-        # Wider dialog for the scroll area to breathe.
-        self.widget.setMinimumWidth(520)
+        # Bigger dialog footprint — long preset names fit, every row has
+        # room, scroll area shows ~8 effects without scrolling.
+        self.widget.setMinimumWidth(720)
+        self.widget.setMinimumHeight(740)
 
     def _on_main_changed(self) -> None:
         """Main preset changed: rebuild 'Add from' list (excluding the new
