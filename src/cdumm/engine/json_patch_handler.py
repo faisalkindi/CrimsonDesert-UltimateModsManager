@@ -2021,6 +2021,24 @@ def process_json_patches_for_overlay(
                     f"updated release.")
             continue
 
+        # Loud-error fallback (see review Option C): even for non-data-
+        # table files, any patch that mismatched vanilla means the mod
+        # is shipping a half-patched file. The game may still crash
+        # (LeoBodnar's prefab case). Surface it to the user via
+        # errors_out so a post-apply InfoBar names the mod + file.
+        # Unlike the data-table case above, we don't abort — partial
+        # patches on prefabs etc. sometimes work, and refusing to ship
+        # them would break mods that already work today. The user sees
+        # the warning and can disable/reorder if the game crashes.
+        if mismatched > 0 and errors_out is not None:
+            mod_name = Path(json_source).stem
+            errors_out.append(
+                f"{mod_name}: {mismatched} of {applied + mismatched} "
+                f"patches did not match vanilla {game_file}. Another "
+                f"mod may have already modified this file. If the "
+                f"game crashes or this mod has no effect, try "
+                f"disabling it or changing load order.")
+
         if bytes(modified) == plaintext:
             logger.debug("mount-time: no changes for '%s', skipping", game_file)
             continue

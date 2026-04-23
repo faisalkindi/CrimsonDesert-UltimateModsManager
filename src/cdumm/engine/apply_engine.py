@@ -1181,6 +1181,51 @@ class ApplyWorker(QObject):
             self._overlay_entries = self._merge_same_target_overlay_entries(
                 self._overlay_entries)
 
+            # ── Cross-layer overlay de-dup ──────────────────────────
+            # When multiple apply phases contributed an entry for the
+            # same (pamt_dir, entry_path) — e.g. JSON Phase 1a + an
+            # ENTR rewrite both targeting the same prefab — collapse
+            # them into a single byte-merged entry instead of silently
+            # priority-picking one. Runs BEFORE Phase 1b so the
+            # overlay builder sees one entry per target.
+            if self._overlay_entries:
+                from cdumm.engine.overlay_dedup import (
+                    merge_duplicate_overlay_entries,
+                )
+
+                def _dedup_vanilla_resolver(pamt_dir: str,
+                                             entry_path: str):
+                    if not entry_path:
+                        return None
+                    # _get_vanilla_entry_content takes (file_path, entry_path)
+                    # where file_path is a PAMT-relative archive path (e.g.
+                    # '0009/0.paz'). pamt_dir alone isn't enough — but the
+                    # canonical "0.paz" suffix is what vanilla stores.
+                    try:
+                        return self._get_vanilla_entry_content(
+                            f"{pamt_dir}/0.paz", entry_path)
+                    except Exception as e:
+                        logger.debug(
+                            "dedup resolver failed for %s/%s: %s",
+                            pamt_dir, entry_path, e)
+                        return None
+
+                before_count = len(self._overlay_entries)
+                merged_entries, dedup_warnings = (
+                    merge_duplicate_overlay_entries(
+                        self._overlay_entries, _dedup_vanilla_resolver))
+                self._overlay_entries = merged_entries
+                if before_count != len(merged_entries):
+                    logger.info(
+                        "overlay-dedup: %d entries collapsed into %d",
+                        before_count, len(merged_entries))
+                for w in dedup_warnings:
+                    self._soft_warnings.append(w)
+                    try:
+                        self.warning.emit(w)
+                    except Exception:
+                        pass
+
             _phase(f"Phase 1b: Build overlay ({len(self._overlay_entries)} entries)")
             # ── Phase 1b: Build overlay PAZ for ENTR deltas ─────────
             if self._overlay_entries:
