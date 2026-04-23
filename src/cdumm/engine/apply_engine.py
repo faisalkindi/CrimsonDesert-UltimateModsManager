@@ -1320,6 +1320,13 @@ class ApplyWorker(QObject):
             _phase("Phase 3: Revert disabled mods")
             # ── Phase 3: Revert files from disabled mods ───────────────
             new_files_to_delete = self._get_new_files_to_delete(set(file_deltas.keys()))
+            # Hash-first short-circuit: if the live game file already
+            # matches the snapshot (vanilla) hash, skip the ~100 MB read
+            # + stage + rename entirely. Phase 3 dominates wallclock on
+            # texture-mod toggles; most reverted files are already vanilla
+            # from a prior apply/revert and only need the hash to confirm.
+            from cdumm.engine.snapshot_manager import hash_matches
+            phase3_skipped = 0
             for file_path in revert_files:
                 pct = int((file_idx / total_files) * 80)
                 self.progress_updated.emit(pct, f"Reverting {file_path}...")
@@ -1339,6 +1346,21 @@ class ApplyWorker(QObject):
                             logger.info("Removed empty mod directory: %s", parent.name)
                     continue
 
+                game_path = self._game_dir / file_path.replace("/", "\\")
+                if game_path.exists():
+                    try:
+                        snap_row = self._db.connection.execute(
+                            "SELECT file_hash, file_size FROM snapshots "
+                            "WHERE file_path = ?", (file_path,)).fetchone()
+                        if snap_row:
+                            snap_hash, snap_size = snap_row
+                            if (game_path.stat().st_size == snap_size
+                                    and hash_matches(game_path, snap_hash)):
+                                phase3_skipped += 1
+                                continue
+                    except OSError:
+                        pass
+
                 vanilla_bytes = self._get_vanilla_bytes(file_path)
                 if vanilla_bytes is None:
                     logger.warning("Cannot revert %s — no backup", file_path)
@@ -1347,6 +1369,11 @@ class ApplyWorker(QObject):
                 txn.stage_file(file_path, vanilla_bytes)
                 if file_path.endswith(".pamt"):
                     modified_pamts[file_path.split("/")[0]] = vanilla_bytes
+
+            if phase3_skipped:
+                logger.info("Phase 3: skipped %d file(s) already matching "
+                            "vanilla snapshot (no read/write needed)",
+                            phase3_skipped)
 
             # ── Phase 3b: Safety net — restore orphaned modded files ────
             # Files can be left modded if a previous CDUMM version modified
@@ -2953,10 +2980,16 @@ class ApplyWorker(QObject):
             pathc.header.hash_count = len(pathc.key_hashes)
 
             pathc_bytes = serialize_pathc(pathc)
-            txn.stage_file("meta/0.pathc", pathc_bytes)
+            # Fast path: if every DDS overlay entry was preserved (same m1
+            # as vanilla) we're writing bytes identical to vanilla. Check
+            # live file and skip the stage+commit cycle if it already
+            # matches. Saves ~6.8 MB staging write + atomic-rename churn
+            # every texture apply where no DDS index actually changed.
+            staged = txn.stage_file_if_changed("meta/0.pathc", pathc_bytes)
             logger.info("Updated PATHC: %d updated, %d added, %d preserved "
-                        "(%d DDS overlay entries)",
-                        updated, added, preserved, len(dds_entries))
+                        "(%d DDS overlay entries)%s",
+                        updated, added, preserved, len(dds_entries),
+                        "" if staged else " — already in sync, skipped write")
 
         except Exception as e:
             logger.error("Failed to update PATHC for DDS overlay: %s", e, exc_info=True)

@@ -13,6 +13,16 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.5",
+        "date": "2026-04-23",
+        "notes": [
+            "Texture mods render correctly in game again. Icons from mods like Bigger Minimap Tweaks were being written into the overlay without a specific header the game expects, so enemies and dropped items showed as blank on the minimap. Those render again. Thanks to RoninWoof and AvariceHnt for the bug reports.",
+            "Apply is about 4x faster on typical loadouts. An Apply run with 33 mods that used to take 35 seconds now finishes in about 9. CDUMM skips rewriting files already at vanilla state, and skips a small but repeated texture table write that was running on every apply even when nothing changed.",
+            "Texture mods now work correctly on first install. A leftover issue from v3.0.0 was writing a garbage value into the game's texture table every apply, so some textures could fail to load cleanly. The table is now written exactly as the game expects, byte for byte.",
+            "Fix Everything runs the revert step correctly instead of crashing partway through with a signal error.",
+        ],
+    },
+    {
         "version": "3.1.4",
         "date": "2026-04-22",
         "notes": [
@@ -81,7 +91,7 @@ CHANGELOG = [
             "Settings status messages use theme-aware icon badges instead of hardcoded hex colors — readable in both light and dark themes.",
             "Conflicts dialog redesigned: Fluent header with count badge, cleaner tree rhythm, scannable load-order cards with rank pills.",
             "Conflicts dialog: theme-aware surface colors, no more raw Qt chrome.",
-            "JMM V9.9.1 full parity: DDS partial payload, PATHC hierarchical paths, PABGH fixup-after-insert, XML patch/merge with identity keys, language redirect + PAMT .paloc rewrite, compiled-file byte-merge fallback, ChaCha20 overlay re-encryption.",
+            "Broad format-support pass: DDS partial payload, PATHC hierarchical paths, PABGH fixup after inserts, XML patch/merge with identity keys, language redirect + PAMT .paloc rewrite, compiled-file byte-merge fallback, ChaCha20 overlay re-encryption.",
             "Texture mods now render correctly (Enhanced Map Icons, Barber Unlocked, Kliff Wears Damiane hair).",
             "Multi-variant JSON mods: one card per drop with cog switcher, conflict-group radio selection, title wraps correctly in dark theme.",
             "Miki990 UX fixes: rename propagation, conflict re-detect on reorder, long-name wrap, multi-drop crash-guards, dedicated conflict-order dialog.",
@@ -296,7 +306,7 @@ CHANGELOG = [
         "version": "2.1.8",
         "date": "2026-04-07",
         "notes": [
-            "Overlay PAZ system: ENTR delta mods now write to a fresh overlay directory instead of modifying original game files. Original PAZ and PAMT files stay vanilla. The game loads modded entries from the overlay. This matches JSON Mod Manager's approach and improves stability.",
+            "Overlay PAZ system: ENTR delta mods now write to a fresh overlay directory instead of modifying original game files. Original PAZ and PAMT files stay vanilla. The game loads modded entries from the overlay, which improves stability and makes revert cleaner.",
             "DDS texture mod support: fixed type 0x01 DDS split handling. The compression check no longer relies on comp_size vs orig_size (which is always equal for DDS split). DDS headers are automatically fixed with correct flags, depth, mip sizes, and format identifier. Mods like Modern Controller Icons now work correctly.",
             "DDS decompression reads inner LZ4 size from the DDS header instead of using the full padded body. Fixes decompression failures for overlay DDS entries.",
             "Removed PATHC update for DDS mods that was causing hash collisions with existing textures.",

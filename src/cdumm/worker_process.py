@@ -443,19 +443,35 @@ def _run_fix(game_dir: str, vanilla_dir: str, db_path: str,
     results = []  # list of {"title": ..., "desc": ..., "color": ...}
 
     # Step 1: Revert
+    # RevertWorker is a QObject that emits progress/error/warning signals
+    # during _revert(). Constructing via __new__ and calling _revert()
+    # directly would hit PySide's "signal source has been deleted" because
+    # the C++ QObject backing the signals was never initialized. Match
+    # _run_revert's pattern: full constructor + signal wiring to _emit.
     _emit({"type": "progress", "pct": 5, "msg": "Reverting to vanilla..."})
     try:
         from cdumm.engine.apply_engine import RevertWorker
-        revert_db = Database(Path(db_path))
-        revert_db.initialize()
-        rw = RevertWorker.__new__(RevertWorker)
-        rw._game_dir = game_dir
-        rw._vanilla_dir = vanilla_dir
-        rw._db = revert_db
-        rw._revert()
-        revert_db.close()
-        results.append({"title": "Revert Complete",
-                        "desc": "All game files restored to vanilla.", "color": "#A3BE8C"})
+        rw = RevertWorker(
+            game_dir=game_dir,
+            vanilla_dir=vanilla_dir,
+            db_path=Path(db_path),
+        )
+        rw.progress_updated.connect(
+            lambda pct, msg: _emit({"type": "progress",
+                                    "pct": 5 + int(pct * 0.30),
+                                    "msg": msg}))
+        rw.warning.connect(
+            lambda msg: _emit({"type": "warning", "msg": msg}))
+        _revert_err: list[str] = []
+        rw.error_occurred.connect(lambda err: _revert_err.append(err))
+        rw.run()
+        if _revert_err:
+            results.append({"title": "Revert Warning",
+                            "desc": _revert_err[0], "color": "#EBCB8B"})
+        else:
+            results.append({"title": "Revert Complete",
+                            "desc": "All game files restored to vanilla.",
+                            "color": "#A3BE8C"})
     except Exception as e:
         results.append({"title": "Revert Warning",
                         "desc": f"Revert issue: {e}", "color": "#EBCB8B"})

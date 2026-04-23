@@ -33,6 +33,32 @@ class TransactionalIO:
             self._staged_files.append(rel_path)
         logger.debug("Staged: %s (%d bytes)", rel_path, len(data))
 
+    def stage_file_if_changed(self, rel_path: str, data: bytes) -> bool:
+        """Stage only if the target differs from ``data``.
+
+        Returns True if a stage was performed, False if skipped.
+
+        Fast path for Phase 3 reverts and PATHC writes: when the live
+        game file already contains these exact bytes (e.g. a prior apply
+        left it in the desired state), skip the read+write+rename cycle
+        of stage_file + commit entirely. Only the size+byte comparison
+        cost is paid.
+        """
+        target = self._game_dir / rel_path.replace("/", "\\")
+        if target.exists():
+            try:
+                if target.stat().st_size == len(data):
+                    if target.read_bytes() == data:
+                        logger.debug(
+                            "Skipped stage (target already matches): %s "
+                            "(%d bytes)", rel_path, len(data))
+                        return False
+            except OSError as e:
+                logger.debug("Identity check for %s failed (%s) — "
+                             "falling through to stage", rel_path, e)
+        self.stage_file(rel_path, data)
+        return True
+
     def commit(self) -> None:
         """Atomically swap staged files into the game directory.
 

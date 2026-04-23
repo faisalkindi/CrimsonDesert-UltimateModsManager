@@ -544,6 +544,18 @@ def build_overlay(
         if comp_type is None:
             comp_type = _infer_comp_type_from_extension(
                 entry_path.rsplit("/", 1)[-1] if "/" in entry_path else entry_path)
+        # JMM-parity: any .dds entry must take the partial-DDS payload branch
+        # (flags=1) in the overlay regardless of what metadata's
+        # compression_type says. That metadata captures how VANILLA stored
+        # the entry — orthogonal to how the OVERLAY should encode the
+        # replacement. Without this, DDS entries whose vanilla copy happened
+        # to be uncompressed (comp_size==decomp_size, metadata comp_type=0)
+        # fell through to raw passthrough with flags=0 + no reserved1 stamp,
+        # which the game can't render. Fixes RoninWoof / AvariceHnt minimap
+        # enemy-die / dropped-item icon blank-render bug. Equivalent to
+        # JMM ModManager.cs:1769 "Flags = .EndsWith('.dds') ? 1 : 2".
+        if entry_path.lower().endswith(".dds"):
+            comp_type = 1
         pamt_dir = metadata.get("pamt_dir", "")
 
         # Resolve full folder path from vanilla PAMT.

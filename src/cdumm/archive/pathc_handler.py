@@ -160,14 +160,12 @@ def serialize_pathc(pathc: PathcFile) -> bytes:
 
     out.write(collision_blob)
 
-    # Recompute PATHC self-hash at offset 4.
-    # The hash covers everything from offset 8 onwards (after the two header words).
-    # This is the same pattern as PAPGT: hash = hashlittle(data[8:], 0).
-    result = out.getvalue()
-    from cdumm.archive.hashlittle import hashlittle as _hl
-    content_hash = _hl(result[8:], 0)
-    result = result[:4] + struct.pack("<I", content_hash) + result[8:]
-    return result
+    # PATHC's offset-4 field is NOT a self-hash. Vanilla meta/0.pathc ships
+    # with 0x00000000 there, and JMM's SerializePathc (ModManager.cs:5200)
+    # writes Unknown1 through as parsed. The "same pattern as PAPGT" stamp
+    # this code used to do was the c6b0e39 regression that broke every
+    # texture mod since v3.0.0 (RoninWoof, AvariceHnt, Caites reports).
+    return out.getvalue()
 
 
 def normalize_path(path_str: str) -> str:
