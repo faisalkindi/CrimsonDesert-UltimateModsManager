@@ -716,11 +716,18 @@ def _find_loose_file_candidates(path: Path, max_depth: int = 5) -> list[dict]:
                 with open(mod_json, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict) and "modinfo" in data:
-                    # Check if this is a standalone PAZ mod (has NNNN/0.paz)
+                    # Check if this is a standalone PAZ mod (has NNNN/0.paz).
+                    # Authors may nest the numbered dirs under game_files/
+                    # (JMM 9.9.2 layout). Treat both placements identically.
+                    paz_search_roots = [candidate]
+                    gf_dir = candidate / "game_files"
+                    if gf_dir.is_dir():
+                        paz_search_roots.append(gf_dir)
                     is_standalone_paz = any(
                         d.is_dir() and d.name.isdigit() and len(d.name) == 4
                         and (d / "0.paz").exists()
-                        for d in candidate.iterdir()
+                        for root in paz_search_roots
+                        for d in root.iterdir()
                     )
                     if is_standalone_paz:
                         pass  # Let _match_game_files handle it as a PAZ mod

@@ -13,6 +13,15 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.7",
+        "date": "2026-04-23",
+        "notes": [
+            "Source PAZ mods authored under a game_files/ subfolder are now detected. Some authors ship MyMod/game_files/0036/0.paz instead of MyMod/0036/0.paz; both layouts now import cleanly as the same standalone PAZ mod.",
+            "New files added by mods that use less common extensions now inherit their compression flags from a vanilla neighbor in the same archive instead of always defaulting to LZ4. Avoids subtle load failures for mods that introduce file types CDUMM doesn't have a hardcoded rule for.",
+            "PAPGT entry builder now exposes the per-entry IsOptional and LangType fields with safe defaults (required, all-languages). Existing apply output is byte-identical for everyone; this is groundwork for upcoming language-targeted mod support.",
+        ],
+    },
+    {
         "version": "3.1.6",
         "date": "2026-04-23",
         "notes": [

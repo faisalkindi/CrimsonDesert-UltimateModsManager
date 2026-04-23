@@ -27,6 +27,39 @@ logger = logging.getLogger(__name__)
 
 ENTRY_SIZE = 12  # bytes per directory entry
 
+# Default LangType: 0x3FFF means "all languages" — matches the value the
+# game ships in vanilla PAPGT entries and JMM 9.9.2's BuildPapgtWithMod
+# default (ModManager.cs:2902, langType=16383).
+DEFAULT_LANG_TYPE = 0x3FFF
+
+
+def decode_papgt_entry_flags(flags: int) -> tuple[int, int, int]:
+    """Split a PAPGT entry's first 4 bytes into the named fields.
+
+    The vanilla game and JMM 9.9.2 (ModManager.cs:2911-2919) treat these
+    bytes as ``IsOptional`` (byte 0), ``LangType`` (uint16 little-endian,
+    bytes 1-2) and ``Zero`` (byte 3). Returns ``(is_optional, lang_type,
+    zero)``.
+    """
+    is_optional = flags & 0xFF
+    lang_type = (flags >> 8) & 0xFFFF
+    zero = (flags >> 24) & 0xFF
+    return is_optional, lang_type, zero
+
+
+def encode_papgt_entry_flags(
+    is_optional: int = 0,
+    lang_type: int = DEFAULT_LANG_TYPE,
+    zero: int = 0,
+) -> int:
+    """Inverse of :func:`decode_papgt_entry_flags` — pack three fields
+    into the historical 4-byte ``flags`` uint32 the game expects."""
+    return (
+        (is_optional & 0xFF)
+        | ((lang_type & 0xFFFF) << 8)
+        | ((zero & 0xFF) << 24)
+    )
+
 
 class PapgtManager:
     """Manages PAPGT rebuild from scratch."""
@@ -37,7 +70,8 @@ class PapgtManager:
         self._vanilla_papgt = vanilla_dir / "meta" / "0.papgt" if vanilla_dir else None
 
     def rebuild(self, modified_pamts: dict[str, bytes] | None = None,
-                mod_papgt: bytes | None = None) -> bytes:
+                mod_papgt: bytes | None = None,
+                mod_entry_options: dict[str, dict] | None = None) -> bytes:
         """Rebuild PAPGT with correct hashes for all directories.
 
         Starts from the vanilla PAPGT structure (or mod-shipped PAPGT if
@@ -144,9 +178,13 @@ class PapgtManager:
         except OSError:
             pass
 
-        # New mod directories use 0x003FFF00 (same as vanilla data dirs 0000-0017).
-        # This matches what mod authors use when they ship their own PAPGT.
-        new_dir_flags = 0x003FFF00
+        # New mod directories default to is_optional=0, lang_type=0x3FFF
+        # (= 0x003FFF00 packed) — same as vanilla data dirs 0000-0017.
+        # Callers can override per-dir via ``mod_entry_options`` to mark
+        # an entry optional or target a specific language group, matching
+        # JMM 9.9.2's BuildPapgtWithMod isOptional / langType parameters.
+        default_new_flags = encode_papgt_entry_flags()
+        opts = mod_entry_options or {}
 
         if new_dirs:
             logger.info("PAPGT: adding %d new entries: %s", len(new_dirs), new_dirs)
@@ -156,7 +194,16 @@ class PapgtManager:
         # then existing dirs.
         all_entries: list[tuple[str, int]] = []  # (dir_name, flags)
         for dir_name in new_dirs:
-            all_entries.append((dir_name, new_dir_flags))
+            override = opts.get(dir_name)
+            if override:
+                flags_u32 = encode_papgt_entry_flags(
+                    is_optional=int(override.get("is_optional", 0)),
+                    lang_type=int(override.get("lang_type", DEFAULT_LANG_TYPE)),
+                    zero=int(override.get("zero", 0)),
+                )
+            else:
+                flags_u32 = default_new_flags
+            all_entries.append((dir_name, flags_u32))
         for dir_name, flags, _ in live_entries:
             all_entries.append((dir_name, flags))
 

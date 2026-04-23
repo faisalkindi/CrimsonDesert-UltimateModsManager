@@ -25,6 +25,10 @@ PAMT_CONSTANT = 0x610E0232  # from JSON MM: 1628308018u
 # Cache for full path maps (per pamt_dir)
 _path_map_cache: dict[str, dict[str, str]] = {}
 
+# Cache for (filename, comp_type) lists per pamt_dir, used by the
+# vanilla-flag-inheritance fallback below.
+_ext_comp_cache: dict[str, list[tuple[str, int]]] = {}
+
 # Extension → compression type mapping (from CRIMSON_DESERT_MODDING_BIBLE.md §4)
 _EXT_COMP_TYPE: dict[str, int] = {
     ".dds": 1,   # DDS texture: 128-byte header + LZ4 body
@@ -69,6 +73,41 @@ def _infer_comp_type_from_extension(filename: str) -> int:
         ext = filename[dot:].lower()
         return _EXT_COMP_TYPE.get(ext, 2)
     return 2
+
+
+def infer_comp_type_from_pamt(
+    pamt_entries: list[tuple[str, int]], ext: str
+) -> int | None:
+    """Find the first PAMT entry whose filename ends with ``ext`` and
+    return its compression type. Case-insensitive.
+
+    Used as a smarter fallback than the hardcoded extension map: when
+    a mod ships a NEW file (not in vanilla) whose extension isn't in
+    ``_EXT_COMP_TYPE``, scanning a real PAMT for the same extension
+    gives an accurate answer (the engine itself cares about flags
+    matching whatever shape the loader expects for that file type).
+
+    Args:
+        pamt_entries: list of ``(filename, comp_type)`` tuples taken
+            from a vanilla PAMT (typically the ``pamt_dir`` the new
+            entry will land in).
+        ext: extension to look up, including the leading dot
+            (e.g. ``".dds"``). Empty string returns None.
+
+    Returns:
+        The first matching entry's comp_type, or None if no match.
+    """
+    if not ext:
+        return None
+    lo = ext.lower()
+    for filename, comp_type in pamt_entries:
+        # Filenames without an extension (no dot, or trailing dot) never
+        # match a non-empty extension query.
+        if "." not in filename:
+            continue
+        if filename.lower().endswith(lo):
+            return comp_type
+    return None
 
 
 @dataclass
@@ -252,6 +291,39 @@ def _reset_pathc_cache() -> None:
     """Clear the vanilla-PATHC cache. Called at the start of each apply to
     avoid stale data if the user swaps the vanilla backup."""
     _pathc_cache.clear()
+    _ext_comp_cache.clear()
+
+
+def _build_ext_comp_list(pamt_dir: str, game_dir) -> list[tuple[str, int]]:
+    """Return a list of ``(filename, comp_type)`` from the vanilla PAMT
+    for ``pamt_dir``. Cached per pamt_dir per apply.
+
+    Used by the fallback path that infers a NEW file's comp_type from a
+    vanilla neighbor with the same extension.
+    """
+    if pamt_dir in _ext_comp_cache:
+        return _ext_comp_cache[pamt_dir]
+
+    from pathlib import Path
+    from cdumm.archive.paz_parse import parse_pamt
+
+    out: list[tuple[str, int]] = []
+    game_dir = Path(game_dir)
+    for base in [game_dir / "CDMods" / "vanilla", game_dir]:
+        pamt_path = base / pamt_dir / "0.pamt"
+        if not pamt_path.exists():
+            continue
+        try:
+            for entry in parse_pamt(str(pamt_path)):
+                filename = entry.path.rsplit("/", 1)[-1] if "/" in entry.path else entry.path
+                out.append((filename, entry.compression_type))
+            break
+        except Exception as e:
+            logger.debug("ext-comp PAMT scan failed (%s): %s", pamt_path, e)
+            continue
+
+    _ext_comp_cache[pamt_dir] = out
+    return out
 
 
 def _build_full_path_map(pamt_dir: str, game_dir) -> dict[str, str]:
@@ -542,8 +614,30 @@ def build_overlay(
         entry_path = metadata["entry_path"]
         comp_type = metadata.get("compression_type")
         if comp_type is None:
-            comp_type = _infer_comp_type_from_extension(
-                entry_path.rsplit("/", 1)[-1] if "/" in entry_path else entry_path)
+            entry_filename = (
+                entry_path.rsplit("/", 1)[-1] if "/" in entry_path else entry_path
+            )
+            # Try the explicit extension map first (DDS, BNK).
+            dot = entry_filename.rfind(".")
+            ext = entry_filename[dot:].lower() if dot >= 0 else ""
+            if ext and ext in _EXT_COMP_TYPE:
+                comp_type = _EXT_COMP_TYPE[ext]
+            else:
+                # Unknown extension: scan the vanilla PAMT for the entry's
+                # pamt_dir for any neighbor sharing the extension and copy
+                # its comp_type. More accurate than always defaulting to
+                # LZ4 (=2). Falls back to _infer_comp_type_from_extension
+                # if no neighbor exists or the PAMT can't be read.
+                pamt_dir_for_ext = metadata.get("pamt_dir", "")
+                inferred: int | None = None
+                if game_dir and pamt_dir_for_ext and ext:
+                    ext_list = _build_ext_comp_list(pamt_dir_for_ext, game_dir)
+                    inferred = infer_comp_type_from_pamt(ext_list, ext)
+                comp_type = (
+                    inferred
+                    if inferred is not None
+                    else _infer_comp_type_from_extension(entry_filename)
+                )
         # JMM-parity: any .dds entry must take the partial-DDS payload branch
         # (flags=1) in the overlay regardless of what metadata's
         # compression_type says. That metadata captures how VANILLA stored
