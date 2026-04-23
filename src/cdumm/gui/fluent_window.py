@@ -4291,8 +4291,11 @@ class CdummWindow(FluentWindow):
                 "Your game is installed under Program Files, which has\n"
                 "restricted write permissions on Windows.\n\n"
                 "This can cause issues with mod backups and configuration.\n"
-                "If you experience problems, consider moving your Steam\n"
-                "library to a different location (e.g. C:\\SteamLibrary).\n\n"
+                "If you experience problems, move your Steam library to\n"
+                "a different drive (e.g. D:\\SteamLibrary). Steam only\n"
+                "allows one library per drive, so a second folder on C:\n"
+                "will be rejected with \"This drive already has a library\n"
+                "folder.\" You need a separate drive.\n\n"
                 "Steam -> Settings -> Storage -> Add a new library folder",
                 self,
             ).exec()

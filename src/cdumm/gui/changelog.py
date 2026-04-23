@@ -13,6 +13,13 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.6",
+        "date": "2026-04-23",
+        "notes": [
+            "Fixed the Program Files warning dialog that was telling users to move their Steam library to C:\\SteamLibrary. Steam only allows one library per drive, so if the game is already on C: you can't make a second library there. The dialog now says to use a different drive (e.g. D:\\SteamLibrary) and explains why Steam would reject a second folder on C:. Thanks to 1Phase1 on Nexus for catching this.",
+        ],
+    },
+    {
         "version": "3.1.5",
         "date": "2026-04-23",
         "notes": [
