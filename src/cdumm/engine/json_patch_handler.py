@@ -186,6 +186,32 @@ def detect_json_patches_all(path: Path) -> list[dict]:
         except Exception:
             continue
 
+    # Dedupe by SHA-256 of the on-disk bytes. Some authors ship a mod
+    # zipped inside itself (e.g. CDInventoryExpander v2.5.0 had three
+    # nested copies of the same JSON), and the rglob above would
+    # otherwise hand back N copies of the identical mod. Keep the
+    # shallowest path so the user sees the source closest to the
+    # folder they dropped.
+    import hashlib as _hashlib
+    by_hash: dict[str, dict] = {}
+    for patch in valid:
+        p = patch["_json_path"]
+        try:
+            h = _hashlib.sha256(Path(p).read_bytes()).hexdigest()
+        except OSError:
+            # Unreadable now (race with deletion?) — keep it under a
+            # unique key so we don't silently drop it.
+            by_hash[f"_no_hash_{id(patch)}"] = patch
+            continue
+        existing = by_hash.get(h)
+        if existing is None:
+            by_hash[h] = patch
+        else:
+            ex_p = Path(existing["_json_path"])
+            if len(Path(p).parts) < len(ex_p.parts):
+                by_hash[h] = patch
+    valid = list(by_hash.values())
+
     # Cache the result on the path object so callers that walk the
     # same archive twice (e.g. _probe_for_json at drop-time + later
     # _import_sibling_json_patches inside the worker) don't each

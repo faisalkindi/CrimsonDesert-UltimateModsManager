@@ -43,9 +43,28 @@ def find_json_presets(path: Path) -> list[tuple[Path, dict]]:
     if path.is_file() and path.suffix.lower() == ".json":
         candidates = [path]
     elif path.is_dir():
-        candidates = sorted(path.glob("*.json"))
+        import re as _re_nnnn
+        _NNNN = _re_nnnn.compile(r"^\d{4}$")
+
+        def _legit(p: Path) -> bool:
+            try:
+                rel = p.relative_to(path)
+            except ValueError:
+                return False
+            return not any(
+                _NNNN.match(part) or part.lower() == "meta"
+                for part in rel.parts[:-1]
+            )
+
+        # Try depth 1, then depth 2, then a full rglob. First non-empty
+        # result wins so the fast path stays fast for normal layouts.
+        # Same NNNN/meta filter detect_json_patches_all uses so the
+        # picker doesn't false-positive on extracted vanilla content.
+        candidates = [p for p in sorted(path.glob("*.json")) if _legit(p)]
         if not candidates:
-            candidates = sorted(path.glob("*/*.json"))
+            candidates = [p for p in sorted(path.glob("*/*.json")) if _legit(p)]
+        if not candidates:
+            candidates = [p for p in sorted(path.rglob("*.json")) if _legit(p)]
     else:
         candidates = []
 
