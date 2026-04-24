@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
+# Promoted to module-level: the lazy import inside _launch_import_worker
+# was crashing the frozen exe with `zlib.error: Error -3 while decompressing
+# data: incorrect header check` on PyInstaller 6.x — the bootloader's
+# lazy-archive-extract path occasionally fails on submodules. Importing
+# at module load time bypasses that path entirely.
+from cdumm.gui.import_context import snapshot_and_clear_import_context
 
 
 def _probe_console_state(tag: str) -> None:
@@ -3707,7 +3713,8 @@ class CdummWindow(FluentWindow):
         # These snapshots are attached to `proc` and read from the
         # closure-captured proc in _on_finished, so each proc's handler
         # sees the context that belonged to ITS import.
-        from cdumm.gui.import_context import snapshot_and_clear_import_context
+        # NOTE: snapshot_and_clear_import_context is imported at module
+        # top — see comment near the top-level import for why.
         proc._cdumm_ctx = snapshot_and_clear_import_context(self)
 
         # Build command: the exe calls itself with --worker

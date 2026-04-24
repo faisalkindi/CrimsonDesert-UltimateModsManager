@@ -72,6 +72,10 @@ a = Analysis(
         'cdumm.gui.components.config_panel',
         'cdumm.gui.components.conflict_card',
         'cdumm.gui.components.drop_overlay',
+        'cdumm.gui.import_context',
+        'cdumm.gui.recovery_flow',
+        'cdumm.engine.recovery_candidates',
+        'cdumm.engine.compiled_merge',
         # PySide6-Fluent-Widgets + dependencies
         'qfluentwidgets',
         'qfluentwidgets._rc',
