@@ -3100,6 +3100,14 @@ class CdummWindow(FluentWindow):
                                 self._update_priority = m.get("priority")
                                 self._update_enabled = m.get("enabled")
                                 break
+                        # Bug 34: snapshot the configurable mod's
+                        # selected_labels BEFORE remove_mod cascades the
+                        # mod_config row. _restore_selected_labels replays
+                        # them onto the new row in the post-import hook
+                        # so users don't lose preset picks on click-to-
+                        # update.
+                        self._pending_selected_labels = (
+                            _snapshot_selected_labels(self._db, mid))
                         self._mod_manager.remove_mod(mid)
                     else:
                         self._process_next_import()
@@ -3789,14 +3797,22 @@ class CdummWindow(FluentWindow):
             primary_mod_id = getattr(self, '_import_result_mod_id', None)
 
             def _primary_id():
-                if primary_mod_id is not None:
-                    return primary_mod_id
+                """Resolve the post-import target row via the shared
+                _resolve_post_import_target_id helper — same prefer-
+                list-over-MAX(id) logic the nxm:// flow needs."""
+                max_row_id = None
                 try:
                     row = self._db.connection.execute(
                         "SELECT MAX(id) FROM mods").fetchone()
-                    return row[0] if row else None
+                    max_row_id = row[0] if row else None
                 except Exception:
-                    return None
+                    pass
+                return _resolve_post_import_target_id(
+                    result_mod_id=primary_mod_id,
+                    existing_mod_id=getattr(
+                        self, '_last_existing_mod_id', None),
+                    max_row_id=max_row_id,
+                )
 
             # Post-import: game version stamp
             try:
@@ -3968,6 +3984,39 @@ class CdummWindow(FluentWindow):
                 except Exception:
                     pass
 
+            # Post-import: restore selected_labels (variant/preset picks)
+            # that were snapshotted BEFORE the dup-remove ran. See Bug 34:
+            # click-to-update would wipe users' picks because the old row
+            # was cascade-deleted before the new one could inherit them.
+            snap = getattr(self, '_pending_selected_labels', None)
+            if snap:
+                try:
+                    _pid = _primary_id()
+                    if _pid is not None:
+                        import json as _json
+                        cur = self._db.connection.execute(
+                            "SELECT selected_labels FROM mod_config "
+                            "WHERE mod_id = ?", (_pid,)).fetchone()
+                        available = set()
+                        if cur and cur[0]:
+                            try:
+                                available = set(
+                                    _json.loads(cur[0]).keys())
+                            except Exception:
+                                available = set()
+                        if not available:
+                            available = set(snap.keys())
+                        _restore_selected_labels(
+                            self._db, _pid, snap, available)
+                except Exception as _e:
+                    logger.debug("restore preset labels failed: %s", _e)
+                self._pending_selected_labels = None
+
+            # Bug #14: clear any scratch state that didn't come through
+            # import_context (nexus_real_file_id_map entry, etc.) so the
+            # next import doesn't inherit stale values.
+            _clear_pending_post_import_state(self, path)
+
             # Install staged ASI files from mixed ZIP import
             asi_staged = getattr(self, '_import_result_asi_staged', [])
             # Character Creator style: top-level .asi alongside variant
@@ -4101,7 +4150,18 @@ class CdummWindow(FluentWindow):
             nexus_id, _ = _parse_nexus_filename(stem)
         except Exception:
             nexus_id = None
-        if not version and not nexus_id:
+        # Bug 35: pick up the real numeric Nexus file_id if this install
+        # came through the nxm:// flow. _nexus_real_file_id_map is
+        # keyed on the original drop path; look it up and pop so a
+        # later import doesn't inherit the value.
+        real_file_id = 0
+        try:
+            nrf = getattr(self, "_nexus_real_file_id_map", None)
+            if isinstance(nrf, dict):
+                real_file_id = int(nrf.pop(str(source_path), 0) or 0)
+        except Exception:
+            real_file_id = 0
+        if not version and not nexus_id and not real_file_id:
             return
         for fname in installed_files:
             if not fname.endswith('.asi'):
@@ -4121,9 +4181,20 @@ class CdummWindow(FluentWindow):
                     self._db.connection.execute(
                         "UPDATE asi_plugin_state SET nexus_mod_id = ? WHERE name = ?",
                         (nexus_id, plugin_name))
+                if real_file_id:
+                    # Bug 35: persist the actual Nexus file_id so the
+                    # next update check walks the file_updates chain
+                    # for this ASI plugin instead of the fragile name
+                    # match.
+                    self._db.connection.execute(
+                        "UPDATE asi_plugin_state SET nexus_real_file_id = ? "
+                        "WHERE name = ?",
+                        (real_file_id, plugin_name))
                 self._db.connection.commit()
-                logger.info("Stored ASI metadata: %s version=%s nexus_mod_id=%s",
-                            plugin_name, version, nexus_id)
+                logger.info(
+                    "Stored ASI metadata: %s version=%s nexus_mod_id=%s "
+                    "real_file_id=%s",
+                    plugin_name, version, nexus_id, real_file_id or None)
             except Exception as e:
                 logger.warning("Failed to store ASI metadata: %s", e)
 
