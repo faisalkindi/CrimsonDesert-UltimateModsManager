@@ -1002,6 +1002,16 @@ class CdummWindow(FluentWindow):
         """Check NexusMods for mod updates in background. Runs automatically."""
         if not self._db:
             return
+        # Bug 45: honour the rate-limit back-off. If Nexus returned
+        # 429 on a prior cycle and we haven't reached the reset
+        # epoch, skip — another check against 429 burns more quota
+        # and can't succeed.
+        import time as _time
+        if _is_nexus_rate_limited(self, now=int(_time.time())):
+            logger.debug(
+                "NexusMods update check skipped — rate limit active "
+                "until %d", int(getattr(self, "_nexus_rate_limited_until", 0)))
+            return
         from cdumm.storage.config import Config
         api_key = Config(self._db).get("nexus_api_key")
         if not api_key:
@@ -1009,15 +1019,30 @@ class CdummWindow(FluentWindow):
 
         # Read both PAZ mods and ASI plugins on main thread (SQLite thread safety).
         # Both tables share a single NexusMods update-check pass so the API quota
-        # is spent once per cycle.
+        # is spent once per cycle. nexus_last_checked_at lets the 1-week feed
+        # act as an optimization rather than a blanket gate — see plan 4.2.
         try:
             cursor = self._db.connection.execute(
-                "SELECT id, name, version, nexus_mod_id FROM mods WHERE mod_type = 'paz'")
-            mods = [{"id": r[0], "name": r[1], "version": r[2], "nexus_mod_id": r[3]}
+                "SELECT id, name, version, nexus_mod_id, nexus_last_checked_at, "
+                "nexus_real_file_id "
+                "FROM mods WHERE mod_type = 'paz'")
+            mods = [{"id": r[0], "name": r[1], "version": r[2],
+                     "nexus_mod_id": r[3],
+                     "nexus_last_checked_at": r[4],
+                     "nexus_real_file_id": r[5]}
                     for r in cursor.fetchall()]
+            # Bug 43: read the new columns (nexus_real_file_id lets
+            # the chain walk find the author-declared successor;
+            # nexus_last_checked_at lets the feed-skip optimization
+            # apply to ASI plugins too).
             cursor = self._db.connection.execute(
-                "SELECT name, version, nexus_mod_id FROM asi_plugin_state")
-            asi_mods = [{"id": r[0], "name": r[0], "version": r[1], "nexus_mod_id": r[2]}
+                "SELECT name, version, nexus_mod_id, "
+                "nexus_real_file_id, nexus_last_checked_at "
+                "FROM asi_plugin_state")
+            asi_mods = [{"id": None, "name": r[0], "version": r[1],
+                         "nexus_mod_id": r[2],
+                         "nexus_real_file_id": r[3] or 0,
+                         "nexus_last_checked_at": r[4] or 0}
                         for r in cursor.fetchall()]
         except Exception:
             return
@@ -1029,12 +1054,52 @@ class CdummWindow(FluentWindow):
         import threading
         def _check():
             try:
-                from cdumm.engine.nexus_api import check_mod_updates
-                updates = check_mod_updates(combined, api_key)
-                self._pending_nexus_updates = {u.mod_id: u for u in updates}
+                from cdumm.engine.nexus_api import (
+                    check_mod_updates, NexusAuthError, NexusRateLimited,
+                )
+                try:
+                    updates, checked_ids, now_ts, backfill = check_mod_updates(
+                        combined, api_key)
+                    self._pending_nexus_updates = {u.mod_id: u for u in updates}
+                    self._pending_nexus_checked_ids = checked_ids
+                    self._pending_nexus_checked_ts = now_ts
+                    self._pending_nexus_backfill = backfill
+                    self._pending_nexus_auth_error = False
+                    self._pending_nexus_rate_limited_at = 0
+                except NexusAuthError as e:
+                    # Bug #12 fix: distinguish invalid API key from
+                    # generic transport failure so the UI can prompt
+                    # the user to re-enter instead of silently staying
+                    # grey forever.
+                    logger.warning("Nexus API key rejected: %s", e)
+                    self._pending_nexus_updates = {}
+                    self._pending_nexus_checked_ids = []
+                    self._pending_nexus_checked_ts = 0
+                    self._pending_nexus_backfill = {}
+                    self._pending_nexus_auth_error = True
+                    self._pending_nexus_rate_limited_at = 0
+                except NexusRateLimited as e:
+                    # Bug 36: route rate-limit through a dedicated
+                    # flag so the GUI can back off until reset_at
+                    # instead of spamming 429s on the 30-min timer.
+                    logger.warning(
+                        "Nexus rate-limited in auto-check, reset_at=%d",
+                        getattr(e, "reset_at", 0))
+                    self._pending_nexus_updates = {}
+                    self._pending_nexus_checked_ids = []
+                    self._pending_nexus_checked_ts = 0
+                    self._pending_nexus_backfill = {}
+                    self._pending_nexus_auth_error = False
+                    self._pending_nexus_rate_limited_at = int(
+                        getattr(e, "reset_at", 0) or 0)
             except Exception as e:
                 logger.warning("NexusMods update check failed: %s", e)
                 self._pending_nexus_updates = {}
+                self._pending_nexus_checked_ids = []
+                self._pending_nexus_checked_ts = 0
+                self._pending_nexus_backfill = {}
+                self._pending_nexus_auth_error = False
+                self._pending_nexus_rate_limited_at = 0
             from PySide6.QtCore import QMetaObject, Qt as _Qt
             QMetaObject.invokeMethod(
                 self, "_apply_nexus_update_colors", _Qt.ConnectionType.QueuedConnection)
@@ -1043,6 +1108,104 @@ class CdummWindow(FluentWindow):
     @Slot()
     def _apply_nexus_update_colors(self) -> None:
         """Propagate update results to both PAZ mods page and ASI plugins page."""
+        # Bug 45: copy the rate-limit reset epoch from the per-cycle
+        # _pending_* slot into persistent _nexus_rate_limited_until.
+        # _is_nexus_rate_limited reads the persistent attr before
+        # each auto-check fires, so setting it here is what actually
+        # makes the back-off effective.
+        rl_at = int(
+            getattr(self, "_pending_nexus_rate_limited_at", 0) or 0)
+        if rl_at:
+            self._nexus_rate_limited_until = rl_at
+            # InfoBar-level warning at transition into rate-limit
+            # state. One-shot guarded by the same rl_at comparison.
+            if getattr(self, "_rate_limit_banner_until", 0) != rl_at:
+                self._rate_limit_banner_until = rl_at
+                try:
+                    InfoBar.warning(
+                        title="Nexus rate limit reached",
+                        content=(
+                            "You've used your hourly Nexus API "
+                            "quota. CDUMM will pause update checks "
+                            "until the limit resets."),
+                        duration=-1, position=InfoBarPosition.TOP,
+                        parent=self)
+                except Exception as _e:
+                    logger.debug("rate-limit InfoBar failed: %s", _e)
+        else:
+            # Successful / non-rate-limited cycle — clear the
+            # throttle so the next timer tick isn't suppressed.
+            self._nexus_rate_limited_until = 0
+        # Bug #12 / #18 fix: surface auth failures to the user, and
+        # reset the "already shown" flag on successful cycles so a
+        # LATER failure re-shows the banner. The old one-shot gate
+        # was sticky forever — a user who fixed their key and then
+        # had it fail again never saw a second warning.
+        had_auth_error = bool(
+            getattr(self, "_pending_nexus_auth_error", False))
+        self._pending_nexus_auth_error = False
+        shown_previously = bool(
+            getattr(self, "_nexus_auth_banner_shown", False))
+        show_banner, new_flag = _decide_auth_banner(
+            had_auth_error, shown_previously)
+        self._nexus_auth_banner_shown = new_flag
+        if show_banner:
+            try:
+                # Bug #32: stash the InfoBar so a later "valid key
+                # saved" event can close it instead of waiting 30
+                # minutes for the next auto-check confirmation.
+                self._nexus_auth_banner = InfoBar.error(
+                    title=tr("settings.nexus_auth_rejected_title"),
+                    content=tr("settings.nexus_auth_rejected_body"),
+                    duration=-1, position=InfoBarPosition.TOP,
+                    parent=self)
+            except Exception as e:
+                logger.debug("auth-rejected InfoBar failed: %s", e)
+                self._nexus_auth_banner = None
+        # Persist the last-checked timestamps on the GUI thread — the
+        # worker hit SQLite's "connection bound to originating thread"
+        # constraint. Only row ids that returned a valid file list are
+        # in checked_ids; transient failures are NOT persisted so they
+        # get retried on the next cycle.
+        checked_ids = getattr(self, "_pending_nexus_checked_ids", [])
+        now_ts = getattr(self, "_pending_nexus_checked_ts", 0)
+        if self._db and checked_ids and now_ts:
+            try:
+                placeholders = ",".join("?" * len(checked_ids))
+                self._db.connection.execute(
+                    f"UPDATE mods SET nexus_last_checked_at = ? "
+                    f"WHERE id IN ({placeholders})",
+                    [now_ts, *checked_ids])
+                self._db.connection.commit()
+            except Exception as e:
+                logger.debug("nexus_last_checked_at persist failed: %s", e)
+
+        # Backfill nexus_real_file_id for rows that got resolved via the
+        # name-match path this cycle. Once populated, the next check
+        # walks the file_updates chain for these rows instead of guessing
+        # by name — that's what flips grey-because-name-match-failed to
+        # green or red on the second check. Guard with IS NULL so we
+        # never overwrite a reliable pre-existing value.
+        backfill = getattr(self, "_pending_nexus_backfill", {}) or {}
+        if self._db and backfill:
+            persisted = 0
+            for row_id, file_id in backfill.items():
+                try:
+                    cur = self._db.connection.execute(
+                        "UPDATE mods SET nexus_real_file_id = ? "
+                        "WHERE id = ? AND (nexus_real_file_id IS NULL "
+                        "OR nexus_real_file_id = 0)",
+                        (int(file_id), int(row_id)))
+                    if cur.rowcount:
+                        persisted += 1
+                except Exception as e:
+                    logger.debug(
+                        "nexus_real_file_id backfill failed for row %s: %s",
+                        row_id, e)
+            if persisted:
+                self._db.connection.commit()
+                logger.info(
+                    "nexus_real_file_id: backfilled %d row(s)", persisted)
         self._nexus_updates = getattr(self, "_pending_nexus_updates", {})
         if hasattr(self, 'paz_mods_page'):
             self.paz_mods_page.set_nexus_updates(self._nexus_updates)
@@ -1051,7 +1214,14 @@ class CdummWindow(FluentWindow):
                 self.asi_plugins_page.set_nexus_updates(self._nexus_updates)
             except AttributeError:
                 pass  # ASI page may not implement it in older builds
-        logger.info("NexusMods update check: %d updates found", len(self._nexus_updates))
+        # ``_nexus_updates`` now carries both outdated and confirmed-
+        # current entries (three-state pill support). Split the counts
+        # in the log so it's clear how many are actually actionable.
+        from cdumm.engine.nexus_api import filter_outdated
+        outdated_ct = len(filter_outdated(self._nexus_updates.values()))
+        logger.info(
+            "NexusMods update check: %d outdated, %d confirmed current",
+            outdated_ct, len(self._nexus_updates) - outdated_ct)
 
     # ------------------------------------------------------------------
     # Runtime retranslation
@@ -1607,6 +1777,438 @@ class CdummWindow(FluentWindow):
                 pass
 
     # ------------------------------------------------------------------
+    # NXM (nxm:// URL) download + pending-queue handling
+    # ------------------------------------------------------------------
+
+    def _process_pending_nxm(self) -> None:
+        """Drain queued ``nxm://`` URLs left by ``--nxm`` launches.
+
+        Each line in ``pending_nxm.txt`` is one URL. For each: parse,
+        look up the API key, call ``download_link.json`` (with the
+        ``key`` + ``expires`` query params that came from the URL when
+        present — that's what lets free-tier downloads succeed), fetch
+        the file to a temp path, and dispatch through the existing drop
+        handler so import follows the same path as a dragged file.
+        """
+        pending = self._app_data_dir / "pending_nxm.txt"
+        if not pending.exists():
+            return
+        # Atomic handoff: rename the queue file aside before reading it,
+        # so a concurrent ``--nxm`` launcher that appends in the window
+        # between our read and unlink doesn't have its URL dropped on
+        # the floor. ``os.replace`` is atomic on both Windows and POSIX.
+        import os, time as _time
+        processing = self._app_data_dir / f".pending_nxm.processing.{os.getpid()}.{int(_time.time() * 1000)}"
+        try:
+            os.replace(pending, processing)
+        except FileNotFoundError:
+            return  # another cycle picked it up first
+        except Exception as e:
+            logger.warning("Failed to rename pending_nxm.txt: %s", e)
+            return
+        try:
+            lines = [
+                ln.strip() for ln in
+                processing.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+        except Exception as e:
+            logger.warning("Failed to read %s: %s", processing, e)
+            lines = []
+        finally:
+            try:
+                processing.unlink()
+            except Exception:
+                pass
+        if not lines:
+            return
+        for url in lines:
+            try:
+                self._handle_nxm_url(url)
+            except Exception as e:
+                logger.error("nxm URL %s failed: %s", url, e, exc_info=True)
+                InfoBar.error(
+                    title="Download Failed",
+                    content=f"Could not handle {url}\n\n{e}",
+                    duration=-1, position=InfoBarPosition.TOP, parent=self)
+
+    def _handle_direct_update(self, local_mod_id: int, nexus_mod_id: int,
+                               file_id: int, fallback_url: str) -> None:
+        """Premium direct download for the click-to-update pill.
+
+        Synthesises an ``nxm://`` URL without ``key``/``expires`` query
+        params (those are only required for free tier). The standard
+        :meth:`_handle_nxm_url` worker handles the rest — it'll get
+        a ``download_link.json`` response for premium users and fall
+        back to the browser via :class:`NexusPremiumRequired` for free
+        users, which opens ``fallback_url`` (the mod's Files tab).
+        """
+        if not nexus_mod_id or not file_id:
+            # We don't have enough info to synthesise the URL (probably
+            # an outdated update payload that pre-dates latest_file_id).
+            # Open the browser so the user can still update.
+            if fallback_url:
+                import webbrowser
+                webbrowser.open(fallback_url)
+            return
+        # Use the same scheme/path Nexus's website would emit so the
+        # downstream code path is byte-identical to a real nxm:// click.
+        synth_url = f"nxm://crimsondesert/mods/{nexus_mod_id}/files/{file_id}"
+        logger.info(
+            "direct update: local_mod_id=%d nexus_mod_id=%d file_id=%d "
+            "(skipping browser handover)",
+            local_mod_id, nexus_mod_id, file_id)
+        self._handle_nxm_url(synth_url)
+
+    def _handle_nxm_url(self, url: str) -> None:
+        """Resolve an ``nxm://`` URL into a downloaded file + import queue.
+
+        Runs the :func:`get_download_link` API call AND the CDN download
+        on a background thread so the GUI stays responsive. Results are
+        marshalled back to the main thread via
+        :meth:`PySide6.QtCore.QMetaObject.invokeMethod` and fed into the
+        standard drop flow.
+        """
+        from cdumm.engine.nxm_handler import parse_nxm_url, NxmUrlError
+        from cdumm.storage.config import Config
+
+        try:
+            parsed = parse_nxm_url(url)
+        except NxmUrlError as e:
+            # Bug 38: give the user a specific message rather than
+            # letting the generic handler say "Could not handle".
+            logger.warning("Malformed nxm:// URL: %s — %s", url, e)
+            InfoBar.error(
+                title="Malformed NXM URL",
+                content=f"Could not parse {url!r}: {e}",
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+        api_key = Config(self._db).get("nexus_api_key") if self._db else None
+        if not api_key:
+            InfoBar.warning(
+                title="Nexus API key missing",
+                content="Add your API key in Settings → NexusMods Integration first.",
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+
+        # Show progress toast so the reviewer doesn't think the click
+        # was a no-op while the CDN warms up. Bug #17: sticky until
+        # the download actually finishes (closed in
+        # _finish_nxm_download). Fixed 15s was too short for slow
+        # networks / large mods — the toast disappeared before
+        # completion and users thought nothing was happening.
+        #
+        # Bug 39: close any prior banner before overwriting the
+        # attribute — rapid NXM clicks otherwise pile up orphaned
+        # InfoBars that linger until window destruction.
+        prior = getattr(self, "_nxm_download_banner", None)
+        if prior is not None:
+            try:
+                prior.close()
+            except Exception:
+                pass
+        try:
+            self._nxm_download_banner = InfoBar.info(
+                title="Downloading from Nexus…",
+                content=f"Mod {parsed.mod_id}, file {parsed.file_id}",
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+        except Exception as e:
+            logger.debug("NXM download banner create failed: %s", e)
+            self._nxm_download_banner = None
+        try:
+            self._log_activity(
+                "import",
+                _format_nxm_download_activity(parsed.mod_id, parsed.file_id))
+        except Exception:
+            pass
+
+        # Thread-safe producer-consumer queue so overlapping nxm clicks
+        # don't race over shared instance attributes. Each worker pushes
+        # exactly one (result, error) record; _finish_nxm_download
+        # drains whatever's available on the main thread.
+        if not hasattr(self, "_nxm_completion_queue"):
+            import queue as _queue
+            self._nxm_completion_queue = _queue.Queue()
+
+        import threading
+
+        def _worker():
+            import tempfile, urllib.request, urllib.parse
+            from cdumm.engine.nexus_api import (
+                get_download_link, NexusPremiumRequired,
+                NexusAuthError, NexusRateLimited,
+                mod_page_files_url,
+            )
+            result = None
+            error = None
+            try:
+                try:
+                    download_url = get_download_link(
+                        parsed.mod_id, parsed.file_id, api_key,
+                        nxm_key=parsed.key, nxm_expires=parsed.expires)
+                except NexusPremiumRequired:
+                    error = ("premium_required", mod_page_files_url(parsed.mod_id))
+                    return
+                except NexusAuthError as e:
+                    # Bug #21: route auth failure through the auth-
+                    # banner path (same one the auto-check uses) so
+                    # the user gets a persistent "re-enter your key"
+                    # message, not a bland toast that vanishes.
+                    error = ("auth", str(e))
+                    return
+                except NexusRateLimited as e:
+                    error = ("rate_limited", getattr(e, "reset_at", 0))
+                    return
+                if not download_url:
+                    error = ("no_url", "Nexus didn't hand back a CDN link. "
+                             "Try again in a moment.")
+                    return
+                split = urllib.parse.urlsplit(download_url)
+                # Bug #27: reject non-HTTPS scheme before request.
+                try:
+                    _assert_https_download_url(download_url)
+                except ValueError as _scheme_err:
+                    error = ("other", str(_scheme_err))
+                    return
+                safe_path = urllib.parse.quote(split.path, safe="/%")
+                download_url = urllib.parse.urlunsplit((
+                    split.scheme, split.netloc, safe_path,
+                    split.query, split.fragment))
+
+                tmp_dir = Path(tempfile.mkdtemp(prefix="cdumm_nxm_"))
+                dest = tmp_dir / f"nxm_{parsed.mod_id}_{parsed.file_id}.bin"
+                logger.info("nxm: downloading %s -> %s", download_url, dest)
+                from cdumm import __version__
+                req = urllib.request.Request(
+                    download_url,
+                    headers={
+                        "User-Agent": f"CDUMM/{__version__}",
+                        "Application-Name": "CDUMM",
+                        "Application-Version": __version__,
+                    })
+                with urllib.request.urlopen(req, timeout=60) as resp, \
+                        open(dest, "wb") as f:
+                    # Bug #29: content-length sanity check up front.
+                    cl_raw = resp.headers.get("Content-Length")
+                    try:
+                        cl = int(cl_raw) if cl_raw else None
+                    except (TypeError, ValueError):
+                        cl = None
+                    try:
+                        _validate_download_size(
+                            cl, _NXM_MAX_DOWNLOAD_BYTES)
+                    except ValueError as _size_err:
+                        error = ("other", str(_size_err))
+                        return
+                    # Bug #28: streaming accumulator catches the
+                    # Content-Length-absent case where the CDN
+                    # trickles bytes indefinitely.
+                    total = 0
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        try:
+                            _check_download_progress(
+                                total, _NXM_MAX_DOWNLOAD_BYTES)
+                        except ValueError as _prog_err:
+                            error = ("other", str(_prog_err))
+                            return
+                        f.write(chunk)
+                logger.info("nxm: downloaded %d bytes to %s",
+                            dest.stat().st_size, dest)
+
+                # Rename to the ACTUAL filename Nexus served (not just
+                # the extension). Without this the imported mod ends up
+                # named "Nxm 774 3148" because the prettifier sees the
+                # synthetic temp name. Using the real filename also
+                # lets parse_nexus_filename extract the version + mod
+                # id properly via the standard timestamped format
+                # (ModName-id-version-uploaded.zip).
+                final = dest
+                tail = download_url.rsplit("/", 1)[-1].split("?")[0]
+                if tail:
+                    # Decode percent-encoded spaces back to real spaces
+                    # so the final filename matches what a browser
+                    # download would have produced.
+                    real_name = urllib.parse.unquote(tail)
+                    # Sanitise: strip path separators, keep only
+                    # filename portion. Path() already drops directory
+                    # components but we belt-and-suspenders here.
+                    real_name = Path(real_name).name
+                    if real_name and real_name != dest.name:
+                        final = tmp_dir / real_name
+                        dest.rename(final)
+                result = final
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:200]
+                except Exception:
+                    body = ""
+                logger.error(
+                    "nxm: CDN download failed — HTTP %d: %s | URL: %s",
+                    e.code, body, getattr(e, "url", "?"))
+                error = ("http", f"HTTP {e.code}: {body or str(e)}")
+            except Exception as e:
+                logger.error("nxm: CDN download failed: %s", e, exc_info=True)
+                error = ("other", str(e))
+            finally:
+                # Push (result, error, nexus_mod_id, nexus_file_id) —
+                # queue is thread-safe. mod_id binds to an existing
+                # local row; file_id gets stored on that row so the
+                # next update check can walk the file_updates chain
+                # to find which file supersedes this one.
+                self._nxm_completion_queue.put(
+                    (result, error, parsed.mod_id, parsed.file_id))
+                from PySide6.QtCore import QMetaObject, Qt as _Qt
+                QMetaObject.invokeMethod(
+                    self, "_finish_nxm_download",
+                    _Qt.ConnectionType.QueuedConnection)
+
+        threading.Thread(
+            target=_worker, daemon=True, name="cdumm-nxm").start()
+
+    @Slot()
+    def _finish_nxm_download(self) -> None:
+        """Main-thread completion slot for :meth:`_handle_nxm_url`.
+
+        Drains every ``(result, error)`` record queued by a worker. The
+        queue is the synchronization point — if two downloads finished
+        back-to-back, both are processed even if QueuedConnection
+        coalesced the slot invocations.
+        """
+        import queue as _queue
+        # Bug #17: close the sticky "Downloading from Nexus…" banner
+        # now that the worker has reported in.
+        banner = getattr(self, "_nxm_download_banner", None)
+        if banner is not None:
+            try:
+                banner.close()
+            except Exception:
+                pass
+            self._nxm_download_banner = None
+        q = getattr(self, "_nxm_completion_queue", None)
+        if q is None:
+            return
+        while True:
+            try:
+                result, err, nexus_mod_id, nexus_file_id = q.get_nowait()
+            except _queue.Empty:
+                return
+            if err is not None:
+                kind, detail = err
+                # Bug #5 fix: every nxm:// error path now also logs an
+                # Activity entry so a free-tier user clicking "Click To
+                # Update" without a premium account gets a persistent
+                # record of what happened, not just a toast that might
+                # vanish or land offscreen.
+                try:
+                    if kind == "premium_required":
+                        self._log_activity(
+                            "import",
+                            "Free-tier download: opening Nexus page "
+                            "for manual 'Mod Manager Download' click")
+                    else:
+                        self._log_activity(
+                            "import",
+                            f"Nexus download failed ({kind}): {detail}")
+                except Exception:
+                    pass
+                if kind == "premium_required":
+                    import webbrowser
+                    webbrowser.open(detail)
+                    InfoBar.info(
+                        title="Free-tier download — click 'Mod Manager Download' on Nexus",
+                        content=(
+                            "Opened the mod's Files tab in your browser. "
+                            "Click 'Mod Manager Download' there and the "
+                            "file will come back to CDUMM automatically."),
+                        duration=15000,
+                        position=InfoBarPosition.TOP, parent=self)
+                elif kind == "auth":
+                    # Bug #21: route through the same flag the auto-
+                    # check uses so the user sees a single coherent
+                    # "API key rejected — re-enter in Settings"
+                    # banner. _apply_nexus_update_colors reads this
+                    # flag + _decide_auth_banner to avoid spamming.
+                    self._pending_nexus_auth_error = True
+                    from PySide6.QtCore import QMetaObject, Qt as _Qt
+                    QMetaObject.invokeMethod(
+                        self, "_apply_nexus_update_colors",
+                        _Qt.ConnectionType.QueuedConnection)
+                elif kind == "rate_limited":
+                    InfoBar.warning(
+                        title="Nexus rate limit reached",
+                        content=(
+                            "You've used your hourly Nexus API quota. "
+                            "Try again shortly; the limit resets on "
+                            "the hour."),
+                        duration=-1, position=InfoBarPosition.TOP,
+                        parent=self)
+                elif kind == "no_url":
+                    InfoBar.error(
+                        title="No download URL returned",
+                        content=detail, duration=-1,
+                        position=InfoBarPosition.TOP, parent=self)
+                elif kind == "http":
+                    InfoBar.error(
+                        title="Download failed", content=detail,
+                        duration=-1, position=InfoBarPosition.TOP, parent=self)
+                else:
+                    InfoBar.error(
+                        title="Download failed", content=detail,
+                        duration=-1, position=InfoBarPosition.TOP, parent=self)
+                continue
+            if result is not None:
+                # Look up which existing local mod row points at this
+                # Nexus mod_id and pass it to _queue_import so the
+                # import REPLACES instead of duplicating.
+                #
+                # Multi-row case: backfill bugs can put the same
+                # nexus_mod_id on multiple rows (e.g. mod 664 is shared
+                # by Easier QTE + Easier Rodeo via filename inference).
+                # If we silently pick one, the other row stays outdated
+                # forever and re-clicking just downloads the same file
+                # again. Surface the ambiguity to the user via an
+                # InfoBar so they can de-dup before retrying.
+                existing_id = None
+                if self._db and nexus_mod_id:
+                    try:
+                        rows = self._db.connection.execute(
+                            "SELECT id, name FROM mods WHERE nexus_mod_id = ? "
+                            "ORDER BY id ASC",
+                            (int(nexus_mod_id),)).fetchall()
+                    except Exception as e:
+                        logger.debug("nxm: existing-mod lookup failed: %s", e)
+                        rows = []
+                    if len(rows) == 1:
+                        existing_id = rows[0][0]
+                        logger.info(
+                            "nxm: binding download to existing mod_id=%d "
+                            "(nexus_mod_id=%d)", existing_id, nexus_mod_id)
+                    elif len(rows) > 1:
+                        names = ", ".join(r[1] for r in rows)
+                        logger.warning(
+                            "nxm: %d mod rows share nexus_mod_id=%d (%s) — "
+                            "importing as new to avoid wrong-target replace",
+                            len(rows), nexus_mod_id, names)
+                        InfoBar.warning(
+                            title="Multiple mods share this Nexus ID",
+                            content=(
+                                f"You have {len(rows)} installed mods linked to "
+                                f"Nexus mod #{nexus_mod_id} ({names}). "
+                                "CDUMM imported the new download as a separate "
+                                "mod to avoid replacing the wrong one. "
+                                "Right-click → Delete the duplicates if you "
+                                "want a single entry."),
+                            duration=-1, position=InfoBarPosition.TOP, parent=self)
+                self._queue_import(
+                    result,
+                    existing_mod_id=existing_id,
+                    nexus_real_file_id=nexus_file_id)
+
+    # ------------------------------------------------------------------
     # Theme change — reapply custom styles on all components
     # ------------------------------------------------------------------
 
@@ -1986,15 +2588,40 @@ class CdummWindow(FluentWindow):
             return
         self._queue_import(Path(path) if not isinstance(path, Path) else path)
 
-    def _queue_import(self, path: Path) -> None:
-        """Add a path to the import queue. Processes sequentially."""
+    def _queue_import(self, path: Path, existing_mod_id: int | None = None,
+                       nexus_real_file_id: int | None = None) -> None:
+        """Add a path to the import queue. Processes sequentially.
+
+        ``existing_mod_id`` lets callers (notably the nxm:// download
+        handler) bind the queued file to an already-imported mod row so
+        the import REPLACES it instead of creating a duplicate.
+
+        ``nexus_real_file_id`` is the actual numeric Nexus file_id when
+        known (always present for nxm:// downloads). Stored on the mod
+        row by the post-import handler so the next update check can
+        walk the file_updates chain.
+        """
         if not hasattr(self, '_import_queue'):
             self._import_queue: list[Path] = []
         if not hasattr(self, '_import_errors'):
             self._import_errors: list[str] = []
+        if not hasattr(self, '_existing_mod_id_map'):
+            self._existing_mod_id_map: dict[str, int] = {}
+        if not hasattr(self, '_nexus_real_file_id_map'):
+            self._nexus_real_file_id_map: dict[str, int] = {}
         self._import_queue.append(path)
-        logger.info("Queued for import: %s (queue size: %d, worker active: %s)",
-                     path.name, len(self._import_queue), self._active_worker is not None)
+        if existing_mod_id is not None:
+            self._existing_mod_id_map[str(path)] = existing_mod_id
+            logger.info(
+                "Queued for import: %s (queue size: %d, worker active: %s, "
+                "replacing mod_id=%d)",
+                path.name, len(self._import_queue),
+                self._active_worker is not None, existing_mod_id)
+        else:
+            logger.info("Queued for import: %s (queue size: %d, worker active: %s)",
+                         path.name, len(self._import_queue), self._active_worker is not None)
+        if nexus_real_file_id:
+            self._nexus_real_file_id_map[str(path)] = int(nexus_real_file_id)
         # If no import is running, start the first one
         if not self._active_worker:
             self._process_next_import()
@@ -2023,13 +2650,21 @@ class CdummWindow(FluentWindow):
         # But first, separate out multi-preset / multi-variant mods that need
         # user interaction. Archives are peeked via a lightweight namelist
         # check to avoid extracting every zip up-front.
+        # Files with a prebound existing_mod_id (nxm:// downloads that
+        # need to REPLACE an existing mod, not import as new) also get
+        # forced through the single-import path so the binding survives
+        # — the batch worker doesn't accept per-file mod_ids.
         if len(self._import_queue) > 1:
             from cdumm.gui.preset_picker import find_json_presets, find_folder_variants
+            prebound = getattr(self, "_existing_mod_id_map", {})
             batch = []
             deferred = []  # multi-preset mods that need dialog
             for p in self._import_queue:
                 needs_dialog = False
-                if p.is_dir():
+                if str(p) in prebound:
+                    # Skip batch — force single import to preserve mod_id binding
+                    needs_dialog = True
+                elif p.is_dir():
                     presets = find_json_presets(p)
                     if len(presets) > 1:
                         needs_dialog = True
@@ -2349,7 +2984,13 @@ class CdummWindow(FluentWindow):
             return
         logger.info("Import pre-checks for: %s", path)
         self._original_drop_path = path  # saved for version extraction after import
-        existing_mod_id = None
+        # Pre-bound mod_id from _queue_import (e.g. nxm:// downloads
+        # already know which existing mod they're updating). Falling
+        # back to the dup-detection flow below if not bound.
+        prebound_id = None
+        if hasattr(self, "_existing_mod_id_map"):
+            prebound_id = self._existing_mod_id_map.pop(str(path), None)
+        existing_mod_id = prebound_id
 
         # ── 1. ASI detection ──────────────────────────────────────────
         from cdumm.asi.asi_manager import AsiManager
@@ -2373,7 +3014,9 @@ class CdummWindow(FluentWindow):
                 return
 
         # ── 3. Existing mod detection ─────────────────────────────────
-        if self._mod_manager:
+        # Skip when caller pre-bound a mod_id (nxm:// downloads already
+        # know which mod they're updating via nexus_mod_id lookup).
+        if self._mod_manager and prebound_id is None:
             existing = self._find_existing_mod(path)
             if existing:
                 mid, mname, match_level = existing
@@ -3181,6 +3824,52 @@ class CdummWindow(FluentWindow):
                                     nexus_id, nexus_file_ver)
                 except Exception:
                     pass
+
+            # Persist the real numeric file_id when an nxm:// download
+            # provided it. This is what enables the file_updates chain
+            # walk on subsequent update checks (no more "downloaded
+            # the wrong variant" bugs).
+            real_file_id = None
+            if hasattr(self, '_nexus_real_file_id_map'):
+                real_file_id = self._nexus_real_file_id_map.pop(
+                    str(path), None)
+            if real_file_id:
+                try:
+                    _pid = _primary_id()
+                    if _pid is not None:
+                        self._db.connection.execute(
+                            "UPDATE mods SET nexus_real_file_id = ? "
+                            "WHERE id = ?",
+                            (int(real_file_id), _pid))
+                        self._db.connection.commit()
+                        logger.info(
+                            "Stored Nexus real file_id=%d on row %d",
+                            int(real_file_id), _pid)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to store nexus_real_file_id: %s", e)
+
+            # Invalidate the cached "outdated" entry for this mod's
+            # nexus_mod_id so the red "Click To Update" pill turns
+            # green immediately, instead of waiting up to 30 minutes
+            # for the next background update check.
+            if nexus_id and hasattr(self, "_nexus_updates") \
+                    and self._nexus_updates:
+                try:
+                    from cdumm.engine.nexus_api import clear_outdated_after_update
+                    self._nexus_updates = clear_outdated_after_update(
+                        self._nexus_updates, int(nexus_id))
+                    if hasattr(self, 'paz_mods_page'):
+                        self.paz_mods_page.set_nexus_updates(
+                            self._nexus_updates)
+                    if hasattr(self, 'asi_plugins_page'):
+                        try:
+                            self.asi_plugins_page.set_nexus_updates(
+                                self._nexus_updates)
+                        except AttributeError:
+                            pass
+                except Exception as e:
+                    logger.debug("pill-clear failed: %s", e)
 
             # Post-import: store original drop name + extract version
             try:
