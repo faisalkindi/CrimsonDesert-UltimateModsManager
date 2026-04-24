@@ -96,21 +96,31 @@ def merge_compiled_mod_files(
             chunk_start = i if i > chunk_end else chunk_end
 
     warnings: list[str] = []
-    # Overlap detection — O(E²) but E is tiny in practice (a handful of
-    # edit regions per mod). JMM uses the same quadratic scan.
-    for j in range(len(edits)):
-        for k in range(j + 1, len(edits)):
-            a = edits[j]
-            b = edits[k]
-            if a.mod_name == b.mod_name:
-                continue
-            if a.start < b.end and b.start < a.end:
-                lo = max(a.start, b.start)
-                hi = min(a.end, b.end)
+    # Overlap detection. Original loop was O(E²) and assumed "E is tiny
+    # in practice." That assumption breaks on tables like iteminfo.pabgb
+    # where two mods can produce thousands of edit runs each — 9000² is
+    # 81 million pure-Python iterations, ~minute(s) of wallclock. Real
+    # bug: users hit it on Apply with conflicting item-table mods.
+    #
+    # Sweep-line approach: sort edits by start, walk in order, maintain
+    # the currently-active edit; emit a warning only when the next edit
+    # starts before the active one ends. O(E log E) — for 9000 edits
+    # that's ~40k operations instead of 40 million.
+    if len(edits) >= 2:
+        sorted_edits = sorted(edits, key=lambda e: (e.start, e.end))
+        active = sorted_edits[0]
+        for e in sorted_edits[1:]:
+            if e.start < active.end and e.mod_name != active.mod_name:
+                lo = max(active.start, e.start)
+                hi = min(active.end, e.end)
                 warnings.append(
-                    f"[CONFLICT] {a.mod_name} vs {b.mod_name}: "
-                    f"bytes 0x{lo:X}–0x{hi:X} overlap (last mod wins)"
+                    f"[CONFLICT] {active.mod_name} vs {e.mod_name}: "
+                    f"bytes 0x{lo:X}-0x{hi:X} overlap (last mod wins)"
                 )
+            # Advance the active interval to whichever ends later. This
+            # captures chains of overlaps without re-checking pairs.
+            if e.end > active.end:
+                active = e
     if warnings:
         logger.info("compiled merge: %d byte-range overlap(s) across mods",
                     len(warnings))
