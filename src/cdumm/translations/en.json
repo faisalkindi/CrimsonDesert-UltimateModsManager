@@ -1102,5 +1102,14 @@
   "activity.msg_failed_compat_check": "Failed mod compatibility check",
   "activity.msg_fix_everything": "Fix Everything: reverted and cleaned up (no rescan)",
   "activity.msg_fix_everything_rescan": "Fix Everything: reverted, cleared backups, rescanning",
-  "activity.msg_removed_stale_appdata": "Removed stale AppData ({size_mb} MB)"
+  "activity.msg_removed_stale_appdata": "Removed stale AppData ({size_mb} MB)",
+  "recovery.banner_title": "Game was updated — mods need refreshing",
+  "recovery.banner_button": "Start Recovery",
+  "recovery.verify_prompt_title": "Verify your game files",
+  "recovery.verify_prompt_body_steam": "Open Steam, right-click Crimson Desert, Properties, Installed Files, Verify Integrity. Click Done once Steam reports success.",
+  "recovery.verify_prompt_body_xbox": "Close and relaunch Crimson Desert once; the Microsoft Store will re-verify files on launch. Click Done after the game relaunches cleanly.",
+  "recovery.verify_prompt_body_other": "Verify your game files in your launcher (Steam: Verify Integrity; Xbox: relaunch the game; other: reinstall). Click Done when your launcher confirms the files are clean.",
+  "recovery.all_skipped_msg": "Your mods were disabled because their original files are gone. Drop the archives back in CDUMM to re-import them.",
+  "recovery.partial_skipped_msg": "{count} mod(s) were disabled because their original files are gone: {names}",
+  "recovery.complete_msg": "Recovery complete. Launch the game. If it still crashes, check Nexus for newer versions of your mods."
 }
