@@ -3353,6 +3353,26 @@ class CdummWindow(FluentWindow):
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
+        # D1: refuse to apply while a detected game update is
+        # outstanding. Applying on a stale snapshot is the root
+        # cause of most "stuck at 2%" reports — patches land on
+        # the wrong bytes because our vanilla baseline no longer
+        # matches the live game.
+        from cdumm.gui.apply_watchdog import (
+            is_apply_blocked_by_stale_snapshot,
+        )
+        if is_apply_blocked_by_stale_snapshot(self._startup_context):
+            InfoBar.error(
+                title="Rescan required",
+                content=(
+                    "Crimson Desert was updated since your last "
+                    "snapshot. Apply is locked until you run Rescan "
+                    "Game Files — otherwise mods land on the wrong "
+                    "bytes and won't work. Use the Rescan panel in "
+                    "the sidebar to unlock Apply."),
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+
         if not self._check_game_running():
             return
 
@@ -3375,6 +3395,19 @@ class CdummWindow(FluentWindow):
                     title=tr("main.apply_warnings"),
                     content="\n".join(warnings),
                     duration=-1, position=InfoBarPosition.TOP, parent=self)
+            # F3: successful apply → stamp every enabled mod with
+            # the current game fingerprint. These mods just produced
+            # patches that landed cleanly, so they're "known-good"
+            # on this version. Clears the orange "outdated" badge
+            # and stops the Post-Apply Verification dialog from
+            # flagging them as "imported on a different version".
+            try:
+                from cdumm.engine.version_detector import (
+                    stamp_enabled_mods_as_current,
+                )
+                stamp_enabled_mods_as_current(self._db, self._game_dir)
+            except Exception as e:
+                logger.debug("stamp after apply failed: %s", e)
             self._sync_db()
             self._snapshot_applied_state()
             logger.info("on_apply_done: applied_state has %d entries, %d enabled",
@@ -3609,19 +3642,16 @@ class CdummWindow(FluentWindow):
         #    for large installations. The apply engine already ensures correct
         #    offsets/sizes during PAZ composition.
 
-        # 4. Check for mods imported on a different game version
-        try:
-            from cdumm.engine.version_detector import detect_game_version
-            current_ver = detect_game_version(self._game_dir)
-            if current_ver:
-                cursor = self._db.connection.execute(
-                    "SELECT name, game_version_hash FROM mods "
-                    "WHERE enabled = 1 AND game_version_hash IS NOT NULL")
-                for name, ver in cursor.fetchall():
-                    if ver and ver != current_ver:
-                        issues.append((name, "Imported on a different game version -- may be outdated"))
-        except Exception:
-            pass
+        # F3: the version-hash comparison used to live here and
+        # append "may be outdated" to every mod that was imported on
+        # a prior game version. That's speculation, not verification
+        # — after every Steam patch it drowned out real PAPGT/PAMT
+        # failures with 20+ false-positive lines. The real signal for
+        # "this mod might crash" is patch byte mismatches during
+        # apply (already loudly logged by json_patch_handler and
+        # surfaced as apply errors). Successful apply now auto-stamps
+        # mods with the current fingerprint so the orange "outdated"
+        # badge self-heals (see stamp_enabled_mods_as_current).
 
         _dt = _t.perf_counter() - _t0
         logger.info("Post-apply verify took %.1fs, found %d issue(s)", _dt, len(issues))
@@ -3920,8 +3950,12 @@ class CdummWindow(FluentWindow):
             on_done: called when process finishes (receives parsed JSON msgs list)
             on_msg: optional callback for each JSON message as it arrives
         """
-        from PySide6.QtCore import QProcess
+        from PySide6.QtCore import QProcess, QTimer
         import json as _json
+        import time as _time
+        from cdumm.gui.apply_watchdog import (
+            APPLY_STALL_THRESHOLD_S, is_apply_stalled, build_stall_message,
+        )
 
         self._active_progress = tip
         proc = QProcess(self)
@@ -3940,6 +3974,15 @@ class CdummWindow(FluentWindow):
         _buf = [""]
         _msgs = []
 
+        # A1 watchdog state — reset on every progress message; checked
+        # by a QTimer every 10s. If the gap exceeds the threshold,
+        # kill the QProcess and surface a clear error.
+        _wd = {
+            "last_progress_ts": _time.monotonic(),
+            "last_progress_msg": None,
+            "killed_by_watchdog": False,
+        }
+
         def _on_stdout():
             data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
             _buf[0] += data
@@ -3954,6 +3997,8 @@ class CdummWindow(FluentWindow):
                     continue
                 _msgs.append(msg)
                 if msg.get("type") == "progress":
+                    _wd["last_progress_ts"] = _time.monotonic()
+                    _wd["last_progress_msg"] = msg.get("msg", "")
                     try:
                         tip.setContent(f"{msg.get('msg', '')} ({msg.get('pct', 0)}%)")
                     except RuntimeError:
@@ -3961,7 +4006,60 @@ class CdummWindow(FluentWindow):
                 if on_msg:
                     on_msg(msg)
 
+        watchdog = QTimer(self)
+        watchdog.setInterval(10_000)  # check every 10s
+
+        def _on_watchdog_tick():
+            if proc.state() != QProcess.Running:
+                watchdog.stop()
+                return
+            if is_apply_stalled(
+                    now=_time.monotonic(),
+                    last_progress_ts=_wd["last_progress_ts"],
+                    threshold_s=APPLY_STALL_THRESHOLD_S):
+                _wd["killed_by_watchdog"] = True
+                watchdog.stop()
+                logger.error(
+                    "Watchdog: no progress for %ss, killing %s PID %s",
+                    APPLY_STALL_THRESHOLD_S, worker_args[0],
+                    proc.processId())
+                proc.kill()
+                stall_msg = build_stall_message(
+                    phase=worker_args[0],
+                    last_progress_msg=_wd["last_progress_msg"],
+                    threshold_s=APPLY_STALL_THRESHOLD_S)
+                try:
+                    tip.setContent(tr("progress.failed") if False else
+                                   f"{worker_args[0]} stopped (stalled)")
+                    tip.setState(True)
+                except RuntimeError:
+                    pass
+                InfoBar.error(
+                    title=f"{worker_args[0].capitalize()} stopped",
+                    content=stall_msg, duration=-1,
+                    position=InfoBarPosition.TOP, parent=self)
+
+        watchdog.timeout.connect(_on_watchdog_tick)
+
         def _on_finished(exit_code, exit_status):
+            watchdog.stop()
+            if _wd["killed_by_watchdog"]:
+                # Error was already shown by the watchdog. Still
+                # clean up the process + callback state.
+                proc.deleteLater()
+                self._active_worker = None
+                self._active_progress = None
+                self._resume_timers()
+                # Feed a synthetic error message so on_done branches
+                # that expect an error list see it.
+                _msgs.append({
+                    "type": "error",
+                    "msg": build_stall_message(
+                        phase=worker_args[0],
+                        last_progress_msg=_wd["last_progress_msg"],
+                        threshold_s=APPLY_STALL_THRESHOLD_S)})
+                on_done(_msgs)
+                return
             tip.setContent(tr("progress.completed"))
             tip.setState(True)
             proc.deleteLater()
@@ -3979,6 +4077,7 @@ class CdummWindow(FluentWindow):
         proc.readyReadStandardError.connect(_on_stderr)
         proc.finished.connect(_on_finished)
         proc.start(exe, args)
+        watchdog.start()
         logger.info("QProcess started [%s]: PID %s", worker_args[0], proc.processId())
 
     def _run_worker(self, worker, thread: QThread, progress: StateToolTip, on_finished) -> None:
@@ -4209,6 +4308,19 @@ class CdummWindow(FluentWindow):
         )
         if box.exec():
             self._on_refresh_snapshot(skip_verify_prompt=True)
+        else:
+            # D1: user declined the rescan prompt. Apply is now
+            # locked by the _on_apply gate — surface a sticky banner
+            # so they understand WHY Apply won't work until they
+            # rescan.
+            InfoBar.error(
+                title="Apply locked",
+                content=(
+                    "Crimson Desert was updated since your last "
+                    "snapshot. Apply stays locked until you run "
+                    "Rescan Game Files. Use the Rescan panel in the "
+                    "sidebar when you're ready."),
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
         return True
 
     def _check_stale_appdata(self) -> None:
@@ -4273,19 +4385,43 @@ class CdummWindow(FluentWindow):
             logger.debug("Stale appdata check failed: %s", e)
 
     def _check_program_files_warning(self) -> None:
-        """Warn if game is installed under Program Files (admin restrictions)."""
+        """Warn if game is installed under Program Files (admin restrictions).
+
+        Two-tier UX:
+        * First-ever launch with the game here → one-time modal with
+          the full explanation of what's wrong and how to fix it.
+        * Every launch after that → sticky InfoBar.warning at the top
+          of the window (dismissable per session) so the user keeps
+          seeing it until they move the library. Quiet one-time
+          modals were getting forgotten by the time stuck-apply
+          reports came in (issue #30, kai481).
+        """
         try:
             if not self._game_dir:
                 return
+            from cdumm.gui.apply_watchdog import is_game_in_program_files
+            if not is_game_in_program_files(self._game_dir):
+                return
+
             from cdumm.storage.config import Config
             config = Config(self._db)
+
+            # Sticky per-session banner — fires EVERY launch while
+            # the game is still in Program Files.
+            InfoBar.warning(
+                title="Game location warning",
+                content=(
+                    "Crimson Desert is installed under Program Files. "
+                    "Windows restricts writes here, so mods can "
+                    "silently fail or get stuck during apply. Move "
+                    "your Steam library to a different drive (e.g. "
+                    "D:\\SteamLibrary) to fix this for good."),
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+
+            # One-time modal with the full explanation (only first
+            # time we ever detect this).
             if config.get("program_files_warned"):
                 return
-
-            game_path = str(self._game_dir).lower()
-            if "program files" not in game_path:
-                return
-
             MessageBox(
                 "Game Location Warning",
                 "Your game is installed under Program Files, which has\n"
@@ -4377,6 +4513,46 @@ class CdummWindow(FluentWindow):
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
+        # I1: snapshot-contamination guard. Before rescan touches
+        # anything, sample-check live game files against stored
+        # vanilla backups. If live disk differs, rescanning would
+        # bake modded bytes into the snapshot and every future
+        # revert would restore the wrong state. Refuse, tell the
+        # user exactly what to do next.
+        if self._vanilla_dir and self._vanilla_dir.exists():
+            try:
+                from cdumm.engine.snapshot_manager import (
+                    verify_live_disk_matches_backups,
+                )
+                is_clean, problem_files = verify_live_disk_matches_backups(
+                    self._game_dir, self._vanilla_dir)
+            except Exception as e:
+                logger.warning(
+                    "Rescan guard check failed (%s) — proceeding", e)
+                is_clean, problem_files = True, []
+            if not is_clean:
+                shown = problem_files[:5]
+                more = len(problem_files) - len(shown)
+                block = "\n".join(f"  - {p}" for p in shown)
+                if more > 0:
+                    block += f"\n  - ...and {more} more"
+                MessageBox(
+                    "Rescan Blocked — Disk Looks Modded",
+                    "CDUMM detected live game files that don't match "
+                    "the vanilla backups it has on disk. Rescanning "
+                    "now would capture modded bytes as vanilla and "
+                    "break every future Revert.\n\n"
+                    f"Files that differ from their backups:\n\n"
+                    f"{block}\n\n"
+                    "Fix before rescan:\n"
+                    "  1. Revert to Vanilla (if your backups are "
+                    "valid), OR\n"
+                    "  2. Run Steam's Verify Integrity, then click "
+                    "Fix Everything with the Steam-verified option.",
+                    self,
+                ).exec()
+                return
+
         if not skip_verify_prompt:
             box = MessageBox(
                 "Rescan Game Files",
@@ -4441,6 +4617,13 @@ class CdummWindow(FluentWindow):
                 logger.info("Saved game version fingerprint: %s", fp)
         except Exception:
             pass
+
+        # D1: rescan succeeded — clear the stale-snapshot flag so
+        # Apply unlocks without requiring a restart.
+        if self._startup_context.get("game_updated"):
+            self._startup_context["game_updated"] = False
+            logger.info(
+                "Cleared game_updated flag after rescan; Apply unlocked")
 
         # Refresh vanilla backups — ensure they match clean game state
         self._refresh_vanilla_backups()

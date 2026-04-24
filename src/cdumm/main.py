@@ -420,8 +420,16 @@ def main() -> int:
         splash.showMessage("  Verifying game files...", 0x0081)
         app.processEvents()
 
+        # F2: one-time fingerprint backfill for installs that
+        # predate the stable-fingerprint fix. No-ops after first
+        # successful run. Must run BEFORE the stale-check below so
+        # the comparison uses the new-algorithm values on both sides.
+        from cdumm.engine.version_detector import (
+            backfill_stored_fingerprints, detect_game_version,
+        )
+        backfill_stored_fingerprints(db, game_path)
+
         # Check game version fingerprint (fast — just reads a config value)
-        from cdumm.engine.version_detector import detect_game_version
         current_fp = detect_game_version(game_path)
         stored_fp = config.get("game_version_fingerprint")
         if stored_fp and current_fp and stored_fp != current_fp:

@@ -254,6 +254,109 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
     _emit({"type": "done", "batch_total": total})
 
 
+# ── Batch Reimport ───────────────────────────────────────────────────
+
+def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
+                        deltas_dir: str) -> None:
+    """Re-run import for multiple mods, preserving each mod's id.
+
+    Used after a game update: every mod's stored delta targets the
+    old vanilla bytes, so every mod needs its delta regenerated
+    against the new vanilla. Re-running import with ``existing_mod_id``
+    keeps the mod row (name, notes, priority, enabled state) and
+    only swaps out the stored deltas.
+
+    Paths file format: one ``{mod_id}\\t{source_path}`` per line.
+    """
+    from cdumm.storage.database import Database
+    from cdumm.engine.snapshot_manager import SnapshotManager
+    from cdumm.engine.import_handler import (
+        detect_format, import_from_zip, import_from_7z, import_from_folder,
+        import_from_json_patch, import_from_bsdiff, import_from_script,
+        import_from_rar, set_import_progress_cb,
+    )
+
+    game_dir = Path(game_dir)
+    db_path = Path(db_path)
+    deltas_dir = Path(deltas_dir)
+
+    entries: list[tuple[int, Path]] = []
+    for line in Path(paths_file).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        mid_str, _, path_str = line.partition("\t")
+        if not path_str:
+            continue
+        try:
+            entries.append((int(mid_str), Path(path_str)))
+        except ValueError:
+            continue
+
+    if not entries:
+        _emit({"type": "error", "msg": "No mod entries in reimport file"})
+        return
+
+    db = Database(db_path)
+    db.initialize()
+    snapshot = SnapshotManager(db)
+
+    total = len(entries)
+    _emit({"type": "batch_start", "total": total})
+
+    dispatch_map = {
+        "zip": import_from_zip, "7z": import_from_7z,
+        "rar": import_from_rar, "folder": import_from_folder,
+        "json_patch": import_from_json_patch,
+    }
+
+    for idx, (mod_id, mod_path) in enumerate(entries):
+        _emit({"type": "batch_progress", "index": idx, "total": total,
+               "name": mod_path.name, "mod_id": mod_id})
+        set_import_progress_cb(lambda pct, msg, _i=idx: _emit({
+            "type": "progress", "pct": pct, "msg": msg,
+            "batch_index": _i, "batch_total": total}))
+
+        if not mod_path.exists():
+            _emit({"type": "batch_item", "index": idx,
+                   "name": mod_path.name, "mod_id": mod_id,
+                   "error": f"Source not found: {mod_path}"})
+            continue
+
+        fmt = detect_format(mod_path)
+        handler = dispatch_map.get(fmt)
+        if handler is None:
+            _emit({"type": "batch_item", "index": idx,
+                   "name": mod_path.name, "mod_id": mod_id,
+                   "error": f"Unsupported format for reimport: {fmt}"})
+            continue
+
+        try:
+            result = handler(mod_path, game_dir, db, snapshot,
+                             deltas_dir, existing_mod_id=mod_id)
+        except Exception as e:
+            _emit({"type": "batch_item", "index": idx,
+                   "name": mod_path.name, "mod_id": mod_id,
+                   "error": str(e)})
+            continue
+
+        if result and result.error:
+            _emit({"type": "batch_item", "index": idx,
+                   "name": mod_path.name, "mod_id": mod_id,
+                   "error": result.error})
+        elif result:
+            _emit({"type": "batch_item", "index": idx,
+                   "name": result.name, "mod_id": result.mod_id,
+                   "mod_type": result.mod_type, "error": None})
+        else:
+            _emit({"type": "batch_item", "index": idx,
+                   "name": mod_path.name, "mod_id": mod_id,
+                   "error": "Reimport returned no result"})
+
+    db.close()
+    _emit({"type": "done", "batch_total": total})
+
+
 # ── Apply ─────────────────────────────────────────────────────────────
 
 def _run_apply(game_dir: str, vanilla_dir: str, db_path: str,
@@ -442,39 +545,59 @@ def _run_fix(game_dir: str, vanilla_dir: str, db_path: str,
     steam = steam_verified == "1"
     results = []  # list of {"title": ..., "desc": ..., "color": ...}
 
-    # Step 1: Revert
-    # RevertWorker is a QObject that emits progress/error/warning signals
-    # during _revert(). Constructing via __new__ and calling _revert()
-    # directly would hit PySide's "signal source has been deleted" because
-    # the C++ QObject backing the signals was never initialized. Match
-    # _run_revert's pattern: full constructor + signal wiring to _emit.
-    _emit({"type": "progress", "pct": 5, "msg": "Reverting to vanilla..."})
-    try:
-        from cdumm.engine.apply_engine import RevertWorker
-        rw = RevertWorker(
-            game_dir=game_dir,
-            vanilla_dir=vanilla_dir,
-            db_path=Path(db_path),
-        )
-        rw.progress_updated.connect(
-            lambda pct, msg: _emit({"type": "progress",
-                                    "pct": 5 + int(pct * 0.30),
-                                    "msg": msg}))
-        rw.warning.connect(
-            lambda msg: _emit({"type": "warning", "msg": msg}))
-        _revert_err: list[str] = []
-        rw.error_occurred.connect(lambda err: _revert_err.append(err))
-        rw.run()
-        if _revert_err:
+    # Step 1: Revert — ONLY when user hasn't Steam-verified.
+    #
+    # H1 fix: if the user just ran Steam's "Verify Integrity", the
+    # game files on disk ARE clean 1.04 bytes. Running our revert
+    # would overwrite them with whatever stale backups we have in
+    # ``vanilla/`` (Frankenstein post-game-update), directly undoing
+    # Steam's repair. That's what produced the "40 files reacquired"
+    # loop users hit after a Steam patch.
+    #
+    # The Steam-verified branch trusts the disk and just wipes our
+    # own state (backups, orphan dirs) so the fresh rescan below
+    # captures reality.
+    if not steam:
+        _emit({"type": "progress", "pct": 5, "msg": "Reverting to vanilla..."})
+        try:
+            from cdumm.engine.apply_engine import RevertWorker
+            rw = RevertWorker(
+                game_dir=game_dir,
+                vanilla_dir=vanilla_dir,
+                db_path=Path(db_path),
+            )
+            rw.progress_updated.connect(
+                lambda pct, msg: _emit({"type": "progress",
+                                        "pct": 5 + int(pct * 0.30),
+                                        "msg": msg}))
+            rw.warning.connect(
+                lambda msg: _emit({"type": "warning", "msg": msg}))
+            _revert_err: list[str] = []
+            rw.error_occurred.connect(lambda err: _revert_err.append(err))
+            rw.run()
+            if _revert_err:
+                results.append({"title": "Revert Warning",
+                                "desc": _revert_err[0], "color": "#EBCB8B"})
+            else:
+                results.append({"title": "Revert Complete",
+                                "desc": "All game files restored to vanilla.",
+                                "color": "#A3BE8C"})
+        except Exception as e:
             results.append({"title": "Revert Warning",
-                            "desc": _revert_err[0], "color": "#EBCB8B"})
-        else:
-            results.append({"title": "Revert Complete",
-                            "desc": "All game files restored to vanilla.",
-                            "color": "#A3BE8C"})
-    except Exception as e:
-        results.append({"title": "Revert Warning",
-                        "desc": f"Revert issue: {e}", "color": "#EBCB8B"})
+                            "desc": f"Revert issue: {e}", "color": "#EBCB8B"})
+    else:
+        # Steam verify just finished — game is already clean 1.04.
+        # Don't touch it. Report this honestly so users see that
+        # CDUMM respected the Steam-verified state.
+        _emit({"type": "progress", "pct": 35,
+               "msg": "Steam-verified — skipping revert to preserve "
+                      "clean game files"})
+        results.append({
+            "title": "Revert Skipped (Steam-verified)",
+            "desc": "Game files are already clean per Steam — no "
+                    "revert needed.",
+            "color": "#A3BE8C",
+        })
 
     # Step 2: Clean orphan directories
     _emit({"type": "progress", "pct": 40, "msg": "Cleaning orphan directories..."})
@@ -597,6 +720,10 @@ def worker_main(args: list[str]) -> None:
         elif cmd == "import_batch":
             # import_batch <paths_file> <game_dir> <db_path> <deltas_dir>
             _run_batch_import(args[1], args[2], args[3], args[4])
+        elif cmd == "reimport_batch":
+            # reimport_batch <paths_file> <game_dir> <db_path> <deltas_dir>
+            # paths_file has "mod_id\tsource_path" per line.
+            _run_reimport_batch(args[1], args[2], args[3], args[4])
         elif cmd == "apply":
             # apply <game_dir> <vanilla_dir> <db_path> [force_outdated]
             _run_apply(args[1], args[2], args[3],

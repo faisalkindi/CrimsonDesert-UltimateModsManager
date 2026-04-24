@@ -7,6 +7,7 @@ drag-drop import overlay, and search/filter controls.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, Qt, Signal
@@ -1923,11 +1924,15 @@ class ModsPage(QWidget):
         menu = RoundMenu(parent=self)
 
         if multi:
-            # Multi-select: batch enable/disable/uninstall
+            # Multi-select: batch enable/disable/uninstall/reimport
             menu.addAction(Action(FluentIcon.ACCEPT, f"Enable {len(selected_ids)} mods",
                                   triggered=lambda: self._ctx_batch_toggle(selected_ids, True)))
             menu.addAction(Action(FluentIcon.REMOVE, f"Disable {len(selected_ids)} mods",
                                   triggered=lambda: self._ctx_batch_toggle(selected_ids, False)))
+            menu.addSeparator()
+            menu.addAction(Action(FluentIcon.SYNC,
+                                  f"Reimport {len(selected_ids)} mods from source",
+                                  triggered=lambda: self._ctx_batch_reimport(selected_ids)))
             menu.addSeparator()
             menu.addAction(Action(FluentIcon.DELETE, f"Uninstall {len(selected_ids)} mods",
                                   triggered=lambda: self._ctx_batch_uninstall(selected_ids)))
@@ -1994,6 +1999,11 @@ class ModsPage(QWidget):
 
             # Update
             menu.addAction(Action(FluentIcon.UPDATE, "Update (replace)", triggered=lambda: self._ctx_update(mod_id)))
+
+            # Reimport from source (single) — regenerates deltas
+            # against current vanilla. Useful after a game update.
+            menu.addAction(Action(FluentIcon.SYNC, "Reimport from source",
+                                  triggered=lambda: self._ctx_batch_reimport([mod_id])))
 
             menu.addSeparator()
 
@@ -2104,6 +2114,172 @@ class ModsPage(QWidget):
                     break
         self._update_stats()
         self._resume_db_watcher()
+
+    def _ctx_batch_reimport(self, mod_ids: list[int]) -> None:
+        """Reimport each selected mod from its stored source.
+
+        After a game update (Steam patch), every mod's stored delta
+        targets the OLD vanilla bytes. Applying them against NEW
+        vanilla produces garbage and crashes the game. This action
+        regenerates deltas by rerunning import from each mod's
+        original zip/folder, preserving the mod row (priority, notes,
+        enabled state) via ``existing_mod_id``.
+        """
+        from qfluentwidgets import MessageBox
+        from PySide6.QtCore import QProcess
+        import json as _json
+        import tempfile
+
+        window = self.window()
+        if not mod_ids or not self._mod_manager:
+            return
+        if not getattr(window, "_game_dir", None) or not getattr(window, "_db", None):
+            InfoBar.error(
+                title="Not ready",
+                content="Game directory not set.",
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
+            return
+
+        # Gather source_path for each selected mod. Skip any with
+        # missing/empty source_path — those were imported on an older
+        # CDUMM that didn't store sources.
+        entries: list[tuple[int, str, str]] = []  # (mod_id, name, source_path)
+        missing: list[str] = []
+        for m in self._mod_manager.list_mods():
+            if m["id"] not in mod_ids:
+                continue
+            sp = m.get("source_path")
+            if not sp:
+                missing.append(m["name"])
+                continue
+            entries.append((m["id"], m["name"], sp))
+
+        if not entries:
+            MessageBox(
+                "Reimport",
+                "None of the selected mods have a stored source. "
+                "Reimport needs the original zip/folder to regenerate "
+                "patches. Drop the original file back in to fix those.",
+                window).exec()
+            return
+
+        msg = (f"Reimport {len(entries)} mod(s) from their stored "
+               "sources?\n\n"
+               "This regenerates patches against the current vanilla. "
+               "Use this after a game update when mods stop working.")
+        if missing:
+            # Show the actual names so users know which mods need
+            # manual drag-drop. Cap the inline list so a huge
+            # selection doesn't blow up the dialog.
+            shown = missing[:15]
+            more = len(missing) - len(shown)
+            names_block = "\n".join(f"  - {n}" for n in shown)
+            if more > 0:
+                names_block += f"\n  - ... and {more} more"
+            msg += (f"\n\n{len(missing)} mod(s) can't be reimported "
+                    "automatically (no stored source) and will be "
+                    "skipped:\n\n"
+                    f"{names_block}\n\n"
+                    "Drop their original files back in to fix those "
+                    "manually.")
+        if not MessageBox("Reimport from source", msg, window).exec():
+            return
+
+        # Write mod_id\tsource_path lines to a temp file for the
+        # worker subprocess.
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                          delete=False, encoding="utf-8")
+        for mid, _name, sp in entries:
+            tmp.write(f"{mid}\t{sp}\n")
+        tmp.close()
+
+        total = len(entries)
+        tip = window._make_state_tooltip(f"Reimporting {total} mod(s)...")
+        window._active_progress = tip
+
+        proc = QProcess(window)
+        window._active_worker = proc
+
+        _buf = [""]
+        _errors: list[str] = []
+        _succeeded = 0
+
+        def _on_stdout():
+            nonlocal _succeeded
+            raw = proc.readAllStandardOutput().data().decode(
+                "utf-8", errors="replace")
+            _buf[0] += raw
+            while "\n" in _buf[0]:
+                line, _buf[0] = _buf[0].split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    m = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                t = m.get("type")
+                if t == "batch_progress":
+                    idx = m.get("index", 0)
+                    nm = m.get("name", "")
+                    try:
+                        tip.setContent(f"({idx + 1}/{total}) {nm}")
+                    except RuntimeError:
+                        pass
+                elif t == "batch_item":
+                    if m.get("error"):
+                        _errors.append(
+                            f"{m.get('name', '?')}: {m['error']}")
+                    else:
+                        _succeeded += 1
+                elif t == "progress":
+                    try:
+                        tip.setContent(
+                            f"({m.get('batch_index', 0) + 1}/{total}) "
+                            f"{m.get('msg', '')}")
+                    except RuntimeError:
+                        pass
+
+        def _on_finished(_code, _status):
+            try:
+                tip.setContent(
+                    f"Reimported {_succeeded}/{total} mod(s)")
+                tip.setState(True)
+            except RuntimeError:
+                pass
+            proc.deleteLater()
+            window._active_worker = None
+            window._active_progress = None
+            if hasattr(window, "_resume_timers"):
+                window._resume_timers()
+            if _errors:
+                InfoBar.warning(
+                    title="Reimport finished with issues",
+                    content=(f"{_succeeded} reimported, "
+                             f"{len(_errors)} failed:\n\n"
+                             + "\n".join(_errors[:10])),
+                    duration=-1, position=InfoBarPosition.TOP,
+                    parent=window)
+            else:
+                InfoBar.success(
+                    title="Reimport complete",
+                    content=(f"{_succeeded} mod(s) reimported. Click "
+                             "Apply to use the refreshed patches."),
+                    duration=5000, position=InfoBarPosition.TOP,
+                    parent=window)
+            if hasattr(window, "_refresh_all"):
+                window._refresh_all()
+
+        proc.readyReadStandardOutput.connect(_on_stdout)
+        proc.finished.connect(_on_finished)
+        exe = sys.executable
+        args = ["--worker", "reimport_batch", tmp.name,
+                str(window._game_dir), str(window._db.db_path),
+                str(window._deltas_dir)]
+        proc.start(exe, args)
+        logger.info(
+            "Reimport batch started: %d mods, PID=%s",
+            total, proc.processId())
 
     def _ctx_batch_uninstall(self, mod_ids: list[int]) -> None:
         """Uninstall multiple selected mods — disables first, reverts via Apply, then removes."""

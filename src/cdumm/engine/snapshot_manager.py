@@ -26,6 +26,61 @@ PATHC_FILE = "meta/0.pathc"
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks for hashing
 
 
+def verify_live_disk_matches_backups(
+        game_dir: Path, vanilla_dir: Path,
+        max_checked: int = 5) -> tuple[bool, list[str]]:
+    """Sanity-check: do the live game files still match the vanilla
+    backups CDUMM has on disk?
+
+    Rationale: Rescan hashes whatever is on disk into the snapshot.
+    If disk has been modified since the last apply (a silent Steam
+    update, a stale-backup revert, a mod that bypassed CDUMM), the
+    snapshot captures modded bytes as "vanilla." Every future
+    revert restores to the wrong state.
+
+    This helper reads up to ``max_checked`` full-file backups from
+    ``vanilla_dir`` and compares each against its live counterpart
+    in ``game_dir``. If any differ, the disk is NOT vanilla — abort
+    rescan and tell the user to Revert (if backups are valid) or run
+    Steam Verify (if the game was externally updated).
+
+    Skipped:
+    - Range backups (``*.vranges``) — they're not raw copies.
+    - Missing live counterparts — CDUMM may have renamed files.
+
+    Returns ``(is_clean, problem_files)``.
+    """
+    import os
+    problems: list[str] = []
+    if not vanilla_dir.exists():
+        return True, []
+    checked = 0
+    for root, _dirs, files in os.walk(vanilla_dir):
+        for name in files:
+            if name.endswith(".vranges"):
+                continue
+            bp = Path(root) / name
+            rel = bp.relative_to(vanilla_dir)
+            live = game_dir / rel
+            if not live.exists():
+                continue
+            try:
+                if live.stat().st_size != bp.stat().st_size:
+                    problems.append(str(rel).replace("\\", "/"))
+                    continue
+                if live.read_bytes() != bp.read_bytes():
+                    problems.append(str(rel).replace("\\", "/"))
+            except OSError as e:
+                logger.debug(
+                    "verify_live_disk_matches_backups: skip %s (%s)",
+                    rel, e)
+                continue
+            checked += 1
+            if checked >= max_checked and not problems:
+                return True, []
+    return (len(problems) == 0), problems
+
+
 def hash_matches(path: Path, stored_hash: str) -> bool:
     """Check if a file matches a stored hash, auto-detecting the algorithm.
 

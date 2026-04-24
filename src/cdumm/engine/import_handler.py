@@ -1827,6 +1827,25 @@ def import_from_folder(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
                     existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
 
+    # C1: compound layout detection. Issue #34 (kori228, Character
+    # Creator - Female and Male) — a bodytype preset folder shipped
+    # NNNN/0.paz mesh data AND a sibling FemaleAnimations.json. The
+    # old flow short-circuited on JSON presence and silently dropped
+    # the preset data. If we see NNNN/0.paz siblings alongside the
+    # .json, import the PAZ-dir mod as primary and defer the JSONs
+    # to _import_sibling_json_patches (same pattern CB-mode uses).
+    def _has_paz_dirs(root: Path) -> bool:
+        try:
+            for d in root.iterdir():
+                if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                        and (d / "0.paz").exists()):
+                    return True
+        except OSError:
+            pass
+        return False
+
+    _is_compound_layout = _has_paz_dirs(folder_path)
+
     # Check for JSON byte-patch format in folder — use ENTR deltas.
     # When the folder has MULTIPLE valid JSONs (Trust Me main + Pet
     # Abyss Gear, bundled packs), import each as its own mod so the
@@ -1837,6 +1856,16 @@ def import_from_folder(
         detect_json_patches_all, import_json_as_entr,
     )
     jp_list = detect_json_patches_all(folder_path)
+    if jp_list and _is_compound_layout:
+        logger.info(
+            "Compound layout: %d JSON patch(es) + NNNN/0.paz siblings "
+            "in %s. Importing PAZ-dir mod as primary; JSON siblings "
+            "will be deferred to sibling-import after.",
+            len(jp_list), folder_path.name)
+        # Fall through to the PAZ-dir flow below. After that
+        # completes we invoke _import_sibling_json_patches so the
+        # JSON patches land as their own separate mods.
+        jp_list = []  # prevent JSON-only branch below from firing
     if jp_list:
         if len(jp_list) > 1:
             logger.info(
@@ -1959,6 +1988,24 @@ def import_from_folder(
         if has_standalone_paz:
             _import_remaining_loose_files(
                 folder_path, game_dir, db, snapshot, deltas_dir, result)
+
+    # C1: compound layout — the PAZ-dir primary has landed; now
+    # import any sibling .json patches as their own separate mods so
+    # users can toggle them independently (issue #34).
+    if (_is_compound_layout and result.changed_files and not result.error
+            and result.mod_id is not None):
+        try:
+            # exclude_subdir is used by the helper to skip a CB/LFM
+            # converted subdir. We don't have one here — the NNNN
+            # and meta/ filters inside the helper already skip
+            # game-data JSONs, so pass a non-existent sentinel so
+            # nothing real gets excluded.
+            _sentinel = folder_path / "__cdumm_nonexistent__"
+            _import_sibling_json_patches(
+                folder_path, _sentinel, game_dir, db, deltas_dir)
+        except Exception as e:
+            logger.warning(
+                "Compound-layout sibling JSON scan failed: %s", e)
 
     return result
 
@@ -2769,6 +2816,31 @@ def _process_extracted_files(
             # Auto-fix PAMT CRC if it's wrong (common mod authoring mistake)
             if rel_path.endswith(".pamt") and len(modified_bytes) >= 12:
                 modified_bytes = _verify_and_fix_pamt_crc(modified_bytes, rel_path)
+                # B1: validate the PAMT can actually be parsed before
+                # saving a delta. A corrupt pamt here will break apply
+                # forever for this mod — surface it at import time so
+                # the user sees the failure during import, not during
+                # a 7-minute apply stall.
+                import tempfile as _b1_tempfile
+                from cdumm.archive.paz_parse import parse_pamt as _b1_parse
+                with _b1_tempfile.NamedTemporaryFile(
+                        suffix=".pamt", delete=False) as _b1_tmp:
+                    _b1_tmp.write(modified_bytes)
+                    _b1_tmp_path = _b1_tmp.name
+                try:
+                    _b1_parse(_b1_tmp_path)
+                except ValueError as _b1_err:
+                    raise ValueError(
+                        f"Mod ships a corrupt {rel_path}: {_b1_err}. "
+                        "The PAMT can't be parsed. Re-download the "
+                        "mod from its source — the archive is "
+                        "damaged.") from _b1_err
+                finally:
+                    import os as _b1_os
+                    try:
+                        _b1_os.unlink(_b1_tmp_path)
+                    except OSError:
+                        pass
 
             if vanilla_bytes == modified_bytes:
                 logger.debug("File %s is identical to vanilla, skipping", rel_path)

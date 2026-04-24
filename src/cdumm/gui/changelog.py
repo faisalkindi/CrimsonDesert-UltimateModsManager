@@ -14,11 +14,78 @@ from cdumm.i18n import tr
 CHANGELOG = [
     {
         "version": "3.1.7",
-        "date": "2026-04-23",
+        "date": "2026-04-24",
         "notes": [
+            "Apply is now locked when CDUMM detects Crimson Desert "
+            "has been updated but you haven't rescanned yet. Applying "
+            "mods on a stale baseline is what caused most of the "
+            "recent \"stuck at 2%\" reports — patches land on the "
+            "wrong bytes and mods silently fail. You'll see a clear "
+            "banner telling you to run Rescan Game Files; once the "
+            "rescan finishes, Apply unlocks automatically.",
+            "If your game is installed under Program Files, CDUMM "
+            "now shows a persistent warning banner every session "
+            "instead of a one-time dialog you'd forget about. "
+            "Windows restricts writes under Program Files, which "
+            "causes silent mod failures. Move your Steam library to "
+            "a different drive (e.g. D:\\SteamLibrary) to resolve it "
+            "permanently.",
+            "Rescan Game Files now refuses to run when the live "
+            "game files don't match your vanilla backups. Before "
+            "this, if the disk was modded (from a stale backup, a "
+            "silent Steam patch, etc.), rescan would happily hash "
+            "the modded bytes as \"vanilla\" — and every future "
+            "Revert would restore the wrong state forever. CDUMM "
+            "now detects the mismatch, blocks the rescan, and tells "
+            "you exactly what to do (Revert first, or Steam Verify "
+            "then Fix Everything with the verified option).",
+            "Fix Everything no longer overwrites a just-verified "
+            "game. When you pick the \"Steam verified\" option, the "
+            "revert step is now skipped — your clean Steam-repaired "
+            "files stay untouched, vanilla backups are wiped, and a "
+            "fresh snapshot captures the real game state. Before "
+            "this fix, Fix Everything's revert would paste stale "
+            "pre-update backups over Steam's freshly downloaded "
+            "files, which is why \"40 files reacquired\" kept "
+            "coming back every time.",
+            "Right-click a mod (or multi-select several) and pick "
+            "\"Reimport from source\" to regenerate patches against "
+            "the current game without re-dragging each zip. After a "
+            "Steam update this is the fastest way to unstick every "
+            "mod that silently stopped working. The mod's priority, "
+            "notes, enabled state, and everything else you set on "
+            "it are preserved.",
+            "Fixed the Post-Apply Verification dialog falsely "
+            "reporting dozens of mods as \"imported on a different "
+            "game version\". Two bugs rolled together: (1) the "
+            "version fingerprint used to change every apply/revert "
+            "cycle (now stable, based only on Steam build ID + game "
+            "exe); (2) mods kept the fingerprint from their import "
+            "moment and were never re-stamped even after working on "
+            "a newer game version. Successful apply now stamps "
+            "every enabled mod with the current game version, so "
+            "the \"outdated\" signal self-heals after a Steam patch "
+            "if your mods still work. Existing installs are "
+            "auto-migrated on first launch.",
+            "CDUMM no longer gets stuck when a mod's files are damaged. "
+            "If a mod archive is corrupt or the apply step stops "
+            "making progress, CDUMM now stops the operation and tells "
+            "you which mod caused it instead of sitting frozen on a "
+            "progress bar.",
+            "The vanilla-backup step shows per-file progress now, so "
+            "the progress bar actually moves through that phase "
+            "instead of sitting at 2% for the whole run.",
+            "Importing a mod now checks the mod's internal index "
+            "files up front. A damaged archive gets rejected at "
+            "import time with a clear message instead of silently "
+            "failing every time you try to apply.",
+            "Folder imports that contain both mesh/texture data and "
+            "sibling .json files (e.g. Character Creator preset "
+            "folders with an extra animations JSON inside) now "
+            "import BOTH parts instead of only the .json. Thanks to "
+            "kori228 on GitHub for the report.",
             "Compatibility improvements for mod packaging.",
             "Improved handling of edge case files in mods.",
-            "Quiet internal changes, no behavior change for users.",
         ],
     },
     {

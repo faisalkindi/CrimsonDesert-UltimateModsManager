@@ -56,6 +56,9 @@ class PazEntry:
         return self.path.lower().endswith('.xml')
 
 
+_MAX_SANE_PAZ_COUNT = 4096
+
+
 def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
     """Parse a .pamt index file and return all file entries.
 
@@ -65,7 +68,34 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
 
     Returns:
         list of PazEntry
+
+    Raises:
+        ValueError: the PAMT is truncated, claims a section larger than
+            the file itself, or declares a wildly impossible paz_count.
+            Message names the file so callers can surface which mod
+            shipped the corrupt archive.
     """
+    try:
+        return _parse_pamt_impl(pamt_path, paz_dir)
+    except (struct.error, IndexError) as e:
+        # Surface low-level parse errors as a clean ValueError. Callers
+        # (import_handler precheck, apply_engine precheck) need one
+        # exception type to distinguish "corrupt archive, skip this
+        # mod" from actual bugs.
+        raise ValueError(
+            f"Corrupt PAMT {os.path.basename(pamt_path)}: {e}") from e
+
+
+def _bounds_check(pamt_path: str, what: str, declared: int,
+                  limit: int) -> None:
+    """Raise ValueError naming the file if ``declared`` exceeds ``limit``."""
+    if declared > limit:
+        raise ValueError(
+            f"Corrupt PAMT {os.path.basename(pamt_path)}: {what} "
+            f"exceeds file size ({declared} > {limit})")
+
+
+def _parse_pamt_impl(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
     with open(pamt_path, 'rb') as f:
         data = f.read()
 
@@ -74,10 +104,22 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
 
     pamt_stem = os.path.splitext(os.path.basename(pamt_path))[0]
 
+    # Minimum useful header = magic(4) + paz_count(4) + hash+zero(8)
+    # + folder_size(4) + node_size(4) + folder_count(4) + file_count(4)
+    # = 32 bytes.
+    if len(data) < 32:
+        raise ValueError(
+            f"Corrupt PAMT {os.path.basename(pamt_path)}: truncated "
+            f"(file is {len(data)} bytes, need at least 32)")
+
     off = 0
     off += 4  # skip magic (varies between game versions)
 
     paz_count = struct.unpack_from('<I', data, off)[0]; off += 4
+    if paz_count > _MAX_SANE_PAZ_COUNT:
+        raise ValueError(
+            f"Corrupt PAMT {os.path.basename(pamt_path)}: paz_count "
+            f"{paz_count} is implausibly large (max {_MAX_SANE_PAZ_COUNT})")
     off += 8  # hash + zero
 
     # PAZ table
@@ -89,7 +131,12 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
 
     # Folder section
     folder_size = struct.unpack_from('<I', data, off)[0]; off += 4
+    _bounds_check(pamt_path, "folder_size", folder_size, len(data))
     folder_end = off + folder_size
+    if folder_end > len(data):
+        raise ValueError(
+            f"Corrupt PAMT {os.path.basename(pamt_path)}: folder "
+            f"section extends past end of file ({folder_end} > {len(data)})")
     folder_prefix = ""
     while off < folder_end:
         parent = struct.unpack_from('<I', data, off)[0]
@@ -101,7 +148,13 @@ def parse_pamt(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
 
     # Node section (path tree)
     node_size = struct.unpack_from('<I', data, off)[0]; off += 4
+    _bounds_check(pamt_path, "node_size", node_size, len(data))
     node_start = off
+    if node_start + node_size > len(data):
+        raise ValueError(
+            f"Corrupt PAMT {os.path.basename(pamt_path)}: node section "
+            f"extends past end of file "
+            f"({node_start + node_size} > {len(data)})")
     nodes = {}
     while off < node_start + node_size:
         rel = off - node_start

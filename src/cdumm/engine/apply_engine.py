@@ -209,8 +209,43 @@ def collect_enabled_json_targets(db) -> set[str]:
     return targets
 
 
+def precheck_enabled_mod_pamts(db) -> list[str]:
+    """Scan every enabled PAZ mod's stored .pamt deltas and return
+    user-facing warnings for any that fail to parse.
+
+    Catches corrupt archives left over from pre-B1 installs — B1
+    rejects corrupt pamts at import time, but users with existing
+    broken mods need a safety net at apply time. Running this at
+    the top of _apply() surfaces the issue before the multi-minute
+    phases kick in, so the user isn't "stuck at 2%" staring at a
+    frozen dialog.
+    """
+    from cdumm.archive.paz_parse import parse_pamt
+
+    warnings: list[str] = []
+    rows = db.connection.execute(
+        "SELECT DISTINCT d.mod_id, m.name, d.delta_path, d.file_path "
+        "FROM mod_deltas d JOIN mods m ON m.id = d.mod_id "
+        "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
+        "AND d.file_path LIKE '%.pamt' "
+        "ORDER BY m.priority ASC, m.id ASC"
+    ).fetchall()
+    for _mod_id, mod_name, delta_path, file_path in rows:
+        if not delta_path:
+            continue
+        try:
+            parse_pamt(str(delta_path))
+        except (ValueError, OSError) as e:
+            warnings.append(
+                f"Mod '{mod_name}' has a corrupt {file_path}: {e}. "
+                "Re-import it from the original zip — this mod will "
+                "not apply until it's reimported.")
+    return warnings
+
+
 def collect_paz_dir_overrides(
     db, enabled_only: bool = True,
+    warnings_out: list | None = None,
 ) -> dict:
     """Scan enabled PAZ-dir mods, return a map of game_file → override.
 
@@ -283,6 +318,15 @@ def collect_paz_dir_overrides(
             logger.debug(
                 "collect_paz_dir_overrides: skip mod %d — pamt parse "
                 "failed: %s", mod_id, e)
+            if warnings_out is not None:
+                # A2 fix: surface this to the GUI InfoBar. The silent
+                # DEBUG log made every corrupt-archive case look like
+                # "stuck at 2%" to users. Tell them what broke and
+                # what to do next.
+                warnings_out.append(
+                    f"Mod '{mod_name}' has a corrupt archive "
+                    f"(pamt parse failed: {e}) and was skipped. "
+                    "Re-import it from the original zip.")
             import shutil as _shutil
             _shutil.rmtree(stage_root, ignore_errors=True)
             continue
@@ -730,7 +774,11 @@ class ApplyWorker(QObject):
         # start (so Phase 1 can skip direct-staging overridden files).
         # Read it from self here; don't re-collect.
         if not hasattr(self, "_paz_dir_overrides"):
-            self._paz_dir_overrides = collect_paz_dir_overrides(self._db)
+            _fallback_warn_before = len(self._soft_warnings)
+            self._paz_dir_overrides = collect_paz_dir_overrides(
+                self._db, warnings_out=self._soft_warnings)
+            for _w in self._soft_warnings[_fallback_warn_before:]:
+                self.warning.emit(_w)
 
         def resolver(game_file: str):
             return resolve_vanilla_source(
@@ -907,7 +955,21 @@ class ApplyWorker(QObject):
         # actually patch that file. Skipping without a replacement
         # leaves an orphaned PAMT pointing at a missing PAZ and the
         # game crashes on load.
-        self._paz_dir_overrides = collect_paz_dir_overrides(self._db)
+        # B3: upfront corrupt-archive precheck. Runs BEFORE the
+        # cross-layer override build so users see the warning at the
+        # top of apply, not mid-run.
+        for _pw in precheck_enabled_mod_pamts(self._db):
+            self._soft_warnings.append(_pw)
+            self.warning.emit(_pw)
+
+        # A2 fix: forward any pamt-parse failures through
+        # self._soft_warnings so the GUI InfoBar surfaces "mod X has
+        # a corrupt archive" instead of silently losing the mod.
+        _dedup_warn_before = len(self._soft_warnings)
+        self._paz_dir_overrides = collect_paz_dir_overrides(
+            self._db, warnings_out=self._soft_warnings)
+        for _w in self._soft_warnings[_dedup_warn_before:]:
+            self.warning.emit(_w)
         _json_targets = collect_enabled_json_targets(self._db)
         _active_overrides = {
             k: v for k, v in self._paz_dir_overrides.items()
@@ -1641,7 +1703,17 @@ class ApplyWorker(QObject):
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
                     _backup_copy(game_path, backup_path)
                     logger.info("Implicit vanilla backup: %s", imp_path)
-        for file_path in all_files:
+        # A3 fix: emit per-file progress across the loop so the UI
+        # advances from 2% through the backup phase (previously silent
+        # until Phase 1 kicked in at 55% — users called this "stuck
+        # at 2%"). Reserve 2-15 for backups, leaving 15+ for Phase 1.
+        _total_backup_files = max(1, len(all_files))
+        for backup_idx, file_path in enumerate(all_files):
+            pct = 2 + int((backup_idx / _total_backup_files) * 13)
+            self.progress_updated.emit(
+                pct,
+                f"Backing up vanilla files... "
+                f"({backup_idx + 1}/{_total_backup_files}) {file_path}")
             delta_infos = file_deltas.get(file_path, [])
 
             # Skip revert-only files — they don't need new backups,
