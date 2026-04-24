@@ -1,10 +1,17 @@
 """B3: at the start of Apply, walk every enabled mod's stored PAMT
-deltas and parse-test them. Surface any that fail so users don't
-sit through a partial apply that silently drops the broken mod.
+deltas and parse-test them.
 
-B1 now catches corrupt PAMTs at import time. B3 covers the existing
-installs from before B1 — any corrupt pamt already sitting in the
-deltas store gets flagged at the top of apply with a clear warning.
+**v3.1.7.2 update:** the original implementation was fundamentally
+broken — it ``parse_pamt``'d delta files, which are BSDIFF patches
+not PAMT bytes. Issue #38 (LeoBodnar) showed every valid mod being
+false-flagged on every Apply. The precheck is now a no-op pending a
+proper reimplementation that reconstructs the modified PAMT via
+bsdiff4.patch before parsing. See ``precheck_enabled_mod_pamts``
+docstring for the full rationale.
+
+B1 (v3.1.7.1) catches corrupt PAMTs at import time, so the safety
+net is mostly redundant; the apply flow's downstream error handling
+covers the remaining legacy case.
 """
 from __future__ import annotations
 
@@ -40,56 +47,27 @@ def test_precheck_returns_empty_on_clean_db(tmp_path):
         db.close()
 
 
-def test_precheck_flags_corrupt_pamt(tmp_path):
-    """Mod with a corrupt .pamt delta → precheck surfaces a warning
-    naming the mod."""
+def test_precheck_is_a_noop_pending_proper_impl(tmp_path):
+    """v3.1.7.2: placeholder returns [] regardless of DB state. The
+    previous implementation called parse_pamt on delta files, which
+    are BSDIFF patches — produced garbage PAMT headers that flagged
+    every valid mod as corrupt on every Apply."""
     from cdumm.engine.apply_engine import precheck_enabled_mod_pamts
     from cdumm.storage.database import Database
 
     db = Database(tmp_path / "test.db")
     db.initialize()
 
-    # Stage a corrupt pamt on disk — claim paz_count=1 million
-    # (overflows our sanity bound).
+    # Stage what the old test called a "corrupt pamt" — in v3.1.7.1
+    # this produced a warning; in v3.1.7.2 it must not, because the
+    # precheck never opens the file in the first place.
     bad_pamt = tmp_path / "0.pamt"
     blob = b"\x00" * 4 + struct.pack("<I", 1_000_000) + b"\x00" * 40
     bad_pamt.write_bytes(blob)
 
     db.connection.execute(
         "INSERT INTO mods (id, name, mod_type, enabled, priority) "
-        "VALUES (1, 'Broken Mod', 'paz', 1, 1)")
-    db.connection.execute(
-        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
-        "byte_start, byte_end, is_new) "
-        "VALUES (1, '0042/0.pamt', ?, 0, 0, 0)",
-        (str(bad_pamt),))
-    db.connection.commit()
-
-    try:
-        warnings = precheck_enabled_mod_pamts(db)
-        assert warnings, "corrupt pamt must produce at least one warning"
-        joined = " ".join(warnings)
-        assert "Broken Mod" in joined, (
-            "warning must name the mod so users know which one to fix")
-    finally:
-        db.close()
-
-
-def test_precheck_ignores_disabled_mods(tmp_path):
-    """Only walk ENABLED mods — disabled mods are opt-out already."""
-    from cdumm.engine.apply_engine import precheck_enabled_mod_pamts
-    from cdumm.storage.database import Database
-
-    db = Database(tmp_path / "test.db")
-    db.initialize()
-
-    bad_pamt = tmp_path / "0.pamt"
-    blob = b"\x00" * 4 + struct.pack("<I", 1_000_000) + b"\x00" * 40
-    bad_pamt.write_bytes(blob)
-
-    db.connection.execute(
-        "INSERT INTO mods (id, name, mod_type, enabled, priority) "
-        "VALUES (1, 'Disabled Broken', 'paz', 0, 1)")
+        "VALUES (1, 'Anything', 'paz', 1, 1)")
     db.connection.execute(
         "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
         "byte_start, byte_end, is_new) "
@@ -99,7 +77,8 @@ def test_precheck_ignores_disabled_mods(tmp_path):
 
     try:
         assert precheck_enabled_mod_pamts(db) == [], (
-            "disabled mods must not generate precheck warnings")
+            "precheck is a no-op in v3.1.7.2 — it must not "
+            "false-positive on any DB state")
     finally:
         db.close()
 
