@@ -5058,11 +5058,17 @@ class CdummWindow(FluentWindow):
                 tip.setState(True)
             except RuntimeError:
                 pass
-            proc.deleteLater()
+            try:
+                proc.deleteLater()
+            except RuntimeError:
+                pass
             self._active_worker = None
             self._active_progress = None
             self._resume_timers()
-            on_done(_msgs)
+            try:
+                on_done(_msgs)
+            except RuntimeError:
+                pass
 
         def _on_stderr():
             data = proc.readAllStandardError().data().decode("utf-8", errors="replace")

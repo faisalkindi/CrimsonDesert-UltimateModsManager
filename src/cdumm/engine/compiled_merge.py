@@ -58,19 +58,42 @@ def merge_compiled_mod_files(
     merged = bytearray(original_decomp)
     edits: list[MergeEdit] = []
 
+    # Chunk-wise scan: most bytes are identical between mod and vanilla
+    # (mods only edit small regions). Walking byte by byte in pure Python
+    # against a 25 MB pabgb is brutally slow — minute(s) per mod. Compare
+    # 64 KB chunks first; only fall back to byte-by-byte inside chunks
+    # that actually differ. ~1000x speedup on typical loadouts.
+    CHUNK = 65536
     for mod_name, mod_decomp in mod_versions:
         limit = min(len(original_decomp), len(mod_decomp))
-        i = 0
-        while i < limit:
-            if mod_decomp[i] != original_decomp[i]:
-                start = i
-                while i < limit and mod_decomp[i] != original_decomp[i]:
+        # Use memoryview slicing so the chunk comparisons don't allocate.
+        orig_mv = memoryview(original_decomp)
+        mod_mv = memoryview(mod_decomp)
+        chunk_start = 0
+        while chunk_start < limit:
+            chunk_end = min(chunk_start + CHUNK, limit)
+            # Fast path: whole chunk matches → skip it.
+            if orig_mv[chunk_start:chunk_end].tobytes() == \
+                    mod_mv[chunk_start:chunk_end].tobytes():
+                chunk_start = chunk_end
+                continue
+            # Slow path: walk byte by byte INSIDE this chunk only.
+            i = chunk_start
+            while i < chunk_end:
+                if mod_decomp[i] != original_decomp[i]:
+                    start = i
+                    while i < chunk_end and mod_decomp[i] != original_decomp[i]:
+                        i += 1
+                    # If the differing run continues past the chunk
+                    # boundary, extend it without splitting the edit.
+                    while i < limit and mod_decomp[i] != original_decomp[i]:
+                        i += 1
+                    end = i
+                    merged[start:end] = mod_decomp[start:end]
+                    edits.append(MergeEdit(mod_name, start, end))
+                else:
                     i += 1
-                end = i
-                merged[start:end] = mod_decomp[start:end]
-                edits.append(MergeEdit(mod_name, start, end))
-            else:
-                i += 1
+            chunk_start = i if i > chunk_end else chunk_end
 
     warnings: list[str] = []
     # Overlap detection — O(E²) but E is tiny in practice (a handful of
