@@ -1,21 +1,12 @@
 """Shared NexusMods filename parser.
 
 Used by both the GUI (single-drop) and worker (batch import) to extract
-the mod id and file version from NexusMods download filenames.
+mod_id and version from NexusMods download filenames.
 
-Format: ``{ModName}-{mod_id}-{file_version_parts_dashed}-{unix_timestamp}``
-
-Examples::
-
-    'Legendary Bear Without Tack-934-2-1775958271' -> (934, '2')
-    'Better Radial Menus (RAW)-618-1-4-1775912922' -> (618, '1.4')
-    'No Letterbox (RAW)-208-1-4-2-1775938453' -> (208, '1.4.2')
-
-Master branch note: even though CDUMM master ships without Nexus API
-integration, this parser still runs at import time so the mod's
-version column can be populated from the filename. Without it,
-most Nexus-downloaded mods import with an empty version field since
-mod authors rarely embed version in modinfo.json.
+Format: '{ModName}-{mod_id}-{file_version_parts_dashed}-{unix_timestamp}'
+Example: 'Legendary Bear Without Tack-934-2-1775958271' -> (934, '2')
+         'Better Radial Menus (RAW)-618-1-4-1775912922' -> (618, '1.4')
+         'No Letterbox (RAW)-208-1-4-2-1775938453' -> (208, '1.4.2')
 """
 from __future__ import annotations
 
@@ -30,17 +21,20 @@ _GREEDY_ANCHORED = re.compile(
 def parse_nexus_filename(name: str) -> tuple[int | None, str]:
     """Parse a NexusMods download filename stem.
 
-    Returns ``(nexus_mod_id, file_version)`` or ``(None, '')`` if the
-    name does not match the NexusMods convention. The 10-digit unix
-    timestamp anchors the end of the pattern.
+    Returns (nexus_mod_id, file_version) or (None, '') if the name does
+    not match the NexusMods convention. The 10-digit unix timestamp
+    anchors the end of the pattern.
 
-    Two regexes are used. The primary is a non-greedy match, which
-    correctly handles multi-segment versions like ``1-4-2``
-    (-> ``"1.4.2"``). When that regex returns a mod_id that falls in
-    the 1900-2099 range, the display name probably ended in a year and
-    the year was captured instead of the real mod id — we retry with a
-    right-anchored greedy regex that ties the version to 1-3 numeric
-    segments, letting the display name consume the year prefix.
+    Implementation note (Codex P2 regression fix):
+
+    Two regexes are used. The primary is the historical non-greedy
+    match, which correctly handles multi-segment versions like
+    ``1-4-2`` (→ ``"1.4.2"``). When that regex returns a mod_id that
+    falls in the 1900-2099 range, the display name probably ended in a
+    year and the year was captured instead of the real mod id — we
+    retry with a right-anchored greedy regex that ties the version to
+    1-3 numeric segments, which lets the display name consume the year
+    prefix.
     """
     m = _NON_GREEDY.match(name)
     if not m:
@@ -48,6 +42,7 @@ def parse_nexus_filename(name: str) -> tuple[int | None, str]:
     mod_id = int(m.group(1))
 
     if 1900 <= mod_id <= 2099:
+        # Year-in-display-name heuristic — retry with greedy anchor.
         m2 = _GREEDY_ANCHORED.match(name)
         if m2:
             candidate_id = int(m2.group(2))

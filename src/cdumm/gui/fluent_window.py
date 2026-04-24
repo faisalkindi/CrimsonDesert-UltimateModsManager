@@ -240,6 +240,215 @@ def _has_game_content(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Nexus / NXM / SSO helpers (ported from CDUMM_API_Test)
+# ---------------------------------------------------------------------------
+
+def _format_nxm_download_activity(mod_id: int, file_id: int) -> str:
+    """Activity log message for nxm:// download start.
+
+    Bug #3 fix: the pure InfoBar notification was sometimes invisible
+    on multi-monitor setups. Logging to Activity gives the user a
+    persistent record they can always find.
+    """
+    return f"Downloading mod {mod_id}, file {file_id} from Nexus"
+
+
+def _format_nxm_import_activity(
+    mod_name: str | None, is_update: bool,
+) -> str:
+    """Activity log message for nxm:// import completion."""
+    name = mod_name or "mod"
+    verb = "Updated" if is_update else "Imported"
+    return f"{verb} {name} from Nexus"
+
+
+_NXM_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB hard cap
+
+
+def _assert_https_download_url(url: str) -> None:
+    """Bug #27: refuse to download from any non-HTTPS URL. Nexus CDN
+    answers only over HTTPS — an ``http://`` URL is either a
+    misconfig or a MITM, and we're about to install the bytes into
+    the user's game folder. Bail before the request.
+    """
+    try:
+        import urllib.parse
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+    except Exception as e:
+        raise ValueError(f"cannot parse download URL: {e}") from e
+    if scheme != "https":
+        raise ValueError(
+            f"refusing to download over non-HTTPS scheme {scheme!r}")
+
+
+def _validate_download_size(
+    content_length: int | None, max_bytes: int
+) -> None:
+    """Bug #29: reject downloads whose advertised Content-Length
+    exceeds the hard cap before we open the destination file.
+    ``None`` = CDN didn't send the header; the streaming loop's
+    running-total check catches those cases instead.
+    """
+    if content_length is None:
+        return
+    if int(content_length) > int(max_bytes):
+        raise ValueError(
+            f"download too large: Content-Length {content_length} > "
+            f"cap {max_bytes}")
+
+
+def _check_download_progress(total_bytes: int, max_bytes: int) -> None:
+    """Bug #28/#29: running-total check called per chunk in the
+    streaming loop. Catches Content-Length-absent cases where the
+    CDN would otherwise trickle unbounded bytes.
+    """
+    if total_bytes > max_bytes:
+        raise ValueError(
+            f"download aborted: {total_bytes} bytes exceeds cap "
+            f"{max_bytes}")
+
+
+def _is_nexus_rate_limited(win, now: int) -> bool:
+    """True when the auto-check should skip this cycle because Nexus
+    previously returned 429 and the reset epoch hasn't passed yet.
+
+    Bug 45: wires ``_pending_nexus_rate_limited_at`` into the
+    actual timer decision so the captured reset_at isn't just a
+    write-only breadcrumb.
+    """
+    until = int(getattr(win, "_nexus_rate_limited_until", 0) or 0)
+    return until > int(now)
+
+
+def _clear_auth_banner_state(win) -> None:
+    """Bug #32: dismiss the "Nexus API key rejected" InfoBar and
+    reset the flag when the user has saved a fresh valid key. Used
+    by the Settings save path so the banner doesn't linger for up
+    to 30 minutes until the next auto-check confirms.
+    """
+    banner = getattr(win, "_nexus_auth_banner", None)
+    if banner is not None:
+        try:
+            banner.close()
+        except Exception:
+            pass
+    win._nexus_auth_banner = None
+    win._nexus_auth_banner_shown = False
+
+
+def _snapshot_selected_labels(db, mod_id: int) -> dict | None:
+    """Bug #24: capture the configurable-mod's ``selected_labels``
+    before ``remove_mod`` cascade-deletes the mod_config row. Returns
+    the parsed dict, or None when the mod was never configurable.
+    """
+    try:
+        row = db.connection.execute(
+            "SELECT selected_labels FROM mod_config WHERE mod_id = ?",
+            (mod_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        import json as _json
+        data = _json.loads(row[0])
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _restore_selected_labels(
+    db, mod_id: int, snapshot: dict | None,
+    available_preset_names,
+) -> None:
+    """Bug #24: write the preserved ``selected_labels`` to the new
+    mod's ``mod_config`` row, filtering out preset names the author
+    removed/renamed in the update. A no-op when ``snapshot`` is None.
+    """
+    if not snapshot:
+        return
+    allowed = set(available_preset_names or [])
+    filtered = {k: v for k, v in snapshot.items() if k in allowed}
+    if not filtered:
+        return
+    try:
+        import json as _json
+        db.connection.execute(
+            "INSERT OR REPLACE INTO mod_config "
+            "(mod_id, selected_labels) VALUES (?, ?)",
+            (mod_id, _json.dumps(filtered)))
+        db.connection.commit()
+    except Exception as e:
+        logger.debug("restore selected_labels failed: %s", e)
+
+
+def _clear_pending_post_import_state(win, path) -> None:
+    """Zero the post-import scratch attributes the pre-check stages
+    accumulate. Safe to call regardless of whether the worker ran to
+    completion or failed — prevents stale values from bleeding into
+    the next import (Bug #14).
+    """
+    for attr in (
+        "_update_priority",
+        "_update_enabled",
+        "_configurable_source",
+        "_configurable_labels",
+        "_original_drop_path",
+        "_pending_selected_labels",
+        "_last_existing_mod_id",
+    ):
+        setattr(win, attr, None)
+    nrf = getattr(win, "_nexus_real_file_id_map", None)
+    if isinstance(nrf, dict) and path is not None:
+        nrf.pop(str(path), None)
+
+
+def _decide_auth_banner(
+    had_error: bool, previously_shown: bool
+) -> tuple[bool, bool]:
+    """Decide whether to show the "Nexus API key rejected" banner
+    for the current update cycle.
+
+    Returns ``(show_now, new_flag)``. ``show_now`` is True only on
+    the *first* failure after a success (or at startup); ``new_flag``
+    replaces the previous ``_nexus_auth_banner_shown`` value and
+    resets on any successful cycle so a later failure re-surfaces
+    the banner (Bug #18).
+    """
+    if had_error:
+        return (not previously_shown, True)
+    return (False, False)
+
+
+def _resolve_post_import_target_id(
+    result_mod_id: int | None,
+    existing_mod_id: int | None,
+    max_row_id: int | None,
+) -> int | None:
+    """Pick the correct row to stamp post-import metadata onto.
+
+    Priority: worker-emitted ``result_mod_id`` > prebound
+    ``existing_mod_id`` > ``MAX(id)`` fallback.
+
+    Before this helper existed, the post-import UPDATE statements used
+    ``WHERE id = (SELECT MAX(id) FROM mods)`` unconditionally. That
+    works for fresh inserts but breaks for the nxm:// update-in-place
+    flow: the update lands on row 1333, while MAX(id) might be 1361.
+
+    Returning None means "we don't know which row — write nothing"
+    rather than silently targeting the wrong row.
+    """
+    if result_mod_id:
+        return int(result_mod_id)
+    if existing_mod_id:
+        return int(existing_mod_id)
+    if max_row_id:
+        return int(max_row_id)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Thread-safe callback dispatcher
 # ---------------------------------------------------------------------------
 
