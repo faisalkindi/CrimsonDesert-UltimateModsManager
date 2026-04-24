@@ -29,6 +29,39 @@ def _emit_progress(pct, msg):
         cb(pct, msg)
 
 
+def _validate_modified_pamt(modified_bytes: bytes, rel_path: str) -> None:
+    """Parse ``modified_bytes`` as a PAMT to validate it before import.
+
+    v3.1.7.1 hotfix for issues #37 and #38: the previous implementation
+    wrote bytes to ``NamedTemporaryFile(suffix=".pamt")`` which
+    produced paths like ``tmpXXXXXXXX.pamt``. ``parse_pamt`` then tried
+    ``int(pamt_stem)`` on ``tmpXXXXXXXX`` — a ValueError that
+    false-positived valid mods as corrupt.
+
+    Fix: write to a TemporaryDirectory using the real basename from
+    ``rel_path`` (e.g. ``0.pamt``) so the stem is numeric. Raises
+    ``ValueError`` on genuinely corrupt PAMTs; returns None on success.
+    """
+    import os as _os
+    from cdumm.archive.paz_parse import parse_pamt
+    basename = _os.path.basename(rel_path.replace("\\", "/"))
+    # Fall back to '0.pamt' if rel_path somehow lacks a basename — the
+    # '0' stem keeps int() happy.
+    if not basename or not basename.lower().endswith(".pamt"):
+        basename = "0.pamt"
+    with tempfile.TemporaryDirectory(prefix="cdumm_pamt_validate_") as tmpdir:
+        tmp_path = _os.path.join(tmpdir, basename)
+        with open(tmp_path, "wb") as f:
+            f.write(modified_bytes)
+        try:
+            parse_pamt(tmp_path)
+        except ValueError as err:
+            raise ValueError(
+                f"Mod ships a corrupt {rel_path}: {err}. "
+                "The PAMT can't be parsed. Re-download the mod from "
+                "its source — the archive is damaged.") from err
+
+
 def _next_priority(db: Database) -> int:
     """Get the next available priority value for a new mod."""
     cursor = db.connection.execute("SELECT COALESCE(MAX(priority), 0) + 1 FROM mods")
@@ -2820,27 +2853,9 @@ def _process_extracted_files(
                 # saving a delta. A corrupt pamt here will break apply
                 # forever for this mod — surface it at import time so
                 # the user sees the failure during import, not during
-                # a 7-minute apply stall.
-                import tempfile as _b1_tempfile
-                from cdumm.archive.paz_parse import parse_pamt as _b1_parse
-                with _b1_tempfile.NamedTemporaryFile(
-                        suffix=".pamt", delete=False) as _b1_tmp:
-                    _b1_tmp.write(modified_bytes)
-                    _b1_tmp_path = _b1_tmp.name
-                try:
-                    _b1_parse(_b1_tmp_path)
-                except ValueError as _b1_err:
-                    raise ValueError(
-                        f"Mod ships a corrupt {rel_path}: {_b1_err}. "
-                        "The PAMT can't be parsed. Re-download the "
-                        "mod from its source — the archive is "
-                        "damaged.") from _b1_err
-                finally:
-                    import os as _b1_os
-                    try:
-                        _b1_os.unlink(_b1_tmp_path)
-                    except OSError:
-                        pass
+                # a 7-minute apply stall. See _validate_modified_pamt
+                # docstring for the v3.1.7.1 hotfix history.
+                _validate_modified_pamt(modified_bytes, rel_path)
 
             if vanilla_bytes == modified_bytes:
                 logger.debug("File %s is identical to vanilla, skipping", rel_path)

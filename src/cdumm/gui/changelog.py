@@ -13,6 +13,21 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.7.1",
+        "date": "2026-04-24",
+        "notes": [
+            "Hotfix: v3.1.7 was rejecting some mods at import time "
+            "with a \"corrupt PAMT\" error that mentioned a weird "
+            "temp-file name (e.g. invalid literal for int() with "
+            "base 10: 'tmp9wk9wy2h'). The mods weren't actually "
+            "corrupt — CDUMM's new import-time PAMT validator was "
+            "writing to a randomly-named temp file that confused "
+            "the parser into flagging valid files. Fixed by using "
+            "the mod's real PAMT filename for validation. Affected "
+            "mods should re-import cleanly now.",
+        ],
+    },
+    {
         "version": "3.1.7",
         "date": "2026-04-24",
         "notes": [
