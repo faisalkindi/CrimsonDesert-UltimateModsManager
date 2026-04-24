@@ -783,12 +783,18 @@ class SettingsPage(SmoothScrollArea):
         except Exception as _e:
             logger.debug("auth banner clear (SSO) failed: %s", _e)
         self._set_nexus_status(
-            "Signed in via Nexus SSO. API key saved.", InfoLevel.SUCCESS)
+            "Signed in via Nexus SSO. API key saved. Checking for "
+            "mod updates...", InfoLevel.SUCCESS)
         # Keep button enabled — user may want to re-link a different
         # account or refresh the key. Re-disable only if slug approval
         # is revoked.
         from cdumm.engine.nexus_sso import slug_placeholder
         self._sso_login_btn.setEnabled(not slug_placeholder())
+        # User-requested: kick off a Check for Mod Updates automatically
+        # 2 seconds after sign-in so users don't have to find and click
+        # the button. Goes through the same handler the button uses.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(2000, self._on_check_nexus_updates)
 
     @Slot()
     def _sso_finished_err(self) -> None:
@@ -831,6 +837,9 @@ class SettingsPage(SmoothScrollArea):
             name = user.get("name", "Unknown")
             self._set_nexus_status(
                 tr("settings.nexus_logged_in", name=name), InfoLevel.SUCCESS)
+            # Same auto-check as SSO: spare the user the extra click.
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, self._on_check_nexus_updates)
         else:
             self._set_nexus_status(
                 tr("settings.nexus_invalid_key"), InfoLevel.ERROR)
