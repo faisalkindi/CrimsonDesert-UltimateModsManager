@@ -2020,7 +2020,21 @@ class ApplyWorker(QObject):
 
         merged_deltas = list(entry_deltas)  # start with original list
 
-        for entry_path, conflicting in entries_to_merge.items():
+        # Tell the user what's happening BEFORE the merge loop runs.
+        # This phase can take 10-30+ seconds with many overlapping mods
+        # and the percentage doesn't move during it (we're still on the
+        # same file). Without this emit, progress looks frozen.
+        total_entries = len(entries_to_merge)
+        total_mods = sum(len(d) for d in entries_to_merge.values())
+        try:
+            self.progress_updated.emit(
+                self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
+                f"Merging {total_mods} mods into {total_entries} entries "
+                f"in {file_path} (this can take a while with many mods)...")
+        except Exception:
+            pass
+
+        for idx, (entry_path, conflicting) in enumerate(entries_to_merge.items()):
             table_name = identify_table_from_path(entry_path)
             if not table_name:
                 continue  # not a supported format
@@ -2057,6 +2071,19 @@ class ApplyWorker(QObject):
                     file_path, entry_path)
                 if not vanilla_content:
                     continue
+
+                # Heartbeat so the progress bar text changes for huge
+                # tables. analyze_bytes can take many seconds on
+                # 6000+ record tables like iteminfo with multiple
+                # conflicting mods. Without this emit, the bar message
+                # stays stale on the same file/percentage.
+                try:
+                    self.progress_updated.emit(
+                        self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
+                        f"Merging entry {idx + 1}/{total_entries} in "
+                        f"{file_path}: {entry_path} ({len(mod_bodies)} mods)...")
+                except Exception:
+                    pass
 
                 # Run semantic merge
                 result = engine.analyze_bytes(

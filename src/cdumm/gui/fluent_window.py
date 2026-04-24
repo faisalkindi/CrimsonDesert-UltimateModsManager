@@ -5048,8 +5048,16 @@ class CdummWindow(FluentWindow):
                         threshold_s=APPLY_STALL_THRESHOLD_S)})
                 on_done(_msgs)
                 return
-            tip.setContent(tr("progress.completed"))
-            tip.setState(True)
+            # Guard against the case where the user closed the main
+            # window while apply was still running. By the time this
+            # finished-handler fires, Qt may have already deleted the
+            # tooltip's underlying C++ object — calling setContent
+            # then crashes with "Internal C++ object already deleted."
+            try:
+                tip.setContent(tr("progress.completed"))
+                tip.setState(True)
+            except RuntimeError:
+                pass
             proc.deleteLater()
             self._active_worker = None
             self._active_progress = None
