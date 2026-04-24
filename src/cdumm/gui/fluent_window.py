@@ -1454,15 +1454,17 @@ class CdummWindow(FluentWindow):
                 current_fp = detect_game_version(self._game_dir)
                 stored_fp = config.get("game_version_fingerprint")
                 if current_fp and stored_fp and current_fp != stored_fp:
-                    box = MessageBox(
-                        "Game Files Changed",
-                        "Your game files have changed since the last snapshot.\n\n"
-                        "This usually means you verified through Steam.\n\n"
-                        "Rescan now to update the snapshot?",
-                        self,
-                    )
-                    if box.exec():
-                        self._on_refresh_snapshot(skip_verify_prompt=True)
+                    # v3.2: unified Recovery Flow trigger (Codex
+                    # review finding 10). Both startup paths surface
+                    # the same Recovery button instead of two
+                    # different MessageBoxes.
+                    self._offer_recovery_flow(
+                        title="Game files changed — recovery available",
+                        body=(
+                            "Your game files have changed since the "
+                            "last snapshot (likely a Steam patch or "
+                            "Verify Integrity). Click Start Recovery "
+                            "to run the full recovery flow."))
             except Exception:
                 pass
 
@@ -5281,33 +5283,85 @@ class CdummWindow(FluentWindow):
         return False
 
     def _check_game_updated(self) -> bool:
-        """Check if the game was updated and offer a rescan."""
+        """Check if the game was updated and offer the Recovery Flow.
+
+        v3.2: replaces the plain "Rescan now?" MessageBox with a
+        sticky Recovery InfoBar. Button fires RecoveryFlow which runs
+        the full Fix Everything → rescan → reimport → apply chain.
+        The old "Apply locked" banner from v3.1.7 stays as a second
+        InfoBar so users who dismiss Recovery still see why Apply is
+        disabled.
+        """
         if not self._startup_context.get("game_updated"):
             return False
 
-        box = MessageBox(
-            "Game Updated",
-            "Crimson Desert has been updated since your last snapshot.\n\n"
-            "All mods will be disabled and a fresh scan is needed.\n\n"
-            "Rescan now?",
-            self,
-        )
-        if box.exec():
-            self._on_refresh_snapshot(skip_verify_prompt=True)
-        else:
-            # D1: user declined the rescan prompt. Apply is now
-            # locked by the _on_apply gate — surface a sticky banner
-            # so they understand WHY Apply won't work until they
-            # rescan.
-            InfoBar.error(
-                title="Apply locked",
-                content=(
-                    "Crimson Desert was updated since your last "
-                    "snapshot. Apply stays locked until you run "
-                    "Rescan Game Files. Use the Rescan panel in the "
-                    "sidebar when you're ready."),
-                duration=-1, position=InfoBarPosition.TOP, parent=self)
+        self._offer_recovery_flow(
+            title="Game was updated — mods need refreshing",
+            body=(
+                "Crimson Desert has been updated since your last "
+                "snapshot. Click Start Recovery to run the full "
+                "recovery flow (verify, rescan, reimport, apply)."))
+        # Also show the D1 "Apply locked" banner so the reason is
+        # visible even if the user dismisses the Recovery InfoBar.
+        InfoBar.error(
+            title="Apply locked",
+            content=(
+                "Crimson Desert was updated since your last "
+                "snapshot. Apply stays locked until a fresh rescan "
+                "completes."),
+            duration=-1, position=InfoBarPosition.TOP, parent=self)
         return True
+
+    def _offer_recovery_flow(self, title: str, body: str) -> None:
+        """Show the Recovery InfoBar with a Start Recovery button.
+
+        Called from both :meth:`_check_game_updated` (startup
+        ``game_updated`` flag) and from the deferred-startup
+        fingerprint-mismatch branch. Single UX for both paths
+        (Codex review finding 10 — unified recovery trigger).
+        """
+        # Guard against duplicate InfoBars when called twice.
+        prior = getattr(self, "_recovery_infobar", None)
+        if prior is not None:
+            try:
+                prior.close()
+            except Exception:
+                pass
+
+        bar = InfoBar.warning(
+            title=title,
+            content=body,
+            duration=-1, position=InfoBarPosition.TOP, parent=self)
+
+        # Add a Start Recovery button.
+        from qfluentwidgets import PrimaryPushButton
+        btn = PrimaryPushButton("Start Recovery")
+        btn.setMinimumWidth(160)
+
+        def _on_start_recovery() -> None:
+            # Close the banner so we don't stack another one while
+            # the flow runs.
+            try:
+                bar.close()
+            except Exception:
+                pass
+            self._recovery_infobar = None
+            try:
+                from cdumm.gui.recovery_flow import RecoveryFlow
+                flow = RecoveryFlow(self)
+                self._recovery_flow = flow  # keep ref alive
+                flow.start()
+            except Exception as e:
+                logger.exception("RecoveryFlow failed to start: %s", e)
+                InfoBar.error(
+                    title="Recovery failed to start",
+                    content=str(e),
+                    duration=-1, position=InfoBarPosition.TOP,
+                    parent=self)
+
+        btn.clicked.connect(_on_start_recovery)
+        bar.addWidget(btn)
+        self._recovery_infobar = bar
 
     def _check_stale_appdata(self) -> None:
         """Detect stale data in %LocalAppData%/cdumm from old versions."""

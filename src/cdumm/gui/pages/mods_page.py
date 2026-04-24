@@ -2115,7 +2115,8 @@ class ModsPage(QWidget):
         self._update_stats()
         self._resume_db_watcher()
 
-    def _ctx_batch_reimport(self, mod_ids: list[int]) -> None:
+    def _ctx_batch_reimport(self, mod_ids: list[int],
+                              skip_confirm: bool = False) -> None:
         """Reimport each selected mod from its stored source.
 
         After a game update (Steam patch), every mod's stored delta
@@ -2124,6 +2125,10 @@ class ModsPage(QWidget):
         regenerates deltas by rerunning import from each mod's
         original zip/folder, preserving the mod row (priority, notes,
         enabled state) via ``existing_mod_id``.
+
+        ``skip_confirm=True`` bypasses the interactive confirm dialog;
+        the RecoveryFlow orchestrator sets this so it can drive the
+        reimport step without user intervention (v3.2).
         """
         from qfluentwidgets import MessageBox
         from PySide6.QtCore import QProcess
@@ -2155,35 +2160,37 @@ class ModsPage(QWidget):
             entries.append((m["id"], m["name"], sp))
 
         if not entries:
-            MessageBox(
-                "Reimport",
-                "None of the selected mods have a stored source. "
-                "Reimport needs the original zip/folder to regenerate "
-                "patches. Drop the original file back in to fix those.",
-                window).exec()
+            if not skip_confirm:
+                MessageBox(
+                    "Reimport",
+                    "None of the selected mods have a stored source. "
+                    "Reimport needs the original zip/folder to regenerate "
+                    "patches. Drop the original file back in to fix those.",
+                    window).exec()
             return
 
-        msg = (f"Reimport {len(entries)} mod(s) from their stored "
-               "sources?\n\n"
-               "This regenerates patches against the current vanilla. "
-               "Use this after a game update when mods stop working.")
-        if missing:
-            # Show the actual names so users know which mods need
-            # manual drag-drop. Cap the inline list so a huge
-            # selection doesn't blow up the dialog.
-            shown = missing[:15]
-            more = len(missing) - len(shown)
-            names_block = "\n".join(f"  - {n}" for n in shown)
-            if more > 0:
-                names_block += f"\n  - ... and {more} more"
-            msg += (f"\n\n{len(missing)} mod(s) can't be reimported "
-                    "automatically (no stored source) and will be "
-                    "skipped:\n\n"
-                    f"{names_block}\n\n"
-                    "Drop their original files back in to fix those "
-                    "manually.")
-        if not MessageBox("Reimport from source", msg, window).exec():
-            return
+        if not skip_confirm:
+            msg = (f"Reimport {len(entries)} mod(s) from their stored "
+                   "sources?\n\n"
+                   "This regenerates patches against the current vanilla. "
+                   "Use this after a game update when mods stop working.")
+            if missing:
+                # Show the actual names so users know which mods need
+                # manual drag-drop. Cap the inline list so a huge
+                # selection doesn't blow up the dialog.
+                shown = missing[:15]
+                more = len(missing) - len(shown)
+                names_block = "\n".join(f"  - {n}" for n in shown)
+                if more > 0:
+                    names_block += f"\n  - ... and {more} more"
+                msg += (f"\n\n{len(missing)} mod(s) can't be reimported "
+                        "automatically (no stored source) and will be "
+                        "skipped:\n\n"
+                        f"{names_block}\n\n"
+                        "Drop their original files back in to fix those "
+                        "manually.")
+            if not MessageBox("Reimport from source", msg, window).exec():
+                return
 
         # Write mod_id\tsource_path lines to a temp file for the
         # worker subprocess.
