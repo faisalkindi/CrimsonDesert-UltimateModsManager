@@ -994,6 +994,23 @@ class CdummWindow(FluentWindow):
         # Run first check 5 seconds after startup (let UI settle)
         QTimer.singleShot(5000, self._run_nexus_update_check)
 
+        # Module-level helpers read these attrs via getattr; initialise
+        # them up-front so the first cycle doesn't have to special-case
+        # "never ran before".
+        self._nexus_rate_limited_until = 0
+        self._nexus_auth_banner = None
+        self._nexus_auth_banner_shown = False
+
+        # ── nxm:// pending URL watcher ────────────────────────────────
+        # Another CDUMM process launched with `--nxm <url>` drops the URL
+        # into pending_nxm.txt and exits. This timer polls for queued
+        # URLs and processes them as if the user had dragged the file.
+        self._nxm_poll_timer = QTimer(self)
+        self._nxm_poll_timer.timeout.connect(self._process_pending_nxm)
+        self._nxm_poll_timer.start(2000)
+        # Also drain any URL already queued before this instance started.
+        QTimer.singleShot(1500, self._process_pending_nxm)
+
     # ------------------------------------------------------------------
     # NexusMods automatic update check
     # ------------------------------------------------------------------
@@ -5630,7 +5647,13 @@ class CdummWindow(FluentWindow):
                 logger.debug("Theme listener teardown failed: %s", _e)
         # Stop timers (guard against already-deleted C++ objects — Qt may
         # have reaped children by the time closeEvent fires)
-        for timer_name in ("_update_timer", "_db_poll_timer"):
+        for timer_name in (
+            "_update_timer",
+            "_db_poll_timer",
+            "_db_change_timer",
+            "_nxm_poll_timer",
+            "_nexus_update_timer",
+        ):
             timer = getattr(self, timer_name, None)
             if timer is None:
                 continue
