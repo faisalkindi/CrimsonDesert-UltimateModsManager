@@ -5,19 +5,26 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Qt, Signal
+from PySide6.QtCore import QEasingCurve, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
 from qfluentwidgets import (
+    BodyLabel,
     CaptionLabel,
     ComboBox,
     FluentIcon,
     GroupHeaderCardWidget,
+    HyperlinkButton,
+    IconInfoBadge,
+    InfoBadge,
     InfoBar,
     InfoBarPosition,
+    InfoLevel,
     LineEdit,
+    PasswordLineEdit,
+    PrimaryPushButton,
     PushButton,
     PushSettingCard,
     SettingCard,
@@ -30,6 +37,48 @@ from qfluentwidgets import (
 from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_settings_error(error: str | None) -> tuple[str, str]:
+    """Split the prefixed error string produced by the check thread
+    into ``(kind, detail)``. Bug 46: without this, raw
+    ``"auth:Nexus rejected the key"`` leaked into the user-facing
+    message.
+
+    Recognised kinds: ``"auth"``, ``"rate_limited"``, ``"generic"``
+    (unknown prefix — raw detail), ``"none"`` (empty / None input).
+    """
+    if not error:
+        return "none", ""
+    for prefix in ("auth", "rate_limited"):
+        token = prefix + ":"
+        if error.startswith(token):
+            return prefix, error[len(token):]
+    return "generic", error
+
+
+def _persist_nexus_key_if_valid(key: str, cfg) -> dict | None:
+    """Validate a Nexus API key and persist it ONLY on success.
+
+    Bug #15 fix: the previous flow called ``cfg.set("nexus_api_key",
+    key)`` BEFORE validation, so a bad key stayed in the DB forever
+    and the next app launch silently used it.
+
+    ``key == ""`` is treated as "clear the saved key" and skips
+    validation entirely.
+
+    Returns the user dict from ``validate_api_key`` on success,
+    ``None`` otherwise. ``cfg`` is any object with a ``.set(key,
+    value)`` method (a ``Config`` in production, a fake in tests).
+    """
+    if not key:
+        cfg.set("nexus_api_key", "")
+        return None
+    from cdumm.engine.nexus_api import validate_api_key
+    user = validate_api_key(key)
+    if user:
+        cfg.set("nexus_api_key", key)
+    return user
 
 
 class SettingsPage(SmoothScrollArea):
@@ -104,7 +153,7 @@ class SettingsPage(SmoothScrollArea):
         self._game_dir_card.button.setMinimumWidth(140)
         self._game_group.addSettingCard(self._game_dir_card)
 
-        # ASI loader auto-install toggle. Default ON — matches pre-v3.1.4
+        # ASI loader auto-install toggle — lets users disable the default
         # behaviour where CDUMM ships its own winmm.dll proxy and keeps
         # it current on every ASI page refresh. Users running OptiScaler
         # (or another tool) with its own winmm loader turn this OFF so
@@ -153,6 +202,114 @@ class SettingsPage(SmoothScrollArea):
         self._profiles_group.addSettingCard(self._import_list_card)
 
         self._layout.addWidget(self._profiles_group)
+
+        # ── NexusMods API (testing only — personal key) ──────────
+        self._nexus_card = GroupHeaderCardWidget(self._container)
+        self._nexus_card.setTitle(tr("settings.nexus_title"))
+        self._nexus_card.setBorderRadius(8)
+
+        # Row 1 — API key input + inline save
+        key_widget = QWidget()
+        key_row = QHBoxLayout(key_widget)
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(8)
+        self._nexus_key_input = PasswordLineEdit()
+        self._nexus_key_input.setPlaceholderText(tr("settings.nexus_key_placeholder"))
+        self._nexus_key_input.setMinimumWidth(280)
+        self._nexus_key_input.setClearButtonEnabled(True)
+        key_row.addWidget(self._nexus_key_input, 1)
+        save_key_btn = PushButton(tr("settings.nexus_save"))
+        save_key_btn.setMinimumWidth(84)
+        save_key_btn.clicked.connect(self._on_save_nexus_key)
+        key_row.addWidget(save_key_btn)
+        self._nexus_card.addGroup(
+            FluentIcon.VPN,
+            tr("settings.nexus_key_row_title"),
+            tr("settings.nexus_key_row_desc"),
+            key_widget,
+        )
+
+        # Row 2 — primary check-for-updates action
+        self._nexus_check_btn = PrimaryPushButton(tr("settings.nexus_check"))
+        self._nexus_check_btn.setIcon(FluentIcon.SYNC)
+        self._nexus_check_btn.setMinimumWidth(200)
+        self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
+        self._nexus_card.addGroup(
+            FluentIcon.SYNC,
+            tr("settings.nexus_check_row_title"),
+            tr("settings.nexus_check_row_desc"),
+            self._nexus_check_btn,
+        )
+
+        self._layout.addWidget(self._nexus_card)
+
+        # Status strip (badge + text) — theme-aware, shown only when populated
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(6, 0, 6, 0)
+        status_layout.setSpacing(8)
+        self._nexus_status_badge = IconInfoBadge.info(FluentIcon.INFO, self._container)
+        self._nexus_status_badge.setFixedSize(18, 18)
+        self._nexus_status_badge.hide()
+        status_layout.addWidget(self._nexus_status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._nexus_status = BodyLabel("")
+        status_layout.addWidget(self._nexus_status, 1, Qt.AlignmentFlag.AlignVCenter)
+        nexus_help = HyperlinkButton(
+            "https://next.nexusmods.com/settings/api-keys",
+            tr("settings.nexus_get_key"))
+        nexus_help.setIcon(FluentIcon.LINK)
+        status_layout.addWidget(nexus_help, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._layout.addWidget(status_row)
+
+        # ── SSO + nxm:// handler rows ────────────────────────────────
+        sso_row = QWidget()
+        sso_layout = QHBoxLayout(sso_row)
+        sso_layout.setContentsMargins(6, 4, 6, 4)
+        sso_layout.setSpacing(8)
+        sso_label = BodyLabel(
+            "Login with Nexus — opens your browser to sign in, no "
+            "manual key paste. CDUMM's application slug is approved "
+            "by Nexus; this is the recommended flow.")
+        sso_label.setWordWrap(True)
+        sso_layout.addWidget(sso_label, 1)
+        self._sso_login_btn = PushButton("Login with Nexus")
+        self._sso_login_btn.setMinimumWidth(160)
+        # Enabled by default — slug is approved (see nexus_sso.py).
+        # _sync_ui_from_db re-checks slug_placeholder() at runtime to
+        # handle any future re-disable.
+        from cdumm.engine.nexus_sso import slug_placeholder
+        sso_ready = not slug_placeholder()
+        self._sso_login_btn.setEnabled(sso_ready)
+        if not sso_ready:
+            self._sso_login_btn.setToolTip(
+                "Pending Nexus approval of CDUMM's application slug. "
+                "Until approved, paste your personal API key above instead.")
+        else:
+            self._sso_login_btn.setToolTip(
+                "Opens your browser to sign in with your Nexus Mods "
+                "account. CDUMM never sees your password.")
+        self._sso_login_btn.clicked.connect(self._on_sso_login)
+        sso_layout.addWidget(self._sso_login_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._layout.addWidget(sso_row)
+
+        nxm_row = QWidget()
+        nxm_layout = QHBoxLayout(nxm_row)
+        nxm_layout.setContentsMargins(6, 4, 6, 4)
+        nxm_layout.setSpacing(8)
+        nxm_label = BodyLabel(
+            "Handle nxm:// links — when you click 'Mod Manager "
+            "Download' on a Nexus mod page, the file is sent to CDUMM "
+            "automatically (premium users download directly; free "
+            "users still route through the website's button).")
+        nxm_label.setWordWrap(True)
+        nxm_layout.addWidget(nxm_label, 1)
+        self._nxm_toggle_btn = PushButton("Register")
+        self._nxm_toggle_btn.setMinimumWidth(160)
+        self._nxm_toggle_btn.clicked.connect(self._on_nxm_toggle)
+        nxm_layout.addWidget(self._nxm_toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._layout.addWidget(nxm_row)
+        # Populate the initial state of the button
+        self._refresh_nxm_button()
 
         # ── Bug Report (PrivateBin) ───────────────────────────────
         self._privatebin_card = GroupHeaderCardWidget(self._container)
@@ -321,6 +478,11 @@ class SettingsPage(SmoothScrollArea):
         self._asi_loader_switch.setChecked(checked)
         self._asi_loader_switch.blockSignals(False)
 
+        # NexusMods API key
+        saved_key = self._config.get("nexus_api_key") or ""
+        if saved_key and hasattr(self, '_nexus_key_input'):
+            self._nexus_key_input.setText(saved_key)
+
         # PrivateBin
         if hasattr(self, '_privatebin_instance_input'):
             inst = self._config.get("privatebin_instance") or "https://privatebin.net"
@@ -461,6 +623,176 @@ class SettingsPage(SmoothScrollArea):
         )
         logger.info("Game directory changed to %s", new_path)
 
+    def _refresh_nxm_button(self) -> None:
+        """Sync nxm:// register/unregister button label with current state."""
+        from cdumm.engine.nxm_handler import is_handler_registered
+        if is_handler_registered():
+            self._nxm_toggle_btn.setText("Unregister")
+        else:
+            self._nxm_toggle_btn.setText("Register")
+
+    def _on_nxm_toggle(self) -> None:
+        """Register/unregister CDUMM as the nxm:// protocol handler.
+
+        Safety: when another mod manager (Vortex/MO2) already owns the
+        scheme, we refuse to overwrite silently. The user gets a
+        confirmation dialog that shows the existing command string so
+        they can decide whether to take over. Codex P1 — previous code
+        auto-retried with ``force=True`` in the same click, defeating
+        the explicit-opt-in contract documented in ``nxm_handler.py``.
+        """
+        from cdumm.engine.nxm_handler import (
+            is_handler_registered, register_windows_handler,
+            unregister_windows_handler, _read_command_string,
+        )
+        if is_handler_registered():
+            ok = unregister_windows_handler()
+            msg = ("nxm:// handler unregistered." if ok
+                   else "Could not fully unregister nxm:// handler — check the log.")
+            self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
+            self._refresh_nxm_button()
+            return
+
+        # Try non-destructive register first.
+        ok = register_windows_handler(force=False)
+        if ok:
+            self._set_nexus_status(
+                "CDUMM is now the nxm:// handler for your user account.",
+                InfoLevel.SUCCESS)
+            self._refresh_nxm_button()
+            return
+
+        # Another mod manager owns the scheme — ask before stomping.
+        try:
+            import winreg
+            existing_cmd = _read_command_string(winreg) or "(unknown)"
+        except Exception:
+            existing_cmd = "(unknown)"
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Another nxm:// handler is registered")
+        box.setText(
+            "Another application is currently registered as the "
+            "nxm:// handler — usually Vortex or Mod Organizer 2.")
+        box.setInformativeText(
+            f"Current handler:\n{existing_cmd}\n\n"
+            "If you replace it, 'Mod Manager Download' clicks on "
+            "Nexus will route to CDUMM instead. You can switch back "
+            "by running the other manager's setup again.")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        choice = box.exec_() if hasattr(box, "exec_") else box.exec()
+        if choice != QMessageBox.StandardButton.Yes:
+            self._set_nexus_status(
+                "nxm:// registration cancelled — existing handler kept.",
+                InfoLevel.INFOAMTION)
+            self._refresh_nxm_button()
+            return
+
+        ok = register_windows_handler(force=True)
+        msg = ("CDUMM is now the nxm:// handler for your user "
+               "account." if ok else "Registration failed — CDUMM "
+               "must be running as the packaged .exe, not the dev "
+               "source, to register as a handler.")
+        self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
+        self._refresh_nxm_button()
+
+    def _on_sso_login(self) -> None:
+        """Run the SSO WebSocket flow. Disabled while awaiting slug approval."""
+        from PySide6.QtCore import QMetaObject, Qt as _Qt
+        from cdumm.engine.nexus_sso import start_sso_flow
+        self._sso_login_btn.setEnabled(False)
+        self._set_nexus_status(
+            "Opening browser for Nexus login…", InfoLevel.INFOAMTION)
+
+        def _on_key(api_key: str) -> None:
+            # Called from the websocket thread — marshal to GUI thread
+            # by stashing the result and invoking a slot.
+            self._pending_sso_key = api_key
+            QMetaObject.invokeMethod(
+                self, "_sso_finished_ok",
+                _Qt.ConnectionType.QueuedConnection)
+
+        def _on_error(msg: str) -> None:
+            self._pending_sso_err = msg
+            QMetaObject.invokeMethod(
+                self, "_sso_finished_err",
+                _Qt.ConnectionType.QueuedConnection)
+
+        start_sso_flow(_on_key, _on_error)
+
+    @Slot()
+    def _sso_finished_ok(self) -> None:
+        from cdumm.storage.config import Config
+        key = getattr(self, "_pending_sso_key", "") or ""
+        if not key:
+            self._sso_finished_err()
+            return
+        Config(self._db).set("nexus_api_key", key)
+        self._nexus_key_input.setText(key)
+        # Bug 52: SSO-returned key is by definition valid; drop any
+        # stale rejected-auth banner so the user doesn't see a red
+        # warning hovering over a successful login.
+        try:
+            from cdumm.gui.fluent_window import _clear_auth_banner_state
+            _clear_auth_banner_state(self.window())
+        except Exception as _e:
+            logger.debug("auth banner clear (SSO) failed: %s", _e)
+        self._set_nexus_status(
+            "Signed in via Nexus SSO. API key saved.", InfoLevel.SUCCESS)
+        # Keep button enabled — user may want to re-link a different
+        # account or refresh the key. Re-disable only if slug approval
+        # is revoked.
+        from cdumm.engine.nexus_sso import slug_placeholder
+        self._sso_login_btn.setEnabled(not slug_placeholder())
+
+    @Slot()
+    def _sso_finished_err(self) -> None:
+        msg = getattr(self, "_pending_sso_err", "Unknown SSO error")
+        self._set_nexus_status(f"SSO failed: {msg}", InfoLevel.ERROR)
+        # Re-enable so the user can retry. Only disabled when the slug
+        # itself is not yet approved.
+        from cdumm.engine.nexus_sso import slug_placeholder
+        self._sso_login_btn.setEnabled(not slug_placeholder())
+
+    def _on_save_nexus_key(self) -> None:
+        key = self._nexus_key_input.text().strip()
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        cfg = Config(self._db)
+        user = _persist_nexus_key_if_valid(key, cfg)
+        if not key:
+            # Bug 51: clearing the key should also dismiss the
+            # rejected-auth banner — the user is starting over.
+            try:
+                from cdumm.gui.fluent_window import _clear_auth_banner_state
+                _clear_auth_banner_state(self.window())
+            except Exception as _e:
+                logger.debug("auth banner clear failed: %s", _e)
+            self._set_nexus_status(
+                tr("settings.nexus_key_cleared"), InfoLevel.INFOAMTION)
+            return
+        if user:
+            # Bug #32: proactively dismiss the auth-rejected banner so
+            # the user doesn't see it hovering after they just fixed
+            # the key. The flag reset also lets a LATER failure re-
+            # show the banner instead of being squelched by the
+            # already-shown gate.
+            try:
+                from cdumm.gui.fluent_window import _clear_auth_banner_state
+                _clear_auth_banner_state(self.window())
+            except Exception as _e:
+                logger.debug("auth banner clear failed: %s", _e)
+            name = user.get("name", "Unknown")
+            self._set_nexus_status(
+                tr("settings.nexus_logged_in", name=name), InfoLevel.SUCCESS)
+        else:
+            self._set_nexus_status(
+                tr("settings.nexus_invalid_key"), InfoLevel.ERROR)
+
     def _on_save_privatebin_settings(self) -> None:
         if not self._config:
             return
@@ -478,3 +810,191 @@ class SettingsPage(SmoothScrollArea):
             duration=2500, position=InfoBarPosition.TOP, parent=self.window(),
         )
 
+    def _on_check_nexus_updates(self) -> None:
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        api_key = Config(self._db).get("nexus_api_key")
+        if not api_key:
+            self._set_nexus_status(
+                tr("settings.nexus_need_key"), InfoLevel.ERROR)
+            return
+        self._set_nexus_status(
+            tr("settings.nexus_checking"), InfoLevel.INFOAMTION)
+        self._nexus_check_btn.setEnabled(False)
+        # Read mods on main thread (SQLite connections can't cross threads).
+        # Union PAZ mods and ASI plugins — the automatic background check
+        # already does this, so the manual button must match it. Without
+        # this union, users with linked ASI plugins got false 'all up to
+        # date' results (Codex P2 regression).
+        try:
+            cursor = self._db.connection.execute(
+                "SELECT id, name, version, nexus_mod_id, nexus_last_checked_at, "
+                "nexus_real_file_id "
+                "FROM mods WHERE mod_type = 'paz'")
+            mods = [{"id": r[0], "name": r[1], "version": r[2],
+                     "nexus_mod_id": r[3],
+                     "nexus_last_checked_at": r[4],
+                     "nexus_real_file_id": r[5]}
+                    for r in cursor.fetchall()]
+            # Bug 43: match the auto-check — read nexus_real_file_id
+            # + nexus_last_checked_at so ASI plugins get chain-walk
+            # + feed-skip just like PAZ mods.
+            cursor = self._db.connection.execute(
+                "SELECT name, version, nexus_mod_id, "
+                "nexus_real_file_id, nexus_last_checked_at "
+                "FROM asi_plugin_state")
+            asi_mods = [{"id": None, "name": r[0], "version": r[1],
+                         "nexus_mod_id": r[2],
+                         "nexus_real_file_id": r[3] or 0,
+                         "nexus_last_checked_at": r[4] or 0}
+                        for r in cursor.fetchall()]
+        except Exception as e:
+            self._set_nexus_status(
+                tr("settings.nexus_db_error", error=str(e)), InfoLevel.ERROR)
+            self._nexus_check_btn.setEnabled(True)
+            return
+
+        combined = mods + asi_mods
+        _db = self._db
+
+        import threading
+        def _check():
+            try:
+                from cdumm.engine.nexus_api import (
+                    check_mod_updates, NexusAuthError, NexusRateLimited,
+                )
+                # Unpack 4-tuple: the 4th element (backfill map) is
+                # owned by the main window's _apply_nexus_update_colors
+                # slot. Discarding here is intentional — a manual
+                # "Check for Mod Updates" click in Settings runs this
+                # same pipeline, and the backfill is handled on the
+                # separate auto-check path that the main window drives.
+                updates, checked_ids, now_ts, _backfill = check_mod_updates(
+                    combined, api_key)
+                self._pending_updates = updates
+                self._pending_checked_ids = checked_ids
+                self._pending_checked_ts = now_ts
+                self._pending_error = None
+            except NexusAuthError as e:
+                # Bug 37: surface the same "API key rejected" message
+                # the auto-check banner uses, not a generic toast.
+                self._pending_updates = []
+                self._pending_checked_ids = []
+                self._pending_checked_ts = 0
+                self._pending_error = f"auth:{e}"
+            except NexusRateLimited as e:
+                # Bug 37: distinct message for rate-limit so the user
+                # knows to wait for the hourly reset instead of
+                # re-entering their key.
+                self._pending_updates = []
+                self._pending_checked_ids = []
+                self._pending_checked_ts = 0
+                self._pending_error = (
+                    f"rate_limited:{getattr(e, 'reset_at', 0)}")
+            except Exception as e:
+                self._pending_updates = []
+                self._pending_checked_ids = []
+                self._pending_checked_ts = 0
+                self._pending_error = str(e)
+            from PySide6.QtCore import QMetaObject, Qt as _Qt
+            QMetaObject.invokeMethod(
+                self, "_show_nexus_results", _Qt.ConnectionType.QueuedConnection)
+        threading.Thread(target=_check, daemon=True).start()
+
+    @Slot()
+    def _show_nexus_results(self) -> None:
+        self._nexus_check_btn.setEnabled(True)
+        # Persist last-checked timestamps on the GUI thread — worker can't
+        # because SQLite connections are thread-bound. Only rows that had
+        # a successful file-list fetch are in checked_ids.
+        checked_ids = getattr(self, "_pending_checked_ids", [])
+        now_ts = getattr(self, "_pending_checked_ts", 0)
+        if self._db and checked_ids and now_ts:
+            try:
+                placeholders = ",".join("?" * len(checked_ids))
+                self._db.connection.execute(
+                    f"UPDATE mods SET nexus_last_checked_at = ? "
+                    f"WHERE id IN ({placeholders})",
+                    [now_ts, *checked_ids])
+                self._db.connection.commit()
+            except Exception as e:
+                logger.debug("nexus_last_checked_at persist failed: %s", e)
+        error = getattr(self, "_pending_error", None)
+        kind, detail = _classify_settings_error(error)
+        if kind == "auth":
+            # Same wording as the auto-check banner so users hear
+            # one consistent message for the same failure.
+            self._set_nexus_status(
+                tr("settings.nexus_auth_rejected_title"),
+                InfoLevel.ERROR)
+            return
+        if kind == "rate_limited":
+            self._set_nexus_status(
+                "Nexus rate limit reached — try again after the "
+                "hourly window resets.", InfoLevel.WARNING)
+            return
+        if kind == "generic":
+            self._set_nexus_status(
+                tr("settings.nexus_error", error=detail[:80]),
+                InfoLevel.ERROR)
+            return
+        from cdumm.engine.nexus_api import filter_outdated
+        # ``_pending_updates`` includes confirmed-current entries too
+        # (three-state pill support). The dialog only wants truly
+        # outdated mods — filter them out or we claim every matched
+        # mod has a newer version on Nexus, with local == latest.
+        outdated = filter_outdated(getattr(self, "_pending_updates", []))
+        if not outdated:
+            self._set_nexus_status(
+                tr("settings.nexus_all_up_to_date"), InfoLevel.SUCCESS)
+            return
+        lines = [f"{u.local_name}: {u.local_version} -> {u.latest_version}" for u in outdated]
+        self._set_nexus_status(
+            tr("settings.nexus_updates_available", count=len(outdated)),
+            InfoLevel.ATTENTION)
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self.window())
+        msg.setWindowTitle(tr("settings.nexus_updates_title", count=len(outdated)))
+        msg.setText("Newer versions on NexusMods:\n\n" + "\n".join(lines))
+        # Qt 6 deprecated exec_ in favour of exec; both still work on the
+        # PySide6 versions we ship. Must stay MODAL — msg.show() (the old
+        # fallback) was modeless, which Codex flagged as P2.
+        msg.exec_() if hasattr(msg, "exec_") else msg.exec()
+
+    # ------------------------------------------------------------------
+    # Status helper — theme-aware badge swap
+    # ------------------------------------------------------------------
+
+    def _set_nexus_status(self, text: str, level: "InfoLevel") -> None:
+        """Update the inline status row with a theme-aware badge + message.
+
+        Replaces the previous hex-coded ``setStyleSheet`` approach — those
+        colours survived in light mode but crushed to unreadable in dark.
+        ``IconInfoBadge`` picks its palette from the current Fluent theme.
+        """
+        if not text:
+            self._nexus_status.setText("")
+            self._nexus_status_badge.hide()
+            return
+
+        icon_for_level = {
+            InfoLevel.SUCCESS: FluentIcon.ACCEPT,
+            InfoLevel.ERROR: FluentIcon.CLOSE,
+            InfoLevel.WARNING: FluentIcon.INFO,
+            InfoLevel.ATTENTION: FluentIcon.SYNC,
+            InfoLevel.INFOAMTION: FluentIcon.INFO,
+        }.get(level, FluentIcon.INFO)
+
+        old = self._nexus_status_badge
+        parent = old.parentWidget()
+        layout = parent.layout() if parent else None
+        index = layout.indexOf(old) if layout else -1
+        old.hide()
+        old.deleteLater()
+        new_badge = IconInfoBadge.make(icon_for_level, parent, level=level)
+        new_badge.setFixedSize(18, 18)
+        if layout is not None and index >= 0:
+            layout.insertWidget(index, new_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._nexus_status_badge = new_badge
+        self._nexus_status.setText(text)
