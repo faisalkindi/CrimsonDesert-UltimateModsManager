@@ -210,37 +210,31 @@ def collect_enabled_json_targets(db) -> set[str]:
 
 
 def precheck_enabled_mod_pamts(db) -> list[str]:
-    """Scan every enabled PAZ mod's stored .pamt deltas and return
-    user-facing warnings for any that fail to parse.
+    """Placeholder — was the v3.1.7 apply-time PAMT precheck.
 
-    Catches corrupt archives left over from pre-B1 installs — B1
-    rejects corrupt pamts at import time, but users with existing
-    broken mods need a safety net at apply time. Running this at
-    the top of _apply() surfaces the issue before the multi-minute
-    phases kick in, so the user isn't "stuck at 2%" staring at a
-    frozen dialog.
+    Disabled in v3.1.7.2 because the implementation was fundamentally
+    wrong: it called ``parse_pamt`` on stored delta files, which are
+    BSDIFF patches — not PAMT bytes. Two failure modes:
+
+    1. Parsing bsdiff binary as PAMT produced garbage headers that
+       tripped the paz_count sanity guard, false-flagging every valid
+       mod as corrupt.
+    2. The bsdiff filename stem (e.g. ``0036_0.pamt``) is non-numeric,
+       so ``int(pamt_stem)`` in parse_pamt blew up before any header
+       parsing — same failure shape as the v3.1.7 B1 bug.
+
+    Reported as a warning banner on every Apply in issue #38
+    (LeoBodnar). A proper version of this precheck would reconstruct
+    the modified PAMT bytes via ``bsdiff4.patch(vanilla, delta)`` and
+    validate them — that's real work and should land in a later
+    release. Meanwhile, B1 (v3.1.7.1) catches corrupt PAMTs at import
+    time, and the apply flow's existing error handling catches them
+    downstream if a legacy broken delta still exists.
+
+    Kept as a callable no-op so the call site in ``_apply()`` doesn't
+    need a conditional.
     """
-    from cdumm.archive.paz_parse import parse_pamt
-
-    warnings: list[str] = []
-    rows = db.connection.execute(
-        "SELECT DISTINCT d.mod_id, m.name, d.delta_path, d.file_path "
-        "FROM mod_deltas d JOIN mods m ON m.id = d.mod_id "
-        "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
-        "AND d.file_path LIKE '%.pamt' "
-        "ORDER BY m.priority ASC, m.id ASC"
-    ).fetchall()
-    for _mod_id, mod_name, delta_path, file_path in rows:
-        if not delta_path:
-            continue
-        try:
-            parse_pamt(str(delta_path))
-        except (ValueError, OSError) as e:
-            warnings.append(
-                f"Mod '{mod_name}' has a corrupt {file_path}: {e}. "
-                "Re-import it from the original zip — this mod will "
-                "not apply until it's reimported.")
-    return warnings
+    return []
 
 
 def collect_paz_dir_overrides(

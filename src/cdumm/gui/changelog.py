@@ -13,6 +13,21 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.1.7.2",
+        "date": "2026-04-24",
+        "notes": [
+            "Hotfix: v3.1.7 / v3.1.7.1 showed an \"Apply Completed "
+            "with Warnings\" banner after every Apply saying your "
+            "mods had corrupt PAMT files, even when the Apply itself "
+            "worked. The precheck that produced that banner was "
+            "examining the wrong file (the binary patch, not the "
+            "reconstructed PAMT) and false-flagging every valid mod. "
+            "The precheck is now disabled; the actual import and "
+            "apply flows still catch truly corrupt files. The banner "
+            "should not appear anymore.",
+        ],
+    },
+    {
         "version": "3.1.7.1",
         "date": "2026-04-24",
         "notes": [
