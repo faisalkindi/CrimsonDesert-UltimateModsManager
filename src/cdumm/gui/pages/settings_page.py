@@ -203,12 +203,32 @@ class SettingsPage(SmoothScrollArea):
 
         self._layout.addWidget(self._profiles_group)
 
-        # ── NexusMods API (testing only — personal key) ──────────
+        # ── NexusMods API ────────────────────────────────────────
         self._nexus_card = GroupHeaderCardWidget(self._container)
         self._nexus_card.setTitle(tr("settings.nexus_title"))
         self._nexus_card.setBorderRadius(8)
 
-        # Row 1 — API key input + inline save
+        # Row 1 — primary check-for-updates action. SSO is the
+        # recommended way to authenticate and lives below the card;
+        # manual API key paste is now Advanced-only (collapsed by
+        # default) to avoid the "why both?" UX confusion.
+        self._nexus_check_btn = PrimaryPushButton(tr("settings.nexus_check"))
+        self._nexus_check_btn.setIcon(FluentIcon.SYNC)
+        self._nexus_check_btn.setMinimumWidth(200)
+        self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
+        self._nexus_card.addGroup(
+            FluentIcon.SYNC,
+            tr("settings.nexus_check_row_title"),
+            tr("settings.nexus_check_row_desc"),
+            self._nexus_check_btn,
+        )
+
+        # Row 2 — Advanced: manual API key paste (collapsed by default)
+        # ``key_widget`` holds the actual input + Save button. It's
+        # added to the card always, but hidden until the user clicks
+        # the "Advanced" toggle below. If a saved key already exists,
+        # _sync_ui_from_db reveals the row automatically so the user
+        # can edit/clear it.
         key_widget = QWidget()
         key_row = QHBoxLayout(key_widget)
         key_row.setContentsMargins(0, 0, 0, 0)
@@ -222,26 +242,42 @@ class SettingsPage(SmoothScrollArea):
         save_key_btn.setMinimumWidth(84)
         save_key_btn.clicked.connect(self._on_save_nexus_key)
         key_row.addWidget(save_key_btn)
-        self._nexus_card.addGroup(
+        self._nexus_advanced_group = self._nexus_card.addGroup(
             FluentIcon.VPN,
             tr("settings.nexus_key_row_title"),
             tr("settings.nexus_key_row_desc"),
             key_widget,
         )
-
-        # Row 2 — primary check-for-updates action
-        self._nexus_check_btn = PrimaryPushButton(tr("settings.nexus_check"))
-        self._nexus_check_btn.setIcon(FluentIcon.SYNC)
-        self._nexus_check_btn.setMinimumWidth(200)
-        self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
-        self._nexus_card.addGroup(
-            FluentIcon.SYNC,
-            tr("settings.nexus_check_row_title"),
-            tr("settings.nexus_check_row_desc"),
-            self._nexus_check_btn,
-        )
+        # Hide the whole group row by default. _sync_ui_from_db will
+        # reveal it if a key is already saved. The "Advanced" link
+        # below toggles it on demand.
+        if self._nexus_advanced_group is not None:
+            self._nexus_advanced_group.setVisible(False)
 
         self._layout.addWidget(self._nexus_card)
+
+        # Advanced toggle: clicking reveals the manual API key paste
+        # row. New users only see "Login with Nexus" (the recommended
+        # path) and the manual key field stays out of sight unless
+        # explicitly opened.
+        advanced_row = QWidget()
+        advanced_layout = QHBoxLayout(advanced_row)
+        advanced_layout.setContentsMargins(6, 0, 6, 0)
+        advanced_layout.setSpacing(6)
+        self._nexus_advanced_toggle = HyperlinkButton(
+            "", "Advanced: paste API key manually")
+        self._nexus_advanced_toggle.setIcon(FluentIcon.SETTING)
+
+        def _toggle_advanced_key_row() -> None:
+            if self._nexus_advanced_group is None:
+                return
+            self._nexus_advanced_group.setVisible(
+                not self._nexus_advanced_group.isVisible())
+
+        self._nexus_advanced_toggle.clicked.connect(_toggle_advanced_key_row)
+        advanced_layout.addStretch(1)
+        advanced_layout.addWidget(self._nexus_advanced_toggle)
+        self._layout.addWidget(advanced_row)
 
         # Status strip (badge + text) — theme-aware, shown only when populated
         status_row = QWidget()
@@ -478,10 +514,16 @@ class SettingsPage(SmoothScrollArea):
         self._asi_loader_switch.setChecked(checked)
         self._asi_loader_switch.blockSignals(False)
 
-        # NexusMods API key
+        # NexusMods API key. If a key is already saved (either via
+        # manual paste OR via the SSO handoff), reveal the Advanced
+        # row so the user can edit/clear it without hunting for the
+        # toggle. Brand-new users see only the SSO button.
         saved_key = self._config.get("nexus_api_key") or ""
         if saved_key and hasattr(self, '_nexus_key_input'):
             self._nexus_key_input.setText(saved_key)
+            grp = getattr(self, "_nexus_advanced_group", None)
+            if grp is not None:
+                grp.setVisible(True)
 
         # PrivateBin
         if hasattr(self, '_privatebin_instance_input'):
