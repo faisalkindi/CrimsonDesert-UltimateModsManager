@@ -32,17 +32,36 @@ def test_import_validates_pamt_after_crc_fix():
     assert anchor != -1, "CRC-fix anchor not found"
     # Scope: next ~800 chars.
     scope = src[anchor:anchor + 2000]
-    assert "parse_pamt" in scope, (
-        "after CRC fix, the import must call parse_pamt to validate "
-        "the bytes before saving a delta — otherwise a corrupt pamt "
-        "gets stored and apply fails forever")
+    # v3.1.7.1: the call was extracted into _validate_modified_pamt
+    # which wraps parse_pamt with a safe tempfile name. Accept either
+    # the direct parse_pamt call (old shape) or the helper (new shape).
+    assert ("parse_pamt" in scope
+            or "_validate_modified_pamt" in scope), (
+        "after CRC fix, the import must call parse_pamt (directly or "
+        "via _validate_modified_pamt) to validate the bytes before "
+        "saving a delta — otherwise a corrupt pamt gets stored and "
+        "apply fails forever")
     # The exception path must be explicit: a raise, not a silent
-    # logger call.
-    assert re.search(r"raise\s+(ValueError|ImportError|RuntimeError)",
-                     scope), (
-        "a corrupt pamt must raise at import time so the user sees "
-        "the problem during the import step, not 7 minutes into "
-        "apply")
+    # logger call. v3.1.7.1: the raise can live inside the
+    # _validate_modified_pamt helper rather than inline at the
+    # callsite. Accept either.
+    has_inline_raise = re.search(
+        r"raise\s+(ValueError|ImportError|RuntimeError)", scope)
+    if not has_inline_raise and "_validate_modified_pamt" in scope:
+        # Helper path — verify the helper itself raises.
+        helper_match = re.search(
+            r"def\s+_validate_modified_pamt[^\n]*:\s*\n(.*?)\n(?=def |\Z)",
+            src, flags=re.DOTALL)
+        assert helper_match and re.search(
+            r"raise\s+(ValueError|ImportError|RuntimeError)",
+            helper_match.group(1)), (
+            "_validate_modified_pamt must raise so corrupt pamts "
+            "surface during import")
+    else:
+        assert has_inline_raise, (
+            "a corrupt pamt must raise at import time so the user "
+            "sees the problem during the import step, not 7 minutes "
+            "into apply")
 
 
 def test_import_error_message_names_mod_and_file():
