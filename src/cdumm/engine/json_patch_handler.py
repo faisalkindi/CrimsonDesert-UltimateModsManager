@@ -610,7 +610,8 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                         vanilla_data: bytes | None = None,
                         record_offsets: dict[int, int] | None = None,
                         name_offsets: dict[str, int] | None = None,
-                        inserts_out: list | None = None) -> tuple[int, int, int]:
+                        inserts_out: list | None = None,
+                        skipped_out: list | None = None) -> tuple[int, int, int]:
     """Apply byte patches to decompressed file data.
 
     If signature is provided, find it in data and treat change offsets
@@ -630,8 +631,27 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     their offset via the name→body-offset map. This lets mods survive
     game updates that shuffle record keys but keep names stable.
 
+    If ``skipped_out`` is a list, every patch that fails to apply
+    appends a dict describing it: ``{label, expected, actual, offset,
+    reason}``. Lets callers surface the per-patch skip details to the
+    user (JMM-parity UX — JMM v9.9.3 prints these inline; CDUMM
+    previously only debug-logged them so users thought silent skips
+    meant the mod worked when in fact it didn't fully apply).
+
     Returns (applied_count, mismatched_count, relocated_count).
     """
+    def _record_skip(change: dict, offset_val: int | None,
+                     actual: bytes | None, reason: str) -> None:
+        if skipped_out is None:
+            return
+        entry = {
+            "label": change.get("label") or change.get("entry") or "",
+            "expected": change.get("original", ""),
+            "actual": actual.hex() if actual is not None else "",
+            "offset": offset_val if offset_val is not None else -1,
+            "reason": reason,
+        }
+        skipped_out.append(entry)
     mismatched = 0
     relocated = 0
     base_offset = 0
@@ -749,6 +769,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             # malformed offset). Count as mismatched so the import layer
             # reports this as a compatibility failure, not "already applied".
             mismatched += 1
+            _record_skip(change, None, None, "unresolvable offset")
             logger.warning("Unresolvable offset for change: entry=%r record_key=%r offset=%r",
                            change.get("entry"), change.get("record_key"),
                            change.get("offset"))
@@ -894,6 +915,8 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             change.get("entry"), len(viable_fbs),
                             ", 0x".join(f"{o:X}" for o in viable_fbs))
                         mismatched += 1
+                        _record_skip(change, offset, actual,
+                                     "ambiguous fallback")
                         continue
 
                     # Pattern scan drift recovery.
@@ -921,6 +944,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
                                    offset, change["original"], actual.hex())
                     mismatched += 1
+                    _record_skip(change, offset, actual, "byte mismatch")
                     continue
 
             # Track size delta for replace ops that change size
@@ -1874,6 +1898,7 @@ def process_json_patches_for_overlay(
     custom_values: dict | None = None,
     vanilla_source_resolver=None,
     errors_out: list[str] | None = None,
+    skipped_out: list[dict] | None = None,
 ) -> list[tuple[bytes, dict]]:
     """Process a JSON mod's patches at Apply time (mount-time patching).
 
@@ -2010,7 +2035,8 @@ def process_json_patches_for_overlay(
         inserts_out: list[tuple[int, int]] = []
         applied, mismatched, relocated = _apply_byte_patches(
             modified, changes, signature=signature, vanilla_data=vanilla_ref,
-            name_offsets=name_offsets, inserts_out=inserts_out)
+            name_offsets=name_offsets, inserts_out=inserts_out,
+            skipped_out=skipped_out)
 
         if applied == 0 and mismatched > 0:
             logger.warning("mount-time: all patches mismatched for '%s' — game update?",

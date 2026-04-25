@@ -1165,13 +1165,50 @@ class ApplyWorker(QObject):
                         55, f"Patching {len(synth_data['patches'])} "
                         "target file(s) from vanilla...")
                     patch_errors: list[str] = []
+                    patch_skips: list[dict] = []
                     entries = process_json_patches_for_overlay(
                         0,  # pseudo mod_id — no single mod owns this
                         str(synth_path), self._game_dir,
                         disabled_indices=None,
                         custom_values=None,
                         vanilla_source_resolver=resolver,
-                        errors_out=patch_errors)
+                        errors_out=patch_errors,
+                        skipped_out=patch_skips)
+                    # JMM-parity UX: surface the per-patch skip details
+                    # to the user. CDUMM previously logged these at
+                    # debug-level only, so users with mods that
+                    # partially-fail (mod built for an older game
+                    # version where some byte offsets shifted) saw
+                    # "Apply complete" with no warning and concluded
+                    # CDUMM was broken when in fact 121/140 patches
+                    # applied and 19 silently skipped. JMM v9.9.3
+                    # prints "121 applied, 19 skipped" inline; this
+                    # match brings parity. The skip list goes to the
+                    # warning signal which on_apply_done renders in
+                    # the post-apply InfoBar.
+                    if patch_skips:
+                        skip_lines = [
+                            f"  - {s.get('label') or '(unnamed)'}"
+                            f" (expected {s.get('expected')}, "
+                            f"got {s.get('actual')}, {s.get('reason')})"
+                            for s in patch_skips[:15]
+                        ]
+                        more = max(0, len(patch_skips) - 15)
+                        suffix = (f"\n  ... and {more} more"
+                                  if more else "")
+                        msg = (
+                            f"{len(patch_skips)} JSON patch(es) "
+                            "skipped because the bytes they expect "
+                            "don't match the current game. The mod "
+                            "was probably built for an older game "
+                            "version. Affected entries:\n"
+                            + "\n".join(skip_lines) + suffix)
+                        try:
+                            self.warning.emit(msg)
+                        except Exception:
+                            pass
+                        if hasattr(self, "_soft_warnings"):
+                            self._soft_warnings.append(msg)
                     # Tag each overlay entry with the LOWEST priority
                     # number among its contributors (lowest = highest
                     # precedence = CDUMM winner on downstream collisions
