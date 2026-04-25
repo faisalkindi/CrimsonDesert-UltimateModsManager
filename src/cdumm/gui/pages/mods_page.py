@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     CheckBox,
     FluentIcon,
+    InfoBar,
+    InfoBarPosition,
     PushButton,
     SearchLineEdit,
     SmoothScrollArea,
