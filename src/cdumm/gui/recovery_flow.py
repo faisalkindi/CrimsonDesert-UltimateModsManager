@@ -61,11 +61,14 @@ DEFAULT_STEP_TIMEOUT_S = 360.0
 
 
 _STEP_LABELS = {
-    STEP_AWAITING_STEAM_VERIFY: "Step 1/5 — Waiting for Steam Verify",
-    STEP_FIX_EVERYTHING:       "Step 2/5 — Reverting game files to vanilla",
-    STEP_RESCAN:               "Step 3/5 — Rescanning game files",
-    STEP_REIMPORT:             "Step 4/5 — Reimporting your mods",
-    STEP_APPLY:                "Step 5/5 — Reapplying mods to game files",
+    # ``awaiting_steam_verify`` is intentionally absent — that phase
+    # is a pre-flight prompt waiting on a user click, not work CDUMM
+    # is doing. Numbering starts at the first chain step the user
+    # cares about (the revert).
+    STEP_FIX_EVERYTHING:       "Step 1/4 — Reverting game files to vanilla",
+    STEP_RESCAN:               "Step 2/4 — Rescanning game files",
+    STEP_REIMPORT:             "Step 3/4 — Reimporting your mods",
+    STEP_APPLY:                "Step 4/4 — Reapplying mods to game files",
 }
 
 
