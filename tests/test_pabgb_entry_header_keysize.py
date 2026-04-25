@@ -223,3 +223,46 @@ def test_format3_writer_does_not_corrupt_name_bytes_on_u16_table(
         "kstest", body, header, intents)
     records = parse_records("kstest", new_body, header)
     assert records[1]["_name"] == "PreserveMe"
+
+
+# ── Refuse unsupported key_size values ──────────────────────────────
+
+
+def test_writer_refuses_apply_when_key_size_is_neither_2_nor_4(
+        schema_in_cache):
+    """parse_pabgh_index can yield key_size = 1, 3, 5, 6, 7, 8 from
+    arithmetic on (header_len - count_size) / count if a header is
+    truncated, malformed, or genuinely uses a width we don't know.
+    The entry-header parser only handles 2 or 4. Anything else
+    silently misaligns every payload read, which is worse than
+    refusing the apply.
+
+    Build a header where the arithmetic yields key_size=8 (a u64-
+    keyed table — we don't know if any real CD table uses this
+    width but it's reachable from the parse function). The writer
+    must return vanilla unchanged.
+    """
+    import struct
+    from cdumm.engine.format3_handler import (
+        Format3Intent,
+        apply_intents_to_pabgb_bytes,
+    )
+    # Construct a synthetic body + 8-byte-key header
+    name = b"WeirdSize"
+    head = struct.pack("<II", 1, len(name))
+    payload = struct.pack("<II", 0xCAFEBABE, 0xCAFEBABE)
+    body = head + name + b"\x00" + payload
+    # Header: u16 count=1 + 1 entry of (8B key + 4B offset)
+    header = bytearray(struct.pack("<H", 1))
+    header.extend(struct.pack("<Q", 1))   # 8-byte key
+    header.extend(struct.pack("<I", 0))   # offset
+    header = bytes(header)
+
+    intents = [Format3Intent(
+        entry="WeirdSize", key=1, field="_alpha",
+        op="set", new=0xDEADBEEF)]
+    new_body = apply_intents_to_pabgb_bytes(
+        "kstest", bytes(body), header, intents)
+
+    # Refused → bytes unchanged. We do NOT silently misalign.
+    assert new_body == bytes(body)

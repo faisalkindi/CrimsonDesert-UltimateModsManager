@@ -486,6 +486,18 @@ def apply_intents_to_pabgb_bytes(
     key_size, offsets = parse_pabgh_index(vanilla_header, table_name)
     if not offsets:
         return vanilla_body
+    # parse_pabgh_index derives key_size from arithmetic on the
+    # header layout — it can yield 1, 3, 5, 6, 7, 8 from a
+    # truncated or malformed header. The entry-header parser only
+    # handles u16 (2) and u32 (4) widths. Refuse the apply for
+    # anything else; silently misaligning every payload is worse
+    # than not applying.
+    if key_size not in (2, 4):
+        logger.warning(
+            "Format 3 apply on '%s' refused: unsupported PABGH "
+            "key_size=%d (only 2 or 4 are handled)",
+            table_name, key_size)
+        return vanilla_body
 
     body = bytearray(vanilla_body)
     field_specs = {f.name: f for f in schema.fields}
