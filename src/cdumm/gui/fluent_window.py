@@ -4218,6 +4218,48 @@ class CdummWindow(FluentWindow):
                     "Stored ASI metadata: %s version=%s nexus_mod_id=%s "
                     "real_file_id=%s",
                     plugin_name, version, nexus_id, real_file_id or None)
+
+                # Author-renamed-asi cleanup: when the new file is named
+                # differently from the prior version (e.g. the author
+                # baked the version into the filename — EnhancedFlight.asi
+                # -> EnhancedFlightv31.asi), the old .asi is still in
+                # bin64/ AND its asi_plugin_state row still says
+                # outdated. Game would load BOTH at startup. Delete the
+                # stale prior file + DB row.
+                if nexus_id:
+                    try:
+                        stale_rows = self._db.connection.execute(
+                            "SELECT name FROM asi_plugin_state "
+                            "WHERE nexus_mod_id = ? AND name != ?",
+                            (nexus_id, plugin_name)).fetchall()
+                        for (old_name,) in stale_rows:
+                            old_asi = (self._game_dir / "bin64"
+                                       / f"{old_name}.asi")
+                            old_ini = (self._game_dir / "bin64"
+                                       / f"{old_name}.ini")
+                            for stale in (old_asi, old_ini):
+                                try:
+                                    if stale.exists():
+                                        stale.unlink()
+                                        logger.info(
+                                            "ASI rename cleanup: removed "
+                                            "stale %s", stale.name)
+                                except OSError as oe:
+                                    logger.warning(
+                                        "ASI rename cleanup: could not "
+                                        "remove %s: %s", stale, oe)
+                            self._db.connection.execute(
+                                "DELETE FROM asi_plugin_state "
+                                "WHERE name = ?",
+                                (old_name,))
+                            logger.info(
+                                "ASI rename cleanup: removed stale "
+                                "asi_plugin_state row %r", old_name)
+                        if stale_rows:
+                            self._db.connection.commit()
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            "ASI rename cleanup failed: %s", cleanup_err)
             except Exception as e:
                 logger.warning("Failed to store ASI metadata: %s", e)
 
