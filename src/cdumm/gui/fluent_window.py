@@ -6002,15 +6002,31 @@ class CdummWindow(FluentWindow):
         pass
 
     def _check_show_update_notes(self) -> None:
-        """Show patch notes dialog if version changed since last run."""
+        """Show patch notes dialog when CDUMM was upgraded since the
+        last run. Stamps the new version even when the dialog isn't
+        shown so a fresh install doesn't fire on every subsequent
+        launch.
+
+        Skipped on a true fresh install (``last_seen_version`` is
+        unset) — a brand-new user has no reason to see "what's new in
+        v3.2" for a version they just installed for the first time.
+        """
         from cdumm import __version__
         from cdumm.storage.config import Config
 
         config = Config(self._db)
         last_ver = config.get("last_seen_version")
-        if last_ver != __version__:
-            config.set("last_seen_version", __version__)
-            # TODO: show patch notes dialog
+        if last_ver == __version__:
+            return
+        config.set("last_seen_version", __version__)
+        if not last_ver:
+            # Fresh install — stamp the version, don't pop the dialog.
+            return
+        try:
+            from cdumm.gui.changelog import PatchNotesDialog
+            PatchNotesDialog(self, latest_only=True).exec()
+        except Exception as e:
+            logger.debug("Patch notes dialog failed to show: %s", e)
 
     def _on_refresh_snapshot(self, skip_verify_prompt: bool = False) -> None:
         """Trigger a full game file rescan via SnapshotWorker on a background thread."""
