@@ -17,6 +17,12 @@ _NON_GREEDY = re.compile(r'^.+?-(\d+)-(.+)-(\d{10})$')
 _GREEDY_ANCHORED = re.compile(
     r'^(.+)-(\d+)-(\d+(?:-\d+){0,2}|-\d+)-(\d{10})$')
 
+# Archive extensions that commonly survive into the stored ``drop_name``
+# (especially for manual file drops vs nxm:// downloads). The regex
+# anchors on a 10-digit unix timestamp at end-of-string, which breaks
+# whenever a trailing ``.zip`` / ``.7z`` / ``.rar`` is left in place.
+_ARCHIVE_EXTENSIONS = (".zip", ".7z", ".rar", ".paz")
+
 
 def parse_nexus_filename(name: str) -> tuple[int | None, str]:
     """Parse a NexusMods download filename stem.
@@ -35,7 +41,18 @@ def parse_nexus_filename(name: str) -> tuple[int | None, str]:
     retry with a right-anchored greedy regex that ties the version to
     1-3 numeric segments, which lets the display name consume the year
     prefix.
+
+    A trailing archive extension (``.zip`` / ``.7z`` / ``.rar`` /
+    ``.paz``) is stripped before matching so manual file drops parse
+    the same way nxm:// downloads do. Without this, ``drop_name``
+    rendering fell through to the em-dash placeholder for any mod
+    imported as a raw archive.
     """
+    lowered = name.lower()
+    for ext in _ARCHIVE_EXTENSIONS:
+        if lowered.endswith(ext):
+            name = name[: -len(ext)]
+            break
     m = _NON_GREEDY.match(name)
     if not m:
         return None, ''

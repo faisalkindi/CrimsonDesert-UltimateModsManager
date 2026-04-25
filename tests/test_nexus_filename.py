@@ -20,6 +20,32 @@ def test_extract_version_nexus_timestamped():
         "Better Radial Menus (RAW)-618-1-4-1775912922") == "1.4"
 
 
+def test_parse_with_zip_extension():
+    """Manual file drops keep the .zip suffix in drop_name. The 10-digit
+    timestamp anchor breaks if the extension isn't stripped first."""
+    assert parse_nexus_filename(
+        "CultusRubeus_012-1025-0-1-2-1775990189.zip") == (1025, "0.1.2")
+    assert parse_nexus_filename(
+        "Modern Controller Icons-767-1-2-1-1775761018.zip") == (767, "1.2.1")
+    assert parse_nexus_filename(
+        "Easier Rodeo-664-1-2-1775904741.zip") == (664, "1.2")
+
+
+def test_parse_with_7z_extension():
+    assert parse_nexus_filename(
+        "Some Mod-1234-2-0-1775904741.7z") == (1234, "2.0")
+
+
+def test_parse_with_rar_extension():
+    assert parse_nexus_filename(
+        "Some Mod-1234-2-0-1775904741.rar") == (1234, "2.0")
+
+
+def test_parse_extension_match_is_case_insensitive():
+    assert parse_nexus_filename(
+        "Some Mod-1234-2-0-1775904741.ZIP") == (1234, "2.0")
+
+
 def test_extract_version_v_prefixed_with_dots():
     assert extract_version_from_filename("stamina_v1.02.00_infinite") == "1.02.00"
 
