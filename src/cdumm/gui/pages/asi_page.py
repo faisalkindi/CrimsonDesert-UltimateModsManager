@@ -1320,13 +1320,17 @@ class AsiPluginsPage(QWidget):
         # Count plugins with a NexusMods update available. ASI cards key
         # by plugin_name (not mod_id), so we look up via _nexus_id_map
         # which is populated by set_nexus_updates as {plugin_name: nexus_id}.
+        # Must respect has_update — confirmed-current entries
+        # (has_update=False) are still in the dict so fill_missing_version
+        # has a Nexus version to paint, but they aren't actionable updates.
         outdated = 0
         nexus_updates = getattr(self, "_nexus_updates", None) or {}
         if nexus_updates:
             nexus_map = getattr(self, "_nexus_id_map", {}) or {}
             for c in self._cards:
                 nid = nexus_map.get(getattr(c, "plugin_name", ""))
-                if nid and nid in nexus_updates:
+                if nid and nid in nexus_updates and getattr(
+                        nexus_updates[nid], "has_update", False):
                     outdated += 1
         self._summary_bar.update_stats(total, enabled, disabled,
                                        outdated=outdated)

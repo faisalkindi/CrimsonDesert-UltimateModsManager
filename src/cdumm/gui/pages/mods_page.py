@@ -887,14 +887,20 @@ class ModsPage(QWidget):
                 pending += 1  # needs Apply (either add or remove)
         # Count mods that have a NexusMods update available. The lookup
         # is the same one set_nexus_updates uses to color the version
-        # pills, just summed here for the summary bar.
+        # pills, just summed here for the summary bar. Must respect
+        # has_update — confirmed-current entries (has_update=False)
+        # are still in the dict so the GREEN pill knows what version
+        # to paint, but they should NOT count as outdated. Counting
+        # every dict entry produced "10 outdated" alongside zero red
+        # pills.
         outdated = 0
         nexus_updates = getattr(self, "_nexus_updates", None) or {}
         if nexus_updates:
             nexus_map = getattr(self, "_nexus_id_map", {}) or {}
             for c in self._mod_cards:
                 nid = nexus_map.get(c.mod_id)
-                if nid and nid in nexus_updates:
+                if nid and nid in nexus_updates and getattr(
+                        nexus_updates[nid], "has_update", False):
                     outdated += 1
         self._summary_bar.update_stats(total, active, pending, inactive,
                                        outdated=outdated)
