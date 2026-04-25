@@ -599,18 +599,34 @@ def check_mod_updates(
         latest_tuple = _version_to_tuple((latest.version or "").strip())
         remote_ver = (latest.version or "").strip()
 
-        # Outdated iff the remote file is the user's CURRENT file
-        # (chain found nothing newer) AND remote version is greater,
-        # OR the chain walk landed on a different file_id (= author
-        # explicitly declared this as the successor).
+        # Outdated iff the chain walk landed on a DIFFERENT file_id
+        # (the author explicitly declared a successor), OR we couldn't
+        # do a chain walk (legacy row, local_file_id=0) and a name-
+        # match candidate has a strictly greater version string.
+        #
+        # Critical: when local_file_id is set AND latest.file_id ==
+        # local_file_id, the user IS on the file Nexus is serving as
+        # the latest. Version-string drift between CDUMM's filename-
+        # extracted local_ver and Nexus's API "version" field is NOT
+        # an update — that was the false-positive 'mod has only 1 file
+        # but pill is red' bug (e.g. Better Radial Menus 1.5 vs 1.5.2,
+        # both on file_id 5733).
         has_update = False
         if local_file_id and latest.file_id != local_file_id:
             # Author declared this as a successor — definitively
             # outdated regardless of version string parsing.
             has_update = True
+        elif local_file_id and latest.file_id == local_file_id:
+            # Same file. User is current. Version drift is metadata,
+            # not a real update.
+            has_update = False
         elif local_tuple is None:
+            # No local_file_id AND local version doesn't parse — bail
+            # out as 'unknown' rather than guessing.
             has_update = False
         elif latest_tuple is not None and latest_tuple > local_tuple:
+            # Legacy row (no nexus_real_file_id) AND name-match
+            # candidate has a strictly greater version. Real update.
             has_update = True
 
         # Diagnostic: when we flag a mod outdated, log the comparison
