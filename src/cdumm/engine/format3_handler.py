@@ -43,6 +43,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cdumm.engine.field_schema import (
+    FieldSchemaEntry,
+    load_field_schema,
+    locate_field,
+)
 from cdumm.semantic.parser import get_schema, has_schema
 
 logger = logging.getLogger(__name__)
@@ -244,9 +249,13 @@ def validate_intents(
     schema = get_schema(table_name)
     # Map field name → spec for O(1) lookups.
     field_specs = {f.name: f for f in schema.fields}
+    # Community-curated field schema (JMM-compatible). Empty if no
+    # field_schema/<table>.json exists yet — that's normal.
+    fs_entries = load_field_schema(table_name)
 
     for intent in intents:
-        reason = _classify_intent(intent, field_specs, table_name)
+        reason = _classify_intent(
+            intent, field_specs, fs_entries, table_name)
         if reason is None:
             result.supported.append(intent)
         else:
@@ -256,15 +265,27 @@ def validate_intents(
 
 
 def _classify_intent(
-    intent: Format3Intent, field_specs: dict, table_name: str
+    intent: Format3Intent, field_specs: dict,
+    fs_entries: dict, table_name: str
 ) -> str | None:
     """Return ``None`` if the intent is supported, otherwise a
-    human-readable reason for skipping it."""
+    human-readable reason for skipping it.
+
+    Resolution order: field_schema (community-curated) takes
+    precedence over the PABGB engine schema, mirroring JMM's
+    design where field_schema is the override layer mod authors
+    target. Fall back to PABGB schema for direct matches against
+    underscored engine names (``_dropRollCount`` etc.).
+    """
     if intent.op not in _SUPPORTED_OPS:
         return (
             f"op '{intent.op}' not supported in Phase 1 "
             f"(only 'set' is implemented)"
         )
+
+    # Community-curated field_schema wins
+    if intent.field in fs_entries:
+        return None
 
     spec = field_specs.get(intent.field)
     if spec is None:
@@ -283,10 +304,10 @@ def _classify_intent(
                 f"variable-length data lands in a later phase"
             )
         return (
-            f"field '{intent.field}' not found in schema — "
-            f"may need a friendly-name → schema-name mapping "
-            f"(NattKh's tools translate names like 'drops' → "
-            f"'_list' internally; that mapping isn't published yet)"
+            f"field '{intent.field}' has no field_schema entry "
+            f"and isn't in the PABGB record schema — "
+            f"author needs to add a field_schema/{table_name}.json "
+            f"entry mapping '{intent.field}' to a tid or rel_offset"
         )
 
     # Variable-length / unknown-layout fields: stream None or 0.
@@ -457,20 +478,45 @@ def apply_intents_to_pabgb_bytes(
 
     body = bytearray(vanilla_body)
     field_specs = {f.name: f for f in schema.fields}
+    fs_entries = load_field_schema(table_name)
+
+    # Compute (start, end) bounds per record so the TID search has
+    # an upper limit and won't match the next entry's bytes.
+    sorted_offs = sorted(offsets.items(), key=lambda kv: kv[1])
+    entry_bounds: dict[int, tuple[int, int]] = {}
+    for idx, (k, off) in enumerate(sorted_offs):
+        end = (sorted_offs[idx + 1][1]
+               if idx + 1 < len(sorted_offs) else len(body))
+        entry_bounds[k] = (off, end)
 
     for intent in intents:
         if intent.op not in _SUPPORTED_OPS:
             continue
-        if intent.key not in offsets:
-            continue
-        if intent.field not in field_specs:
+        if intent.key not in entry_bounds:
             continue
 
-        entry_off = offsets[intent.key]
+        entry_off, entry_end = entry_bounds[intent.key]
         payload_off = _entry_payload_offset(body, entry_off, key_size)
         if payload_off is None:
             continue
 
+        # Try community field_schema first (TID or rel_offset).
+        fs_entry = fs_entries.get(intent.field)
+        if fs_entry is not None:
+            written = _apply_via_field_schema(
+                body, fs_entry, payload_off, entry_end, intent.new)
+            if written:
+                continue
+            # field_schema entry was present but write failed (TID
+            # not found, value out of range, etc.). Don't fall back
+            # to PABGB schema — the author meant the field_schema
+            # path; falling back would silently target a different
+            # field.
+            continue
+
+        # Fall back to PABGB schema for direct field-name match.
+        if intent.field not in field_specs:
+            continue
         located = _field_offset_in_payload(schema, intent.field)
         if located is None:
             continue
@@ -486,3 +532,49 @@ def apply_intents_to_pabgb_bytes(
         body[abs_off:abs_off + spec.stream_size] = packed
 
     return bytes(body)
+
+
+# ── field_schema apply helpers ──────────────────────────────────────
+
+
+# struct format + size table for the community-schema data_type
+# strings (matches JMM's IteminfoBlobPatcher.GetDataTypeSize).
+_DTYPE_TABLE: dict[str, tuple[str, int]] = {
+    "i8": ("b", 1),  "u8": ("B", 1),
+    "i16": ("h", 2), "u16": ("H", 2),
+    "i32": ("i", 4), "u32": ("I", 4), "f32": ("f", 4),
+    "i64": ("q", 8), "u64": ("Q", 8), "f64": ("d", 8),
+}
+
+
+def _apply_via_field_schema(
+    body: bytearray, entry: FieldSchemaEntry,
+    payload_off: int, entry_end: int, new_value
+) -> bool:
+    """Try writing ``new_value`` using a field_schema entry.
+
+    Returns True on a successful write, False if the entry can't
+    be applied (TID missing, value out of range, write would
+    overflow entry bounds, unknown data type).
+    """
+    fmt_size = _DTYPE_TABLE.get(entry.data_type.lower())
+    if fmt_size is None:
+        return False
+    fmt, size = fmt_size
+
+    # locate_field uses [blob_start, blob_end) — payload is the
+    # entry's blob from JMM's perspective.
+    abs_off = locate_field(
+        bytes(body), payload_off, entry_end, entry)
+    if abs_off is None:
+        return False
+    if abs_off + size > entry_end:
+        return False
+
+    try:
+        packed = struct.pack(f"<{fmt}", new_value)
+    except struct.error:
+        return False
+
+    body[abs_off:abs_off + size] = packed
+    return True
