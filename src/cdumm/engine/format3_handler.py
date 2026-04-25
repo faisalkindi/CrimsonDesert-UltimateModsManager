@@ -350,3 +350,131 @@ def apply_intents_to_records(
             out[intent.key] = dict(vanilla_rec)  # shallow copy
         out[intent.key][intent.field] = intent.new
     return out
+
+
+# ── Apply (binary level) ────────────────────────────────────────────
+
+
+import struct  # noqa: E402  -- binary writer below uses this
+
+from cdumm.semantic.parser import parse_pabgh_index  # noqa: E402
+
+
+def _entry_payload_offset(body: bytes, entry_offset: int) -> int | None:
+    """Return the absolute byte offset where the payload starts
+    inside the entry at ``entry_offset``.
+
+    Entry header: u32 entry_id + u32 name_len + name UTF-8 + 0x00.
+    """
+    if entry_offset + 8 > len(body):
+        return None
+    name_len = struct.unpack_from("<I", body, entry_offset + 4)[0]
+    if name_len > 500 or entry_offset + 8 + name_len > len(body):
+        return None
+    name_end = entry_offset + 8 + name_len
+    # Single byte null terminator after the name
+    if name_end < len(body) and body[name_end] == 0:
+        return name_end + 1
+    return name_end
+
+
+def _field_offset_in_payload(
+    schema, target_field: str
+) -> tuple[int, "FieldSpec"] | None:
+    """Walk the schema's flat fields up to ``target_field``, summing
+    their stream sizes. Returns ``(offset_in_payload, spec)`` or
+    None if the field doesn't exist or any preceding field has
+    unknown layout (which would invalidate the offset).
+    """
+    offset = 0
+    for spec in schema.fields:
+        if spec.name == target_field:
+            return offset, spec
+        if not spec.stream_size:
+            # Variable-length / unknown field before our target
+            # invalidates the byte offset — we cannot find the
+            # target deterministically without parsing the
+            # variable-length field's contents first.
+            return None
+        offset += spec.stream_size
+    return None
+
+
+def _pack_value(value, spec) -> bytes | None:
+    """Pack a Python value into the field's binary format.
+
+    Returns the bytes to write, or None if the value can't fit
+    or the field doesn't have a known struct format.
+    """
+    if not spec.struct_fmt:
+        return None
+    try:
+        return struct.pack(f"<{spec.struct_fmt}", value)
+    except struct.error:
+        # Out-of-range, wrong type, etc. Caller's job to refuse
+        # rather than corrupting bytes.
+        return None
+
+
+def apply_intents_to_pabgb_bytes(
+    table_name: str,
+    vanilla_body: bytes,
+    vanilla_header: bytes,
+    intents: list[Format3Intent],
+) -> bytes:
+    """Apply each supported intent directly to ``vanilla_body``,
+    returning the modified bytes.
+
+    Phase 1 supports flat fixed-width fields only. An intent is
+    silently ignored when:
+
+      * the table has no schema, or
+      * the intent's key isn't in the PABGH index, or
+      * the intent's op is not 'set', or
+      * the intent's field isn't a known fixed-width schema field
+        with no preceding variable-length field, or
+      * the value won't fit in the field's binary format.
+
+    Use ``validate_intents`` upstream to surface skip reasons to
+    the user — this writer is the apply step for already-validated
+    intents and won't itself produce diagnostics.
+    """
+    if not has_schema(table_name):
+        return vanilla_body
+
+    schema = get_schema(table_name)
+    _, offsets = parse_pabgh_index(vanilla_header, table_name)
+    if not offsets:
+        return vanilla_body
+
+    body = bytearray(vanilla_body)
+    field_specs = {f.name: f for f in schema.fields}
+
+    for intent in intents:
+        if intent.op not in _SUPPORTED_OPS:
+            continue
+        if intent.key not in offsets:
+            continue
+        if intent.field not in field_specs:
+            continue
+
+        entry_off = offsets[intent.key]
+        payload_off = _entry_payload_offset(body, entry_off)
+        if payload_off is None:
+            continue
+
+        located = _field_offset_in_payload(schema, intent.field)
+        if located is None:
+            continue
+        rel_off, spec = located
+        abs_off = payload_off + rel_off
+
+        packed = _pack_value(intent.new, spec)
+        if packed is None or len(packed) != spec.stream_size:
+            continue
+        if abs_off + spec.stream_size > len(body):
+            continue
+
+        body[abs_off:abs_off + spec.stream_size] = packed
+
+    return bytes(body)
