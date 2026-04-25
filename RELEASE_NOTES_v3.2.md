@@ -18,6 +18,8 @@ Bundles the v3.1.7.x hotfixes, the NexusMods API integration, and the new Game U
 
 - **Apply no longer shows false "corrupt PAMT" warning** (was v3.1.7.2). v3.1.7.1 still showed an "Apply Completed with Warnings" banner after every successful Apply claiming your mods had corrupt PAMT files. The precheck producing that banner was examining the wrong file (the binary patch, not the reconstructed PAMT). The precheck is disabled; the real import and apply flows still catch truly corrupt files.
 
+- **Recovery no longer explodes multi-preset mods into a sea of duplicates.** When a mod was originally imported from a folder with multiple preset JSONs (Glider Stamina ships 5, Infinite Horse ships 9), Recovery's reimport step was sending the FOLDER to the worker. The worker's multi-JSON branch then split each preset into its own mod row — turning one Glider into 5 cards and one Horse into 9. Reimport now resolves the source as `json_source` first (the user's chosen single preset) and only falls back to the folder for PAZ-archive mods. One mod stays one mod.
+
 ### After updating
 
 1. Replace your old `CDUMM3.exe` with this release.

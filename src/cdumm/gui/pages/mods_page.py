@@ -2167,17 +2167,26 @@ class ModsPage(QWidget):
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
-        # Gather a usable source for each selected mod. Three fallback
-        # rules, in order:
-        #   1. ``source_path`` IF the folder is non-empty (PAZ-style
-        #      mod imported as a folder/archive).
-        #   2. ``json_source`` from the DB (JSON-patch mods archive
-        #      their original .json into deltas/<id>/source.json; the
-        #      source_path folder ends up empty).
+        # Gather a usable source for each selected mod. Resolution order:
+        #   1. ``json_source`` IF it points at an existing .json file
+        #      (JSON-patch mods bake the user's chosen preset into
+        #      deltas/<id>/source.json — reimport from THAT keeps the
+        #      same single preset).
+        #   2. ``source_path`` if it's a folder OR a single archive file.
         #   3. Skip otherwise.
-        # Without rule 2, recovery's reimport pass tries to reimport
-        # JSON-patch mods from an empty folder and fails with
-        # "Found 0 file(s)" — the user's screenshot showed 17 of those.
+        #
+        # Why json_source wins over source_path: when a JSON-patch mod
+        # was originally imported from a folder with multiple preset
+        # JSONs (Glider Stamina ships 5 presets, Infinite Horse ships
+        # 9), CDUMM's PresetPickerDialog asked the user to pick one and
+        # then archived ALL the original presets under sources/<id>/.
+        # During reimport, picking the FOLDER causes import_from_folder
+        # to re-detect every preset as a separate JSON patch and
+        # explode them into N mod rows (only the first reusing
+        # existing_mod_id; the rest become NEW rows). json_source
+        # always points at the single preset the user actually chose,
+        # so reimporting from it regenerates the same one delta in
+        # place — no row duplication.
         import os
         entries: list[tuple[int, str, str]] = []  # (mod_id, name, source)
         missing: list[str] = []
@@ -2185,18 +2194,21 @@ class ModsPage(QWidget):
             if m["id"] not in mod_ids:
                 continue
             sp = m.get("source_path") or ""
+            js = m.get("json_source") or ""
             chosen: str | None = None
-            if sp and os.path.isdir(sp) and os.listdir(sp):
+            if js and os.path.isfile(js):
+                chosen = js
+            elif sp and os.path.isdir(sp) and os.listdir(sp):
                 chosen = sp
             elif sp and os.path.isfile(sp):
                 chosen = sp
-            else:
-                js = m.get("json_source") or ""
-                if js and os.path.isfile(js):
-                    chosen = js
             if not chosen:
                 missing.append(m["name"])
                 continue
+            logger.info(
+                "Reimport source resolved: id=%d name=%r chosen=%r "
+                "(json_source=%r source_path=%r)",
+                m["id"], m["name"], chosen, js, sp)
             entries.append((m["id"], m["name"], chosen))
 
         if not entries:
