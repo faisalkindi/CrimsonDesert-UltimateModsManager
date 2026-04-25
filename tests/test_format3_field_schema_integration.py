@@ -196,6 +196,43 @@ def test_tid_not_found_in_entry_skips_write(
     assert new_body == body
 
 
+def test_tid_search_refuses_write_on_multiple_matches(
+        synth_schema, field_schema_root):
+    """A 4-byte TID has a low but nonzero collision rate inside a
+    real entry payload — values inside CString text, integer
+    constants, and other fields can match by chance.
+
+    JMM v9.9.3 takes the FIRST match silently. CDUMM does
+    something safer: refuse to write when the TID appears more
+    than once in the entry's blob. The author can either pick a
+    different TID, narrow with rel_offset, or add disambiguating
+    context.
+
+    Test: synthtest entry where TID bytes appear at TWO positions
+    inside the payload (here as both _alpha and _beta values).
+    The writer must NOT clobber bytes at either match."""
+    tid_value = 0x12345678
+    body, header = _build_pabgb([
+        # _alpha and _beta both equal the TID — two matches
+        _entry_u32_id(1, "First", tid_value, tid_value, 0xCAFE),
+    ], keys=[1])
+    _write_field_schema(field_schema_root, "kvtest", {
+        "ambiguous": {
+            "tid": tid_value, "value_offset": 4, "type": "u32",
+        },
+    })
+
+    intents = [Format3Intent(
+        entry="First", key=1, field="ambiguous",
+        op="set", new=0xDEADBEEF)]
+    new_body = apply_intents_to_pabgb_bytes(
+        "kvtest", body, header, intents)
+
+    # Body must be unchanged — refusing to guess which match was
+    # meant is safer than silently corrupting one of them.
+    assert new_body == body
+
+
 def test_tid_search_bound_excludes_next_entry_header(
         synth_schema, field_schema_root):
     """Adjacent-entry collision guard.

@@ -222,6 +222,15 @@ def locate_field(body: bytes, blob_start: int, blob_end: int,
       * ``tid``: search ``[blob_start, blob_end)`` for the 4-byte
         TID marker, return ``tid_pos + value_offset``
 
+    Multi-match safety: when a TID appears more than once inside
+    the entry blob (real risk on 4-byte search patterns —
+    integer constants, CString bytes, neighboring fields can all
+    coincidentally match), refuse to guess which match was meant.
+    JMM takes the first match silently; we surface this case as
+    None so the caller can skip with a clear reason. The mod
+    author can disambiguate by switching to ``rel_offset`` or
+    picking a more unique TID.
+
     ``blob_end`` is the exclusive upper bound — the search must
     not match a TID belonging to the next entry.
     """
@@ -230,10 +239,17 @@ def locate_field(body: bytes, blob_start: int, blob_end: int,
 
     if entry.tid is not None:
         tid_bytes = struct.pack("<I", entry.tid & 0xFFFFFFFF)
-        # bytes.find with start/end keeps us inside the entry
-        pos = body.find(tid_bytes, blob_start, blob_end)
-        if pos < 0:
+        # bytes.count + bytes.find both bounded by [start, end).
+        n_matches = body.count(tid_bytes, blob_start, blob_end)
+        if n_matches == 0:
             return None
-        return pos + entry.value_offset
+        if n_matches > 1:
+            logger.warning(
+                "TID 0x%08X appears %d times in entry blob "
+                "[%d, %d); refusing to guess which match — "
+                "use rel_offset or a more unique TID",
+                entry.tid, n_matches, blob_start, blob_end)
+            return None
+        return body.find(tid_bytes, blob_start, blob_end) + entry.value_offset
 
     return None
