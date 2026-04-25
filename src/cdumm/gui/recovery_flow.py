@@ -301,20 +301,36 @@ class RecoveryFlow(QObject):
         self.step_changed.emit(step)
 
     def _freeze_main_window(self) -> None:
-        try:
-            central = self._main_window.centralWidget()
-            if central is not None:
-                central.setEnabled(False)
-        except Exception as e:
-            logger.debug("RecoveryFlow freeze failed: %s", e)
+        """Disable the content area + sidebar nav while the chain runs.
+
+        ``CdummWindow`` extends ``qfluentwidgets.FluentWindow``, which
+        does NOT expose ``centralWidget()`` (that's QMainWindow's API).
+        FluentWindow's content area is ``stackedWidget`` and the left
+        sidebar is ``navigationInterface``. Disabling both freezes
+        every interactive surface (mod cards, Apply button, sidebar
+        nav) without freezing the InfoBar overlay so the user can
+        still see status updates.
+        """
+        win = self._main_window
+        for attr in ("stackedWidget", "navigationInterface"):
+            try:
+                widget = getattr(win, attr, None)
+                if widget is not None:
+                    widget.setEnabled(False)
+            except Exception as e:
+                logger.debug(
+                    "RecoveryFlow freeze (%s) failed: %s", attr, e)
 
     def _thaw_main_window(self) -> None:
-        try:
-            central = self._main_window.centralWidget()
-            if central is not None:
-                central.setEnabled(True)
-        except Exception as e:
-            logger.debug("RecoveryFlow thaw failed: %s", e)
+        win = self._main_window
+        for attr in ("stackedWidget", "navigationInterface"):
+            try:
+                widget = getattr(win, attr, None)
+                if widget is not None:
+                    widget.setEnabled(True)
+            except Exception as e:
+                logger.debug(
+                    "RecoveryFlow thaw (%s) failed: %s", attr, e)
 
     def _platform_hint(self) -> str:
         try:

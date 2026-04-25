@@ -5634,19 +5634,20 @@ class CdummWindow(FluentWindow):
             return
         stale_count = sum(len(rows) - 1 for rows in groups.values())
         names = list(groups.keys())
-        head = ", ".join(names[:5])
-        tail = (f" (+{len(names) - 5} more)"
-                if len(names) > 5 else "")
+        head = ", ".join(names[:3])
+        tail = (f" +{len(names) - 3}"
+                if len(names) > 3 else "")
         bar = InfoBar.warning(
             title=f"{stale_count} duplicate mod row(s) detected",
-            content=(f"{head}{tail}. Old re-imports left stale rows "
-                     "behind. Click Clean Up to merge and remove them."),
+            content=(
+                f"Click Clean up to merge and remove them. ({head}{tail})"),
             duration=-1,
             position=InfoBarPosition.TOP,
             parent=self,
         )
         from qfluentwidgets import PushButton
         btn = PushButton("Clean up")
+        btn.setMinimumWidth(120)
         btn.clicked.connect(self._on_cleanup_duplicates_clicked)
         bar.addWidget(btn)
         self._dup_cleanup_bar = bar
@@ -5696,9 +5697,8 @@ class CdummWindow(FluentWindow):
         self._offer_recovery_flow(
             title="Game was updated — mods need refreshing",
             body=(
-                "Crimson Desert has been updated since your last "
-                "snapshot. Click Start Recovery to run the full "
-                "recovery flow (verify, rescan, reimport, apply)."))
+                "Click Start Recovery to verify, rescan, and "
+                "reapply your mods."))
         # Also show the D1 "Apply locked" banner so the reason is
         # visible even if the user dismisses the Recovery InfoBar.
         InfoBar.error(
