@@ -152,3 +152,77 @@ def test_max_reported_caps_the_mismatch_list(db, tmp_path: Path):
     drift, mismatches = detect_snapshot_drift(db, game_dir, max_reported=5)
     assert drift is True
     assert len(mismatches) == 5
+
+
+def test_apply_rewritten_meta_files_excluded_when_a_mod_is_applied(
+        db, tmp_path: Path):
+    """meta/0.papgt and meta/0.pathc get rebuilt by Apply on every
+    cycle. With at least one applied mod, the post-apply size differs
+    from the vanilla snapshot by design — drift detection must NOT
+    treat that as user-visible drift, otherwise the Recovery banner
+    fires after every successful Apply on next launch."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    _seed_snapshot(db, [
+        ("meta/0.papgt", 6794283),
+        ("meta/0.pathc", 12345),
+        ("0000/0.paz", 100),
+    ])
+    # Live files reflect modded sizes for the meta integrity files,
+    # vanilla size for the unrelated PAZ.
+    _make_live_file(game_dir, "meta/0.papgt", 7000000)
+    _make_live_file(game_dir, "meta/0.pathc", 99999)
+    _make_live_file(game_dir, "0000/0.paz", 100)
+
+    db.connection.execute(
+        "INSERT INTO mods (name, mod_type, enabled, applied) "
+        "VALUES (?, ?, 1, 1)",
+        ("ModA", "paz"))
+    mod_id = db.connection.execute(
+        "SELECT id FROM mods WHERE name = ?", ("ModA",)
+    ).fetchone()[0]
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, byte_start, byte_end, "
+        "delta_path) VALUES (?, ?, ?, ?, ?)",
+        (mod_id, "0001/0.paz", 0, 100, "/tmp/delta"))
+    db.connection.commit()
+
+    drift, mismatches = detect_snapshot_drift(db, game_dir)
+    assert drift is False, (
+        "with an applied mod, meta integrity files must NOT be "
+        f"flagged as drift. Got mismatches={mismatches}")
+
+
+def test_meta_integrity_files_still_drift_checked_when_zero_mods_applied(
+        db, tmp_path: Path):
+    """Conversely: with zero applied mods, the meta integrity files
+    are still vanilla. External tampering with them on a clean
+    install IS user-visible drift and must be flagged."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    _seed_snapshot(db, [("meta/0.papgt", 6794283)])
+    _make_live_file(game_dir, "meta/0.papgt", 9999999)  # tampered
+
+    drift, mismatches = detect_snapshot_drift(db, game_dir)
+    assert drift is True
+    assert "meta/0.papgt" in mismatches
+
+
+def test_meta_exclusion_only_kicks_in_when_apply_count_is_positive(
+        db, tmp_path: Path):
+    """Sanity: an enabled-but-not-applied mod doesn't bump the
+    applied counter, so the meta exclusion stays off."""
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    _seed_snapshot(db, [("meta/0.pathc", 12345)])
+    _make_live_file(game_dir, "meta/0.pathc", 99999)  # tampered
+
+    db.connection.execute(
+        "INSERT INTO mods (name, mod_type, enabled, applied) "
+        "VALUES (?, ?, 1, 0)",  # enabled but never applied
+        ("PendingMod", "paz"))
+    db.connection.commit()
+
+    drift, mismatches = detect_snapshot_drift(db, game_dir)
+    assert drift is True
+    assert "meta/0.pathc" in mismatches

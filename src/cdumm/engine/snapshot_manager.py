@@ -81,6 +81,21 @@ def verify_live_disk_matches_backups(
     return (len(problems) == 0), problems
 
 
+# Files Apply rewrites unconditionally as part of CDUMM's PAZ
+# integrity-chain housekeeping. Whenever any PAZ mod is applied,
+# `meta/0.papgt` (PAPGT — group hashes for every PAMT) gets
+# rebuilt and `meta/0.pathc` (PATHC — texture hash chain) may be
+# updated. Their post-apply size differs from the vanilla snapshot
+# by design, so they would otherwise generate a false-positive
+# drift signal on every launch after a successful Apply. They're
+# only excluded when there's at least one applied mod — with zero
+# applied mods these files are still vanilla and SHOULD be checked.
+APPLY_REWRITTEN_META_FILES = frozenset({
+    "meta/0.papgt",
+    "meta/0.pathc",
+})
+
+
 def detect_snapshot_drift(
         db,
         game_dir: Path,
@@ -98,10 +113,15 @@ def detect_snapshot_drift(
     1. Build the set of `file_path` values referenced by mod_deltas
        where the mod is `applied=1` — these files are EXPECTED to
        differ from the snapshot.
-    2. For every other file in the `snapshots` table, stat the live
+    2. Add the apply-rewritten meta integrity files (PAPGT, PATHC)
+       to the same exclusion set whenever any mod is applied —
+       Apply rebuilds them, so their post-apply size differs from
+       the vanilla snapshot by design. Without this, every launch
+       after Apply would false-flag those two files as drift.
+    3. For every other file in the `snapshots` table, stat the live
        counterpart in `game_dir` and compare `st_size` against the
        snapshot's stored `file_size`.
-    3. If any size mismatch shows up, the disk has drifted from the
+    4. If any size mismatch shows up, the disk has drifted from the
        state CDUMM thinks it's in.
 
     Cost: O(N) `os.stat` calls on PAZ files (~200 in current installs).
@@ -130,6 +150,22 @@ def detect_snapshot_drift(
         logger.debug("detect_snapshot_drift: mod_deltas query failed: %s", e)
         return False, []
     touched = {row[0] for row in touched_rows}
+
+    # If anything is applied, exclude the meta integrity files Apply
+    # rewrites. With zero applied mods these files should still be
+    # vanilla; leaving them in the check covers the no-mods drift
+    # case (someone tampered with meta/* on a clean install).
+    try:
+        applied_count_row = db.connection.execute(
+            "SELECT COUNT(*) FROM mods WHERE applied = 1"
+        ).fetchone()
+        applied_count = applied_count_row[0] if applied_count_row else 0
+    except Exception as e:
+        logger.debug(
+            "detect_snapshot_drift: applied-count query failed: %s", e)
+        applied_count = 0
+    if applied_count > 0:
+        touched |= APPLY_REWRITTEN_META_FILES
 
     mismatches: list[str] = []
     for path_str, expected_size in snap_rows:

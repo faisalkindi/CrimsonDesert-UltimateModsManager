@@ -20,6 +20,8 @@ Bundles the v3.1.7.x hotfixes, the NexusMods API integration, and the new Game U
 
 - **Recovery no longer explodes multi-preset mods into a sea of duplicates.** When a mod was originally imported from a folder with multiple preset JSONs (Glider Stamina ships 5, Infinite Horse ships 9), Recovery's reimport step was sending the FOLDER to the worker. The worker's multi-JSON branch then split each preset into its own mod row — turning one Glider into 5 cards and one Horse into 9. Reimport now resolves the source as `json_source` first (the user's chosen single preset) and only falls back to the folder for PAZ-archive mods. One mod stays one mod.
 
+- **Snapshot-drift trigger no longer false-fires after every Apply.** The drift detector was flagging `meta/0.papgt` and `meta/0.pathc` as drifted on every launch after a successful Apply, because Apply rebuilds those PAZ integrity-chain files but they aren't tracked in `mod_deltas`. The detector now skips those two files when at least one mod is applied — they're CDUMM-managed and post-apply size differs from vanilla snapshot by design. With zero applied mods they're still drift-checked normally so external tampering on a clean install is still caught.
+
 ### After updating
 
 1. Replace your old `CDUMM3.exe` with this release.
