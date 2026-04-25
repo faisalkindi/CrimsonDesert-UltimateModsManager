@@ -213,3 +213,59 @@ def test_path_resolves_to_search_root_field_schema_dir(tmp_path):
     expected.write_text("{}", encoding="utf-8")
     p = field_schema_path("iteminfo", search_root=tmp_path)
     assert p == expected
+
+
+# ── Reject offsets that would write outside the entry ───────────────
+
+
+def test_load_rejects_negative_rel_offset(tmp_path):
+    """A typo like ``"rel_offset": -4`` (forgotten minus sign,
+    confused convention) writes 4 bytes BEFORE the entry's payload
+    start — into the previous entry's bytes. The bounds check in
+    _apply_via_field_schema only validates the upper bound, so
+    negatives slip through. Reject at load time so the mod author
+    sees the bad entry instead of silent corruption."""
+    _write_schema(tmp_path, "iteminfo", {
+        "bad_field": {"rel_offset": -4, "type": "u32"},
+    })
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    assert "bad_field" not in schema
+
+
+def test_load_rejects_negative_value_offset(tmp_path):
+    """``value_offset`` is the bytes between the TID match and the
+    write position. Negative values overlap the TID itself or
+    earlier bytes — corrupts the type tag or unrelated fields."""
+    _write_schema(tmp_path, "iteminfo", {
+        "bad_field": {"tid": "0xAA", "value_offset": -1,
+                      "type": "i32"},
+    })
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    assert "bad_field" not in schema
+
+
+def test_load_keeps_valid_entries_when_one_is_negative(tmp_path):
+    """One bad entry must not poison the rest of the schema."""
+    _write_schema(tmp_path, "iteminfo", {
+        "good": {"tid": "0xAA", "type": "i32"},
+        "bad": {"rel_offset": -8, "type": "u32"},
+    })
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    assert "good" in schema
+    assert "bad" not in schema
+
+
+def test_load_zero_offsets_are_allowed(tmp_path):
+    """Zero offsets are legitimate (rel_offset=0 = blob start;
+    value_offset=0 = write at TID position). Don't conflate
+    'falsy' with 'invalid' — only negatives are wrong."""
+    _write_schema(tmp_path, "iteminfo", {
+        "at_zero_rel": {"rel_offset": 0, "type": "u32"},
+        "at_tid": {"tid": "0xAA", "value_offset": 0,
+                   "type": "i32"},
+    })
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    assert "at_zero_rel" in schema
+    assert schema["at_zero_rel"].rel_offset == 0
+    assert "at_tid" in schema
+    assert schema["at_tid"].value_offset == 0

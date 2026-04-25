@@ -138,6 +138,15 @@ def load_field_schema(table_name: str,
         rel_offset = val.get("rel_offset")
         if rel_offset is not None and not isinstance(rel_offset, int):
             rel_offset = None
+        # Negative rel_offset would write into the previous entry's
+        # bytes (only the upper bound is checked at apply time).
+        # Reject at load to surface the typo before any write.
+        if rel_offset is not None and rel_offset < 0:
+            logger.warning(
+                "field_schema entry '%s' in '%s' has negative "
+                "rel_offset=%d; skipping (would write before entry "
+                "start)", key, table_name, rel_offset)
+            continue
 
         # An entry with neither a TID nor a rel_offset has no way to
         # locate the field — drop it. Surfacing a parse-time error
@@ -154,6 +163,15 @@ def load_field_schema(table_name: str,
         value_offset = val.get("value_offset", 5)
         if not isinstance(value_offset, int):
             value_offset = 5
+        # Negative value_offset overlaps the TID itself or earlier
+        # bytes — corrupts the type tag. Reject so the author sees
+        # the bad entry, not a silent corruption.
+        if value_offset < 0:
+            logger.warning(
+                "field_schema entry '%s' in '%s' has negative "
+                "value_offset=%d; skipping",
+                key, table_name, value_offset)
+            continue
 
         result[key] = FieldSchemaEntry(
             tid=tid,
