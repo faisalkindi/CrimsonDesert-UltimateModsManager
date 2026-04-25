@@ -16,46 +16,58 @@ CHANGELOG = [
         "version": "3.2",
         "date": "2026-04-25",
         "notes": [
-            "Game Update Recovery — when Crimson Desert gets patched "
-            "and your mods break, CDUMM now shows a \"Start Recovery\" "
-            "button that runs the full recovery flow in one click: "
-            "verify prompt, Fix Everything, rescan, reimport, apply. "
-            "Mods whose original archive is gone are automatically "
-            "disabled so Apply never runs against stale patches. This "
-            "replaces the five manual steps users had to know after a "
-            "Steam update. Both the startup \"game was updated\" path "
-            "AND the later \"game files changed\" fingerprint check "
-            "now surface the same Recovery button.",
-            "NexusMods integration (Phase 1) — Settings has a new "
-            "NexusMods card where you can paste your personal API key "
-            "and get automatic mod update checks every 30 minutes. "
-            "Outdated mods get a red \"Click To Update\" pill; up-to-"
-            "date mods get a green check. Premium users get one-click "
-            "downloads; free users get routed to the Nexus page with "
-            "CDUMM's application slug approved.",
-            "Single Sign-On with Nexus — click \"Login with Nexus\" "
-            "in Settings to authorize CDUMM via your browser without "
-            "pasting an API key. Uses the Nexus SSO websocket protocol; "
-            "CDUMM never sees your password.",
-            "nxm:// protocol handler — register CDUMM as the default "
-            "handler in Settings and \"Mod Manager Download\" buttons "
-            "on Nexus pages send the file directly to CDUMM. No more "
-            "manual drag-drop after downloading.",
-            "Hotfix (originally v3.1.7.1): v3.1.7 was rejecting some "
-            "mods at import time with a \"corrupt PAMT\" error that "
-            "mentioned a temp-file name (e.g. invalid literal for int() "
-            "with base 10: 'tmp9wk9wy2h'). The mods weren't actually "
-            "corrupt — the import-time validator was writing to a "
-            "randomly-named temp file that confused the parser. Fixed "
-            "by using the mod's real PAMT filename for validation.",
-            "Hotfix (originally v3.1.7.2): v3.1.7.1 still showed an "
-            "\"Apply Completed with Warnings\" banner after every "
-            "Apply falsely claiming your mods had corrupt PAMT files. "
-            "The precheck that produced that banner was examining the "
-            "wrong file (the binary patch, not the reconstructed "
-            "PAMT). The precheck is now disabled; the real import "
-            "and apply flows still catch truly corrupt files. The "
-            "banner should not appear anymore.",
+            "<b>NexusMods is now built in.</b> Sign in once and CDUMM "
+            "keeps an eye on every mod you have installed. When an "
+            "author pushes an update you see a red badge on the card. "
+            "Click \"Mod Manager Download\" on a Nexus page and it "
+            "lands straight in CDUMM. This is the headline feature.",
+            "<b>One-click sign-in to Nexus.</b> Open Settings, hit "
+            "\"Login with Nexus\", browser pops up, you confirm it is "
+            "you, done. No API keys to copy and paste. CDUMM never "
+            "sees your password.",
+            "<b>CDUMM tells you when your mods need updating.</b> "
+            "Every 30 minutes CDUMM quietly checks Nexus for new "
+            "versions of the mods you have installed. Outdated mods "
+            "get a bright red \"Click To Update\" badge. Up-to-date "
+            "mods get a quiet green check.",
+            "<b>Download from Nexus with one click.</b> On any mod's "
+            "Nexus page, the \"Mod Manager Download\" button now "
+            "sends the file straight to CDUMM. Premium members get "
+            "one-click imports; free members get sent to the right "
+            "Files tab.",
+            "<b>Game updates can't break your day anymore.</b> Steam "
+            "patches Crimson Desert overnight, your mods don't work "
+            "in the morning? CDUMM now catches that on launch and "
+            "offers a Start Recovery button. One click runs the whole "
+            "repair: verify your game files, regenerate every mod, "
+            "reapply them. Live progress bar. Cancel any time.",
+            "<b>Apply is way faster.</b> Two engine rewrites: conflict "
+            "detection is near-instant on big mod sets, and merging "
+            "mod changes runs hundreds of times faster. Files that "
+            "took minutes now take seconds. Real progress bar — no "
+            "more frozen 95% mystery.",
+            "<b>Cleaner Settings page.</b> Login is the recommended "
+            "flow now and it leads. Manual API key paste is still "
+            "there for power users, tucked behind an Advanced toggle.",
+            "<b>Mods stop multiplying during Recovery.</b> Some mods "
+            "ship multiple presets in one archive (Glider Stamina with "
+            "5 options, Infinite Horse with 9). Recovery used to "
+            "clone each preset into its own card. One mod is one mod "
+            "again.",
+            "<b>No more black command-prompt windows flashing</b> "
+            "while CDUMM is working.",
+            "<b>No more false \"corrupt PAMT\" warning</b> popping up "
+            "after every Apply when nothing was wrong (rolled in from "
+            "the unreleased v3.1.7.2 hotfix).",
+            "<b>Recovery doesn't false-alarm.</b> A bug was making "
+            "the Recovery banner appear on every launch right after a "
+            "successful Apply. Fixed.",
+            "<b>Cleaner error messages.</b> When a mod fails you see "
+            "which mod failed instead of a generic placeholder.",
+            "<b>ASI plugin polish.</b> Uninstalling cleans up sidecar "
+            "files. If an author renames their .asi between versions, "
+            "CDUMM removes the old one. Outdated badge clears the "
+            "moment you update a plugin.",
         ],
     },
     {
@@ -782,9 +794,16 @@ CHANGELOG = [
 
 
 def get_changelog_html(versions: list[dict] | None = None) -> str:
-    """Generate HTML changelog from version data."""
+    """Generate HTML changelog from version data.
+
+    Body text colour is intentionally NOT hardcoded — the wrapping
+    QTextBrowser sets a theme-aware foreground colour via its
+    stylesheet (dark text on light theme, light text on dark theme).
+    Inline ``color:`` declarations override that stylesheet, which
+    is what caused the unreadable washed-out bullets in light mode.
+    """
     entries = versions or CHANGELOG
-    lines = ['<div style="font-family: Segoe UI, sans-serif; color: #D8DEE9;">']
+    lines = ['<div style="font-family: Segoe UI, sans-serif;">']
     for entry in entries:
         lines.append(
             f'<h3 style="color: #D4A43C; margin-bottom: 4px;">'

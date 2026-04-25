@@ -392,6 +392,23 @@ class SettingsPage(SmoothScrollArea):
         hint.setContentsMargins(6, 0, 6, 0)
         self._layout.addWidget(hint)
 
+        # ── About / Patch Notes ──────────────────────────────────
+        # Lets users re-open the patch notes any time after install,
+        # not just on the one-shot version-upgrade auto-launch. Shows
+        # the FULL changelog (all entries) so users can scroll back
+        # through prior releases too.
+        from cdumm import __version__ as _cdumm_version
+        self._about_card = PushSettingCard(
+            tr("settings.view_patch_notes"),
+            FluentIcon.HISTORY,
+            tr("settings.about_title", version=_cdumm_version),
+            tr("settings.about_desc"),
+            self._container,
+        )
+        self._about_card.button.setMinimumWidth(180)
+        self._about_card.clicked.connect(self._on_view_patch_notes)
+        self._layout.addWidget(self._about_card)
+
         self._layout.addStretch()
 
         self.setWidget(self._container)
@@ -951,6 +968,24 @@ class SettingsPage(SmoothScrollArea):
             content=tr("settings.privatebin_saved"),
             duration=2500, position=InfoBarPosition.TOP, parent=self.window(),
         )
+
+    def _on_view_patch_notes(self) -> None:
+        """Open the patch notes dialog with the FULL changelog (every
+        version, not just the latest). Lets users re-open the dialog
+        any time after install — the on-launch auto-show is a one-shot
+        per upgrade and easy to dismiss accidentally.
+        """
+        try:
+            from cdumm.gui.changelog import PatchNotesDialog
+            PatchNotesDialog(self.window(), latest_only=False).exec()
+        except Exception as e:
+            logger.warning("View Patch Notes failed to open: %s", e)
+            InfoBar.error(
+                title=tr("settings.view_patch_notes_failed_title"),
+                content=str(e),
+                duration=4000, position=InfoBarPosition.TOP,
+                parent=self.window(),
+            )
 
     def _on_check_nexus_updates(self) -> None:
         if not self._db:
