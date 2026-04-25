@@ -2383,12 +2383,32 @@ class ApplyWorker(QObject):
                 kept_mod_meta = entries[winner][1]
                 kept_name = kept_mod_meta.get(
                     "mod_name", "highest-priority mod")
-                dropped_count = len(indices) - 1
-                msg = (f"{dropped_count} mod(s) targeting "
+                # Collect the names of every dropped mod so the user
+                # can actually act on the message — earlier versions
+                # only said "1 mod(s) were dropped" which left users
+                # hunting through the conflict viewer to find which
+                # mod silently lost (GioGr on Nexus reported the
+                # conflict viewer didn't even show his case).
+                dropped_names: list[str] = []
+                for i in indices:
+                    if i == winner:
+                        continue
+                    name = entries[i][1].get("mod_name") if entries[i][1] else None
+                    dropped_names.append(name or f"mod #{i}")
+                # Cap the inline list at 5 to keep banners readable
+                # on huge conflict sets; the activity log captures all.
+                shown = dropped_names[:5]
+                more = len(dropped_names) - len(shown)
+                names_block = ", ".join(f"'{n}'" for n in shown)
+                if more > 0:
+                    names_block += f" and {more} more"
+                msg = (f"{len(dropped_names)} mod(s) targeting "
                        f"'{entry_path}' were dropped because they change "
                        f"the file size and can't merge with inserts. "
-                       f"Only '{kept_name}' is active for that file. "
-                       f"Use priority to pick a different winner.")
+                       f"Active: '{kept_name}'. "
+                       f"Dropped: {names_block}. "
+                       f"Drag a different mod to the top of the load "
+                       f"order to pick another winner.")
                 if hasattr(self, "_soft_warnings"):
                     self._soft_warnings.append(msg)
                 try:
