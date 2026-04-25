@@ -1017,6 +1017,7 @@
   "tooltip.up_to_date": "Up to date",
   "mod_list.click_to_update": "Click To Update",
   "main.download": "Download",
+  "main.dismiss_update_banner": "Dismiss this update notice (will reappear if a newer version becomes available)",
   "progress.completed": "Completed!",
   "progress.failed_short": "Failed!",
   "infobar.skipped": "Skipped",

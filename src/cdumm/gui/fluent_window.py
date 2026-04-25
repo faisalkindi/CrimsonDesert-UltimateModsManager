@@ -1661,25 +1661,56 @@ class CdummWindow(FluentWindow):
         url = info.get("url", "")
         logger.info("Update available: %s", tag)
 
-        # 1. Show persistent update banner on all pages (except about)
-        self._show_update_banner(tag, url)
+        # Honour the user's per-version dismissal — if they previously
+        # closed the banner for this exact tag we skip the banner this
+        # launch. A NEWER tag clears the skip and shows fresh. Without
+        # this, users who dismissed the banner kept getting it back on
+        # every relaunch (DeathZxZ on Nexus reported it blocked the
+        # button text at the top of the window with no way to close).
+        try:
+            from cdumm.storage.config import Config
+            dismissed = (Config(self._db).get("update_banner_dismissed_for")
+                         if self._db else None)
+        except Exception as e:
+            logger.debug("dismissal check failed: %s", e)
+            dismissed = None
+        if dismissed != tag:
+            # 1. Show persistent update banner on all pages (except about)
+            self._show_update_banner(tag, url)
 
-        # 2. Add badge to About nav item in sidebar
+        # 2. Add badge to About nav item in sidebar (always — it's small)
         try:
             self.navigationInterface.widget("AboutPage").setShowBadge(True)
         except Exception:
             pass
 
-        # 3. Update the About page with update info
+        # 3. Update the About page with update info (always)
         if hasattr(self, 'about_page'):
             self.about_page.set_update_status(tag, url, info.get("body", ""))
+
+    def _on_dismiss_update_banner(self) -> None:
+        """Hide the update banner this session AND remember which tag
+        the user dismissed so it doesn't reappear next launch — but a
+        newer tag will show fresh. The About-page badge stays so the
+        user can still find the update if they want it later."""
+        tag = getattr(self, "_update_banner_tag", None)
+        try:
+            from cdumm.storage.config import Config
+            if self._db and tag:
+                Config(self._db).set("update_banner_dismissed_for", tag)
+        except Exception as e:
+            logger.debug("dismissal save failed: %s", e)
+        if hasattr(self, "_update_banner") and self._update_banner:
+            self._update_banner.deleteLater()
+            self._update_banner = None
 
     def _show_update_banner(self, tag: str, url: str) -> None:
         """Show a persistent update banner at the top of the window."""
         from PySide6.QtWidgets import QHBoxLayout, QWidget
-        from PySide6.QtGui import QFont, QDesktopServices, QColor, QPainter
+        from PySide6.QtGui import QFont, QDesktopServices
         from PySide6.QtCore import QUrl
-        from qfluentwidgets import BodyLabel, PushButton, isDarkTheme
+        from qfluentwidgets import (BodyLabel, PushButton, TransparentToolButton,
+                                    FluentIcon)
 
         if hasattr(self, '_update_banner') and self._update_banner:
             self._update_banner.deleteLater()
@@ -1689,7 +1720,7 @@ class CdummWindow(FluentWindow):
         banner.setFixedHeight(36)
 
         layout = QHBoxLayout(banner)
-        layout.setContentsMargins(16, 0, 16, 0)
+        layout.setContentsMargins(16, 0, 8, 0)
         layout.setSpacing(12)
 
         label = BodyLabel(f"CDUMM {tag} is available", banner)
@@ -1707,6 +1738,15 @@ class CdummWindow(FluentWindow):
         btn.setFixedHeight(26)
         btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
         layout.addWidget(btn)
+
+        # Close (X) button — dismisses the banner this session AND
+        # remembers the tag so it won't reappear next launch (until
+        # a newer tag arrives). Fixes DeathZxZ's "non-closable" report.
+        close_btn = TransparentToolButton(FluentIcon.CLOSE, banner)
+        close_btn.setFixedSize(26, 26)
+        close_btn.setToolTip(tr("main.dismiss_update_banner"))
+        close_btn.clicked.connect(self._on_dismiss_update_banner)
+        layout.addWidget(close_btn)
 
         # Store for theme updates and page switching
         self._update_banner = banner
