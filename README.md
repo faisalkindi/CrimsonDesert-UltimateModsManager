@@ -15,16 +15,25 @@
 
 ---
 
+## New in v3.2
+
+- **NexusMods is now built in.** Sign in once, CDUMM watches every mod you've installed and lights up a red badge when an update lands. Click "Mod Manager Download" on a Nexus page and the file goes straight in — no Save As, no drag-drop.
+- **One-click Game Update Recovery.** Steam patches Crimson Desert overnight, your mods break in the morning? CDUMM catches that on launch and a single button runs the whole repair: verify, refresh every mod against the new game files, reapply.
+- **Apply is way faster.** Engine rewrites make conflict detection near-instant and merging mod changes hundreds of times faster on big mod sets. No more "stuck at 0% on 0008/0.paz".
+- **Cleaner Settings + in-app Patch Notes.** Login with Nexus is the recommended path and leads. View any prior version's notes any time from Settings → About.
+
+---
+
 ## How It Works
 
 Your original game files are **never modified**. Mods are applied through an overlay directory. Reverting is instant.
 
 1. Download **CDUMM3.exe** and run it — no install needed
 2. Welcome wizard guides you through language, theme, and game folder setup
-3. Drop mods onto the window — drop many at once for fast batch import
+3. Drop mods onto the window OR sign in to Nexus and use "Mod Manager Download" buttons
 4. Click **Apply**
 
-> If something goes wrong, click **Fix Everything** to restore clean state.
+> If something goes wrong, click **Fix Everything** to restore clean state. After a Steam patch, click **Start Recovery** on the yellow banner.
 
 ---
 
@@ -47,10 +56,22 @@ Your original game files are **never modified**. Mods are applied through an ove
 
 ## Key Features
 
+### NexusMods Integration (v3.2)
+- **One-click sign-in** — Login with Nexus opens your browser, you confirm, done. No API keys to copy and paste. CDUMM never sees your password.
+- **Auto-check for mod updates** — every 30 minutes CDUMM checks Nexus for new versions of the mods you have installed. Outdated mods get a red "Click To Update" badge; current mods get a quiet green check.
+- **Mod Manager Download buttons work** — toggle the handler in Settings and any "Mod Manager Download" button on a Nexus page sends the file straight to CDUMM. Premium users get one-click downloads; free users get sent to the right Files tab.
+- **Manual API key still supported** — tucked behind an Advanced toggle in Settings if you'd rather paste your own key.
+
+### Game Update Recovery (v3.2)
+- **One-click recovery after Steam patches.** Yellow banner appears on launch, click Start Recovery, watch a 4-step progress bar repair everything: verify your game files, regenerate every mod against the new game version, reapply.
+- **Two triggers, one banner.** Catches normal Steam patches AND any other change to your game files (antivirus rewrites, manual edits, half-finished Steam Verify).
+- **Mods that can't be auto-recovered get safely disabled** instead of corrupting your save. CDUMM tells you which ones so you can drop their original archive back in.
+
 ### Performance
+- **Apply is hundreds of times faster on big mod sets** (v3.2). Conflict detection went from O(E²) to O(E log E); cross-mod byte merging is now chunk-wise instead of byte-by-byte.
 - **Batch import** — drop dozens of mods at once, single-process import
 - **Fast apply** — overlay cache + Rust native engine, applies in seconds
-- **34 MB exe** — optimized build, no bloat
+- **48 MB exe** — single standalone binary, no install needed
 
 ### Mod Management
 - **Entry-level composition** — multiple mods safely modify the same PAZ file
@@ -62,13 +83,14 @@ Your original game files are **never modified**. Mods are applied through an ove
 
 ### Game Integration
 - **Auto-detection** — finds your game on Steam, Epic Games, or Xbox Game Pass
-- **Update detection** — flags outdated mods after game patches
+- **Game update detection** — surfaces the Recovery banner the moment Crimson Desert patches
 - **ASI management** — full plugin page with version tracking, enable/disable, config editing
 - **Launch game** — start Crimson Desert directly from the manager
 
 ### Interface
 - **Card-based UI** — Fluent Design with drag-reorder and folder groups
 - **Welcome wizard** — guided first-time setup with store logos
+- **In-app Patch Notes** — Settings → About → View Patch Notes opens the full version history any time
 - **Light & Dark themes** — choose during setup or switch anytime
 - **16 languages** — English, Deutsch, Español, Français, 한국어, 日本語, 简体中文, 繁體中文, العربية, Italiano, Polski, Русский, Türkçe, Українська, Bahasa Indonesia, Português
 
