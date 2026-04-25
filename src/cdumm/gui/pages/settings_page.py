@@ -248,38 +248,18 @@ class SettingsPage(SmoothScrollArea):
             tr("settings.nexus_key_row_desc"),
             key_widget,
         )
-        # Hide the whole group row by default. _sync_ui_from_db will
-        # reveal it if a key is already saved. The "Advanced" link
-        # below toggles it on demand.
+        # Hide the whole group row by default. _sync_ui_from_db keeps
+        # it hidden even when a key is saved — the user reveals it via
+        # the Advanced toggle below if they want to edit/paste a key
+        # manually. Showing both Login + a populated key field at the
+        # same time was the "why is the toggle below the visible field"
+        # confusion the user reported.
         if self._nexus_advanced_group is not None:
             self._nexus_advanced_group.setVisible(False)
 
         self._layout.addWidget(self._nexus_card)
 
-        # Advanced toggle: clicking reveals the manual API key paste
-        # row. New users only see "Login with Nexus" (the recommended
-        # path) and the manual key field stays out of sight unless
-        # explicitly opened.
-        advanced_row = QWidget()
-        advanced_layout = QHBoxLayout(advanced_row)
-        advanced_layout.setContentsMargins(6, 0, 6, 0)
-        advanced_layout.setSpacing(6)
-        self._nexus_advanced_toggle = HyperlinkButton(
-            "", "Advanced: paste API key manually")
-        self._nexus_advanced_toggle.setIcon(FluentIcon.SETTING)
-
-        def _toggle_advanced_key_row() -> None:
-            if self._nexus_advanced_group is None:
-                return
-            self._nexus_advanced_group.setVisible(
-                not self._nexus_advanced_group.isVisible())
-
-        self._nexus_advanced_toggle.clicked.connect(_toggle_advanced_key_row)
-        advanced_layout.addStretch(1)
-        advanced_layout.addWidget(self._nexus_advanced_toggle)
-        self._layout.addWidget(advanced_row)
-
-        # Status strip (badge + text) — theme-aware, shown only when populated
+        # ── Status strip (badge + text) — handler + signed-in status ─
         status_row = QWidget()
         status_layout = QHBoxLayout(status_row)
         status_layout.setContentsMargins(6, 0, 6, 0)
@@ -290,43 +270,27 @@ class SettingsPage(SmoothScrollArea):
         status_layout.addWidget(self._nexus_status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         self._nexus_status = BodyLabel("")
         status_layout.addWidget(self._nexus_status, 1, Qt.AlignmentFlag.AlignVCenter)
-        nexus_help = HyperlinkButton(
-            "https://next.nexusmods.com/settings/api-keys",
-            tr("settings.nexus_get_key"))
-        nexus_help.setIcon(FluentIcon.LINK)
-        status_layout.addWidget(nexus_help, 0, Qt.AlignmentFlag.AlignVCenter)
         self._layout.addWidget(status_row)
 
-        # ── SSO + nxm:// handler rows ────────────────────────────────
+        # ── Account row (Login / Sign out — state-aware) ───────────
+        # One button that toggles between 'Login with Nexus' (when no
+        # key is saved) and 'Sign out' (when a key is saved). The
+        # description text on the left mirrors the state so the user
+        # never sees contradictory copy.
         sso_row = QWidget()
         sso_layout = QHBoxLayout(sso_row)
         sso_layout.setContentsMargins(6, 4, 6, 4)
         sso_layout.setSpacing(8)
-        sso_label = BodyLabel(
-            "Login with Nexus — opens your browser to sign in, no "
-            "manual key paste. CDUMM's application slug is approved "
-            "by Nexus; this is the recommended flow.")
-        sso_label.setWordWrap(True)
-        sso_layout.addWidget(sso_label, 1)
+        self._sso_label = BodyLabel("")
+        self._sso_label.setWordWrap(True)
+        sso_layout.addWidget(self._sso_label, 1)
         self._sso_login_btn = PushButton("Login with Nexus")
         self._sso_login_btn.setMinimumWidth(160)
-        # Enabled by default — slug is approved (see nexus_sso.py).
-        # _sync_ui_from_db re-checks slug_placeholder() at runtime to
-        # handle any future re-disable.
-        from cdumm.engine.nexus_sso import slug_placeholder
-        sso_ready = not slug_placeholder()
-        self._sso_login_btn.setEnabled(sso_ready)
-        if not sso_ready:
-            self._sso_login_btn.setToolTip(
-                "Pending Nexus approval of CDUMM's application slug. "
-                "Until approved, paste your personal API key above instead.")
-        else:
-            self._sso_login_btn.setToolTip(
-                "Opens your browser to sign in with your Nexus Mods "
-                "account. CDUMM never sees your password.")
-        self._sso_login_btn.clicked.connect(self._on_sso_login)
+        self._sso_login_btn.clicked.connect(self._on_sso_button_clicked)
         sso_layout.addWidget(self._sso_login_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self._layout.addWidget(sso_row)
+        # Populate label/button state for the current key.
+        self._refresh_sso_button()
 
         nxm_row = QWidget()
         nxm_layout = QHBoxLayout(nxm_row)
@@ -346,6 +310,39 @@ class SettingsPage(SmoothScrollArea):
         self._layout.addWidget(nxm_row)
         # Populate the initial state of the button
         self._refresh_nxm_button()
+
+        # ── Advanced toggle row (last) ─────────────────────────────
+        # Hyperlink-style toggle that reveals/hides the manual API
+        # Key paste row inside the card above. Label is dynamic so
+        # 'paste' never reads as 'hide'. The 'Get your API key' link
+        # also lives here, next to the toggle, so the manual-paste
+        # path is self-contained.
+        advanced_row = QWidget()
+        advanced_layout = QHBoxLayout(advanced_row)
+        advanced_layout.setContentsMargins(6, 0, 6, 0)
+        advanced_layout.setSpacing(6)
+        self._nexus_advanced_toggle = HyperlinkButton(
+            "", "Show manual API key field")
+        self._nexus_advanced_toggle.setIcon(FluentIcon.SETTING)
+
+        def _toggle_advanced_key_row() -> None:
+            if self._nexus_advanced_group is None:
+                return
+            new_visible = not self._nexus_advanced_group.isVisible()
+            self._nexus_advanced_group.setVisible(new_visible)
+            self._nexus_advanced_toggle.setText(
+                "Hide manual API key field" if new_visible
+                else "Show manual API key field")
+
+        self._nexus_advanced_toggle.clicked.connect(_toggle_advanced_key_row)
+        advanced_layout.addWidget(self._nexus_advanced_toggle)
+        self._nexus_get_key_link = HyperlinkButton(
+            "https://next.nexusmods.com/settings/api-keys",
+            tr("settings.nexus_get_key"))
+        self._nexus_get_key_link.setIcon(FluentIcon.LINK)
+        advanced_layout.addWidget(self._nexus_get_key_link)
+        advanced_layout.addStretch(1)
+        self._layout.addWidget(advanced_row)
 
         # ── Bug Report (PrivateBin) ───────────────────────────────
         self._privatebin_card = GroupHeaderCardWidget(self._container)
@@ -514,16 +511,16 @@ class SettingsPage(SmoothScrollArea):
         self._asi_loader_switch.setChecked(checked)
         self._asi_loader_switch.blockSignals(False)
 
-        # NexusMods API key. If a key is already saved (either via
-        # manual paste OR via the SSO handoff), reveal the Advanced
-        # row so the user can edit/clear it without hunting for the
-        # toggle. Brand-new users see only the SSO button.
+        # NexusMods API key. Pre-fill the Advanced field so it's there
+        # if/when the user clicks the toggle, but keep the row hidden
+        # by default — the primary path is "Login with Nexus", and
+        # showing both at once is the UX clutter the user reported.
         saved_key = self._config.get("nexus_api_key") or ""
         if saved_key and hasattr(self, '_nexus_key_input'):
             self._nexus_key_input.setText(saved_key)
-            grp = getattr(self, "_nexus_advanced_group", None)
-            if grp is not None:
-                grp.setVisible(True)
+        # Sync the Login/Sign-out button label to the saved-key state.
+        if hasattr(self, "_refresh_sso_button"):
+            self._refresh_sso_button()
 
         # PrivateBin
         if hasattr(self, '_privatebin_instance_input'):
@@ -741,6 +738,99 @@ class SettingsPage(SmoothScrollArea):
         self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
         self._refresh_nxm_button()
 
+    def _refresh_sso_button(self) -> None:
+        """Sync the SSO button + label to the current saved-key state.
+
+        - No key  → label = recommended-flow copy, button = "Login with Nexus".
+        - Has key → label = "Signed in. Click Sign out to revoke.",
+                    button = "Sign out".
+        - Slug not yet approved (rare) → button disabled, tooltip explains.
+        """
+        if not self._db:
+            return
+        from cdumm.engine.nexus_sso import slug_placeholder
+        from cdumm.storage.config import Config
+        sso_ready = not slug_placeholder()
+        saved_key = (Config(self._db).get("nexus_api_key") or "").strip()
+        if saved_key:
+            self._sso_label.setText(
+                "Signed in to Nexus. Click 'Sign out' to clear the "
+                "saved API key.")
+            self._sso_login_btn.setText("Sign out")
+            self._sso_login_btn.setEnabled(True)
+            self._sso_login_btn.setToolTip(
+                "Removes the saved API key. You'll need to sign in "
+                "again to check for mod updates.")
+        else:
+            self._sso_label.setText(
+                "Login with Nexus — opens your browser to sign in, "
+                "no manual key paste. CDUMM's application slug is "
+                "approved by Nexus; this is the recommended flow.")
+            self._sso_login_btn.setText("Login with Nexus")
+            self._sso_login_btn.setEnabled(sso_ready)
+            if sso_ready:
+                self._sso_login_btn.setToolTip(
+                    "Opens your browser to sign in with your Nexus "
+                    "Mods account. CDUMM never sees your password.")
+            else:
+                self._sso_login_btn.setToolTip(
+                    "Pending Nexus approval of CDUMM's application "
+                    "slug. Until approved, paste your personal API "
+                    "key via the Advanced toggle below.")
+
+    def _on_sso_button_clicked(self) -> None:
+        """Dispatch the dual-purpose SSO/Sign-out button."""
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        saved_key = (Config(self._db).get("nexus_api_key") or "").strip()
+        if saved_key:
+            self._on_sso_logout()
+        else:
+            self._on_sso_login()
+
+    def _on_sso_logout(self) -> None:
+        """Clear the saved API key, refresh the UI, and drop cached
+        update results so pills go neutral immediately.
+
+        The nxm:// handler registration is a system-level setting and
+        is NOT touched here — signing out doesn't unregister the
+        protocol handler.
+        """
+        if not self._db:
+            return
+        from cdumm.storage.config import Config
+        cfg = Config(self._db)
+        cfg.set("nexus_api_key", "")
+        if hasattr(self, "_nexus_key_input"):
+            self._nexus_key_input.setText("")
+        # Drop the rejected-auth banner if it was up — the user
+        # explicitly chose to sign out, not a transient auth error.
+        try:
+            from cdumm.gui.fluent_window import _clear_auth_banner_state
+            _clear_auth_banner_state(self.window())
+        except Exception as _e:
+            logger.debug("auth banner clear (logout) failed: %s", _e)
+        # Drop cached Nexus update results so pills don't lie about
+        # state we can no longer verify.
+        try:
+            win = self.window()
+            if hasattr(win, "_nexus_updates"):
+                win._nexus_updates = {}
+            if hasattr(win, "paz_mods_page"):
+                win.paz_mods_page.set_nexus_updates({})
+            if hasattr(win, "asi_plugins_page"):
+                try:
+                    win.asi_plugins_page.set_nexus_updates({})
+                except AttributeError:
+                    pass
+        except Exception as _e:
+            logger.debug("post-logout pill clear failed: %s", _e)
+        self._set_nexus_status(
+            "Signed out. Sign in again to check for mod updates.",
+            InfoLevel.INFOAMTION)
+        self._refresh_sso_button()
+
     def _on_sso_login(self) -> None:
         """Run the SSO WebSocket flow. Disabled while awaiting slug approval."""
         from PySide6.QtCore import QMetaObject, Qt as _Qt
@@ -785,11 +875,9 @@ class SettingsPage(SmoothScrollArea):
         self._set_nexus_status(
             "Signed in via Nexus SSO. API key saved. Checking for "
             "mod updates...", InfoLevel.SUCCESS)
-        # Keep button enabled — user may want to re-link a different
-        # account or refresh the key. Re-disable only if slug approval
-        # is revoked.
-        from cdumm.engine.nexus_sso import slug_placeholder
-        self._sso_login_btn.setEnabled(not slug_placeholder())
+        # Flip the dual-purpose button to "Sign out" mode now that
+        # a key is saved.
+        self._refresh_sso_button()
         # User-requested: kick off a Check for Mod Updates automatically
         # 2 seconds after sign-in so users don't have to find and click
         # the button. Goes through the same handler the button uses.
@@ -812,6 +900,9 @@ class SettingsPage(SmoothScrollArea):
         from cdumm.storage.config import Config
         cfg = Config(self._db)
         user = _persist_nexus_key_if_valid(key, cfg)
+        # Saving a (cleared OR new) key always changes the saved-key
+        # state, so resync the dual-purpose Login / Sign-out button.
+        self._refresh_sso_button()
         if not key:
             # Bug 51: clearing the key should also dismiss the
             # rejected-auth banner — the user is starting over.
