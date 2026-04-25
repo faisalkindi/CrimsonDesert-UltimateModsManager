@@ -60,6 +60,15 @@ _POLL_INTERVAL_MS = 500
 DEFAULT_STEP_TIMEOUT_S = 360.0
 
 
+_STEP_LABELS = {
+    STEP_AWAITING_STEAM_VERIFY: "Step 1/5 — Waiting for Steam Verify",
+    STEP_FIX_EVERYTHING:       "Step 2/5 — Reverting game files to vanilla",
+    STEP_RESCAN:               "Step 3/5 — Rescanning game files",
+    STEP_REIMPORT:             "Step 4/5 — Reimporting your mods",
+    STEP_APPLY:                "Step 5/5 — Reapplying mods to game files",
+}
+
+
 class RecoveryFlow(QObject):
     """Orchestrator for the Game Update Recovery chain."""
 
@@ -85,6 +94,13 @@ class RecoveryFlow(QObject):
 
         self._poll_timer: QTimer | None = None
         self._elapsed_polls: int = 0
+        # Sticky InfoBar that announces the current step. Created on
+        # ``start()``, updated on every ``_emit_step``, closed when
+        # the chain reaches a terminal state. Without this, the UI
+        # looked frozen for ~30 s while Fix Everything ran in the
+        # background and the user couldn't tell what stage they were
+        # in or whether mods were currently applied.
+        self._progress_bar: Any = None
 
     def start(self) -> None:
         """Open the Steam Verify prompt and begin the chain."""
@@ -243,7 +259,9 @@ class RecoveryFlow(QObject):
     def _enter_done(self) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         self._emit_step(STEP_DONE)
+        self._refresh_main_ui()
         try:
             InfoBar.success(
                 title="Recovery complete",
@@ -259,7 +277,9 @@ class RecoveryFlow(QObject):
     def _enter_all_skipped(self) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         self._emit_step(STEP_ALL_SKIPPED)
+        self._refresh_main_ui()
         try:
             InfoBar.warning(
                 title="Recovery halted -- no reimportable mods",
@@ -276,8 +296,10 @@ class RecoveryFlow(QObject):
     def _enter_error(self, reason: str) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         logger.warning("RecoveryFlow error: %s", reason)
         self._emit_step(STEP_ERROR)
+        self._refresh_main_ui()
         try:
             InfoBar.error(
                 title="Recovery failed",
@@ -293,12 +315,72 @@ class RecoveryFlow(QObject):
     def _enter_cancelled(self) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         self._emit_step(STEP_CANCELLED)
         self.chain_complete.emit()
 
     def _emit_step(self, step: str) -> None:
         self._current_step = step
         self.step_changed.emit(step)
+        self._update_progress_bar(step)
+        # Each step transition writes new state to the DB (Fix
+        # Everything reverts files, Reimport rebuilds deltas, Apply
+        # marks mods applied). Repaint the cards so the user sees
+        # the transition (status badges flip from "Loaded" to
+        # "Unloaded" during revert, then back to "Loaded" after
+        # apply, etc.) instead of a frozen pre-recovery snapshot.
+        self._refresh_main_ui()
+
+    def _update_progress_bar(self, step: str) -> None:
+        """Show or update a sticky InfoBar with the current step
+        label. Closed automatically by ``_close_progress_bar`` from
+        the terminal-state handlers."""
+        label = _STEP_LABELS.get(step)
+        if label is None:
+            return  # done / all_skipped / error / cancelled — handled by terminal-state InfoBars
+        try:
+            from qfluentwidgets import InfoBarPosition as _Pos
+            bar = self._progress_bar
+            if bar is None:
+                bar = InfoBar.info(
+                    title="Game Update Recovery",
+                    content=label,
+                    duration=-1,
+                    position=_Pos.TOP,
+                    parent=self._main_window,
+                )
+                self._progress_bar = bar
+            else:
+                # Update content in place. setContent is the fluent
+                # method to do this without recreating the widget
+                # (and losing position).
+                try:
+                    bar.contentLabel.setText(label)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("RecoveryFlow progress bar update failed: %s", e)
+
+    def _close_progress_bar(self) -> None:
+        bar = self._progress_bar
+        if bar is None:
+            return
+        try:
+            bar.close()
+        except Exception:
+            pass
+        self._progress_bar = None
+
+    def _refresh_main_ui(self) -> None:
+        """Force the main window to redraw cards from current DB +
+        disk state. Each recovery step writes new state we want the
+        user to see (revert removes applied flag, reimport rebuilds
+        deltas, disable_skipped flips enabled to 0)."""
+        try:
+            if hasattr(self._main_window, "_refresh_all"):
+                self._main_window._refresh_all()
+        except Exception as e:
+            logger.debug("RecoveryFlow _refresh_main_ui failed: %s", e)
 
     def _freeze_main_window(self) -> None:
         """Disable the content area + sidebar nav while the chain runs.
@@ -380,6 +462,11 @@ class RecoveryFlow(QObject):
                 [m["id"] for m in self._skipped_mods])
         except Exception as e:
             logger.warning("disable_mods failed: %s", e)
+            return
+        # Repaint cards so the user sees the mods flip to disabled
+        # before Apply runs. Without this the row stayed visually
+        # ticked even though the DB had enabled=0.
+        self._refresh_main_ui()
 
     def _show_partial_skipped_info(self) -> None:
         names = [m.get("name", f"mod#{m.get('id')}")
