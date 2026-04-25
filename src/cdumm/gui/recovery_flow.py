@@ -227,17 +227,32 @@ class RecoveryFlow(QObject):
         self._start_poll(self._check_reimport_done)
 
     def _check_reimport_done(self) -> bool:
-        if self._main_window_active_worker() is None:
+        worker = self._main_window_active_worker()
+        # Heartbeat once per ~10 polls so we can confirm the timer is
+        # ticking without spamming the log every 500 ms.
+        if self._elapsed_polls % 10 == 0:
+            logger.info(
+                "RecoveryFlow _check_reimport_done: poll #%d, "
+                "active_worker=%s",
+                self._elapsed_polls, worker)
+        if worker is None:
+            logger.info("RecoveryFlow reimport done — calling _on_reimport_finished")
             self._on_reimport_finished()
             return True
         return False
 
     def _on_reimport_finished(self) -> None:
+        logger.info(
+            "RecoveryFlow _on_reimport_finished: skipped=%d",
+            len(self._skipped_mods))
         if self._skipped_mods:
             self._disable_skipped()
             self._show_partial_skipped_info()
 
         remaining = self._count_enabled_paz_mods()
+        logger.info(
+            "RecoveryFlow _on_reimport_finished: %d enabled PAZ mods remain",
+            remaining)
         if remaining == 0:
             self._enter_all_skipped()
             return

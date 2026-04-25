@@ -2256,6 +2256,9 @@ class ModsPage(QWidget):
             raw = proc.readAllStandardOutput().data().decode(
                 "utf-8", errors="replace")
             _buf[0] += raw
+            logger.debug(
+                "Reimport _on_stdout: read %d chars, buf=%d",
+                len(raw), len(_buf[0]))
             while "\n" in _buf[0]:
                 line, _buf[0] = _buf[0].split("\n", 1)
                 line = line.strip()
@@ -2288,17 +2291,29 @@ class ModsPage(QWidget):
                         pass
 
         def _on_finished(_code, _status):
+            logger.info(
+                "Reimport _on_finished fired: code=%s status=%s "
+                "succeeded=%d errors=%d", _code, _status,
+                _succeeded, len(_errors))
             try:
                 tip.setContent(
                     f"Reimported {_succeeded}/{total} mod(s)")
                 tip.setState(True)
             except RuntimeError:
                 pass
-            proc.deleteLater()
+            try:
+                proc.deleteLater()
+            except Exception as _e:
+                logger.warning("Reimport proc.deleteLater failed: %s", _e)
             window._active_worker = None
             window._active_progress = None
+            logger.info(
+                "Reimport _on_finished: cleared _active_worker, calling _resume_timers")
             if hasattr(window, "_resume_timers"):
-                window._resume_timers()
+                try:
+                    window._resume_timers()
+                except Exception as _e:
+                    logger.warning("Reimport _resume_timers failed: %s", _e)
             if _errors:
                 InfoBar.warning(
                     title="Reimport finished with issues",
