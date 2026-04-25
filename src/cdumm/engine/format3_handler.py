@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from cdumm.engine.field_schema import (
+    DTYPE_TABLE,
     FieldSchemaEntry,
     load_field_schema,
     locate_field,
@@ -547,16 +548,6 @@ def apply_intents_to_pabgb_bytes(
 # ── field_schema apply helpers ──────────────────────────────────────
 
 
-# struct format + size table for the community-schema data_type
-# strings (matches JMM's IteminfoBlobPatcher.GetDataTypeSize).
-_DTYPE_TABLE: dict[str, tuple[str, int]] = {
-    "i8": ("b", 1),  "u8": ("B", 1),
-    "i16": ("h", 2), "u16": ("H", 2),
-    "i32": ("i", 4), "u32": ("I", 4), "f32": ("f", 4),
-    "i64": ("q", 8), "u64": ("Q", 8), "f64": ("d", 8),
-}
-
-
 def _apply_via_field_schema(
     body: bytearray, entry: FieldSchemaEntry,
     payload_off: int, entry_end: int, new_value
@@ -565,9 +556,12 @@ def _apply_via_field_schema(
 
     Returns True on a successful write, False if the entry can't
     be applied (TID missing, value out of range, write would
-    overflow entry bounds, unknown data type).
+    overflow entry bounds). The data_type was validated at load
+    time so the dtype lookup here is guaranteed to hit, but check
+    defensively in case someone constructed a FieldSchemaEntry
+    by hand without going through the loader.
     """
-    fmt_size = _DTYPE_TABLE.get(entry.data_type.lower())
+    fmt_size = DTYPE_TABLE.get(entry.data_type.lower())
     if fmt_size is None:
         return False
     fmt, size = fmt_size

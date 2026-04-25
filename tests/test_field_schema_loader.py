@@ -269,3 +269,51 @@ def test_load_zero_offsets_are_allowed(tmp_path):
     assert schema["at_zero_rel"].rel_offset == 0
     assert "at_tid" in schema
     assert schema["at_tid"].value_offset == 0
+
+
+# ── Reject unsupported data types at load ───────────────────────────
+
+
+def test_load_rejects_unknown_data_type(tmp_path):
+    """If a schema entry's ``type`` doesn't appear in the writer's
+    dtype table (e.g. ``u128``, typo), the entry slipped through
+    validation but silently no-op'd at apply time. The user saw
+    'intent ready to apply' followed by no byte change. Refuse at
+    load — surface the typo to the author."""
+    _write_schema(tmp_path, "iteminfo", {
+        "bogus_type": {"tid": "0xAA", "value_offset": 5,
+                       "type": "u128"},
+    })
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    assert "bogus_type" not in schema
+
+
+def test_load_accepts_all_supported_dtypes(tmp_path):
+    """All struct types in the writer's dtype table must pass
+    load. Pin the supported set so a future writer change can't
+    silently drop a type without breaking this test."""
+    supported = ["i8", "u8", "i16", "u16", "i32", "u32",
+                 "f32", "i64", "u64", "f64"]
+    schema_dict = {
+        f"f_{t}": {"tid": "0xAA", "value_offset": 5, "type": t}
+        for t in supported
+    }
+    _write_schema(tmp_path, "iteminfo", schema_dict)
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    for t in supported:
+        assert f"f_{t}" in schema, (
+            f"data_type {t!r} dropped at load — would have silently "
+            f"no-op'd at apply")
+
+
+def test_load_dtype_check_is_case_insensitive(tmp_path):
+    """``"I32"`` and ``"i32"`` should both work — the writer
+    lowercases before lookup so the loader should match its
+    behaviour to keep the user-facing contract consistent."""
+    _write_schema(tmp_path, "iteminfo", {
+        "lower": {"tid": "0xAA", "type": "i32"},
+        "upper": {"tid": "0xAA", "type": "I32"},
+    })
+    schema = load_field_schema("iteminfo", search_root=tmp_path)
+    assert "lower" in schema
+    assert "upper" in schema

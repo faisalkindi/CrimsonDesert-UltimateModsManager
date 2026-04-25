@@ -33,6 +33,19 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+# Canonical struct format + size mapping for community-schema
+# data_type strings. Single source of truth: the loader rejects
+# unknown types at load time, the writer reads from this table
+# at apply time. Keys are lowercase; load + apply both lowercase
+# the user-supplied string before lookup.
+DTYPE_TABLE: dict[str, tuple[str, int]] = {
+    "i8":  ("b", 1),  "u8":  ("B", 1),
+    "i16": ("h", 2),  "u16": ("H", 2),
+    "i32": ("i", 4),  "u32": ("I", 4),  "f32": ("f", 4),
+    "i64": ("q", 8),  "u64": ("Q", 8),  "f64": ("d", 8),
+}
+
+
 @dataclass(frozen=True)
 class FieldSchemaEntry:
     """A single entry in a field_schema/<table>.json file."""
@@ -160,6 +173,18 @@ def load_field_schema(table_name: str,
         data_type = val.get("type") or "i32"
         if not isinstance(data_type, str):
             data_type = "i32"
+        # Refuse unknown type strings at load time. Without this,
+        # validate_intents would classify the intent as supported,
+        # then _apply_via_field_schema would silently no-op at write
+        # because DTYPE_TABLE.get returned None — user sees Apply
+        # succeed and the value never changed.
+        if data_type.lower() not in DTYPE_TABLE:
+            logger.warning(
+                "field_schema entry '%s' in '%s' has unknown "
+                "type=%r; skipping (supported: %s)",
+                key, table_name, data_type,
+                ", ".join(sorted(DTYPE_TABLE.keys())))
+            continue
         value_offset = val.get("value_offset", 5)
         if not isinstance(value_offset, int):
             value_offset = 5
