@@ -2229,6 +2229,24 @@ class CdummWindow(FluentWindow):
                                 "Right-click → Delete the duplicates if you "
                                 "want a single entry."),
                             duration=-1, position=InfoBarPosition.TOP, parent=self)
+                # Fallback: when no row matches by nexus_mod_id (because
+                # the existing row was imported as a local zip and never
+                # got Nexus metadata stored), match by name instead so a
+                # nxm:// download UPDATES the existing row instead of
+                # creating a parallel one. Real-world hit: 'CD Inventory
+                # Expander' was a local-zip import with NULL nexus_mod_id;
+                # clicking 'Mod Manager Download' on Nexus created a
+                # second row 1487 alongside the original 1406.
+                if existing_id is None and self._db:
+                    try:
+                        existing_id = self._match_existing_by_name(result)
+                        if existing_id is not None:
+                            logger.info(
+                                "nxm: name-match binding to existing "
+                                "mod_id=%d (nexus_mod_id was NULL on that "
+                                "row)", existing_id)
+                    except Exception as e:
+                        logger.debug("nxm: name-match fallback failed: %s", e)
                 self._queue_import(
                     result,
                     existing_mod_id=existing_id,
@@ -3120,6 +3138,42 @@ class CdummWindow(FluentWindow):
                             content=tr("infobar.skipped_msg", name=mname, version=drop_version),
                             duration=3000, position=InfoBarPosition.TOP, parent=self)
                         logger.info("Skipped duplicate: %s v%s", mname, drop_version)
+                        # If the user clicked the red 'Click To Update'
+                        # pill and the download turned out to be the same
+                        # version they already have, the pill should
+                        # still flip GREEN — they ARE on the latest. The
+                        # update-check verdict was based on a stale
+                        # local_file_id (filename-vs-API version drift
+                        # is the usual cause). Clear in-memory so the
+                        # pill renderer paints green on next paint.
+                        try:
+                            existing_nid = None
+                            for m in self._mod_manager.list_mods():
+                                if m["id"] == mid:
+                                    existing_nid = m.get("nexus_mod_id")
+                                    break
+                            if (existing_nid
+                                    and getattr(self, "_nexus_updates", None)):
+                                from cdumm.engine.nexus_api import (
+                                    clear_outdated_after_update,
+                                )
+                                self._nexus_updates = clear_outdated_after_update(
+                                    self._nexus_updates,
+                                    int(existing_nid),
+                                    drop_version,
+                                )
+                                if hasattr(self, 'paz_mods_page'):
+                                    self.paz_mods_page.set_nexus_updates(
+                                        self._nexus_updates)
+                                if hasattr(self, 'asi_plugins_page'):
+                                    try:
+                                        self.asi_plugins_page.set_nexus_updates(
+                                            self._nexus_updates)
+                                    except AttributeError:
+                                        pass
+                        except Exception as _e:
+                            logger.debug(
+                                "dedup-skip pill clear failed: %s", _e)
                         self._process_next_import()
                         return
 
@@ -4380,6 +4434,44 @@ class CdummWindow(FluentWindow):
         if match:
             return match.group(1)
         return ""
+
+    def _match_existing_by_name(self, downloaded_path: str | Path) -> int | None:
+        """Return ``mods.id`` of an existing row whose name matches the
+        download stem (exact, prettified) — used by the nxm:// flow when
+        the nexus_mod_id lookup misses because the existing row was
+        imported as a local zip with no Nexus metadata.
+
+        Only returns when there's exactly ONE exact-match row. Multiple
+        matches mean the user already has duplicates; we don't try to
+        guess which one to update. ``None`` means "no safe binding"
+        and the caller imports as new.
+        """
+        if not self._mod_manager:
+            return None
+        from cdumm.engine.mod_matching import is_same_mod
+        path = Path(downloaded_path) if not isinstance(
+            downloaded_path, Path) else downloaded_path
+        drop_name = path.stem
+        # The drop is a Nexus filename like
+        # 'CDInventoryExpander-56-2-7-1776xxx'. _find_existing_mod's
+        # logic for stripping that prefix would be ideal, but the
+        # parser handles it: prefer the parsed mod name, fall back
+        # to the filename stem.
+        try:
+            from cdumm.engine.import_handler import _read_modinfo
+            if path.is_dir():
+                modinfo = _read_modinfo(path)
+                if modinfo and modinfo.get("name"):
+                    drop_name = modinfo["name"]
+        except Exception:
+            pass
+        candidates = [
+            m for m in self._mod_manager.list_mods()
+            if is_same_mod(drop_name, m["name"])
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]["id"]
 
     def _find_existing_mod(self, path: Path) -> tuple[int, str, str] | None:
         """Check if a dropped mod matches an already-installed mod.
