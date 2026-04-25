@@ -266,7 +266,7 @@ def validate_intents(
 
     for intent in intents:
         reason = _classify_intent(
-            intent, field_specs, fs_entries, table_name)
+            intent, schema, field_specs, fs_entries, table_name)
         if reason is None:
             result.supported.append(intent)
         else:
@@ -276,7 +276,7 @@ def validate_intents(
 
 
 def _classify_intent(
-    intent: Format3Intent, field_specs: dict,
+    intent: Format3Intent, schema, field_specs: dict,
     fs_entries: dict, table_name: str
 ) -> str | None:
     """Return ``None`` if the intent is supported, otherwise a
@@ -287,6 +287,12 @@ def _classify_intent(
     design where field_schema is the override layer mod authors
     target. Fall back to PABGB schema for direct matches against
     underscored engine names (``_dropRollCount`` etc.).
+
+    For PABGB-schema fallbacks: the validator must verify the
+    field's byte offset is *actually computable* via the same
+    walk the writer uses — otherwise a flat field that sits
+    after a variable-length field passes validation and silently
+    no-ops at apply time.
     """
     if intent.op not in _SUPPORTED_OPS:
         return (
@@ -339,6 +345,20 @@ def _classify_intent(
             f"primitive format ({spec.field_type}, "
             f"{spec.stream_size}B); writing into tagged primitives "
             f"needs a TID-based field schema and lands in Phase 2"
+        )
+
+    # Final check: the writer locates fields by walking the schema
+    # in order, summing stream_sizes. If any preceding field has
+    # stream_size=0 (variable-length), the walk bails and the
+    # writer silently skips. The validator must surface this case
+    # so 'supported' truly means 'will be written'.
+    if _field_offset_in_payload(schema, intent.field) is None:
+        return (
+            f"field '{intent.field}' is preceded by a variable-"
+            f"length field; its byte offset can't be computed "
+            f"without reading variable-length contents first. "
+            f"Author can add a field_schema entry with rel_offset "
+            f"or tid to bypass the schema walk."
         )
 
     return None

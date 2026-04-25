@@ -256,6 +256,54 @@ def test_validate_mixed_supported_and_skipped_partitions_correctly():
 # ── Format3Validation summary ───────────────────────────────────────
 
 
+def test_validator_skips_intent_when_writer_cannot_resolve_offset(
+        monkeypatch):
+    """The validator and writer share field-resolution logic; if
+    a field is reachable in the PABGB schema by name but its byte
+    offset can't be computed (because a preceding field has
+    stream_size=None / variable-length), the validator MUST mark
+    it as skipped — otherwise the writer silently no-ops at apply
+    time and the user sees 'intent ready' followed by no change.
+
+    Synthesize a table where the second flat field is preceded by
+    a variable-length field. Both fields are in the loaded schema,
+    but only the first is reachable for writing.
+    """
+    from cdumm.semantic import parser as parser_mod
+    from cdumm.semantic.parser import FieldSpec, TableSchema
+
+    schema = TableSchema(table_name="resolvetest", fields=[
+        FieldSpec(name="_first", stream_size=4,
+                  field_type="direct_u32", struct_fmt="I"),
+        # Variable-length blocks the offset walk
+        FieldSpec(name="_blocker", stream_size=0,
+                  field_type="CString", struct_fmt=None),
+        FieldSpec(name="_after", stream_size=4,
+                  field_type="direct_u32", struct_fmt="I"),
+    ])
+    parser_mod._load_schemas()
+    cache = dict(parser_mod._loaded_schemas or {})
+    cache["resolvetest"] = schema
+    monkeypatch.setattr(parser_mod, "_loaded_schemas", cache)
+
+    # _first is reachable
+    result_first = validate_intents("resolvetest.pabgb", [
+        Format3Intent(entry="X", key=1, field="_first",
+                      op="set", new=1)])
+    assert len(result_first.supported) == 1, (
+        "first flat field at payload offset 0 is reachable")
+
+    # _after is NOT reachable — preceded by a variable-length field
+    result_after = validate_intents("resolvetest.pabgb", [
+        Format3Intent(entry="X", key=1, field="_after",
+                      op="set", new=1)])
+    assert len(result_after.skipped) == 1, (
+        "field after a variable-length field can't have its offset "
+        "computed at write time, so validator must skip it too")
+    _, reason = result_after.skipped[0]
+    assert "variable" in reason.lower() or "preceding" in reason.lower()
+
+
 def test_validation_summary_text_lists_skip_reasons():
     """``Format3Validation.summary()`` must produce a human-
     readable, deterministic block listing the skip count and the
