@@ -254,3 +254,62 @@ def test_size_preserving_writes_keep_total_body_length(synth_schema):
     new_body = apply_intents_to_pabgb_bytes(
         "synthtest", body, header, intents)
     assert len(new_body) == len(body)
+
+
+# ── Direct PABGB schema path must respect per-entry bounds ─────────
+
+
+def _make_truncated_entry_pabgb():
+    """Build a PABGB where the first entry has a truncated payload
+    (writer thinks the schema implies 10 bytes, only 6 written),
+    and the second entry follows immediately. The boundary case
+    is what catches the bug.
+
+    Entry 1 truncated to 6 payload bytes (4B _key + 2B _foo, no
+    _bar). Entry 2 is normal.
+    """
+    name1 = b"First"
+    head1 = struct.pack("<II", 1, len(name1))
+    payload1 = struct.pack("<IH", 100, 0x1111)   # 6 bytes — _bar missing
+    entry1 = head1 + name1 + b"\x00" + payload1
+    e1_len = len(entry1)
+
+    name2 = b"Second"
+    head2 = struct.pack("<II", 2, len(name2))
+    payload2 = struct.pack("<IIH", 200, 0xBBBBBBBB, 0x66)
+    entry2 = head2 + name2 + b"\x00" + payload2
+
+    body = entry1 + entry2
+
+    header = bytearray(struct.pack("<H", 2))
+    for k, off in [(100, 0), (200, e1_len)]:
+        header.extend(struct.pack("<II", k, off))
+    return bytes(body), bytes(header), e1_len
+
+
+def test_direct_schema_write_does_not_leak_into_next_entry(
+        synth_schema):
+    """If a record's payload is shorter than the schema implies
+    (truncated entries are real in production data), writing a
+    field whose schema-computed offset lands past the actual
+    payload end must NOT spill into the next entry's bytes.
+
+    Synthtest schema is 10 bytes (_key u32 + _foo u32 + _bar u16).
+    Entry 1 in this fixture is only 6 payload bytes — _bar's
+    schema-computed offset (8) is past the entry's own end. Without
+    the bound check, the write lands inside entry 2's header.
+    """
+    body, header, e1_len = _make_truncated_entry_pabgb()
+    original_body = body
+
+    intents = [Format3Intent(
+        entry="First", key=100, field="_bar",
+        op="set", new=0xCAFE)]
+    new_body = apply_intents_to_pabgb_bytes(
+        "synthtest", body, header, intents)
+
+    # Entry 2's bytes (anything from offset e1_len onward) MUST be
+    # byte-for-byte preserved. If the write leaked, those bytes
+    # would change.
+    assert new_body[e1_len:] == original_body[e1_len:], (
+        "write into truncated entry 1 leaked into entry 2's bytes")

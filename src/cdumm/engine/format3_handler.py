@@ -537,7 +537,12 @@ def apply_intents_to_pabgb_bytes(
         packed = _pack_value(intent.new, spec)
         if packed is None or len(packed) != spec.stream_size:
             continue
-        if abs_off + spec.stream_size > len(body):
+        # Bound to THIS entry's end, not the whole body. Real game
+        # entries are sometimes truncated when trailing fields hold
+        # default values, so a schema-computed offset can validly
+        # land past the entry's own end. Without this check, the
+        # write spills into the next entry's bytes.
+        if abs_off + spec.stream_size > entry_end:
             continue
 
         body[abs_off:abs_off + spec.stream_size] = packed
