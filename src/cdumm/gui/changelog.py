@@ -13,6 +13,52 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2",
+        "date": "2026-04-25",
+        "notes": [
+            "Game Update Recovery — when Crimson Desert gets patched "
+            "and your mods break, CDUMM now shows a \"Start Recovery\" "
+            "button that runs the full recovery flow in one click: "
+            "verify prompt, Fix Everything, rescan, reimport, apply. "
+            "Mods whose original archive is gone are automatically "
+            "disabled so Apply never runs against stale patches. This "
+            "replaces the five manual steps users had to know after a "
+            "Steam update. Both the startup \"game was updated\" path "
+            "AND the later \"game files changed\" fingerprint check "
+            "now surface the same Recovery button.",
+            "NexusMods integration (Phase 1) — Settings has a new "
+            "NexusMods card where you can paste your personal API key "
+            "and get automatic mod update checks every 30 minutes. "
+            "Outdated mods get a red \"Click To Update\" pill; up-to-"
+            "date mods get a green check. Premium users get one-click "
+            "downloads; free users get routed to the Nexus page with "
+            "CDUMM's application slug approved.",
+            "Single Sign-On with Nexus — click \"Login with Nexus\" "
+            "in Settings to authorize CDUMM via your browser without "
+            "pasting an API key. Uses the Nexus SSO websocket protocol; "
+            "CDUMM never sees your password.",
+            "nxm:// protocol handler — register CDUMM as the default "
+            "handler in Settings and \"Mod Manager Download\" buttons "
+            "on Nexus pages send the file directly to CDUMM. No more "
+            "manual drag-drop after downloading.",
+            "Hotfix (originally v3.1.7.1): v3.1.7 was rejecting some "
+            "mods at import time with a \"corrupt PAMT\" error that "
+            "mentioned a temp-file name (e.g. invalid literal for int() "
+            "with base 10: 'tmp9wk9wy2h'). The mods weren't actually "
+            "corrupt — the import-time validator was writing to a "
+            "randomly-named temp file that confused the parser. Fixed "
+            "by using the mod's real PAMT filename for validation.",
+            "Hotfix (originally v3.1.7.2): v3.1.7.1 still showed an "
+            "\"Apply Completed with Warnings\" banner after every "
+            "Apply falsely claiming your mods had corrupt PAMT files. "
+            "The precheck that produced that banner was examining the "
+            "wrong file (the binary patch, not the reconstructed "
+            "PAMT). The precheck is now disabled; the real import "
+            "and apply flows still catch truly corrupt files. The "
+            "banner should not appear anymore.",
+        ],
+    },
+    {
         "version": "3.1.7.2",
         "date": "2026-04-24",
         "notes": [

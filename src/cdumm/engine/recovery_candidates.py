@@ -20,10 +20,13 @@ Addresses Codex review findings 1-3:
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from cdumm.engine.mod_source_path import resolve_mod_source_path
+
+logger = logging.getLogger(__name__)
 
 
 def reimport_candidates(db, game_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -34,6 +37,10 @@ def reimport_candidates(db, game_dir: Path) -> tuple[list[dict[str, Any]], list[
     ``source_path`` and the ``CDMods/sources/<id>/`` fallback are gone.
 
     Disabled mods and ASI plugins are excluded from both lists.
+
+    Logs a diagnostic line per skipped mod so a 'Recovery halted -- no
+    reimportable mods' false positive can be traced post-mortem from
+    cdumm.log instead of guessing at why the resolver said None.
     """
     rows = db.connection.execute(
         "SELECT id, name, source_path FROM mods "
@@ -50,6 +57,25 @@ def reimport_candidates(db, game_dir: Path) -> tuple[list[dict[str, Any]], list[
             reimportable.append(mod)
         else:
             skipped.append(mod)
+            # Diagnostic: WHY did this skip? source_path missing on
+            # disk? Fallback dir missing? Both? Recovery flow's
+            # 'all_skipped' terminal state is destructive (disables
+            # the mods) so we want hard evidence per row.
+            sp = row[2]
+            sp_exists = bool(sp) and Path(sp).exists()
+            fallback = (Path(game_dir) / "CDMods" / "sources" / str(row[0])
+                        if game_dir is not None else None)
+            fb_exists = (fallback is not None and fallback.exists()
+                         and fallback.is_dir())
+            logger.info(
+                "reimport_candidates: SKIP id=%d name=%r "
+                "source_path=%r sp_exists=%s fallback=%s fb_exists=%s",
+                row[0], row[1], sp, sp_exists,
+                str(fallback) if fallback else None, fb_exists)
+    logger.info(
+        "reimport_candidates: %d enabled PAZ rows -> %d reimportable, "
+        "%d skipped (game_dir=%r)",
+        len(rows), len(reimportable), len(skipped), str(game_dir))
     return reimportable, skipped
 
 

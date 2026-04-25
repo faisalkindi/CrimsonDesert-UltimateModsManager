@@ -459,6 +459,23 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
             body.append(f"  Theme: {theme}")
             body.append(f"  Language: {lang}")
             body.append(f"  NexusMods API key configured: {api_set}")
+            # Bug 41: surface the last-known Nexus rate-limit snapshot
+            # so support requests come with context for 429 / "update
+            # check silent" complaints. Nothing sensitive — header
+            # values only.
+            try:
+                from cdumm.engine.nexus_api import get_rate_limit_snapshot
+                snap = get_rate_limit_snapshot()
+                if snap:
+                    body.append("  Nexus rate-limit (last response):")
+                    for k in (
+                        "X-RL-Hourly-Remaining", "X-RL-Hourly-Reset",
+                        "X-RL-Daily-Remaining", "X-RL-Daily-Reset",
+                    ):
+                        if k in snap:
+                            body.append(f"    {k}: {snap[k]}")
+            except Exception as e:
+                body.append(f"  Rate-limit read failed: {e}")
         except Exception as e:
             body.append(f"  Error reading settings: {e}")
         body.append("")

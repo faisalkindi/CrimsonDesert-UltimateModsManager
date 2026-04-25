@@ -60,6 +60,18 @@ _POLL_INTERVAL_MS = 500
 DEFAULT_STEP_TIMEOUT_S = 360.0
 
 
+_STEP_LABELS = {
+    # ``awaiting_steam_verify`` is intentionally absent — that phase
+    # is a pre-flight prompt waiting on a user click, not work CDUMM
+    # is doing. Numbering starts at the first chain step the user
+    # cares about (the revert).
+    STEP_FIX_EVERYTHING:       "Step 1/4 — Reverting game files to vanilla",
+    STEP_RESCAN:               "Step 2/4 — Rescanning game files",
+    STEP_REIMPORT:             "Step 3/4 — Reimporting your mods",
+    STEP_APPLY:                "Step 4/4 — Reapplying mods to game files",
+}
+
+
 class RecoveryFlow(QObject):
     """Orchestrator for the Game Update Recovery chain."""
 
@@ -85,6 +97,13 @@ class RecoveryFlow(QObject):
 
         self._poll_timer: QTimer | None = None
         self._elapsed_polls: int = 0
+        # Sticky InfoBar that announces the current step. Created on
+        # ``start()``, updated on every ``_emit_step``, closed when
+        # the chain reaches a terminal state. Without this, the UI
+        # looked frozen for ~30 s while Fix Everything ran in the
+        # background and the user couldn't tell what stage they were
+        # in or whether mods were currently applied.
+        self._progress_bar: Any = None
 
     def start(self) -> None:
         """Open the Steam Verify prompt and begin the chain."""
@@ -169,7 +188,12 @@ class RecoveryFlow(QObject):
 
     def _check_rescan_done(self) -> bool:
         if self._main_window_active_worker() is None:
-            self._begin_reimport()
+            # Defer to next event-loop tick so the outer _tick's
+            # _stop_poll runs BEFORE _begin_reimport calls
+            # _start_poll. Without this, the newly-started reimport
+            # poll gets stopped immediately by the outer _tick and
+            # the recovery flow stalls forever at "Step 3/4".
+            QTimer.singleShot(0, self._begin_reimport)
             return True
         return False
 
@@ -208,17 +232,35 @@ class RecoveryFlow(QObject):
         self._start_poll(self._check_reimport_done)
 
     def _check_reimport_done(self) -> bool:
-        if self._main_window_active_worker() is None:
-            self._on_reimport_finished()
+        worker = self._main_window_active_worker()
+        # Heartbeat once per ~10 polls so we can confirm the timer is
+        # ticking without spamming the log every 500 ms.
+        if self._elapsed_polls % 10 == 0:
+            logger.info(
+                "RecoveryFlow _check_reimport_done: poll #%d, "
+                "active_worker=%s",
+                self._elapsed_polls, worker)
+        if worker is None:
+            logger.info("RecoveryFlow reimport done — scheduling _on_reimport_finished")
+            # Defer so outer _tick's _stop_poll runs before
+            # _begin_apply starts the next poll. Same race as
+            # _check_rescan_done -> _begin_reimport above.
+            QTimer.singleShot(0, self._on_reimport_finished)
             return True
         return False
 
     def _on_reimport_finished(self) -> None:
+        logger.info(
+            "RecoveryFlow _on_reimport_finished: skipped=%d",
+            len(self._skipped_mods))
         if self._skipped_mods:
             self._disable_skipped()
             self._show_partial_skipped_info()
 
         remaining = self._count_enabled_paz_mods()
+        logger.info(
+            "RecoveryFlow _on_reimport_finished: %d enabled PAZ mods remain",
+            remaining)
         if remaining == 0:
             self._enter_all_skipped()
             return
@@ -243,7 +285,9 @@ class RecoveryFlow(QObject):
     def _enter_done(self) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         self._emit_step(STEP_DONE)
+        self._refresh_main_ui()
         try:
             InfoBar.success(
                 title="Recovery complete",
@@ -259,7 +303,9 @@ class RecoveryFlow(QObject):
     def _enter_all_skipped(self) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         self._emit_step(STEP_ALL_SKIPPED)
+        self._refresh_main_ui()
         try:
             InfoBar.warning(
                 title="Recovery halted -- no reimportable mods",
@@ -276,8 +322,10 @@ class RecoveryFlow(QObject):
     def _enter_error(self, reason: str) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         logger.warning("RecoveryFlow error: %s", reason)
         self._emit_step(STEP_ERROR)
+        self._refresh_main_ui()
         try:
             InfoBar.error(
                 title="Recovery failed",
@@ -293,28 +341,106 @@ class RecoveryFlow(QObject):
     def _enter_cancelled(self) -> None:
         self._stop_poll()
         self._thaw_main_window()
+        self._close_progress_bar()
         self._emit_step(STEP_CANCELLED)
         self.chain_complete.emit()
 
     def _emit_step(self, step: str) -> None:
+        prev = self._current_step
         self._current_step = step
+        logger.info("RecoveryFlow step: %s -> %s", prev, step)
         self.step_changed.emit(step)
+        self._update_progress_bar(step)
+        # Each step transition writes new state to the DB (Fix
+        # Everything reverts files, Reimport rebuilds deltas, Apply
+        # marks mods applied). Repaint the cards so the user sees
+        # the transition (status badges flip from "Loaded" to
+        # "Unloaded" during revert, then back to "Loaded" after
+        # apply, etc.) instead of a frozen pre-recovery snapshot.
+        self._refresh_main_ui()
+
+    def _update_progress_bar(self, step: str) -> None:
+        """Show or update a sticky InfoBar with the current step
+        label. Closed automatically by ``_close_progress_bar`` from
+        the terminal-state handlers."""
+        label = _STEP_LABELS.get(step)
+        if label is None:
+            return  # done / all_skipped / error / cancelled — handled by terminal-state InfoBars
+        try:
+            from qfluentwidgets import InfoBarPosition as _Pos
+            bar = self._progress_bar
+            if bar is None:
+                bar = InfoBar.info(
+                    title="Game Update Recovery",
+                    content=label,
+                    duration=-1,
+                    position=_Pos.TOP,
+                    parent=self._main_window,
+                )
+                self._progress_bar = bar
+            else:
+                # Update content in place. setContent is the fluent
+                # method to do this without recreating the widget
+                # (and losing position).
+                try:
+                    bar.contentLabel.setText(label)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("RecoveryFlow progress bar update failed: %s", e)
+
+    def _close_progress_bar(self) -> None:
+        bar = self._progress_bar
+        if bar is None:
+            return
+        try:
+            bar.close()
+        except Exception:
+            pass
+        self._progress_bar = None
+
+    def _refresh_main_ui(self) -> None:
+        """Force the main window to redraw cards from current DB +
+        disk state. Each recovery step writes new state we want the
+        user to see (revert removes applied flag, reimport rebuilds
+        deltas, disable_skipped flips enabled to 0)."""
+        try:
+            if hasattr(self._main_window, "_refresh_all"):
+                self._main_window._refresh_all()
+        except Exception as e:
+            logger.debug("RecoveryFlow _refresh_main_ui failed: %s", e)
 
     def _freeze_main_window(self) -> None:
-        try:
-            central = self._main_window.centralWidget()
-            if central is not None:
-                central.setEnabled(False)
-        except Exception as e:
-            logger.debug("RecoveryFlow freeze failed: %s", e)
+        """Disable the content area + sidebar nav while the chain runs.
+
+        ``CdummWindow`` extends ``qfluentwidgets.FluentWindow``, which
+        does NOT expose ``centralWidget()`` (that's QMainWindow's API).
+        FluentWindow's content area is ``stackedWidget`` and the left
+        sidebar is ``navigationInterface``. Disabling both freezes
+        every interactive surface (mod cards, Apply button, sidebar
+        nav) without freezing the InfoBar overlay so the user can
+        still see status updates.
+        """
+        win = self._main_window
+        for attr in ("stackedWidget", "navigationInterface"):
+            try:
+                widget = getattr(win, attr, None)
+                if widget is not None:
+                    widget.setEnabled(False)
+            except Exception as e:
+                logger.debug(
+                    "RecoveryFlow freeze (%s) failed: %s", attr, e)
 
     def _thaw_main_window(self) -> None:
-        try:
-            central = self._main_window.centralWidget()
-            if central is not None:
-                central.setEnabled(True)
-        except Exception as e:
-            logger.debug("RecoveryFlow thaw failed: %s", e)
+        win = self._main_window
+        for attr in ("stackedWidget", "navigationInterface"):
+            try:
+                widget = getattr(win, attr, None)
+                if widget is not None:
+                    widget.setEnabled(True)
+            except Exception as e:
+                logger.debug(
+                    "RecoveryFlow thaw (%s) failed: %s", attr, e)
 
     def _platform_hint(self) -> str:
         try:
@@ -364,6 +490,11 @@ class RecoveryFlow(QObject):
                 [m["id"] for m in self._skipped_mods])
         except Exception as e:
             logger.warning("disable_mods failed: %s", e)
+            return
+        # Repaint cards so the user sees the mods flip to disabled
+        # before Apply runs. Without this the row stayed visually
+        # ticked even though the DB had enabled=0.
+        self._refresh_main_ui()
 
     def _show_partial_skipped_info(self) -> None:
         names = [m.get("name", f"mod#{m.get('id')}")

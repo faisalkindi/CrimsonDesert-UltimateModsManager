@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     CheckBox,
     FluentIcon,
+    InfoBar,
+    InfoBarPosition,
     PushButton,
     SearchLineEdit,
     SmoothScrollArea,
@@ -429,26 +431,40 @@ class ModsPage(QWidget):
         nexus_map = getattr(self, '_nexus_id_map', {})
         logger.info("set_nexus_updates: %d updates, %d mods with nexus_id, %d cards",
                      len(updates), len(nexus_map), len(self._mod_cards))
-        # Update existing cards
+        # Update existing cards. Three-state logic (Codex review
+        # finding 1 from the v3.1.8 plan):
+        #   - entry present AND has_update=True  -> RED pill (Click To Update)
+        #   - entry present AND has_update=False -> GREEN/no pill (confirmed current)
+        #   - no entry                           -> GREY/no pill (unknown)
+        # Prior code painted RED whenever an entry existed, ignoring
+        # has_update. That caused 'mod #17 still says outdated' even
+        # after check_mod_updates correctly classified it as current.
         for card in self._mod_cards:
             mod_id = card.mod_id
             nexus_id = nexus_map.get(mod_id)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(
-                    True, u.mod_url,
-                    nexus_mod_id=nexus_id,
-                    latest_file_id=getattr(u, "latest_file_id", 0))
-                # Connect update_clicked once per card. Disconnect first
-                # to dedup since Qt 6 raises if the slot isn't connected
-                # — the only legitimate failures here are TypeError
-                # (signature mismatch) and RuntimeError (no connection).
-                # Catch only those so a real wiring bug isn't masked.
-                try:
-                    card.update_clicked.disconnect(self._on_update_clicked)
-                except (TypeError, RuntimeError):
-                    pass
-                card.update_clicked.connect(self._on_update_clicked)
+                if getattr(u, "has_update", False):
+                    card.set_update_available(
+                        True, u.mod_url,
+                        nexus_mod_id=nexus_id,
+                        latest_file_id=getattr(u, "latest_file_id", 0))
+                    # Connect update_clicked once per card. Disconnect first
+                    # to dedup since Qt 6 raises if the slot isn't connected
+                    # — the only legitimate failures here are TypeError
+                    # (signature mismatch) and RuntimeError (no connection).
+                    try:
+                        card.update_clicked.disconnect(self._on_update_clicked)
+                    except (TypeError, RuntimeError):
+                        pass
+                    card.update_clicked.connect(self._on_update_clicked)
+                else:
+                    # Confirmed current — fill in a missing version label
+                    # from the Nexus-reported one before clearing the red
+                    # pill. Cards with a real local version stay
+                    # untouched.
+                    card.fill_missing_version(getattr(u, "latest_version", ""))
+                    card.set_update_available(False)
             elif nexus_id:
                 card.set_update_available(False)
         # Refresh the summary bar so the Outdated counter reflects the
@@ -873,14 +889,20 @@ class ModsPage(QWidget):
                 pending += 1  # needs Apply (either add or remove)
         # Count mods that have a NexusMods update available. The lookup
         # is the same one set_nexus_updates uses to color the version
-        # pills, just summed here for the summary bar.
+        # pills, just summed here for the summary bar. Must respect
+        # has_update — confirmed-current entries (has_update=False)
+        # are still in the dict so the GREEN pill knows what version
+        # to paint, but they should NOT count as outdated. Counting
+        # every dict entry produced "10 outdated" alongside zero red
+        # pills.
         outdated = 0
         nexus_updates = getattr(self, "_nexus_updates", None) or {}
         if nexus_updates:
             nexus_map = getattr(self, "_nexus_id_map", {}) or {}
             for c in self._mod_cards:
                 nid = nexus_map.get(c.mod_id)
-                if nid and nid in nexus_updates:
+                if nid and nid in nexus_updates and getattr(
+                        nexus_updates[nid], "has_update", False):
                     outdated += 1
         self._summary_bar.update_stats(total, active, pending, inactive,
                                        outdated=outdated)
@@ -2115,7 +2137,8 @@ class ModsPage(QWidget):
         self._update_stats()
         self._resume_db_watcher()
 
-    def _ctx_batch_reimport(self, mod_ids: list[int]) -> None:
+    def _ctx_batch_reimport(self, mod_ids: list[int],
+                              skip_confirm: bool = False) -> None:
         """Reimport each selected mod from its stored source.
 
         After a game update (Steam patch), every mod's stored delta
@@ -2124,6 +2147,10 @@ class ModsPage(QWidget):
         regenerates deltas by rerunning import from each mod's
         original zip/folder, preserving the mod row (priority, notes,
         enabled state) via ``existing_mod_id``.
+
+        ``skip_confirm=True`` bypasses the interactive confirm dialog;
+        the RecoveryFlow orchestrator sets this so it can drive the
+        reimport step without user intervention (v3.2).
         """
         from qfluentwidgets import MessageBox
         from PySide6.QtCore import QProcess
@@ -2140,50 +2167,82 @@ class ModsPage(QWidget):
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
-        # Gather source_path for each selected mod. Skip any with
-        # missing/empty source_path — those were imported on an older
-        # CDUMM that didn't store sources.
-        entries: list[tuple[int, str, str]] = []  # (mod_id, name, source_path)
+        # Gather a usable source for each selected mod. Resolution order:
+        #   1. ``json_source`` IF it points at an existing .json file
+        #      (JSON-patch mods bake the user's chosen preset into
+        #      deltas/<id>/source.json — reimport from THAT keeps the
+        #      same single preset).
+        #   2. ``source_path`` if it's a folder OR a single archive file.
+        #   3. Skip otherwise.
+        #
+        # Why json_source wins over source_path: when a JSON-patch mod
+        # was originally imported from a folder with multiple preset
+        # JSONs (Glider Stamina ships 5 presets, Infinite Horse ships
+        # 9), CDUMM's PresetPickerDialog asked the user to pick one and
+        # then archived ALL the original presets under sources/<id>/.
+        # During reimport, picking the FOLDER causes import_from_folder
+        # to re-detect every preset as a separate JSON patch and
+        # explode them into N mod rows (only the first reusing
+        # existing_mod_id; the rest become NEW rows). json_source
+        # always points at the single preset the user actually chose,
+        # so reimporting from it regenerates the same one delta in
+        # place — no row duplication.
+        import os
+        entries: list[tuple[int, str, str]] = []  # (mod_id, name, source)
         missing: list[str] = []
         for m in self._mod_manager.list_mods():
             if m["id"] not in mod_ids:
                 continue
-            sp = m.get("source_path")
-            if not sp:
+            sp = m.get("source_path") or ""
+            js = m.get("json_source") or ""
+            chosen: str | None = None
+            if js and os.path.isfile(js):
+                chosen = js
+            elif sp and os.path.isdir(sp) and os.listdir(sp):
+                chosen = sp
+            elif sp and os.path.isfile(sp):
+                chosen = sp
+            if not chosen:
                 missing.append(m["name"])
                 continue
-            entries.append((m["id"], m["name"], sp))
+            logger.info(
+                "Reimport source resolved: id=%d name=%r chosen=%r "
+                "(json_source=%r source_path=%r)",
+                m["id"], m["name"], chosen, js, sp)
+            entries.append((m["id"], m["name"], chosen))
 
         if not entries:
-            MessageBox(
-                "Reimport",
-                "None of the selected mods have a stored source. "
-                "Reimport needs the original zip/folder to regenerate "
-                "patches. Drop the original file back in to fix those.",
-                window).exec()
+            if not skip_confirm:
+                MessageBox(
+                    "Reimport",
+                    "None of the selected mods have a stored source. "
+                    "Reimport needs the original zip/folder to regenerate "
+                    "patches. Drop the original file back in to fix those.",
+                    window).exec()
             return
 
-        msg = (f"Reimport {len(entries)} mod(s) from their stored "
-               "sources?\n\n"
-               "This regenerates patches against the current vanilla. "
-               "Use this after a game update when mods stop working.")
-        if missing:
-            # Show the actual names so users know which mods need
-            # manual drag-drop. Cap the inline list so a huge
-            # selection doesn't blow up the dialog.
-            shown = missing[:15]
-            more = len(missing) - len(shown)
-            names_block = "\n".join(f"  - {n}" for n in shown)
-            if more > 0:
-                names_block += f"\n  - ... and {more} more"
-            msg += (f"\n\n{len(missing)} mod(s) can't be reimported "
-                    "automatically (no stored source) and will be "
-                    "skipped:\n\n"
-                    f"{names_block}\n\n"
-                    "Drop their original files back in to fix those "
-                    "manually.")
-        if not MessageBox("Reimport from source", msg, window).exec():
-            return
+        if not skip_confirm:
+            msg = (f"Reimport {len(entries)} mod(s) from their stored "
+                   "sources?\n\n"
+                   "This regenerates patches against the current vanilla. "
+                   "Use this after a game update when mods stop working.")
+            if missing:
+                # Show the actual names so users know which mods need
+                # manual drag-drop. Cap the inline list so a huge
+                # selection doesn't blow up the dialog.
+                shown = missing[:15]
+                more = len(missing) - len(shown)
+                names_block = "\n".join(f"  - {n}" for n in shown)
+                if more > 0:
+                    names_block += f"\n  - ... and {more} more"
+                msg += (f"\n\n{len(missing)} mod(s) can't be reimported "
+                        "automatically (no stored source) and will be "
+                        "skipped:\n\n"
+                        f"{names_block}\n\n"
+                        "Drop their original files back in to fix those "
+                        "manually.")
+            if not MessageBox("Reimport from source", msg, window).exec():
+                return
 
         # Write mod_id\tsource_path lines to a temp file for the
         # worker subprocess.
@@ -2198,6 +2257,8 @@ class ModsPage(QWidget):
         window._active_progress = tip
 
         proc = QProcess(window)
+        from cdumm.gui.fluent_window import _quiet_qprocess
+        _quiet_qprocess(proc)
         window._active_worker = proc
 
         _buf = [""]
@@ -2209,6 +2270,9 @@ class ModsPage(QWidget):
             raw = proc.readAllStandardOutput().data().decode(
                 "utf-8", errors="replace")
             _buf[0] += raw
+            logger.debug(
+                "Reimport _on_stdout: read %d chars, buf=%d",
+                len(raw), len(_buf[0]))
             while "\n" in _buf[0]:
                 line, _buf[0] = _buf[0].split("\n", 1)
                 line = line.strip()
@@ -2241,17 +2305,29 @@ class ModsPage(QWidget):
                         pass
 
         def _on_finished(_code, _status):
+            logger.info(
+                "Reimport _on_finished fired: code=%s status=%s "
+                "succeeded=%d errors=%d", _code, _status,
+                _succeeded, len(_errors))
             try:
                 tip.setContent(
                     f"Reimported {_succeeded}/{total} mod(s)")
                 tip.setState(True)
             except RuntimeError:
                 pass
-            proc.deleteLater()
+            try:
+                proc.deleteLater()
+            except Exception as _e:
+                logger.warning("Reimport proc.deleteLater failed: %s", _e)
             window._active_worker = None
             window._active_progress = None
+            logger.info(
+                "Reimport _on_finished: cleared _active_worker, calling _resume_timers")
             if hasattr(window, "_resume_timers"):
-                window._resume_timers()
+                try:
+                    window._resume_timers()
+                except Exception as _e:
+                    logger.warning("Reimport _resume_timers failed: %s", _e)
             if _errors:
                 InfoBar.warning(
                     title="Reimport finished with issues",

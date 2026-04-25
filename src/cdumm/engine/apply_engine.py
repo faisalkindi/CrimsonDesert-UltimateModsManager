@@ -39,6 +39,58 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+def _rewrite_mount_error_with_mod_names(
+    raw_error: str, targets_to_mods: dict[str, list[str]]
+) -> str:
+    """Replace the synth-file error with real mod names + an action.
+
+    The mount-time patcher emits errors of the form::
+
+        "<json_source_stem>: all N patches mismatched against vanilla
+         <game_file> -- the mod was built for a different game version."
+
+    When the caller pre-aggregates JSON mods, ``json_source_stem`` is
+    the synth filename (e.g. ``aggregated``) and the message tells the
+    user nothing useful. We re-derive the contributing mod names from
+    ``targets_to_mods`` (built upstream from per_mod_summary) and emit
+    a message that names the actual mods AND tells the user what to
+    do about it.
+
+    Falls back to the original ``raw_error`` if the regex doesn't match
+    so we never silently drop diagnostic information.
+    """
+    import re
+    # Match BOTH the "aborting -- N of M patches mismatched" data-table
+    # form AND the "all N patches mismatched" generic form. game_file
+    # capture group is what we need for the lookup.
+    m = re.search(
+        r"(?:all|of)\s+\d+\s+patches\s+(?:mismatched|don['’]t\s+match)\s+"
+        r"(?:against\s+)?(?:vanilla\s+)?([^\s\n]+\.\w+)",
+        raw_error)
+    if not m:
+        return raw_error
+    game_file = m.group(1).rstrip(".,:;")
+    contributors = targets_to_mods.get(game_file, [])
+    if not contributors:
+        # Lookup miss -- preserve original error rather than mislead.
+        return raw_error
+    if len(contributors) == 1:
+        who = f"'{contributors[0]}'"
+    elif len(contributors) <= 3:
+        who = ", ".join(f"'{n}'" for n in contributors)
+    else:
+        head = ", ".join(f"'{n}'" for n in contributors[:3])
+        who = f"{head} (+{len(contributors) - 3} more)"
+    plural = "mod" if len(contributors) == 1 else "mods"
+    return (
+        f"Skipped {who}: the {plural} cannot patch the current "
+        f"{game_file} -- they were built for an older version of "
+        "the game. After a Steam update, click 'Start Recovery' on "
+        "the banner (or right-click each mod -> Reimport from source) "
+        "to regenerate them against your current game files."
+    )
+
+
 def aggregate_json_mods_into_synthetic_patches(
     db, overlay_priority_tiebreak: bool = True,
 ) -> tuple[dict, list[dict]]:
@@ -1150,10 +1202,27 @@ class ApplyWorker(QObject):
                             "Mount-time: aggregated %d JSON mod(s) → "
                             "%d overlay entries",
                             len(mod_summary), len(entries))
+                    # Build {game_file: [mod_name, ...]} so we can replace
+                    # the synth-named error with the real contributing mod
+                    # names. Without this the user sees "aggregated: all
+                    # N patches mismatched..." which is unhelpful — it
+                    # names the temp synth file, not the mod(s) at fault.
+                    targets_to_mods: dict[str, list[str]] = {}
+                    for m in mod_summary:
+                        for gf in m["targets"]:
+                            targets_to_mods.setdefault(gf, []).append(
+                                m["mod_name"])
+
                     for err in patch_errors:
                         logger.warning("Mount-time abort: %s", err)
-                        self._soft_warnings.append(err)
-                        self.warning.emit(err)
+                        # Try to rewrite the synth-named error with real
+                        # mod names. If we can't parse out the game_file
+                        # (different message shape), fall through to the
+                        # original text rather than dropping context.
+                        friendly = _rewrite_mount_error_with_mod_names(
+                            err, targets_to_mods)
+                        self._soft_warnings.append(friendly)
+                        self.warning.emit(friendly)
 
                     # Keep the temp dir alive until apply finishes;
                     # Python's tempfile cleanup on process exit is
@@ -2020,7 +2089,21 @@ class ApplyWorker(QObject):
 
         merged_deltas = list(entry_deltas)  # start with original list
 
-        for entry_path, conflicting in entries_to_merge.items():
+        # Tell the user what's happening BEFORE the merge loop runs.
+        # This phase can take 10-30+ seconds with many overlapping mods
+        # and the percentage doesn't move during it (we're still on the
+        # same file). Without this emit, progress looks frozen.
+        total_entries = len(entries_to_merge)
+        total_mods = sum(len(d) for d in entries_to_merge.values())
+        try:
+            self.progress_updated.emit(
+                self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
+                f"Merging {total_mods} mods into {total_entries} entries "
+                f"in {file_path} (this can take a while with many mods)...")
+        except Exception:
+            pass
+
+        for idx, (entry_path, conflicting) in enumerate(entries_to_merge.items()):
             table_name = identify_table_from_path(entry_path)
             if not table_name:
                 continue  # not a supported format
@@ -2057,6 +2140,19 @@ class ApplyWorker(QObject):
                     file_path, entry_path)
                 if not vanilla_content:
                     continue
+
+                # Heartbeat so the progress bar text changes for huge
+                # tables. analyze_bytes can take many seconds on
+                # 6000+ record tables like iteminfo with multiple
+                # conflicting mods. Without this emit, the bar message
+                # stays stale on the same file/percentage.
+                try:
+                    self.progress_updated.emit(
+                        self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
+                        f"Merging entry {idx + 1}/{total_entries} in "
+                        f"{file_path}: {entry_path} ({len(mod_bodies)} mods)...")
+                except Exception:
+                    pass
 
                 # Run semantic merge
                 result = engine.analyze_bytes(

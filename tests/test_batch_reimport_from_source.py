@@ -90,3 +90,43 @@ def test_batch_handler_exists():
         "need a _ctx_batch_reimport(self, mod_ids) method that "
         "spawns the reimport_batch worker with the selected mods'"
         " source paths")
+
+
+def test_batch_reimport_prioritises_json_source_over_folder():
+    """Glider Stamina / Infinite Horse regression: when a JSON-patch
+    mod was originally imported from a multi-preset folder, the
+    sources/<id>/ archive holds ALL the original presets (5 for
+    Glider, 9 for Horse). If reimport hands the FOLDER to the worker,
+    import_from_folder splits each preset into its own mod row and
+    explodes one mod into N. json_source already points at the user's
+    chosen single preset (deltas/<id>/source.json), so it must be the
+    primary source for reimport — folder is the fallback for
+    PAZ-archive mods that have no json_source.
+    """
+    src = _mods_page_src()
+    anchor = src.find("def _ctx_batch_reimport")
+    assert anchor != -1
+    next_def = src.find("\n    def ", anchor + 20)
+    body = src[anchor:next_def if next_def != -1 else anchor + 8000]
+    # The json_source check must appear before the source_path check
+    # in the resolution chain. Find the first occurrence of each.
+    js_idx = body.find('m.get("json_source")')
+    sp_idx = body.find('m.get("source_path")')
+    assert js_idx != -1, (
+        "_ctx_batch_reimport must read json_source from the mod row")
+    assert sp_idx != -1, (
+        "_ctx_batch_reimport must read source_path from the mod row")
+    # Both must appear, but the json_source resolution branch
+    # (`if js and os.path.isfile(js)`) must precede the source_path
+    # folder branch (`elif sp and os.path.isdir(sp)`).
+    js_branch = body.find("if js and os.path.isfile(js)")
+    sp_dir_branch = body.find("elif sp and os.path.isdir(sp)")
+    assert js_branch != -1 and sp_dir_branch != -1, (
+        "expected explicit if/elif chain checking json_source first, "
+        "source_path folder second")
+    assert js_branch < sp_dir_branch, (
+        "json_source must be checked BEFORE source_path folder so "
+        "JSON-patch mods reimport their chosen preset, not every "
+        "preset in the archived sources/<id>/ folder. Reversing this "
+        "order causes the Glider Stamina / Infinite Horse explosion "
+        "where one mod becomes 5+ separate rows.")

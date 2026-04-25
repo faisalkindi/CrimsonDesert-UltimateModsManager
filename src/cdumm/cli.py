@@ -4,6 +4,7 @@ Commands:
     CDUMM.exe list-mods [--json]
     CDUMM.exe set-enabled --mod-id ID --enabled true|false
     CDUMM.exe apply [--game-dir PATH]
+    CDUMM.exe cleanup-duplicates [--dry-run] [--game-dir PATH]
 """
 import argparse
 import json
@@ -119,6 +120,76 @@ def cmd_set_enabled(args):
     mgr.set_enabled(args.mod_id, enabled)
     state = "enabled" if enabled else "disabled"
     print(f"{mod['name']} (#{args.mod_id}) {state}")
+    db.close()
+
+
+def cmd_cleanup_duplicates(args):
+    """Find and merge duplicate mod rows.
+
+    Symptom: drag-and-drop batch import in older builds skipped the
+    name+version dedup gate, so re-importing a folder of all your
+    mods doubled every row in the DB. This command finds groups of
+    rows that share a name, picks the one most likely to be 'the
+    real install' (applied, then enabled, then most-Nexus-metadata,
+    then highest priority, then newest), copies any data only the
+    siblings had into the kept row, and removes the rest along with
+    their delta + source folders.
+
+    --dry-run prints the plan and exits.
+    """
+    game_dir = _resolve_game_dir(args.game_dir)
+    if not game_dir:
+        print("Error: cannot find game directory. Use --game-dir.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    db_path = game_dir / "CDMods" / "cdumm.db"
+    if not db_path.exists():
+        print(f"Error: database not found at {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    from cdumm.engine.mod_dedup import (
+        find_duplicate_groups, plan_cleanup, apply_cleanup,
+    )
+    from cdumm.engine.mod_manager import ModManager
+    from cdumm.storage.database import Database
+
+    db = Database(db_path)
+    db.initialize()
+    groups = find_duplicate_groups(db.connection)
+    if not groups:
+        print("No duplicate mod rows found. Nothing to do.")
+        db.close()
+        return
+
+    plan = plan_cleanup(db.connection)
+    total_dupes = sum(len(d) for _, d, _ in plan)
+    print(f"Found {len(plan)} duplicate group(s) covering "
+          f"{total_dupes} stale row(s):")
+    print()
+    for canon, deleted, update in plan:
+        applied_flag = " [applied]" if canon.applied else ""
+        print(f"  {canon.name}")
+        print(f"    KEEP   id={canon.id} ver={canon.version!r} "
+              f"fid={canon.nexus_real_file_id} "
+              f"prio={canon.priority}{applied_flag}")
+        for d in deleted:
+            print(f"    DELETE id={d.id} ver={d.version!r} "
+                  f"fid={d.nexus_real_file_id} prio={d.priority}")
+        if update:
+            print(f"    MERGE  copy {update} onto kept row")
+        print()
+
+    if args.dry_run:
+        print("--dry-run set — no changes written.")
+        db.close()
+        return
+
+    deltas_dir = game_dir / "CDMods" / "deltas"
+    mgr = ModManager(db, deltas_dir)
+    results = apply_cleanup(mgr)
+    print(f"Cleanup complete. Removed "
+          f"{sum(len(d) for _, d in results)} duplicate row(s).")
     db.close()
 
 
@@ -366,6 +437,15 @@ def main():
     p_apply = sub.add_parser("apply", help="Apply current mod state to game files")
     p_apply.add_argument("--game-dir", default=None, help="Game directory override")
 
+    # cleanup-duplicates
+    p_dedup = sub.add_parser(
+        "cleanup-duplicates",
+        help="Merge & remove duplicate mod rows (e.g. after a batch re-import)")
+    p_dedup.add_argument("--dry-run", action="store_true",
+                          help="Print the plan without modifying the DB")
+    p_dedup.add_argument("--game-dir", default=None,
+                          help="Game directory override")
+
     # bisect
     p_bisect = sub.add_parser("bisect", help="Binary search for problem mod")
     p_bisect.add_argument("action", choices=["start", "report"], help="start or report")
@@ -383,6 +463,8 @@ def main():
         cmd_apply(args)
     elif args.command == "bisect":
         cmd_bisect(args)
+    elif args.command == "cleanup-duplicates":
+        cmd_cleanup_duplicates(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -480,9 +480,23 @@ if __name__ == "__main__":
             from cdumm.worker_process import worker_main
             worker_main(sys.argv[2:])
         # CLI mode: if first arg is a known subcommand, skip GUI entirely
-        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect"}:
+        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect", "cleanup-duplicates"}:
             from cdumm.cli import main as cli_main
             cli_main()
+        # nxm:// URL handler — Windows fires this when the user clicks
+        # "Mod Manager Download" on a registered Nexus page. Drop the
+        # URL into a pending-queue file, then fall through to main()
+        # which will either take the single-instance lock (and process
+        # the queue) or exit silently (leaving the URL for the already-
+        # running instance to pick up via its watcher).
+        elif len(sys.argv) > 2 and sys.argv[1] == "--nxm":
+            APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            pending = APP_DATA_DIR / "pending_nxm.txt"
+            with open(pending, "a", encoding="utf-8") as f:
+                f.write(sys.argv[2] + "\n")
+            # Strip the consumed args so main() doesn't see them
+            sys.argv = [sys.argv[0]]
+            sys.exit(main())
         else:
             sys.exit(main())
     except BaseException as _bootstrap_exc:

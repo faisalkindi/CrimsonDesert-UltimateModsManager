@@ -45,6 +45,57 @@ def test_scan_finds_ini(tmp_path: Path) -> None:
     assert plugins[0].ini_path.name == "ModA.ini"
 
 
+def test_scan_matches_ini_when_asi_has_baked_version_suffix(tmp_path: Path) -> None:
+    """Author bakes the version into the .asi filename but keeps the
+    .ini name stable so the user's existing config carries over.
+
+    Real-world case: EnhancedFlightv31.asi reads EnhancedFlight.ini.
+    Both forward and exact matches fail; the reverse-prefix fallback
+    must pick up EnhancedFlight.ini for EnhancedFlightv31.asi.
+    """
+    bin64 = _setup_bin64(tmp_path)
+    (bin64 / "EnhancedFlightv31.asi").write_bytes(b"DLL_DATA")
+    (bin64 / "EnhancedFlight.ini").write_text("[General]\nSpeed=1.0\n")
+
+    mgr = AsiManager(bin64)
+    plugins = mgr.scan()
+    target = next(p for p in plugins if p.name == "EnhancedFlightv31")
+    assert target.ini_path is not None
+    assert target.ini_path.name == "EnhancedFlight.ini"
+
+
+def test_scan_does_not_steal_ini_from_sibling_plugin(tmp_path: Path) -> None:
+    """Reverse fallback must not match an INI when another .asi already
+    owns it. Foo.asi + Foo.ini exist as their own plugin; FooBar.asi
+    must NOT inherit Foo.ini.
+    """
+    bin64 = _setup_bin64(tmp_path)
+    (bin64 / "Foo.asi").write_bytes(b"DLL_DATA")
+    (bin64 / "Foo.ini").write_text("[General]\nA=1\n")
+    (bin64 / "FooBar.asi").write_bytes(b"DLL_DATA")
+
+    mgr = AsiManager(bin64)
+    plugins = mgr.scan()
+    foo = next(p for p in plugins if p.name == "Foo")
+    foobar = next(p for p in plugins if p.name == "FooBar")
+    assert foo.ini_path is not None
+    assert foo.ini_path.name == "Foo.ini"
+    assert foobar.ini_path is None
+
+
+def test_scan_does_not_steal_ini_from_disabled_sibling(tmp_path: Path) -> None:
+    """Same protection when the sibling plugin is disabled."""
+    bin64 = _setup_bin64(tmp_path)
+    (bin64 / "Foo.asi.disabled").write_bytes(b"DLL_DATA")
+    (bin64 / "Foo.ini").write_text("[General]\nA=1\n")
+    (bin64 / "FooBar.asi").write_bytes(b"DLL_DATA")
+
+    mgr = AsiManager(bin64)
+    plugins = mgr.scan()
+    foobar = next(p for p in plugins if p.name == "FooBar")
+    assert foobar.ini_path is None
+
+
 def test_has_loader(tmp_path: Path) -> None:
     bin64 = _setup_bin64(tmp_path)
     mgr = AsiManager(bin64)

@@ -34,6 +34,45 @@ logger = logging.getLogger(__name__)
 
 
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
+# Promoted to module-level: the lazy import inside _launch_import_worker
+# was crashing the frozen exe with `zlib.error: Error -3 while decompressing
+# data: incorrect header check` on PyInstaller 6.x — the bootloader's
+# lazy-archive-extract path occasionally fails on submodules. Importing
+# at module load time bypasses that path entirely.
+from cdumm.gui.import_context import snapshot_and_clear_import_context
+
+
+def _quiet_qprocess(proc) -> None:
+    """Suppress the brief console window flash when ``QProcess`` spawns
+    a Windows subprocess.
+
+    Background: CDUMM's exe is built ``console=False`` (no console),
+    but on Windows ``CreateProcess`` still allocates a transient
+    console handle for any GUI-targeting child unless we explicitly
+    pass ``CREATE_NO_WINDOW`` (0x08000000). The result is a "phantom
+    window" that flashes for 50-300 ms (or stays visible for the
+    whole worker run on slower machines) every time CDUMM spawns
+    itself with ``--worker``.
+
+    This helper sets ``QProcess.setCreateProcessArgumentsModifier`` to
+    OR the flag in. No-op on non-Windows platforms — that codepath is
+    never reached on Linux/macOS QProcess.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import subprocess as _sp
+        flag = getattr(_sp, "CREATE_NO_WINDOW", 0x08000000)
+
+        def _modify(args):
+            try:
+                args.flags |= flag
+            except Exception as _e:
+                logger.debug("CREATE_NO_WINDOW modifier write failed: %s", _e)
+
+        proc.setCreateProcessArgumentsModifier(_modify)
+    except Exception as e:
+        logger.debug("CREATE_NO_WINDOW modifier setup failed: %s", e)
 
 
 def _probe_console_state(tag: str) -> None:
@@ -237,6 +276,215 @@ def _has_game_content(path: Path) -> bool:
     except Exception:
         return True  # can't read ZIP — let worker handle it
     return False
+
+
+# ---------------------------------------------------------------------------
+# Nexus / NXM / SSO helpers (ported from CDUMM_API_Test)
+# ---------------------------------------------------------------------------
+
+def _format_nxm_download_activity(mod_id: int, file_id: int) -> str:
+    """Activity log message for nxm:// download start.
+
+    Bug #3 fix: the pure InfoBar notification was sometimes invisible
+    on multi-monitor setups. Logging to Activity gives the user a
+    persistent record they can always find.
+    """
+    return f"Downloading mod {mod_id}, file {file_id} from Nexus"
+
+
+def _format_nxm_import_activity(
+    mod_name: str | None, is_update: bool,
+) -> str:
+    """Activity log message for nxm:// import completion."""
+    name = mod_name or "mod"
+    verb = "Updated" if is_update else "Imported"
+    return f"{verb} {name} from Nexus"
+
+
+_NXM_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB hard cap
+
+
+def _assert_https_download_url(url: str) -> None:
+    """Bug #27: refuse to download from any non-HTTPS URL. Nexus CDN
+    answers only over HTTPS — an ``http://`` URL is either a
+    misconfig or a MITM, and we're about to install the bytes into
+    the user's game folder. Bail before the request.
+    """
+    try:
+        import urllib.parse
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+    except Exception as e:
+        raise ValueError(f"cannot parse download URL: {e}") from e
+    if scheme != "https":
+        raise ValueError(
+            f"refusing to download over non-HTTPS scheme {scheme!r}")
+
+
+def _validate_download_size(
+    content_length: int | None, max_bytes: int
+) -> None:
+    """Bug #29: reject downloads whose advertised Content-Length
+    exceeds the hard cap before we open the destination file.
+    ``None`` = CDN didn't send the header; the streaming loop's
+    running-total check catches those cases instead.
+    """
+    if content_length is None:
+        return
+    if int(content_length) > int(max_bytes):
+        raise ValueError(
+            f"download too large: Content-Length {content_length} > "
+            f"cap {max_bytes}")
+
+
+def _check_download_progress(total_bytes: int, max_bytes: int) -> None:
+    """Bug #28/#29: running-total check called per chunk in the
+    streaming loop. Catches Content-Length-absent cases where the
+    CDN would otherwise trickle unbounded bytes.
+    """
+    if total_bytes > max_bytes:
+        raise ValueError(
+            f"download aborted: {total_bytes} bytes exceeds cap "
+            f"{max_bytes}")
+
+
+def _is_nexus_rate_limited(win, now: int) -> bool:
+    """True when the auto-check should skip this cycle because Nexus
+    previously returned 429 and the reset epoch hasn't passed yet.
+
+    Bug 45: wires ``_pending_nexus_rate_limited_at`` into the
+    actual timer decision so the captured reset_at isn't just a
+    write-only breadcrumb.
+    """
+    until = int(getattr(win, "_nexus_rate_limited_until", 0) or 0)
+    return until > int(now)
+
+
+def _clear_auth_banner_state(win) -> None:
+    """Bug #32: dismiss the "Nexus API key rejected" InfoBar and
+    reset the flag when the user has saved a fresh valid key. Used
+    by the Settings save path so the banner doesn't linger for up
+    to 30 minutes until the next auto-check confirms.
+    """
+    banner = getattr(win, "_nexus_auth_banner", None)
+    if banner is not None:
+        try:
+            banner.close()
+        except Exception:
+            pass
+    win._nexus_auth_banner = None
+    win._nexus_auth_banner_shown = False
+
+
+def _snapshot_selected_labels(db, mod_id: int) -> dict | None:
+    """Bug #24: capture the configurable-mod's ``selected_labels``
+    before ``remove_mod`` cascade-deletes the mod_config row. Returns
+    the parsed dict, or None when the mod was never configurable.
+    """
+    try:
+        row = db.connection.execute(
+            "SELECT selected_labels FROM mod_config WHERE mod_id = ?",
+            (mod_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        import json as _json
+        data = _json.loads(row[0])
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _restore_selected_labels(
+    db, mod_id: int, snapshot: dict | None,
+    available_preset_names,
+) -> None:
+    """Bug #24: write the preserved ``selected_labels`` to the new
+    mod's ``mod_config`` row, filtering out preset names the author
+    removed/renamed in the update. A no-op when ``snapshot`` is None.
+    """
+    if not snapshot:
+        return
+    allowed = set(available_preset_names or [])
+    filtered = {k: v for k, v in snapshot.items() if k in allowed}
+    if not filtered:
+        return
+    try:
+        import json as _json
+        db.connection.execute(
+            "INSERT OR REPLACE INTO mod_config "
+            "(mod_id, selected_labels) VALUES (?, ?)",
+            (mod_id, _json.dumps(filtered)))
+        db.connection.commit()
+    except Exception as e:
+        logger.debug("restore selected_labels failed: %s", e)
+
+
+def _clear_pending_post_import_state(win, path) -> None:
+    """Zero the post-import scratch attributes the pre-check stages
+    accumulate. Safe to call regardless of whether the worker ran to
+    completion or failed — prevents stale values from bleeding into
+    the next import (Bug #14).
+    """
+    for attr in (
+        "_update_priority",
+        "_update_enabled",
+        "_configurable_source",
+        "_configurable_labels",
+        "_original_drop_path",
+        "_pending_selected_labels",
+        "_last_existing_mod_id",
+    ):
+        setattr(win, attr, None)
+    nrf = getattr(win, "_nexus_real_file_id_map", None)
+    if isinstance(nrf, dict) and path is not None:
+        nrf.pop(str(path), None)
+
+
+def _decide_auth_banner(
+    had_error: bool, previously_shown: bool
+) -> tuple[bool, bool]:
+    """Decide whether to show the "Nexus API key rejected" banner
+    for the current update cycle.
+
+    Returns ``(show_now, new_flag)``. ``show_now`` is True only on
+    the *first* failure after a success (or at startup); ``new_flag``
+    replaces the previous ``_nexus_auth_banner_shown`` value and
+    resets on any successful cycle so a later failure re-surfaces
+    the banner (Bug #18).
+    """
+    if had_error:
+        return (not previously_shown, True)
+    return (False, False)
+
+
+def _resolve_post_import_target_id(
+    result_mod_id: int | None,
+    existing_mod_id: int | None,
+    max_row_id: int | None,
+) -> int | None:
+    """Pick the correct row to stamp post-import metadata onto.
+
+    Priority: worker-emitted ``result_mod_id`` > prebound
+    ``existing_mod_id`` > ``MAX(id)`` fallback.
+
+    Before this helper existed, the post-import UPDATE statements used
+    ``WHERE id = (SELECT MAX(id) FROM mods)`` unconditionally. That
+    works for fresh inserts but breaks for the nxm:// update-in-place
+    flow: the update lands on row 1333, while MAX(id) might be 1361.
+
+    Returning None means "we don't know which row — write nothing"
+    rather than silently targeting the wrong row.
+    """
+    if result_mod_id:
+        return int(result_mod_id)
+    if existing_mod_id:
+        return int(existing_mod_id)
+    if max_row_id:
+        return int(max_row_id)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +1033,23 @@ class CdummWindow(FluentWindow):
         # Run first check 5 seconds after startup (let UI settle)
         QTimer.singleShot(5000, self._run_nexus_update_check)
 
+        # Module-level helpers read these attrs via getattr; initialise
+        # them up-front so the first cycle doesn't have to special-case
+        # "never ran before".
+        self._nexus_rate_limited_until = 0
+        self._nexus_auth_banner = None
+        self._nexus_auth_banner_shown = False
+
+        # ── nxm:// pending URL watcher ────────────────────────────────
+        # Another CDUMM process launched with `--nxm <url>` drops the URL
+        # into pending_nxm.txt and exits. This timer polls for queued
+        # URLs and processes them as if the user had dragged the file.
+        self._nxm_poll_timer = QTimer(self)
+        self._nxm_poll_timer.timeout.connect(self._process_pending_nxm)
+        self._nxm_poll_timer.start(2000)
+        # Also drain any URL already queued before this instance started.
+        QTimer.singleShot(1500, self._process_pending_nxm)
+
     # ------------------------------------------------------------------
     # NexusMods automatic update check
     # ------------------------------------------------------------------
@@ -793,6 +1058,16 @@ class CdummWindow(FluentWindow):
         """Check NexusMods for mod updates in background. Runs automatically."""
         if not self._db:
             return
+        # Bug 45: honour the rate-limit back-off. If Nexus returned
+        # 429 on a prior cycle and we haven't reached the reset
+        # epoch, skip — another check against 429 burns more quota
+        # and can't succeed.
+        import time as _time
+        if _is_nexus_rate_limited(self, now=int(_time.time())):
+            logger.debug(
+                "NexusMods update check skipped — rate limit active "
+                "until %d", int(getattr(self, "_nexus_rate_limited_until", 0)))
+            return
         from cdumm.storage.config import Config
         api_key = Config(self._db).get("nexus_api_key")
         if not api_key:
@@ -800,15 +1075,30 @@ class CdummWindow(FluentWindow):
 
         # Read both PAZ mods and ASI plugins on main thread (SQLite thread safety).
         # Both tables share a single NexusMods update-check pass so the API quota
-        # is spent once per cycle.
+        # is spent once per cycle. nexus_last_checked_at lets the 1-week feed
+        # act as an optimization rather than a blanket gate — see plan 4.2.
         try:
             cursor = self._db.connection.execute(
-                "SELECT id, name, version, nexus_mod_id FROM mods WHERE mod_type = 'paz'")
-            mods = [{"id": r[0], "name": r[1], "version": r[2], "nexus_mod_id": r[3]}
+                "SELECT id, name, version, nexus_mod_id, nexus_last_checked_at, "
+                "nexus_real_file_id "
+                "FROM mods WHERE mod_type = 'paz'")
+            mods = [{"id": r[0], "name": r[1], "version": r[2],
+                     "nexus_mod_id": r[3],
+                     "nexus_last_checked_at": r[4],
+                     "nexus_real_file_id": r[5]}
                     for r in cursor.fetchall()]
+            # Bug 43: read the new columns (nexus_real_file_id lets
+            # the chain walk find the author-declared successor;
+            # nexus_last_checked_at lets the feed-skip optimization
+            # apply to ASI plugins too).
             cursor = self._db.connection.execute(
-                "SELECT name, version, nexus_mod_id FROM asi_plugin_state")
-            asi_mods = [{"id": r[0], "name": r[0], "version": r[1], "nexus_mod_id": r[2]}
+                "SELECT name, version, nexus_mod_id, "
+                "nexus_real_file_id, nexus_last_checked_at "
+                "FROM asi_plugin_state")
+            asi_mods = [{"id": None, "name": r[0], "version": r[1],
+                         "nexus_mod_id": r[2],
+                         "nexus_real_file_id": r[3] or 0,
+                         "nexus_last_checked_at": r[4] or 0}
                         for r in cursor.fetchall()]
         except Exception:
             return
@@ -820,12 +1110,52 @@ class CdummWindow(FluentWindow):
         import threading
         def _check():
             try:
-                from cdumm.engine.nexus_api import check_mod_updates
-                updates = check_mod_updates(combined, api_key)
-                self._pending_nexus_updates = {u.mod_id: u for u in updates}
+                from cdumm.engine.nexus_api import (
+                    check_mod_updates, NexusAuthError, NexusRateLimited,
+                )
+                try:
+                    updates, checked_ids, now_ts, backfill = check_mod_updates(
+                        combined, api_key)
+                    self._pending_nexus_updates = {u.mod_id: u for u in updates}
+                    self._pending_nexus_checked_ids = checked_ids
+                    self._pending_nexus_checked_ts = now_ts
+                    self._pending_nexus_backfill = backfill
+                    self._pending_nexus_auth_error = False
+                    self._pending_nexus_rate_limited_at = 0
+                except NexusAuthError as e:
+                    # Bug #12 fix: distinguish invalid API key from
+                    # generic transport failure so the UI can prompt
+                    # the user to re-enter instead of silently staying
+                    # grey forever.
+                    logger.warning("Nexus API key rejected: %s", e)
+                    self._pending_nexus_updates = {}
+                    self._pending_nexus_checked_ids = []
+                    self._pending_nexus_checked_ts = 0
+                    self._pending_nexus_backfill = {}
+                    self._pending_nexus_auth_error = True
+                    self._pending_nexus_rate_limited_at = 0
+                except NexusRateLimited as e:
+                    # Bug 36: route rate-limit through a dedicated
+                    # flag so the GUI can back off until reset_at
+                    # instead of spamming 429s on the 30-min timer.
+                    logger.warning(
+                        "Nexus rate-limited in auto-check, reset_at=%d",
+                        getattr(e, "reset_at", 0))
+                    self._pending_nexus_updates = {}
+                    self._pending_nexus_checked_ids = []
+                    self._pending_nexus_checked_ts = 0
+                    self._pending_nexus_backfill = {}
+                    self._pending_nexus_auth_error = False
+                    self._pending_nexus_rate_limited_at = int(
+                        getattr(e, "reset_at", 0) or 0)
             except Exception as e:
                 logger.warning("NexusMods update check failed: %s", e)
                 self._pending_nexus_updates = {}
+                self._pending_nexus_checked_ids = []
+                self._pending_nexus_checked_ts = 0
+                self._pending_nexus_backfill = {}
+                self._pending_nexus_auth_error = False
+                self._pending_nexus_rate_limited_at = 0
             from PySide6.QtCore import QMetaObject, Qt as _Qt
             QMetaObject.invokeMethod(
                 self, "_apply_nexus_update_colors", _Qt.ConnectionType.QueuedConnection)
@@ -834,6 +1164,104 @@ class CdummWindow(FluentWindow):
     @Slot()
     def _apply_nexus_update_colors(self) -> None:
         """Propagate update results to both PAZ mods page and ASI plugins page."""
+        # Bug 45: copy the rate-limit reset epoch from the per-cycle
+        # _pending_* slot into persistent _nexus_rate_limited_until.
+        # _is_nexus_rate_limited reads the persistent attr before
+        # each auto-check fires, so setting it here is what actually
+        # makes the back-off effective.
+        rl_at = int(
+            getattr(self, "_pending_nexus_rate_limited_at", 0) or 0)
+        if rl_at:
+            self._nexus_rate_limited_until = rl_at
+            # InfoBar-level warning at transition into rate-limit
+            # state. One-shot guarded by the same rl_at comparison.
+            if getattr(self, "_rate_limit_banner_until", 0) != rl_at:
+                self._rate_limit_banner_until = rl_at
+                try:
+                    InfoBar.warning(
+                        title="Nexus rate limit reached",
+                        content=(
+                            "You've used your hourly Nexus API "
+                            "quota. CDUMM will pause update checks "
+                            "until the limit resets."),
+                        duration=-1, position=InfoBarPosition.TOP,
+                        parent=self)
+                except Exception as _e:
+                    logger.debug("rate-limit InfoBar failed: %s", _e)
+        else:
+            # Successful / non-rate-limited cycle — clear the
+            # throttle so the next timer tick isn't suppressed.
+            self._nexus_rate_limited_until = 0
+        # Bug #12 / #18 fix: surface auth failures to the user, and
+        # reset the "already shown" flag on successful cycles so a
+        # LATER failure re-shows the banner. The old one-shot gate
+        # was sticky forever — a user who fixed their key and then
+        # had it fail again never saw a second warning.
+        had_auth_error = bool(
+            getattr(self, "_pending_nexus_auth_error", False))
+        self._pending_nexus_auth_error = False
+        shown_previously = bool(
+            getattr(self, "_nexus_auth_banner_shown", False))
+        show_banner, new_flag = _decide_auth_banner(
+            had_auth_error, shown_previously)
+        self._nexus_auth_banner_shown = new_flag
+        if show_banner:
+            try:
+                # Bug #32: stash the InfoBar so a later "valid key
+                # saved" event can close it instead of waiting 30
+                # minutes for the next auto-check confirmation.
+                self._nexus_auth_banner = InfoBar.error(
+                    title=tr("settings.nexus_auth_rejected_title"),
+                    content=tr("settings.nexus_auth_rejected_body"),
+                    duration=-1, position=InfoBarPosition.TOP,
+                    parent=self)
+            except Exception as e:
+                logger.debug("auth-rejected InfoBar failed: %s", e)
+                self._nexus_auth_banner = None
+        # Persist the last-checked timestamps on the GUI thread — the
+        # worker hit SQLite's "connection bound to originating thread"
+        # constraint. Only row ids that returned a valid file list are
+        # in checked_ids; transient failures are NOT persisted so they
+        # get retried on the next cycle.
+        checked_ids = getattr(self, "_pending_nexus_checked_ids", [])
+        now_ts = getattr(self, "_pending_nexus_checked_ts", 0)
+        if self._db and checked_ids and now_ts:
+            try:
+                placeholders = ",".join("?" * len(checked_ids))
+                self._db.connection.execute(
+                    f"UPDATE mods SET nexus_last_checked_at = ? "
+                    f"WHERE id IN ({placeholders})",
+                    [now_ts, *checked_ids])
+                self._db.connection.commit()
+            except Exception as e:
+                logger.debug("nexus_last_checked_at persist failed: %s", e)
+
+        # Backfill nexus_real_file_id for rows that got resolved via the
+        # name-match path this cycle. Once populated, the next check
+        # walks the file_updates chain for these rows instead of guessing
+        # by name — that's what flips grey-because-name-match-failed to
+        # green or red on the second check. Guard with IS NULL so we
+        # never overwrite a reliable pre-existing value.
+        backfill = getattr(self, "_pending_nexus_backfill", {}) or {}
+        if self._db and backfill:
+            persisted = 0
+            for row_id, file_id in backfill.items():
+                try:
+                    cur = self._db.connection.execute(
+                        "UPDATE mods SET nexus_real_file_id = ? "
+                        "WHERE id = ? AND (nexus_real_file_id IS NULL "
+                        "OR nexus_real_file_id = 0)",
+                        (int(file_id), int(row_id)))
+                    if cur.rowcount:
+                        persisted += 1
+                except Exception as e:
+                    logger.debug(
+                        "nexus_real_file_id backfill failed for row %s: %s",
+                        row_id, e)
+            if persisted:
+                self._db.connection.commit()
+                logger.info(
+                    "nexus_real_file_id: backfilled %d row(s)", persisted)
         self._nexus_updates = getattr(self, "_pending_nexus_updates", {})
         if hasattr(self, 'paz_mods_page'):
             self.paz_mods_page.set_nexus_updates(self._nexus_updates)
@@ -842,7 +1270,14 @@ class CdummWindow(FluentWindow):
                 self.asi_plugins_page.set_nexus_updates(self._nexus_updates)
             except AttributeError:
                 pass  # ASI page may not implement it in older builds
-        logger.info("NexusMods update check: %d updates found", len(self._nexus_updates))
+        # ``_nexus_updates`` now carries both outdated and confirmed-
+        # current entries (three-state pill support). Split the counts
+        # in the log so it's clear how many are actually actionable.
+        from cdumm.engine.nexus_api import filter_outdated
+        outdated_ct = len(filter_outdated(self._nexus_updates.values()))
+        logger.info(
+            "NexusMods update check: %d outdated, %d confirmed current",
+            outdated_ct, len(self._nexus_updates) - outdated_ct)
 
     # ------------------------------------------------------------------
     # Runtime retranslation
@@ -965,6 +1400,7 @@ class CdummWindow(FluentWindow):
                 return
             if self._check_game_updated():
                 return
+            self._check_duplicate_mods()
 
         if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
             from qfluentwidgets import (
@@ -1058,15 +1494,17 @@ class CdummWindow(FluentWindow):
                 current_fp = detect_game_version(self._game_dir)
                 stored_fp = config.get("game_version_fingerprint")
                 if current_fp and stored_fp and current_fp != stored_fp:
-                    box = MessageBox(
-                        "Game Files Changed",
-                        "Your game files have changed since the last snapshot.\n\n"
-                        "This usually means you verified through Steam.\n\n"
-                        "Rescan now to update the snapshot?",
-                        self,
-                    )
-                    if box.exec():
-                        self._on_refresh_snapshot(skip_verify_prompt=True)
+                    # v3.2: unified Recovery Flow trigger (Codex
+                    # review finding 10). Both startup paths surface
+                    # the same Recovery button instead of two
+                    # different MessageBoxes.
+                    self._offer_recovery_flow(
+                        title="Game files changed — recovery available",
+                        body=(
+                            "Your game files have changed since the "
+                            "last snapshot (likely a Steam patch or "
+                            "Verify Integrity). Click Start Recovery "
+                            "to run the full recovery flow."))
             except Exception:
                 pass
 
@@ -1398,6 +1836,478 @@ class CdummWindow(FluentWindow):
                 pass
 
     # ------------------------------------------------------------------
+    # NXM (nxm:// URL) download + pending-queue handling
+    # ------------------------------------------------------------------
+
+    def _process_pending_nxm(self) -> None:
+        """Drain queued ``nxm://`` URLs left by ``--nxm`` launches.
+
+        Each line in ``pending_nxm.txt`` is one URL. For each: parse,
+        look up the API key, call ``download_link.json`` (with the
+        ``key`` + ``expires`` query params that came from the URL when
+        present — that's what lets free-tier downloads succeed), fetch
+        the file to a temp path, and dispatch through the existing drop
+        handler so import follows the same path as a dragged file.
+        """
+        pending = self._app_data_dir / "pending_nxm.txt"
+        if not pending.exists():
+            return
+        # Atomic handoff: rename the queue file aside before reading it,
+        # so a concurrent ``--nxm`` launcher that appends in the window
+        # between our read and unlink doesn't have its URL dropped on
+        # the floor. ``os.replace`` is atomic on both Windows and POSIX.
+        import os, time as _time
+        processing = self._app_data_dir / f".pending_nxm.processing.{os.getpid()}.{int(_time.time() * 1000)}"
+        try:
+            os.replace(pending, processing)
+        except FileNotFoundError:
+            return  # another cycle picked it up first
+        except Exception as e:
+            logger.warning("Failed to rename pending_nxm.txt: %s", e)
+            return
+        try:
+            lines = [
+                ln.strip() for ln in
+                processing.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+        except Exception as e:
+            logger.warning("Failed to read %s: %s", processing, e)
+            lines = []
+        finally:
+            try:
+                processing.unlink()
+            except Exception:
+                pass
+        if not lines:
+            return
+        # De-dupe nxm:// URLs across a 10-second window. Many Chromium
+        # builds fire registered protocol handlers TWICE for a single
+        # click (one from the page, one from the navigation hand-off),
+        # which produces two duplicate downloads and two duplicate mod
+        # rows. The atomic queue handoff above keeps appends from being
+        # dropped, but it doesn't filter same-URL re-fires. Real-world
+        # hit: a single 'Mod Manager Download' click on Better
+        # Inventory And Trade UI created mod_id=1490 AND 1491 in one
+        # drain batch.
+        recent: dict = getattr(self, "_recent_nxm_urls", {})
+        now_ts = _time.time()
+        # Forget anything older than 30s so the dict can't grow
+        # unbounded across a long session.
+        recent = {u: ts for u, ts in recent.items() if now_ts - ts < 30}
+        for url in lines:
+            prior = recent.get(url)
+            if prior is not None and (now_ts - prior) < 10:
+                logger.warning(
+                    "nxm: ignoring duplicate URL fired within 10s: %s",
+                    url)
+                continue
+            recent[url] = now_ts
+            try:
+                self._handle_nxm_url(url)
+            except Exception as e:
+                logger.error("nxm URL %s failed: %s", url, e, exc_info=True)
+                InfoBar.error(
+                    title="Download Failed",
+                    content=f"Could not handle {url}\n\n{e}",
+                    duration=-1, position=InfoBarPosition.TOP, parent=self)
+        self._recent_nxm_urls = recent
+
+    def _handle_direct_update(self, local_mod_id: int, nexus_mod_id: int,
+                               file_id: int, fallback_url: str) -> None:
+        """Premium direct download for the click-to-update pill.
+
+        Synthesises an ``nxm://`` URL without ``key``/``expires`` query
+        params (those are only required for free tier). The standard
+        :meth:`_handle_nxm_url` worker handles the rest — it'll get
+        a ``download_link.json`` response for premium users and fall
+        back to the browser via :class:`NexusPremiumRequired` for free
+        users, which opens ``fallback_url`` (the mod's Files tab).
+        """
+        if not nexus_mod_id or not file_id:
+            # We don't have enough info to synthesise the URL (probably
+            # an outdated update payload that pre-dates latest_file_id).
+            # Open the browser so the user can still update.
+            if fallback_url:
+                import webbrowser
+                webbrowser.open(fallback_url)
+            return
+        # Use the same scheme/path Nexus's website would emit so the
+        # downstream code path is byte-identical to a real nxm:// click.
+        synth_url = f"nxm://crimsondesert/mods/{nexus_mod_id}/files/{file_id}"
+        logger.info(
+            "direct update: local_mod_id=%d nexus_mod_id=%d file_id=%d "
+            "(skipping browser handover)",
+            local_mod_id, nexus_mod_id, file_id)
+        self._handle_nxm_url(synth_url)
+
+    def _handle_nxm_url(self, url: str) -> None:
+        """Resolve an ``nxm://`` URL into a downloaded file + import queue.
+
+        Runs the :func:`get_download_link` API call AND the CDN download
+        on a background thread so the GUI stays responsive. Results are
+        marshalled back to the main thread via
+        :meth:`PySide6.QtCore.QMetaObject.invokeMethod` and fed into the
+        standard drop flow.
+        """
+        from cdumm.engine.nxm_handler import parse_nxm_url, NxmUrlError
+        from cdumm.storage.config import Config
+
+        try:
+            parsed = parse_nxm_url(url)
+        except NxmUrlError as e:
+            # Bug 38: give the user a specific message rather than
+            # letting the generic handler say "Could not handle".
+            logger.warning("Malformed nxm:// URL: %s — %s", url, e)
+            InfoBar.error(
+                title="Malformed NXM URL",
+                content=f"Could not parse {url!r}: {e}",
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+        api_key = Config(self._db).get("nexus_api_key") if self._db else None
+        if not api_key:
+            InfoBar.warning(
+                title="Nexus API key missing",
+                content="Add your API key in Settings → NexusMods Integration first.",
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+
+        # Show progress toast so the reviewer doesn't think the click
+        # was a no-op while the CDN warms up. Bug #17: sticky until
+        # the download actually finishes (closed in
+        # _finish_nxm_download). Fixed 15s was too short for slow
+        # networks / large mods — the toast disappeared before
+        # completion and users thought nothing was happening.
+        #
+        # Bug 39: close any prior banner before overwriting the
+        # attribute — rapid NXM clicks otherwise pile up orphaned
+        # InfoBars that linger until window destruction.
+        prior = getattr(self, "_nxm_download_banner", None)
+        if prior is not None:
+            try:
+                prior.close()
+            except Exception:
+                pass
+        try:
+            self._nxm_download_banner = InfoBar.info(
+                title="Downloading from Nexus…",
+                content=f"Mod {parsed.mod_id}, file {parsed.file_id}",
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+        except Exception as e:
+            logger.debug("NXM download banner create failed: %s", e)
+            self._nxm_download_banner = None
+        try:
+            self._log_activity(
+                "import",
+                _format_nxm_download_activity(parsed.mod_id, parsed.file_id))
+        except Exception:
+            pass
+
+        # Thread-safe producer-consumer queue so overlapping nxm clicks
+        # don't race over shared instance attributes. Each worker pushes
+        # exactly one (result, error) record; _finish_nxm_download
+        # drains whatever's available on the main thread.
+        if not hasattr(self, "_nxm_completion_queue"):
+            import queue as _queue
+            self._nxm_completion_queue = _queue.Queue()
+
+        import threading
+
+        def _worker():
+            import tempfile, urllib.request, urllib.parse
+            from cdumm.engine.nexus_api import (
+                get_download_link, NexusPremiumRequired,
+                NexusAuthError, NexusRateLimited,
+                mod_page_files_url,
+            )
+            result = None
+            error = None
+            try:
+                try:
+                    download_url = get_download_link(
+                        parsed.mod_id, parsed.file_id, api_key,
+                        nxm_key=parsed.key, nxm_expires=parsed.expires)
+                except NexusPremiumRequired:
+                    error = ("premium_required", mod_page_files_url(parsed.mod_id))
+                    return
+                except NexusAuthError as e:
+                    # Bug #21: route auth failure through the auth-
+                    # banner path (same one the auto-check uses) so
+                    # the user gets a persistent "re-enter your key"
+                    # message, not a bland toast that vanishes.
+                    error = ("auth", str(e))
+                    return
+                except NexusRateLimited as e:
+                    error = ("rate_limited", getattr(e, "reset_at", 0))
+                    return
+                if not download_url:
+                    error = ("no_url", "Nexus didn't hand back a CDN link. "
+                             "Try again in a moment.")
+                    return
+                split = urllib.parse.urlsplit(download_url)
+                # Bug #27: reject non-HTTPS scheme before request.
+                try:
+                    _assert_https_download_url(download_url)
+                except ValueError as _scheme_err:
+                    error = ("other", str(_scheme_err))
+                    return
+                safe_path = urllib.parse.quote(split.path, safe="/%")
+                download_url = urllib.parse.urlunsplit((
+                    split.scheme, split.netloc, safe_path,
+                    split.query, split.fragment))
+
+                tmp_dir = Path(tempfile.mkdtemp(prefix="cdumm_nxm_"))
+                dest = tmp_dir / f"nxm_{parsed.mod_id}_{parsed.file_id}.bin"
+                logger.info("nxm: downloading %s -> %s", download_url, dest)
+                from cdumm import __version__
+                req = urllib.request.Request(
+                    download_url,
+                    headers={
+                        "User-Agent": f"CDUMM/{__version__}",
+                        "Application-Name": "CDUMM",
+                        "Application-Version": __version__,
+                    })
+                with urllib.request.urlopen(req, timeout=60) as resp, \
+                        open(dest, "wb") as f:
+                    # Bug #29: content-length sanity check up front.
+                    cl_raw = resp.headers.get("Content-Length")
+                    try:
+                        cl = int(cl_raw) if cl_raw else None
+                    except (TypeError, ValueError):
+                        cl = None
+                    try:
+                        _validate_download_size(
+                            cl, _NXM_MAX_DOWNLOAD_BYTES)
+                    except ValueError as _size_err:
+                        error = ("other", str(_size_err))
+                        return
+                    # Bug #28: streaming accumulator catches the
+                    # Content-Length-absent case where the CDN
+                    # trickles bytes indefinitely.
+                    total = 0
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        try:
+                            _check_download_progress(
+                                total, _NXM_MAX_DOWNLOAD_BYTES)
+                        except ValueError as _prog_err:
+                            error = ("other", str(_prog_err))
+                            return
+                        f.write(chunk)
+                logger.info("nxm: downloaded %d bytes to %s",
+                            dest.stat().st_size, dest)
+
+                # Rename to the ACTUAL filename Nexus served (not just
+                # the extension). Without this the imported mod ends up
+                # named "Nxm 774 3148" because the prettifier sees the
+                # synthetic temp name. Using the real filename also
+                # lets parse_nexus_filename extract the version + mod
+                # id properly via the standard timestamped format
+                # (ModName-id-version-uploaded.zip).
+                final = dest
+                tail = download_url.rsplit("/", 1)[-1].split("?")[0]
+                if tail:
+                    # Decode percent-encoded spaces back to real spaces
+                    # so the final filename matches what a browser
+                    # download would have produced.
+                    real_name = urllib.parse.unquote(tail)
+                    # Sanitise: strip path separators, keep only
+                    # filename portion. Path() already drops directory
+                    # components but we belt-and-suspenders here.
+                    real_name = Path(real_name).name
+                    if real_name and real_name != dest.name:
+                        final = tmp_dir / real_name
+                        dest.rename(final)
+                result = final
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:200]
+                except Exception:
+                    body = ""
+                logger.error(
+                    "nxm: CDN download failed — HTTP %d: %s | URL: %s",
+                    e.code, body, getattr(e, "url", "?"))
+                error = ("http", f"HTTP {e.code}: {body or str(e)}")
+            except Exception as e:
+                logger.error("nxm: CDN download failed: %s", e, exc_info=True)
+                error = ("other", str(e))
+            finally:
+                # Push (result, error, nexus_mod_id, nexus_file_id) —
+                # queue is thread-safe. mod_id binds to an existing
+                # local row; file_id gets stored on that row so the
+                # next update check can walk the file_updates chain
+                # to find which file supersedes this one.
+                self._nxm_completion_queue.put(
+                    (result, error, parsed.mod_id, parsed.file_id))
+                from PySide6.QtCore import QMetaObject, Qt as _Qt
+                QMetaObject.invokeMethod(
+                    self, "_finish_nxm_download",
+                    _Qt.ConnectionType.QueuedConnection)
+
+        threading.Thread(
+            target=_worker, daemon=True, name="cdumm-nxm").start()
+
+    @Slot()
+    def _finish_nxm_download(self) -> None:
+        """Main-thread completion slot for :meth:`_handle_nxm_url`.
+
+        Drains every ``(result, error)`` record queued by a worker. The
+        queue is the synchronization point — if two downloads finished
+        back-to-back, both are processed even if QueuedConnection
+        coalesced the slot invocations.
+        """
+        import queue as _queue
+        # Bug #17: close the sticky "Downloading from Nexus…" banner
+        # now that the worker has reported in.
+        banner = getattr(self, "_nxm_download_banner", None)
+        if banner is not None:
+            try:
+                banner.close()
+            except Exception:
+                pass
+            self._nxm_download_banner = None
+        q = getattr(self, "_nxm_completion_queue", None)
+        if q is None:
+            return
+        while True:
+            try:
+                result, err, nexus_mod_id, nexus_file_id = q.get_nowait()
+            except _queue.Empty:
+                return
+            if err is not None:
+                kind, detail = err
+                # Bug #5 fix: every nxm:// error path now also logs an
+                # Activity entry so a free-tier user clicking "Click To
+                # Update" without a premium account gets a persistent
+                # record of what happened, not just a toast that might
+                # vanish or land offscreen.
+                try:
+                    if kind == "premium_required":
+                        self._log_activity(
+                            "import",
+                            "Free-tier download: opening Nexus page "
+                            "for manual 'Mod Manager Download' click")
+                    else:
+                        self._log_activity(
+                            "import",
+                            f"Nexus download failed ({kind}): {detail}")
+                except Exception:
+                    pass
+                if kind == "premium_required":
+                    import webbrowser
+                    webbrowser.open(detail)
+                    InfoBar.info(
+                        title="Free-tier download — click 'Mod Manager Download' on Nexus",
+                        content=(
+                            "Opened the mod's Files tab in your browser. "
+                            "Click 'Mod Manager Download' there and the "
+                            "file will come back to CDUMM automatically."),
+                        duration=15000,
+                        position=InfoBarPosition.TOP, parent=self)
+                elif kind == "auth":
+                    # Bug #21: route through the same flag the auto-
+                    # check uses so the user sees a single coherent
+                    # "API key rejected — re-enter in Settings"
+                    # banner. _apply_nexus_update_colors reads this
+                    # flag + _decide_auth_banner to avoid spamming.
+                    self._pending_nexus_auth_error = True
+                    from PySide6.QtCore import QMetaObject, Qt as _Qt
+                    QMetaObject.invokeMethod(
+                        self, "_apply_nexus_update_colors",
+                        _Qt.ConnectionType.QueuedConnection)
+                elif kind == "rate_limited":
+                    InfoBar.warning(
+                        title="Nexus rate limit reached",
+                        content=(
+                            "You've used your hourly Nexus API quota. "
+                            "Try again shortly; the limit resets on "
+                            "the hour."),
+                        duration=-1, position=InfoBarPosition.TOP,
+                        parent=self)
+                elif kind == "no_url":
+                    InfoBar.error(
+                        title="No download URL returned",
+                        content=detail, duration=-1,
+                        position=InfoBarPosition.TOP, parent=self)
+                elif kind == "http":
+                    InfoBar.error(
+                        title="Download failed", content=detail,
+                        duration=-1, position=InfoBarPosition.TOP, parent=self)
+                else:
+                    InfoBar.error(
+                        title="Download failed", content=detail,
+                        duration=-1, position=InfoBarPosition.TOP, parent=self)
+                continue
+            if result is not None:
+                # Look up which existing local mod row points at this
+                # Nexus mod_id and pass it to _queue_import so the
+                # import REPLACES instead of duplicating.
+                #
+                # Multi-row case: backfill bugs can put the same
+                # nexus_mod_id on multiple rows (e.g. mod 664 is shared
+                # by Easier QTE + Easier Rodeo via filename inference).
+                # If we silently pick one, the other row stays outdated
+                # forever and re-clicking just downloads the same file
+                # again. Surface the ambiguity to the user via an
+                # InfoBar so they can de-dup before retrying.
+                existing_id = None
+                if self._db and nexus_mod_id:
+                    try:
+                        rows = self._db.connection.execute(
+                            "SELECT id, name FROM mods WHERE nexus_mod_id = ? "
+                            "ORDER BY id ASC",
+                            (int(nexus_mod_id),)).fetchall()
+                    except Exception as e:
+                        logger.debug("nxm: existing-mod lookup failed: %s", e)
+                        rows = []
+                    if len(rows) == 1:
+                        existing_id = rows[0][0]
+                        logger.info(
+                            "nxm: binding download to existing mod_id=%d "
+                            "(nexus_mod_id=%d)", existing_id, nexus_mod_id)
+                    elif len(rows) > 1:
+                        names = ", ".join(r[1] for r in rows)
+                        logger.warning(
+                            "nxm: %d mod rows share nexus_mod_id=%d (%s) — "
+                            "importing as new to avoid wrong-target replace",
+                            len(rows), nexus_mod_id, names)
+                        InfoBar.warning(
+                            title="Multiple mods share this Nexus ID",
+                            content=(
+                                f"You have {len(rows)} installed mods linked to "
+                                f"Nexus mod #{nexus_mod_id} ({names}). "
+                                "CDUMM imported the new download as a separate "
+                                "mod to avoid replacing the wrong one. "
+                                "Right-click → Delete the duplicates if you "
+                                "want a single entry."),
+                            duration=-1, position=InfoBarPosition.TOP, parent=self)
+                # Fallback: when no row matches by nexus_mod_id (because
+                # the existing row was imported as a local zip and never
+                # got Nexus metadata stored), match by name instead so a
+                # nxm:// download UPDATES the existing row instead of
+                # creating a parallel one. Real-world hit: 'CD Inventory
+                # Expander' was a local-zip import with NULL nexus_mod_id;
+                # clicking 'Mod Manager Download' on Nexus created a
+                # second row 1487 alongside the original 1406.
+                if existing_id is None and self._db:
+                    try:
+                        existing_id = self._match_existing_by_name(result)
+                        if existing_id is not None:
+                            logger.info(
+                                "nxm: name-match binding to existing "
+                                "mod_id=%d (nexus_mod_id was NULL on that "
+                                "row)", existing_id)
+                    except Exception as e:
+                        logger.debug("nxm: name-match fallback failed: %s", e)
+                self._queue_import(
+                    result,
+                    existing_mod_id=existing_id,
+                    nexus_real_file_id=nexus_file_id)
+
+    # ------------------------------------------------------------------
     # Theme change — reapply custom styles on all components
     # ------------------------------------------------------------------
 
@@ -1618,6 +2528,7 @@ class CdummWindow(FluentWindow):
             page._progress_detail.setText(f"Analyzing {mod_path.name}...")
 
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -1685,6 +2596,7 @@ class CdummWindow(FluentWindow):
         import json as _json
 
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -1777,15 +2689,40 @@ class CdummWindow(FluentWindow):
             return
         self._queue_import(Path(path) if not isinstance(path, Path) else path)
 
-    def _queue_import(self, path: Path) -> None:
-        """Add a path to the import queue. Processes sequentially."""
+    def _queue_import(self, path: Path, existing_mod_id: int | None = None,
+                       nexus_real_file_id: int | None = None) -> None:
+        """Add a path to the import queue. Processes sequentially.
+
+        ``existing_mod_id`` lets callers (notably the nxm:// download
+        handler) bind the queued file to an already-imported mod row so
+        the import REPLACES it instead of creating a duplicate.
+
+        ``nexus_real_file_id`` is the actual numeric Nexus file_id when
+        known (always present for nxm:// downloads). Stored on the mod
+        row by the post-import handler so the next update check can
+        walk the file_updates chain.
+        """
         if not hasattr(self, '_import_queue'):
             self._import_queue: list[Path] = []
         if not hasattr(self, '_import_errors'):
             self._import_errors: list[str] = []
+        if not hasattr(self, '_existing_mod_id_map'):
+            self._existing_mod_id_map: dict[str, int] = {}
+        if not hasattr(self, '_nexus_real_file_id_map'):
+            self._nexus_real_file_id_map: dict[str, int] = {}
         self._import_queue.append(path)
-        logger.info("Queued for import: %s (queue size: %d, worker active: %s)",
-                     path.name, len(self._import_queue), self._active_worker is not None)
+        if existing_mod_id is not None:
+            self._existing_mod_id_map[str(path)] = existing_mod_id
+            logger.info(
+                "Queued for import: %s (queue size: %d, worker active: %s, "
+                "replacing mod_id=%d)",
+                path.name, len(self._import_queue),
+                self._active_worker is not None, existing_mod_id)
+        else:
+            logger.info("Queued for import: %s (queue size: %d, worker active: %s)",
+                         path.name, len(self._import_queue), self._active_worker is not None)
+        if nexus_real_file_id:
+            self._nexus_real_file_id_map[str(path)] = int(nexus_real_file_id)
         # If no import is running, start the first one
         if not self._active_worker:
             self._process_next_import()
@@ -1814,13 +2751,21 @@ class CdummWindow(FluentWindow):
         # But first, separate out multi-preset / multi-variant mods that need
         # user interaction. Archives are peeked via a lightweight namelist
         # check to avoid extracting every zip up-front.
+        # Files with a prebound existing_mod_id (nxm:// downloads that
+        # need to REPLACE an existing mod, not import as new) also get
+        # forced through the single-import path so the binding survives
+        # — the batch worker doesn't accept per-file mod_ids.
         if len(self._import_queue) > 1:
             from cdumm.gui.preset_picker import find_json_presets, find_folder_variants
+            prebound = getattr(self, "_existing_mod_id_map", {})
             batch = []
             deferred = []  # multi-preset mods that need dialog
             for p in self._import_queue:
                 needs_dialog = False
-                if p.is_dir():
+                if str(p) in prebound:
+                    # Skip batch — force single import to preserve mod_id binding
+                    needs_dialog = True
+                elif p.is_dir():
                     presets = find_json_presets(p)
                     if len(presets) > 1:
                         needs_dialog = True
@@ -1859,6 +2804,45 @@ class CdummWindow(FluentWindow):
             self._import_queue.extend(paths)
             QTimer.singleShot(500, self._process_next_import)
             return
+
+        # Skip exact-name+version duplicates silently. The single-import
+        # path at _import_with_prechecks does this per file via
+        # _find_existing_mod + _get_drop_version; without the same gate
+        # here, dragging a folder of all-already-installed mods doubles
+        # every row in the DB. Mirror the single-path predicate so
+        # behaviour is consistent across drop modes.
+        if self._mod_manager and paths:
+            deduped: list = []
+            skipped: list[tuple[str, str]] = []
+            installed_by_name: dict[str, str] = {
+                m["name"]: (m.get("version") or "")
+                for m in self._mod_manager.list_mods()
+            }
+            for p in paths:
+                existing = self._find_existing_mod(p)
+                if existing:
+                    _, mname, _ = existing
+                    installed_ver = installed_by_name.get(mname, "")
+                    drop_ver = self._get_drop_version(p)
+                    if (installed_ver and drop_ver
+                            and installed_ver == drop_ver):
+                        logger.info(
+                            "Batch dedup: skipping %s v%s (already installed)",
+                            mname, drop_ver)
+                        skipped.append((mname, drop_ver))
+                        continue
+                deduped.append(p)
+            if skipped:
+                head = "; ".join(f"{n} v{v}" for n, v in skipped[:5])
+                tail = (f" (+{len(skipped) - 5} more)"
+                        if len(skipped) > 5 else "")
+                InfoBar.info(
+                    title=tr("infobar.skipped"),
+                    content=f"Skipped {len(skipped)} duplicate(s): {head}{tail}",
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
+            paths = deduped
+            if not paths:
+                return
 
         # Separate ASI mods from PAZ mods — ASI installs are instant (file copy)
         from cdumm.asi.asi_manager import AsiManager
@@ -1933,6 +2917,7 @@ class CdummWindow(FluentWindow):
 
         from PySide6.QtCore import QProcess
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         self._active_worker = proc
 
         exe = sys.executable
@@ -2140,7 +3125,13 @@ class CdummWindow(FluentWindow):
             return
         logger.info("Import pre-checks for: %s", path)
         self._original_drop_path = path  # saved for version extraction after import
-        existing_mod_id = None
+        # Pre-bound mod_id from _queue_import (e.g. nxm:// downloads
+        # already know which existing mod they're updating). Falling
+        # back to the dup-detection flow below if not bound.
+        prebound_id = None
+        if hasattr(self, "_existing_mod_id_map"):
+            prebound_id = self._existing_mod_id_map.pop(str(path), None)
+        existing_mod_id = prebound_id
 
         # ── 1. ASI detection ──────────────────────────────────────────
         from cdumm.asi.asi_manager import AsiManager
@@ -2164,7 +3155,9 @@ class CdummWindow(FluentWindow):
                 return
 
         # ── 3. Existing mod detection ─────────────────────────────────
-        if self._mod_manager:
+        # Skip when caller pre-bound a mod_id (nxm:// downloads already
+        # know which mod they're updating via nexus_mod_id lookup).
+        if self._mod_manager and prebound_id is None:
             existing = self._find_existing_mod(path)
             if existing:
                 mid, mname, match_level = existing
@@ -2203,6 +3196,42 @@ class CdummWindow(FluentWindow):
                             content=tr("infobar.skipped_msg", name=mname, version=drop_version),
                             duration=3000, position=InfoBarPosition.TOP, parent=self)
                         logger.info("Skipped duplicate: %s v%s", mname, drop_version)
+                        # If the user clicked the red 'Click To Update'
+                        # pill and the download turned out to be the same
+                        # version they already have, the pill should
+                        # still flip GREEN — they ARE on the latest. The
+                        # update-check verdict was based on a stale
+                        # local_file_id (filename-vs-API version drift
+                        # is the usual cause). Clear in-memory so the
+                        # pill renderer paints green on next paint.
+                        try:
+                            existing_nid = None
+                            for m in self._mod_manager.list_mods():
+                                if m["id"] == mid:
+                                    existing_nid = m.get("nexus_mod_id")
+                                    break
+                            if (existing_nid
+                                    and getattr(self, "_nexus_updates", None)):
+                                from cdumm.engine.nexus_api import (
+                                    clear_outdated_after_update,
+                                )
+                                self._nexus_updates = clear_outdated_after_update(
+                                    self._nexus_updates,
+                                    int(existing_nid),
+                                    drop_version,
+                                )
+                                if hasattr(self, 'paz_mods_page'):
+                                    self.paz_mods_page.set_nexus_updates(
+                                        self._nexus_updates)
+                                if hasattr(self, 'asi_plugins_page'):
+                                    try:
+                                        self.asi_plugins_page.set_nexus_updates(
+                                            self._nexus_updates)
+                                    except AttributeError:
+                                        pass
+                        except Exception as _e:
+                            logger.debug(
+                                "dedup-skip pill clear failed: %s", _e)
                         self._process_next_import()
                         return
 
@@ -2231,6 +3260,14 @@ class CdummWindow(FluentWindow):
                                 self._update_priority = m.get("priority")
                                 self._update_enabled = m.get("enabled")
                                 break
+                        # Bug 34: snapshot the configurable mod's
+                        # selected_labels BEFORE remove_mod cascades the
+                        # mod_config row. _restore_selected_labels replays
+                        # them onto the new row in the post-import hook
+                        # so users don't lose preset picks on click-to-
+                        # update.
+                        self._pending_selected_labels = (
+                            _snapshot_selected_labels(self._db, mid))
                         self._mod_manager.remove_mod(mid)
                     else:
                         self._process_next_import()
@@ -2381,7 +3418,11 @@ class CdummWindow(FluentWindow):
                             # toggle the full set later.
                             result = import_multi_variant(
                                 presets, path, game_dir, mods_dir, self._db,
+                                existing_mod_id=existing_mod_id,
                                 initial_selection=ticked_paths)
+                            if result:
+                                self._store_nexus_metadata_on_row(
+                                    int(result["mod_id"]), path)
                             if result and hasattr(self, "_activity_log") and self._activity_log:
                                 enabled_ct = sum(1 for v in result["variants"] if v["enabled"])
                                 self._activity_log.log(
@@ -2539,7 +3580,13 @@ class CdummWindow(FluentWindow):
                         mv_result = import_multi_variant(
                             prefixed_presets, source_for_name,
                             self._game_dir, mods_dir, self._db,
+                            existing_mod_id=existing_mod_id,
                             initial_selection=initial)
+                        if mv_result:
+                            self._store_nexus_metadata_on_row(
+                                int(mv_result["mod_id"]),
+                                source_for_name if isinstance(
+                                    source_for_name, Path) else path)
                         if (mv_result and hasattr(self, "_activity_log")
                                 and self._activity_log):
                             self._activity_log.log(
@@ -2712,7 +3759,13 @@ class CdummWindow(FluentWindow):
                             mv_result = import_multi_variant(
                                 mutex_presets, source_for_name,
                                 self._game_dir, mods_dir, self._db,
+                                existing_mod_id=existing_mod_id,
                                 initial_selection=initial)
+                            if mv_result:
+                                self._store_nexus_metadata_on_row(
+                                    int(mv_result["mod_id"]),
+                                    source_for_name if isinstance(
+                                        source_for_name, Path) else path)
                             if (mv_result and hasattr(self, "_activity_log")
                                     and self._activity_log):
                                 self._activity_log.log(
@@ -2817,6 +3870,7 @@ class CdummWindow(FluentWindow):
 
         _probe_console_state("before import QProcess(self)")
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         _probe_console_state("after import QProcess(self)")
         self._active_worker = proc  # reuse guard flag
 
@@ -2828,7 +3882,8 @@ class CdummWindow(FluentWindow):
         # These snapshots are attached to `proc` and read from the
         # closure-captured proc in _on_finished, so each proc's handler
         # sees the context that belonged to ITS import.
-        from cdumm.gui.import_context import snapshot_and_clear_import_context
+        # NOTE: snapshot_and_clear_import_context is imported at module
+        # top — see comment near the top-level import for why.
         proc._cdumm_ctx = snapshot_and_clear_import_context(self)
 
         # Build command: the exe calls itself with --worker
@@ -2920,14 +3975,22 @@ class CdummWindow(FluentWindow):
             primary_mod_id = getattr(self, '_import_result_mod_id', None)
 
             def _primary_id():
-                if primary_mod_id is not None:
-                    return primary_mod_id
+                """Resolve the post-import target row via the shared
+                _resolve_post_import_target_id helper — same prefer-
+                list-over-MAX(id) logic the nxm:// flow needs."""
+                max_row_id = None
                 try:
                     row = self._db.connection.execute(
                         "SELECT MAX(id) FROM mods").fetchone()
-                    return row[0] if row else None
+                    max_row_id = row[0] if row else None
                 except Exception:
-                    return None
+                    pass
+                return _resolve_post_import_target_id(
+                    result_mod_id=primary_mod_id,
+                    existing_mod_id=getattr(
+                        self, '_last_existing_mod_id', None),
+                    max_row_id=max_row_id,
+                )
 
             # Post-import: game version stamp
             try:
@@ -2972,6 +4035,66 @@ class CdummWindow(FluentWindow):
                                     nexus_id, nexus_file_ver)
                 except Exception:
                     pass
+
+            # Persist the real numeric file_id when an nxm:// download
+            # provided it. This is what enables the file_updates chain
+            # walk on subsequent update checks (no more "downloaded
+            # the wrong variant" bugs).
+            real_file_id = None
+            if hasattr(self, '_nexus_real_file_id_map'):
+                real_file_id = self._nexus_real_file_id_map.pop(
+                    str(path), None)
+            if real_file_id:
+                try:
+                    _pid = _primary_id()
+                    if _pid is not None:
+                        self._db.connection.execute(
+                            "UPDATE mods SET nexus_real_file_id = ? "
+                            "WHERE id = ?",
+                            (int(real_file_id), _pid))
+                        self._db.connection.commit()
+                        logger.info(
+                            "Stored Nexus real file_id=%d on row %d",
+                            int(real_file_id), _pid)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to store nexus_real_file_id: %s", e)
+
+            # Invalidate the cached "outdated" entry for this mod's
+            # nexus_mod_id so the red "Click To Update" pill turns
+            # green immediately, instead of waiting up to 30 minutes
+            # for the next background update check.
+            if nexus_id and hasattr(self, "_nexus_updates") \
+                    and self._nexus_updates:
+                try:
+                    from cdumm.engine.nexus_api import clear_outdated_after_update
+                    # clear_outdated_after_update(updates, nexus_mod_id, new_version)
+                    # — pass the just-imported version (parsed from the
+                    # Nexus filename, falls back to whatever local row
+                    # has) so the GREEN pill carries an accurate
+                    # version label.
+                    new_ver = (nexus_file_ver or "").strip()
+                    if not new_ver:
+                        try:
+                            row = self._db.connection.execute(
+                                "SELECT version FROM mods WHERE id = ?",
+                                (_pid,)).fetchone()
+                            new_ver = (row[0] if row and row[0] else "").strip()
+                        except Exception:
+                            new_ver = ""
+                    self._nexus_updates = clear_outdated_after_update(
+                        self._nexus_updates, int(nexus_id), new_ver)
+                    if hasattr(self, 'paz_mods_page'):
+                        self.paz_mods_page.set_nexus_updates(
+                            self._nexus_updates)
+                    if hasattr(self, 'asi_plugins_page'):
+                        try:
+                            self.asi_plugins_page.set_nexus_updates(
+                                self._nexus_updates)
+                        except AttributeError:
+                            pass
+                except Exception as e:
+                    logger.debug("pill-clear failed: %s", e)
 
             # Post-import: store original drop name + extract version
             try:
@@ -3052,6 +4175,39 @@ class CdummWindow(FluentWindow):
                         self._db.connection.commit()
                 except Exception:
                     pass
+
+            # Post-import: restore selected_labels (variant/preset picks)
+            # that were snapshotted BEFORE the dup-remove ran. See Bug 34:
+            # click-to-update would wipe users' picks because the old row
+            # was cascade-deleted before the new one could inherit them.
+            snap = getattr(self, '_pending_selected_labels', None)
+            if snap:
+                try:
+                    _pid = _primary_id()
+                    if _pid is not None:
+                        import json as _json
+                        cur = self._db.connection.execute(
+                            "SELECT selected_labels FROM mod_config "
+                            "WHERE mod_id = ?", (_pid,)).fetchone()
+                        available = set()
+                        if cur and cur[0]:
+                            try:
+                                available = set(
+                                    _json.loads(cur[0]).keys())
+                            except Exception:
+                                available = set()
+                        if not available:
+                            available = set(snap.keys())
+                        _restore_selected_labels(
+                            self._db, _pid, snap, available)
+                except Exception as _e:
+                    logger.debug("restore preset labels failed: %s", _e)
+                self._pending_selected_labels = None
+
+            # Bug #14: clear any scratch state that didn't come through
+            # import_context (nexus_real_file_id_map entry, etc.) so the
+            # next import doesn't inherit stale values.
+            _clear_pending_post_import_state(self, path)
 
             # Install staged ASI files from mixed ZIP import
             asi_staged = getattr(self, '_import_result_asi_staged', [])
@@ -3186,7 +4342,18 @@ class CdummWindow(FluentWindow):
             nexus_id, _ = _parse_nexus_filename(stem)
         except Exception:
             nexus_id = None
-        if not version and not nexus_id:
+        # Bug 35: pick up the real numeric Nexus file_id if this install
+        # came through the nxm:// flow. _nexus_real_file_id_map is
+        # keyed on the original drop path; look it up and pop so a
+        # later import doesn't inherit the value.
+        real_file_id = 0
+        try:
+            nrf = getattr(self, "_nexus_real_file_id_map", None)
+            if isinstance(nrf, dict):
+                real_file_id = int(nrf.pop(str(source_path), 0) or 0)
+        except Exception:
+            real_file_id = 0
+        if not version and not nexus_id and not real_file_id:
             return
         for fname in installed_files:
             if not fname.endswith('.asi'):
@@ -3206,11 +4373,101 @@ class CdummWindow(FluentWindow):
                     self._db.connection.execute(
                         "UPDATE asi_plugin_state SET nexus_mod_id = ? WHERE name = ?",
                         (nexus_id, plugin_name))
+                if real_file_id:
+                    # Bug 35: persist the actual Nexus file_id so the
+                    # next update check walks the file_updates chain
+                    # for this ASI plugin instead of the fragile name
+                    # match.
+                    self._db.connection.execute(
+                        "UPDATE asi_plugin_state SET nexus_real_file_id = ? "
+                        "WHERE name = ?",
+                        (real_file_id, plugin_name))
                 self._db.connection.commit()
-                logger.info("Stored ASI metadata: %s version=%s nexus_mod_id=%s",
-                            plugin_name, version, nexus_id)
+                logger.info(
+                    "Stored ASI metadata: %s version=%s nexus_mod_id=%s "
+                    "real_file_id=%s",
+                    plugin_name, version, nexus_id, real_file_id or None)
+
+                # Author-renamed-asi cleanup: when the new file is named
+                # differently from the prior version (e.g. the author
+                # baked the version into the filename — EnhancedFlight.asi
+                # -> EnhancedFlightv31.asi), the old .asi is still in
+                # bin64/ AND its asi_plugin_state row still says
+                # outdated. Game would load BOTH at startup. Delete the
+                # stale prior file + DB row.
+                if nexus_id:
+                    try:
+                        stale_rows = self._db.connection.execute(
+                            "SELECT name FROM asi_plugin_state "
+                            "WHERE nexus_mod_id = ? AND name != ?",
+                            (nexus_id, plugin_name)).fetchall()
+                        for (old_name,) in stale_rows:
+                            bin64_dir = self._game_dir / "bin64"
+                            # Sweep every variant the old plugin could
+                            # have on disk: enabled (.asi), disabled
+                            # (.asi.disabled — from the right-click
+                            # Disable action), companion .ini, and
+                            # companion .ini.disabled. Without this
+                            # the page's scan() picks up the .disabled
+                            # variant and renders a ghost card.
+                            stale_paths = [
+                                bin64_dir / f"{old_name}.asi",
+                                bin64_dir / f"{old_name}.asi.disabled",
+                                bin64_dir / f"{old_name}.ini",
+                                bin64_dir / f"{old_name}.ini.disabled",
+                                bin64_dir / f"{old_name}.version",
+                            ]
+                            for stale in stale_paths:
+                                try:
+                                    if stale.exists():
+                                        stale.unlink()
+                                        logger.info(
+                                            "ASI rename cleanup: removed "
+                                            "stale %s", stale.name)
+                                except OSError as oe:
+                                    logger.warning(
+                                        "ASI rename cleanup: could not "
+                                        "remove %s: %s", stale, oe)
+                            self._db.connection.execute(
+                                "DELETE FROM asi_plugin_state "
+                                "WHERE name = ?",
+                                (old_name,))
+                            logger.info(
+                                "ASI rename cleanup: removed stale "
+                                "asi_plugin_state row %r", old_name)
+                        if stale_rows:
+                            self._db.connection.commit()
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            "ASI rename cleanup failed: %s", cleanup_err)
             except Exception as e:
                 logger.warning("Failed to store ASI metadata: %s", e)
+
+        # Mirror the PAZ post-import pill clear: when an ASI plugin
+        # update completes the in-memory _nexus_updates dict still
+        # marks the mod as outdated, so the pill stays red until the
+        # next 30-min background check. Flip it to GREEN now using
+        # the version we just stored.
+        if nexus_id and getattr(self, "_nexus_updates", None):
+            try:
+                from cdumm.engine.nexus_api import clear_outdated_after_update
+                new_ver = (version or "").strip()
+                self._nexus_updates = clear_outdated_after_update(
+                    self._nexus_updates, int(nexus_id), new_ver)
+                if hasattr(self, 'asi_plugins_page'):
+                    try:
+                        self.asi_plugins_page.set_nexus_updates(
+                            self._nexus_updates)
+                    except AttributeError:
+                        pass
+                if hasattr(self, 'paz_mods_page'):
+                    try:
+                        self.paz_mods_page.set_nexus_updates(
+                            self._nexus_updates)
+                    except AttributeError:
+                        pass
+            except Exception as e:
+                logger.debug("ASI pill-clear failed: %s", e)
 
     @staticmethod
     def _get_drop_version(path: Path) -> str:
@@ -3252,6 +4509,87 @@ class CdummWindow(FluentWindow):
         if match:
             return match.group(1)
         return ""
+
+    def _store_nexus_metadata_on_row(self, mod_id: int,
+                                       drop_path: Path) -> None:
+        """Persist `nexus_mod_id`, `nexus_file_id`, `nexus_real_file_id`
+        on a mod row by parsing the drop filename and consuming the
+        nxm:// real-file-id map.
+
+        The QProcess-worker path does this inline in `_on_finished`.
+        Variant imports run in-process (no worker) so they need an
+        explicit metadata-storage step, otherwise the resulting row
+        keeps `nexus_mod_id=NULL` and the pill shows grey/no entry on
+        the next update check.
+        """
+        if not self._db or not mod_id:
+            return
+        try:
+            nexus_id, nexus_file_ver = _parse_nexus_filename(drop_path.stem)
+        except Exception:
+            nexus_id, nexus_file_ver = None, ""
+        real_file_id = None
+        if hasattr(self, "_nexus_real_file_id_map"):
+            real_file_id = self._nexus_real_file_id_map.pop(
+                str(drop_path), None)
+        try:
+            if nexus_id:
+                self._db.connection.execute(
+                    "UPDATE mods SET nexus_mod_id = ?, nexus_file_id = ? "
+                    "WHERE id = ?",
+                    (int(nexus_id), nexus_file_ver, int(mod_id)))
+            if real_file_id:
+                self._db.connection.execute(
+                    "UPDATE mods SET nexus_real_file_id = ? WHERE id = ?",
+                    (int(real_file_id), int(mod_id)))
+            if nexus_id or real_file_id:
+                self._db.connection.commit()
+                logger.info(
+                    "Stored Nexus metadata on variant mod_id=%d: "
+                    "nexus_mod_id=%s file_ver=%s real_file_id=%s",
+                    mod_id, nexus_id, nexus_file_ver, real_file_id)
+        except Exception as e:
+            logger.debug(
+                "Failed to store Nexus metadata for variant mod %d: %s",
+                mod_id, e)
+
+    def _match_existing_by_name(self, downloaded_path: str | Path) -> int | None:
+        """Return ``mods.id`` of an existing row whose name matches the
+        download stem (exact, prettified) — used by the nxm:// flow when
+        the nexus_mod_id lookup misses because the existing row was
+        imported as a local zip with no Nexus metadata.
+
+        Only returns when there's exactly ONE exact-match row. Multiple
+        matches mean the user already has duplicates; we don't try to
+        guess which one to update. ``None`` means "no safe binding"
+        and the caller imports as new.
+        """
+        if not self._mod_manager:
+            return None
+        from cdumm.engine.mod_matching import is_same_mod
+        path = Path(downloaded_path) if not isinstance(
+            downloaded_path, Path) else downloaded_path
+        drop_name = path.stem
+        # The drop is a Nexus filename like
+        # 'CDInventoryExpander-56-2-7-1776xxx'. _find_existing_mod's
+        # logic for stripping that prefix would be ideal, but the
+        # parser handles it: prefer the parsed mod name, fall back
+        # to the filename stem.
+        try:
+            from cdumm.engine.import_handler import _read_modinfo
+            if path.is_dir():
+                modinfo = _read_modinfo(path)
+                if modinfo and modinfo.get("name"):
+                    drop_name = modinfo["name"]
+        except Exception:
+            pass
+        candidates = [
+            m for m in self._mod_manager.list_mods()
+            if is_same_mod(drop_name, m["name"])
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]["id"]
 
     def _find_existing_mod(self, path: Path) -> tuple[int, str, str] | None:
         """Check if a dropped mod matches an already-installed mod.
@@ -3959,6 +5297,7 @@ class CdummWindow(FluentWindow):
 
         self._active_progress = tip
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         self._active_worker = proc
 
         # Pause non-essential timers
@@ -4060,13 +5399,27 @@ class CdummWindow(FluentWindow):
                         threshold_s=APPLY_STALL_THRESHOLD_S)})
                 on_done(_msgs)
                 return
-            tip.setContent(tr("progress.completed"))
-            tip.setState(True)
-            proc.deleteLater()
+            # Guard against the case where the user closed the main
+            # window while apply was still running. By the time this
+            # finished-handler fires, Qt may have already deleted the
+            # tooltip's underlying C++ object — calling setContent
+            # then crashes with "Internal C++ object already deleted."
+            try:
+                tip.setContent(tr("progress.completed"))
+                tip.setState(True)
+            except RuntimeError:
+                pass
+            try:
+                proc.deleteLater()
+            except RuntimeError:
+                pass
             self._active_worker = None
             self._active_progress = None
             self._resume_timers()
-            on_done(_msgs)
+            try:
+                on_done(_msgs)
+            except RuntimeError:
+                pass
 
         def _on_stderr():
             data = proc.readAllStandardError().data().decode("utf-8", errors="replace")
@@ -4294,34 +5647,192 @@ class CdummWindow(FluentWindow):
             return True
         return False
 
+    def _check_duplicate_mods(self) -> None:
+        """Surface a one-click cleanup InfoBar when the mods table holds
+        multiple rows for the same name.
+
+        The pre-v3.2 batch-import path skipped the dedup gate, so users
+        who dragged a folder of all their mods back into CDUMM ended up
+        with two rows for every re-imported mod — old enabled+applied
+        rows still active in the engine, plus new disabled rows the
+        user thought were the only ones. This method runs at startup,
+        finds the dupes, and pops a banner with a "Clean up" button.
+
+        Idempotent: silent when there are no duplicates.
+        """
+        if not self._mod_manager or not self._db:
+            return
+        try:
+            from cdumm.engine.mod_dedup import find_duplicate_groups
+            groups = find_duplicate_groups(self._db.connection)
+        except Exception as e:
+            logger.debug("duplicate-mod check failed: %s", e)
+            return
+        if not groups:
+            return
+        stale_count = sum(len(rows) - 1 for rows in groups.values())
+        names = list(groups.keys())
+        head = ", ".join(names[:3])
+        tail = (f" +{len(names) - 3}"
+                if len(names) > 3 else "")
+        bar = InfoBar.warning(
+            title=f"{stale_count} duplicate mod row(s) detected",
+            content=(
+                f"Click Clean up to merge and remove them. ({head}{tail})"),
+            duration=-1,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+        from qfluentwidgets import PushButton
+        btn = PushButton("Clean up")
+        btn.setMinimumWidth(120)
+        btn.clicked.connect(self._on_cleanup_duplicates_clicked)
+        bar.addWidget(btn)
+        self._dup_cleanup_bar = bar
+
+    def _on_cleanup_duplicates_clicked(self) -> None:
+        """Invoke the dedup cleanup and dismiss the banner."""
+        if not self._mod_manager:
+            return
+        try:
+            from cdumm.engine.mod_dedup import apply_cleanup
+            results = apply_cleanup(self._mod_manager)
+        except Exception as e:
+            logger.warning("dedup cleanup failed: %s", e)
+            InfoBar.error(
+                title="Cleanup failed",
+                content=str(e),
+                duration=8000, position=InfoBarPosition.TOP, parent=self)
+            return
+        removed = sum(len(d) for _, d in results)
+        bar = getattr(self, "_dup_cleanup_bar", None)
+        if bar is not None:
+            try:
+                bar.close()
+            except Exception:
+                pass
+            self._dup_cleanup_bar = None
+        InfoBar.success(
+            title="Duplicates cleaned",
+            content=f"Removed {removed} stale mod row(s).",
+            duration=5000, position=InfoBarPosition.TOP, parent=self)
+        self._sync_db()
+        self._refresh_all()
+
     def _check_game_updated(self) -> bool:
-        """Check if the game was updated and offer a rescan."""
-        if not self._startup_context.get("game_updated"):
+        """Check if the game was updated and offer the Recovery Flow.
+
+        v3.2: replaces the plain "Rescan now?" MessageBox with a
+        sticky Recovery InfoBar. Button fires RecoveryFlow which runs
+        the full Fix Everything → rescan → reimport → apply chain.
+        The old "Apply locked" banner from v3.1.7 stays as a second
+        InfoBar so users who dismiss Recovery still see why Apply is
+        disabled.
+
+        Two trigger paths feed this same banner:
+
+        1. ``startup_context["game_updated"]`` — set in main.py when
+           Steam buildid + exe-hash fingerprint changed since last
+           launch. Catches Steam patches.
+        2. Snapshot drift — `detect_snapshot_drift` reads the
+           snapshots table and compares live PAZ file sizes against
+           what CDUMM expects. Catches manual file edits, antivirus
+           rewrites, and partial Steam Verify runs that didn't bump
+           the buildid.
+        """
+        triggered = False
+        body = ""
+        if self._startup_context.get("game_updated"):
+            triggered = True
+            body = ("Click Start Recovery to verify, rescan, and "
+                    "reapply your mods.")
+        elif self._db and self._game_dir:
+            try:
+                from cdumm.engine.snapshot_manager import detect_snapshot_drift
+                drift, mismatches = detect_snapshot_drift(
+                    self._db, self._game_dir)
+                if drift:
+                    triggered = True
+                    sample = ", ".join(mismatches[:3])
+                    extra = (f" (+{len(mismatches) - 3} more)"
+                             if len(mismatches) > 3 else "")
+                    body = (
+                        f"{len(mismatches)} game file(s) drifted from "
+                        f"the snapshot ({sample}{extra}). Click Start "
+                        "Recovery to re-sync.")
+                    logger.info(
+                        "Snapshot drift detected — %d file(s): %s",
+                        len(mismatches),
+                        ", ".join(mismatches[:10]))
+            except Exception as e:
+                logger.debug("snapshot drift check failed: %s", e)
+
+        if not triggered:
             return False
 
-        box = MessageBox(
-            "Game Updated",
-            "Crimson Desert has been updated since your last snapshot.\n\n"
-            "All mods will be disabled and a fresh scan is needed.\n\n"
-            "Rescan now?",
-            self,
-        )
-        if box.exec():
-            self._on_refresh_snapshot(skip_verify_prompt=True)
-        else:
-            # D1: user declined the rescan prompt. Apply is now
-            # locked by the _on_apply gate — surface a sticky banner
-            # so they understand WHY Apply won't work until they
-            # rescan.
-            InfoBar.error(
-                title="Apply locked",
-                content=(
-                    "Crimson Desert was updated since your last "
-                    "snapshot. Apply stays locked until you run "
-                    "Rescan Game Files. Use the Rescan panel in the "
-                    "sidebar when you're ready."),
-                duration=-1, position=InfoBarPosition.TOP, parent=self)
+        self._offer_recovery_flow(
+            title="Game files don't match the snapshot",
+            body=body)
+        # Also show the D1 "Apply locked" banner so the reason is
+        # visible even if the user dismisses the Recovery InfoBar.
+        InfoBar.error(
+            title="Apply locked",
+            content=(
+                "Game files no longer match CDUMM's snapshot. Apply "
+                "stays locked until a fresh rescan completes."),
+            duration=-1, position=InfoBarPosition.TOP, parent=self)
         return True
+
+    def _offer_recovery_flow(self, title: str, body: str) -> None:
+        """Show the Recovery InfoBar with a Start Recovery button.
+
+        Called from both :meth:`_check_game_updated` (startup
+        ``game_updated`` flag) and from the deferred-startup
+        fingerprint-mismatch branch. Single UX for both paths
+        (Codex review finding 10 — unified recovery trigger).
+        """
+        # Guard against duplicate InfoBars when called twice.
+        prior = getattr(self, "_recovery_infobar", None)
+        if prior is not None:
+            try:
+                prior.close()
+            except Exception:
+                pass
+
+        bar = InfoBar.warning(
+            title=title,
+            content=body,
+            duration=-1, position=InfoBarPosition.TOP, parent=self)
+
+        # Add a Start Recovery button.
+        from qfluentwidgets import PrimaryPushButton
+        btn = PrimaryPushButton("Start Recovery")
+        btn.setMinimumWidth(160)
+
+        def _on_start_recovery() -> None:
+            # Close the banner so we don't stack another one while
+            # the flow runs.
+            try:
+                bar.close()
+            except Exception:
+                pass
+            self._recovery_infobar = None
+            try:
+                from cdumm.gui.recovery_flow import RecoveryFlow
+                flow = RecoveryFlow(self)
+                self._recovery_flow = flow  # keep ref alive
+                flow.start()
+            except Exception as e:
+                logger.exception("RecoveryFlow failed to start: %s", e)
+                InfoBar.error(
+                    title="Recovery failed to start",
+                    content=str(e),
+                    duration=-1, position=InfoBarPosition.TOP,
+                    parent=self)
+
+        btn.clicked.connect(_on_start_recovery)
+        bar.addWidget(btn)
+        self._recovery_infobar = bar
 
     def _check_stale_appdata(self) -> None:
         """Detect stale data in %LocalAppData%/cdumm from old versions."""
@@ -4732,7 +6243,13 @@ class CdummWindow(FluentWindow):
                 logger.debug("Theme listener teardown failed: %s", _e)
         # Stop timers (guard against already-deleted C++ objects — Qt may
         # have reaped children by the time closeEvent fires)
-        for timer_name in ("_update_timer", "_db_poll_timer"):
+        for timer_name in (
+            "_update_timer",
+            "_db_poll_timer",
+            "_db_change_timer",
+            "_nxm_poll_timer",
+            "_nexus_update_timer",
+        ):
             timer = getattr(self, timer_name, None)
             if timer is None:
                 continue

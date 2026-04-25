@@ -340,6 +340,31 @@ class Database:
                     "ALTER TABLE asi_plugin_state ADD COLUMN nexus_mod_id INTEGER"
                 )
                 logger.info("Migrated: added nexus_mod_id column to asi_plugin_state")
+            # Bug #25: persist the actual numeric Nexus file_id for
+            # ASI plugins downloaded via nxm:// so the next update
+            # check can walk the file_updates chain instead of
+            # falling back to name matching.
+            if "nexus_real_file_id" not in asi_cols:
+                self._connection.execute(
+                    "ALTER TABLE asi_plugin_state "
+                    "ADD COLUMN nexus_real_file_id INTEGER"
+                )
+                logger.info(
+                    "Migrated: added nexus_real_file_id column to "
+                    "asi_plugin_state")
+            # Bug #26: match the mods-table optimization — the
+            # recently-updated feed can skip ASI plugins that were
+            # confirmed current within the past week, saving API
+            # quota.
+            if "nexus_last_checked_at" not in asi_cols:
+                self._connection.execute(
+                    "ALTER TABLE asi_plugin_state "
+                    "ADD COLUMN nexus_last_checked_at INTEGER "
+                    "NOT NULL DEFAULT 0"
+                )
+                logger.info(
+                    "Migrated: added nexus_last_checked_at column to "
+                    "asi_plugin_state")
 
         # Create asi_groups table — separate from mod_groups so PAZ and ASI
         # have independent folder structures
@@ -394,6 +419,33 @@ class Database:
                 "ALTER TABLE mods ADD COLUMN nexus_file_id TEXT"
             )
             logger.info("Migrated: added nexus_mod_id, nexus_file_id columns to mods")
+
+        # nexus_real_file_id stores the ACTUAL Nexus numeric file_id
+        # (the existing nexus_file_id TEXT column was being populated
+        # with the file VERSION by mistake — a legacy bug). Real file
+        # IDs let the update-check walk Nexus's file_updates chain to
+        # find which file supersedes the user's, surviving renames
+        # and variant splits. Populated by the nxm:// download flow
+        # (where the file_id is in the URL).
+        if "nexus_real_file_id" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN nexus_real_file_id INTEGER"
+            )
+            logger.info(
+                "Migrated: added nexus_real_file_id column to mods")
+
+        # Timestamp of the last successful Nexus update-check for this
+        # mod. Used by check_mod_updates to decide whether the 1-week
+        # recently-updated feed is a safe optimization (skip per-mod
+        # file lookup) or a false negative (fall through and hit the
+        # per-mod endpoint). Unix epoch seconds, 0/NULL means never.
+        if "nexus_last_checked_at" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN "
+                "nexus_last_checked_at INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info(
+                "Migrated: added nexus_last_checked_at column to mods")
 
         if "applied" not in columns:
             self._connection.execute(

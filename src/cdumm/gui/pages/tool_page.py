@@ -656,6 +656,8 @@ class VerifyStatePage(ToolPageBase):
         from PySide6.QtCore import QProcess
 
         proc = QProcess(self)
+        from cdumm.gui.fluent_window import _quiet_qprocess
+        _quiet_qprocess(proc)
         self._verify_proc = proc
         exe = sys.executable
         args = ["--worker", "verify", str(self._game_dir), str(self._db.db_path)]
@@ -855,6 +857,8 @@ class CheckModsPage(ToolPageBase):
         from PySide6.QtCore import QProcess
 
         proc = QProcess(self)
+        from cdumm.gui.fluent_window import _quiet_qprocess
+        _quiet_qprocess(proc)
         self._check_proc = proc
         exe = sys.executable
         args = ["--worker", "check_mods", str(self._game_dir), str(self._db.db_path)]
@@ -1490,6 +1494,8 @@ class InspectModPage(ToolPageBase):
         from PySide6.QtCore import QProcess
 
         proc = QProcess(self)
+        from cdumm.gui.fluent_window import _quiet_qprocess
+        _quiet_qprocess(proc)
         self._inspect_proc = proc
         exe = sys.executable
         args = ["--worker", "inspect", path, str(self._game_dir), str(self._db.db_path)]
@@ -1919,6 +1925,8 @@ class FixEverythingPage(ToolPageBase):
         from PySide6.QtCore import QProcess
 
         proc = QProcess(self)
+        from cdumm.gui.fluent_window import _quiet_qprocess
+        _quiet_qprocess(proc)
         self._fix_proc = proc
         exe = sys.executable
         steam_flag = "1" if self._steam_verified else "0"

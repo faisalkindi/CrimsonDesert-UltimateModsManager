@@ -414,6 +414,25 @@ class AsiCard(CardWidget):
         from cdumm.gui.components.mod_card import _VERSION_COLORS, _pill_qss
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
 
+    def fill_missing_version(self, nexus_version: str) -> None:
+        """Replace the em-dash placeholder with a Nexus-reported version.
+
+        Same contract as :meth:`ModCard.fill_missing_version`. Only
+        fires when the displayed text is the em-dash, so a real local
+        version is never overwritten.
+        """
+        if not nexus_version:
+            return
+        truncated = nexus_version
+        if len(truncated) > 7:
+            truncated = truncated[:6] + "…"
+        if hasattr(self, "_version_pill_orig_text"):
+            if self._version_pill_orig_text == "—":
+                self._version_pill_orig_text = truncated
+            return
+        if self._version_pill.text() == "—":
+            self._version_pill.setText(truncated)
+
     def set_update_available(self, has_update: bool, nexus_url: str = "",
                               nexus_mod_id: int = 0,
                               latest_file_id: int = 0) -> None:
@@ -1252,15 +1271,27 @@ class AsiPluginsPage(QWidget):
         # Stash the plugin_name → nexus_id map so _update_stats can
         # count outdated plugins for the summary bar.
         self._nexus_id_map = nexus_map
+        # Three-state logic mirrors the PAZ mods page (see
+        # mods_page.set_nexus_updates for the full rationale): an
+        # entry with has_update=False means 'confirmed current' and
+        # must paint NO pill, not the red 'Click To Update' pill.
         for card in self._cards:
             plugin_name = card.plugin_name
             nexus_id = nexus_map.get(plugin_name)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(
-                    True, u.mod_url,
-                    nexus_mod_id=nexus_id,
-                    latest_file_id=getattr(u, "latest_file_id", 0))
+                if getattr(u, "has_update", False):
+                    card.set_update_available(
+                        True, u.mod_url,
+                        nexus_mod_id=nexus_id,
+                        latest_file_id=getattr(u, "latest_file_id", 0))
+                else:
+                    # Confirmed current — fill in a missing version
+                    # label from the Nexus-reported one before clearing
+                    # the red pill. No-op when the local version is
+                    # already populated.
+                    card.fill_missing_version(getattr(u, "latest_version", ""))
+                    card.set_update_available(False)
             elif nexus_id:
                 card.set_update_available(False)
         # Refresh the summary bar's Outdated count.
@@ -1289,13 +1320,17 @@ class AsiPluginsPage(QWidget):
         # Count plugins with a NexusMods update available. ASI cards key
         # by plugin_name (not mod_id), so we look up via _nexus_id_map
         # which is populated by set_nexus_updates as {plugin_name: nexus_id}.
+        # Must respect has_update — confirmed-current entries
+        # (has_update=False) are still in the dict so fill_missing_version
+        # has a Nexus version to paint, but they aren't actionable updates.
         outdated = 0
         nexus_updates = getattr(self, "_nexus_updates", None) or {}
         if nexus_updates:
             nexus_map = getattr(self, "_nexus_id_map", {}) or {}
             for c in self._cards:
                 nid = nexus_map.get(getattr(c, "plugin_name", ""))
-                if nid and nid in nexus_updates:
+                if nid and nid in nexus_updates and getattr(
+                        nexus_updates[nid], "has_update", False):
                     outdated += 1
         self._summary_bar.update_stats(total, enabled, disabled,
                                        outdated=outdated)

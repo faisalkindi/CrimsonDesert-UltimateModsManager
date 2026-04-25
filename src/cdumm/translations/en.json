@@ -1047,6 +1047,8 @@
   "settings.nexus_invalid_key": "Invalid API key",
   "settings.nexus_key_cleared": "API key cleared",
   "settings.nexus_need_key": "Enter your API key first",
+  "settings.nexus_auth_rejected_title": "Nexus rejected your API key",
+  "settings.nexus_auth_rejected_body": "Your saved NexusMods API key was rejected. Open Settings and paste a fresh key from your Nexus account page.",
   "settings.nexus_checking": "Checking for updates...",
   "settings.nexus_db_error": "DB error: {error}",
   "settings.nexus_error": "Error: {error}",

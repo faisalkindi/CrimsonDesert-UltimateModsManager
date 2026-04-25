@@ -34,7 +34,13 @@ def _make_db_with_mods(tmp_path: Path, specs: list[dict]):
 
 def _make_mock_main_window(db, game_dir: Path, qtbot) -> MagicMock:
     """MagicMock main window that satisfies the orchestrator's
-    attribute requirements."""
+    attribute requirements.
+
+    The orchestrator now disables ``stackedWidget`` and
+    ``navigationInterface`` (qfluentwidgets FluentWindow's content
+    + sidebar) instead of the QMainWindow-only ``centralWidget()``,
+    so the mock exposes both real QWidgets the test can inspect.
+    """
     from PySide6.QtWidgets import QWidget
 
     win = MagicMock()
@@ -44,8 +50,14 @@ def _make_mock_main_window(db, game_dir: Path, qtbot) -> MagicMock:
 
     central = QWidget()
     qtbot.addWidget(central)
-    win.centralWidget.return_value = central
-    win._central_widget = central  # test-side handle
+    nav = QWidget()
+    qtbot.addWidget(nav)
+    win.stackedWidget = central
+    win.navigationInterface = nav
+    # Test-side handles. Keep ``_central_widget`` as the alias the
+    # existing assertions read so they stay readable.
+    win._central_widget = central
+    win._nav_widget = nav
     return win
 
 
