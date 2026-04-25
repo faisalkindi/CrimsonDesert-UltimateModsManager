@@ -188,7 +188,12 @@ class RecoveryFlow(QObject):
 
     def _check_rescan_done(self) -> bool:
         if self._main_window_active_worker() is None:
-            self._begin_reimport()
+            # Defer to next event-loop tick so the outer _tick's
+            # _stop_poll runs BEFORE _begin_reimport calls
+            # _start_poll. Without this, the newly-started reimport
+            # poll gets stopped immediately by the outer _tick and
+            # the recovery flow stalls forever at "Step 3/4".
+            QTimer.singleShot(0, self._begin_reimport)
             return True
         return False
 
@@ -236,8 +241,11 @@ class RecoveryFlow(QObject):
                 "active_worker=%s",
                 self._elapsed_polls, worker)
         if worker is None:
-            logger.info("RecoveryFlow reimport done — calling _on_reimport_finished")
-            self._on_reimport_finished()
+            logger.info("RecoveryFlow reimport done — scheduling _on_reimport_finished")
+            # Defer so outer _tick's _stop_poll runs before
+            # _begin_apply starts the next poll. Same race as
+            # _check_rescan_done -> _begin_reimport above.
+            QTimer.singleShot(0, self._on_reimport_finished)
             return True
         return False
 
