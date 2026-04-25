@@ -546,6 +546,35 @@ class ModCard(CardWidget):
         key = _theme_key()
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
 
+    def fill_missing_version(self, nexus_version: str) -> None:
+        """Replace the em-dash placeholder with a Nexus-reported version.
+
+        The card builder shows ``—`` (em-dash) when the local DB has
+        no version stored. After a successful Nexus update check we know
+        the latest version even when the local row is empty, so paint
+        that into the pill so the user sees a real number alongside the
+        green "current" pill instead of a meaningless dash.
+
+        Only fires when the displayed text is still the em-dash — never
+        overwrites a real local version (e.g. local says 1.5, Nexus
+        says 1.5.2 on the same file_id; we keep what the user has).
+        """
+        if not nexus_version:
+            return
+        truncated = nexus_version
+        if len(truncated) > 7:
+            truncated = truncated[:6] + "…"
+        # When the pill is in red 'Click To Update' mode, the original
+        # version is stashed and the visible label says 'Click To
+        # Update' — overwrite the stash so the green-restore path picks
+        # up the new label.
+        if hasattr(self, "_version_pill_orig_text"):
+            if self._version_pill_orig_text == "—":
+                self._version_pill_orig_text = truncated
+            return
+        if self._version_pill.text() == "—":
+            self._version_pill.setText(truncated)
+
     def set_update_available(self, has_update: bool, nexus_url: str = "",
                               nexus_mod_id: int = 0,
                               latest_file_id: int = 0) -> None:

@@ -414,6 +414,25 @@ class AsiCard(CardWidget):
         from cdumm.gui.components.mod_card import _VERSION_COLORS, _pill_qss
         self._version_pill.setStyleSheet(_pill_qss(_VERSION_COLORS[key]))
 
+    def fill_missing_version(self, nexus_version: str) -> None:
+        """Replace the em-dash placeholder with a Nexus-reported version.
+
+        Same contract as :meth:`ModCard.fill_missing_version`. Only
+        fires when the displayed text is the em-dash, so a real local
+        version is never overwritten.
+        """
+        if not nexus_version:
+            return
+        truncated = nexus_version
+        if len(truncated) > 7:
+            truncated = truncated[:6] + "…"
+        if hasattr(self, "_version_pill_orig_text"):
+            if self._version_pill_orig_text == "—":
+                self._version_pill_orig_text = truncated
+            return
+        if self._version_pill.text() == "—":
+            self._version_pill.setText(truncated)
+
     def set_update_available(self, has_update: bool, nexus_url: str = "",
                               nexus_mod_id: int = 0,
                               latest_file_id: int = 0) -> None:
@@ -1267,6 +1286,11 @@ class AsiPluginsPage(QWidget):
                         nexus_mod_id=nexus_id,
                         latest_file_id=getattr(u, "latest_file_id", 0))
                 else:
+                    # Confirmed current — fill in a missing version
+                    # label from the Nexus-reported one before clearing
+                    # the red pill. No-op when the local version is
+                    # already populated.
+                    card.fill_missing_version(getattr(u, "latest_version", ""))
                     card.set_update_available(False)
             elif nexus_id:
                 card.set_update_available(False)

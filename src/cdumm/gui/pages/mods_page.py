@@ -457,7 +457,11 @@ class ModsPage(QWidget):
                         pass
                     card.update_clicked.connect(self._on_update_clicked)
                 else:
-                    # Confirmed current — clear any prior 'red' pill.
+                    # Confirmed current — fill in a missing version label
+                    # from the Nexus-reported one before clearing the red
+                    # pill. Cards with a real local version stay
+                    # untouched.
+                    card.fill_missing_version(getattr(u, "latest_version", ""))
                     card.set_update_available(False)
             elif nexus_id:
                 card.set_update_available(False)
