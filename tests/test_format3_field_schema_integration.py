@@ -196,6 +196,54 @@ def test_tid_not_found_in_entry_skips_write(
     assert new_body == body
 
 
+def test_tid_search_bound_excludes_next_entry_header(
+        synth_schema, field_schema_root):
+    """Adjacent-entry collision guard.
+
+    The TID search runs on [payload_start, entry_end). entry_end
+    equals the NEXT entry's start — so a 4-byte TID matching the
+    next entry's u32 entry_id (which sits at entry_end..entry_end+4)
+    would return a write position inside that next entry's
+    name_len bytes. Tighten the upper bound to entry_end - eid_size
+    - 4 (i.e. the latest position where a 4-byte TID can fit
+    entirely inside the current entry's payload).
+
+    This test pins the bound: a TID that exists ONLY at the start
+    of the next entry must NOT match for the current entry's
+    intent.
+    """
+    # First entry has _alpha=0x11111111 (no match), second has
+    # entry_id=2 at its first 4 bytes which we'll target as the
+    # TID in field_schema.
+    body, header = _build_pabgb([
+        _entry_u32_id(1, "First", 0x11111111, 0x77777777, 0xAAAA),
+        _entry_u32_id(2, "Second", 0x33333333, 0x44444444, 0xBBBB),
+    ], keys=[1, 2])
+    # Pick a TID that ONLY appears as the entry_id of Second.
+    # Second's entry header starts at the offset of Second; the
+    # entry_id u32 there is 2 → bytes 02 00 00 00. If the bound
+    # is loose, the writer searching record 1 would match Second's
+    # entry_id at the boundary and write into Second's name_len.
+    _write_field_schema(field_schema_root, "kvtest", {
+        "tidField": {
+            "tid": 0x00000002,   # bytes 02 00 00 00
+            "value_offset": 4,
+            "type": "u32",
+        },
+    })
+
+    intents = [Format3Intent(
+        entry="First", key=1, field="tidField",
+        op="set", new=0xDEADBEEF)]
+    new_body = apply_intents_to_pabgb_bytes(
+        "kvtest", body, header, intents)
+
+    # The body must be unchanged — the TID for the intent on
+    # record 1 lives only in record 2's header bytes, which are
+    # outside record 1's bound.
+    assert new_body == body
+
+
 # ── Fallback: PABGB schema field name still works ──────────────────
 
 
