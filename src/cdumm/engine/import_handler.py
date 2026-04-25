@@ -262,6 +262,14 @@ def detect_format(path: Path) -> str:
     if suffix == ".json":
         if detect_json_patch(path) is not None:
             return "json_patch"
+        # NattKh's Format 3 (field-names + intents) lives in a .json
+        # but doesn't have a patches[] array, so the standard detector
+        # rejects it. We return a dedicated format string so the
+        # dispatch can emit a "coming in v3.3" message instead of the
+        # generic 'unsupported file format'.
+        from cdumm.engine.json_patch_handler import is_natt_format_3
+        if is_natt_format_3(path):
+            return "natt_format_3"
     if suffix in (".bsdiff", ".xdelta"):
         return "bsdiff"
     # Check if it's a zip without extension
@@ -2312,6 +2320,42 @@ def import_from_bsdiff(
     })
     logger.info("bsdiff import: %s targets %s (%d byte ranges)",
                 mod_name, target_path, len(byte_ranges))
+    return result
+
+
+def import_from_natt_format_3(
+    json_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Friendly stub for NattKh's Format 3 (field-names + intents).
+
+    Real support is planned for a future CDUMM release (the semantic
+    engine and PABGB schemas are already in place; the converter from
+    intents → byte changes is what's not yet built). Until then this
+    handler returns a clear ModImportResult error so users see a
+    specific message instead of 'unsupported file format'.
+    """
+    name = json_path.stem
+    try:
+        import json as _json
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        modinfo = data.get("modinfo") or {}
+        title = modinfo.get("title") or name
+        intent_count = len(data.get("intents") or [])
+        target = data.get("target") or "unknown file"
+    except Exception:
+        title, intent_count, target = name, 0, "unknown file"
+    result = ModImportResult(title)
+    result.error = (
+        f"This is NattKh's Format 3 (field-names) — {intent_count} "
+        f"semantic intent(s) targeting {target}. CDUMM doesn't fully "
+        "support this format yet; full support is on the roadmap for "
+        "a future update.\n\n"
+        "Workaround for now: if NattKh ships the same mod in their "
+        "older offset-based JSON format (without the \"format\": 3 "
+        "field), drop that one in instead — it works in CDUMM today."
+    )
     return result
 
 

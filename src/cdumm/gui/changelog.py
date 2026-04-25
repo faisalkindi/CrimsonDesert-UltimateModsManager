@@ -13,6 +13,15 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.1",
+        "date": "2026-04-25",
+        "notes": [
+            "<b>Update-available banner is now closable.</b> The 'CDUMM vX.Y is available' strip at the top of the window now has an X button. Click it to dismiss the banner — CDUMM remembers per-version, so it won't reappear next launch (until a NEWER release lands). The About-page badge in the sidebar still shows the update so you can find it later if you change your mind.",
+            "<b>Conflict warnings now name the dropped mod.</b> When two mods modify the same game file in incompatible ways and one has to be skipped, the warning used to just say '1 mod was dropped' — leaving you guessing which. Now it names both: 'Active: <winner>. Dropped: <name>'. Tells you the exact UI action to change the winner (drag to top of load order).",
+            "<b>NattKh's Format 3 mods now show a clear message.</b> NattKh's GameMods recently switched to a new field-names JSON format (no byte offsets). v3.2 rejected those files with a generic 'unsupported format' error. v3.2.1 detects Format 3 specifically and shows a 'this format is on the roadmap, here's the workaround' message instead. Full Format 3 support is coming in a future update.",
+        ],
+    },
+    {
         "version": "3.2",
         "date": "2026-04-25",
         "notes": [

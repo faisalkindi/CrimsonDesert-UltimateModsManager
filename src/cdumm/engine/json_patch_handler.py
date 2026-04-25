@@ -134,6 +134,36 @@ def detect_json_patch(path: Path) -> dict | None:
     return results[0] if results else None
 
 
+def is_natt_format_3(path: Path) -> bool:
+    """Return True if ``path`` is a NattKh-style Format 3 JSON mod.
+
+    Format 3 is a high-level semantic mod format that uses field
+    names + entry keys instead of byte offsets. CDUMM doesn't fully
+    support it yet (planned for v3.3); this detector exists so the
+    importer can surface a specific 'coming soon' error instead of
+    the generic 'unsupported format' message.
+
+    A Format 3 file:
+      - is a JSON dict at the top level
+      - has ``"format": 3``
+      - has ``"intents"`` as a list (at least one intent)
+      - has ``"target"`` as a string (the .pabgb file to modify)
+    """
+    try:
+        if not path.is_file() or path.suffix.lower() != ".json":
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("format") == 3
+        and isinstance(data.get("intents"), list)
+        and isinstance(data.get("target"), str)
+    )
+
+
 def detect_json_patches_all(path: Path) -> list[dict]:
     """Return every valid JSON byte-patch under ``path``.
 

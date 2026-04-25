@@ -32,7 +32,7 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
         import_from_json_patch, import_from_bsdiff, import_from_script,
-        import_from_rar, set_import_progress_cb,
+        import_from_rar, import_from_natt_format_3, set_import_progress_cb,
     )
 
     mod_path = Path(mod_path)
@@ -56,6 +56,7 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
         "folder": lambda: import_from_folder(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "script": lambda: import_from_script(mod_path, game_dir, db, snapshot, deltas_dir),
         "json_patch": lambda: import_from_json_patch(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
+        "natt_format_3": lambda: import_from_natt_format_3(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "bsdiff": lambda: import_from_bsdiff(mod_path, game_dir, db, snapshot, deltas_dir),
     }
 
@@ -90,7 +91,7 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
         import_from_json_patch, import_from_bsdiff, import_from_script,
-        import_from_rar, set_import_progress_cb,
+        import_from_rar, import_from_natt_format_3, set_import_progress_cb,
     )
 
     game_dir = Path(game_dir)
@@ -120,6 +121,7 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
         "rar": import_from_rar, "folder": import_from_folder,
         "script": import_from_script, "json_patch": import_from_json_patch,
         "bsdiff": import_from_bsdiff,
+        "natt_format_3": import_from_natt_format_3,
     }
 
     # Per-mod timing instrumentation. ``perf_counter`` for accuracy
@@ -273,7 +275,7 @@ def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
         import_from_json_patch, import_from_bsdiff, import_from_script,
-        import_from_rar, set_import_progress_cb,
+        import_from_rar, import_from_natt_format_3, set_import_progress_cb,
     )
 
     game_dir = Path(game_dir)
@@ -308,6 +310,7 @@ def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
         "zip": import_from_zip, "7z": import_from_7z,
         "rar": import_from_rar, "folder": import_from_folder,
         "json_patch": import_from_json_patch,
+        "natt_format_3": import_from_natt_format_3,
     }
 
     for idx, (mod_id, mod_path) in enumerate(entries):

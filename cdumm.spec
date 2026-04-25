@@ -281,7 +281,12 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
-    upx=True,
+    # UPX disabled — heuristic AV engines (Bkav, CrowdStrike Falcon,
+    # DeepInstinct, Fortinet) flag UPX-packed PyInstaller binaries
+    # because real malware uses UPX too. Defender is fine either way,
+    # but enterprise scanners aren't. Trade-off: exe grows ~50% (48 MB
+    # to ~70 MB) but the AV-clean profile is worth it for users.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
