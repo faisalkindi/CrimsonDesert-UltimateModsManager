@@ -3899,8 +3899,22 @@ class CdummWindow(FluentWindow):
                     and self._nexus_updates:
                 try:
                     from cdumm.engine.nexus_api import clear_outdated_after_update
+                    # clear_outdated_after_update(updates, nexus_mod_id, new_version)
+                    # — pass the just-imported version (parsed from the
+                    # Nexus filename, falls back to whatever local row
+                    # has) so the GREEN pill carries an accurate
+                    # version label.
+                    new_ver = (nexus_file_ver or "").strip()
+                    if not new_ver:
+                        try:
+                            row = self._db.connection.execute(
+                                "SELECT version FROM mods WHERE id = ?",
+                                (_pid,)).fetchone()
+                            new_ver = (row[0] if row and row[0] else "").strip()
+                        except Exception:
+                            new_ver = ""
                     self._nexus_updates = clear_outdated_after_update(
-                        self._nexus_updates, int(nexus_id))
+                        self._nexus_updates, int(nexus_id), new_ver)
                     if hasattr(self, 'paz_mods_page'):
                         self.paz_mods_page.set_nexus_updates(
                             self._nexus_updates)

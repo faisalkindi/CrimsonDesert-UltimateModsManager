@@ -613,6 +613,23 @@ def check_mod_updates(
         elif latest_tuple is not None and latest_tuple > local_tuple:
             has_update = True
 
+        # Diagnostic: when we flag a mod outdated, log the comparison
+        # so we can audit false-positives like 'mod has only 1 file
+        # but pill is red'. The triggers are an explicit author-
+        # declared successor (file_id mismatch) OR a version-string
+        # comparison; both are recorded.
+        if has_update:
+            trigger = ("file_id_mismatch"
+                       if local_file_id and latest.file_id != local_file_id
+                       else "version_greater")
+            logger.info(
+                "update check: outdated %r (nexus_mod_id=%d) — "
+                "trigger=%s, local_ver=%r local_file_id=%d, "
+                "latest_ver=%r latest_file_id=%d",
+                mod.get("name"), nexus_id, trigger,
+                local_ver, local_file_id,
+                remote_ver, int(getattr(latest, "file_id", 0) or 0))
+
         # Bug #1 fix: emit results for BOTH outdated and confirmed-current
         # mods so the UI can paint green vs grey correctly. The page
         # layer treats "has_update=False" entries as "confirmed current"
