@@ -76,6 +76,7 @@ a = Analysis(
         'cdumm.gui.recovery_flow',
         'cdumm.engine.recovery_candidates',
         'cdumm.engine.compiled_merge',
+        'cdumm.engine.mod_dedup',
         # PySide6-Fluent-Widgets + dependencies
         'qfluentwidgets',
         'qfluentwidgets._rc',

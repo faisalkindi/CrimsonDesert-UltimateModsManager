@@ -1367,6 +1367,7 @@ class CdummWindow(FluentWindow):
                 return
             if self._check_game_updated():
                 return
+            self._check_duplicate_mods()
 
         if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
             from qfluentwidgets import (
@@ -2728,6 +2729,45 @@ class CdummWindow(FluentWindow):
             self._import_queue.extend(paths)
             QTimer.singleShot(500, self._process_next_import)
             return
+
+        # Skip exact-name+version duplicates silently. The single-import
+        # path at _import_with_prechecks does this per file via
+        # _find_existing_mod + _get_drop_version; without the same gate
+        # here, dragging a folder of all-already-installed mods doubles
+        # every row in the DB. Mirror the single-path predicate so
+        # behaviour is consistent across drop modes.
+        if self._mod_manager and paths:
+            deduped: list = []
+            skipped: list[tuple[str, str]] = []
+            installed_by_name: dict[str, str] = {
+                m["name"]: (m.get("version") or "")
+                for m in self._mod_manager.list_mods()
+            }
+            for p in paths:
+                existing = self._find_existing_mod(p)
+                if existing:
+                    _, mname, _ = existing
+                    installed_ver = installed_by_name.get(mname, "")
+                    drop_ver = self._get_drop_version(p)
+                    if (installed_ver and drop_ver
+                            and installed_ver == drop_ver):
+                        logger.info(
+                            "Batch dedup: skipping %s v%s (already installed)",
+                            mname, drop_ver)
+                        skipped.append((mname, drop_ver))
+                        continue
+                deduped.append(p)
+            if skipped:
+                head = "; ".join(f"{n} v{v}" for n, v in skipped[:5])
+                tail = (f" (+{len(skipped) - 5} more)"
+                        if len(skipped) > 5 else "")
+                InfoBar.info(
+                    title=tr("infobar.skipped"),
+                    content=f"Skipped {len(skipped)} duplicate(s): {head}{tail}",
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
+            paths = deduped
+            if not paths:
+                return
 
         # Separate ASI mods from PAZ mods — ASI installs are instant (file copy)
         from cdumm.asi.asi_manager import AsiManager
@@ -5395,6 +5435,77 @@ class CdummWindow(FluentWindow):
             self._on_refresh_snapshot(skip_verify_prompt=True)
             return True
         return False
+
+    def _check_duplicate_mods(self) -> None:
+        """Surface a one-click cleanup InfoBar when the mods table holds
+        multiple rows for the same name.
+
+        The pre-v3.2 batch-import path skipped the dedup gate, so users
+        who dragged a folder of all their mods back into CDUMM ended up
+        with two rows for every re-imported mod — old enabled+applied
+        rows still active in the engine, plus new disabled rows the
+        user thought were the only ones. This method runs at startup,
+        finds the dupes, and pops a banner with a "Clean up" button.
+
+        Idempotent: silent when there are no duplicates.
+        """
+        if not self._mod_manager or not self._db:
+            return
+        try:
+            from cdumm.engine.mod_dedup import find_duplicate_groups
+            groups = find_duplicate_groups(self._db.connection)
+        except Exception as e:
+            logger.debug("duplicate-mod check failed: %s", e)
+            return
+        if not groups:
+            return
+        stale_count = sum(len(rows) - 1 for rows in groups.values())
+        names = list(groups.keys())
+        head = ", ".join(names[:5])
+        tail = (f" (+{len(names) - 5} more)"
+                if len(names) > 5 else "")
+        bar = InfoBar.warning(
+            title=f"{stale_count} duplicate mod row(s) detected",
+            content=(f"{head}{tail}. Old re-imports left stale rows "
+                     "behind. Click Clean Up to merge and remove them."),
+            duration=-1,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+        from qfluentwidgets import PushButton
+        btn = PushButton("Clean up")
+        btn.clicked.connect(self._on_cleanup_duplicates_clicked)
+        bar.addWidget(btn)
+        self._dup_cleanup_bar = bar
+
+    def _on_cleanup_duplicates_clicked(self) -> None:
+        """Invoke the dedup cleanup and dismiss the banner."""
+        if not self._mod_manager:
+            return
+        try:
+            from cdumm.engine.mod_dedup import apply_cleanup
+            results = apply_cleanup(self._mod_manager)
+        except Exception as e:
+            logger.warning("dedup cleanup failed: %s", e)
+            InfoBar.error(
+                title="Cleanup failed",
+                content=str(e),
+                duration=8000, position=InfoBarPosition.TOP, parent=self)
+            return
+        removed = sum(len(d) for _, d in results)
+        bar = getattr(self, "_dup_cleanup_bar", None)
+        if bar is not None:
+            try:
+                bar.close()
+            except Exception:
+                pass
+            self._dup_cleanup_bar = None
+        InfoBar.success(
+            title="Duplicates cleaned",
+            content=f"Removed {removed} stale mod row(s).",
+            duration=5000, position=InfoBarPosition.TOP, parent=self)
+        self._sync_db()
+        self._refresh_all()
 
     def _check_game_updated(self) -> bool:
         """Check if the game was updated and offer the Recovery Flow.
