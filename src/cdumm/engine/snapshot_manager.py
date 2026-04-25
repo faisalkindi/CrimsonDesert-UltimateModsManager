@@ -81,6 +81,74 @@ def verify_live_disk_matches_backups(
     return (len(problems) == 0), problems
 
 
+def detect_snapshot_drift(
+        db,
+        game_dir: Path,
+        max_reported: int = 20) -> tuple[bool, list[str]]:
+    """Quick size-only drift check for files not touched by any
+    currently-applied mod.
+
+    Complements the Steam-buildid / exe-hash fingerprint trigger:
+    that catches *game patches*, this catches *file tampering* when
+    the buildid hasn't changed (manual edits, antivirus rewrites,
+    third-party tool drops, half-finished Steam Verify runs that
+    didn't bump the buildid).
+
+    Strategy:
+    1. Build the set of `file_path` values referenced by mod_deltas
+       where the mod is `applied=1` — these files are EXPECTED to
+       differ from the snapshot.
+    2. For every other file in the `snapshots` table, stat the live
+       counterpart in `game_dir` and compare `st_size` against the
+       snapshot's stored `file_size`.
+    3. If any size mismatch shows up, the disk has drifted from the
+       state CDUMM thinks it's in.
+
+    Cost: O(N) `os.stat` calls on PAZ files (~200 in current installs).
+    No hashing, no full reads. Designed to add < 100 ms to startup.
+
+    Returns ``(drift_detected, sample_mismatches)``. ``False, []`` when
+    the snapshots table is empty (first-time install — nothing to
+    drift from).
+    """
+    try:
+        snap_rows = db.connection.execute(
+            "SELECT file_path, file_size FROM snapshots"
+        ).fetchall()
+    except Exception as e:
+        logger.debug("detect_snapshot_drift: snapshots query failed: %s", e)
+        return False, []
+    if not snap_rows:
+        return False, []
+
+    try:
+        touched_rows = db.connection.execute(
+            "SELECT DISTINCT md.file_path FROM mod_deltas md "
+            "JOIN mods m ON m.id = md.mod_id WHERE m.applied = 1"
+        ).fetchall()
+    except Exception as e:
+        logger.debug("detect_snapshot_drift: mod_deltas query failed: %s", e)
+        return False, []
+    touched = {row[0] for row in touched_rows}
+
+    mismatches: list[str] = []
+    for path_str, expected_size in snap_rows:
+        if path_str in touched:
+            continue
+        live = game_dir / path_str
+        try:
+            live_size = live.stat().st_size
+        except OSError:
+            # File missing on disk. Could be a renamed PAZ from an
+            # older game version; not safe to flag as drift here.
+            continue
+        if live_size != expected_size:
+            mismatches.append(path_str)
+            if len(mismatches) >= max_reported:
+                break
+    return (len(mismatches) > 0), mismatches
+
+
 def hash_matches(path: Path, stored_hash: str) -> bool:
     """Check if a file matches a stored hash, auto-detecting the algorithm.
 

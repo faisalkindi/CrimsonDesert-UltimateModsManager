@@ -5690,23 +5690,58 @@ class CdummWindow(FluentWindow):
         The old "Apply locked" banner from v3.1.7 stays as a second
         InfoBar so users who dismiss Recovery still see why Apply is
         disabled.
+
+        Two trigger paths feed this same banner:
+
+        1. ``startup_context["game_updated"]`` — set in main.py when
+           Steam buildid + exe-hash fingerprint changed since last
+           launch. Catches Steam patches.
+        2. Snapshot drift — `detect_snapshot_drift` reads the
+           snapshots table and compares live PAZ file sizes against
+           what CDUMM expects. Catches manual file edits, antivirus
+           rewrites, and partial Steam Verify runs that didn't bump
+           the buildid.
         """
-        if not self._startup_context.get("game_updated"):
+        triggered = False
+        body = ""
+        if self._startup_context.get("game_updated"):
+            triggered = True
+            body = ("Click Start Recovery to verify, rescan, and "
+                    "reapply your mods.")
+        elif self._db and self._game_dir:
+            try:
+                from cdumm.engine.snapshot_manager import detect_snapshot_drift
+                drift, mismatches = detect_snapshot_drift(
+                    self._db, self._game_dir)
+                if drift:
+                    triggered = True
+                    sample = ", ".join(mismatches[:3])
+                    extra = (f" (+{len(mismatches) - 3} more)"
+                             if len(mismatches) > 3 else "")
+                    body = (
+                        f"{len(mismatches)} game file(s) drifted from "
+                        f"the snapshot ({sample}{extra}). Click Start "
+                        "Recovery to re-sync.")
+                    logger.info(
+                        "Snapshot drift detected — %d file(s): %s",
+                        len(mismatches),
+                        ", ".join(mismatches[:10]))
+            except Exception as e:
+                logger.debug("snapshot drift check failed: %s", e)
+
+        if not triggered:
             return False
 
         self._offer_recovery_flow(
-            title="Game was updated — mods need refreshing",
-            body=(
-                "Click Start Recovery to verify, rescan, and "
-                "reapply your mods."))
+            title="Game files don't match the snapshot",
+            body=body)
         # Also show the D1 "Apply locked" banner so the reason is
         # visible even if the user dismisses the Recovery InfoBar.
         InfoBar.error(
             title="Apply locked",
             content=(
-                "Crimson Desert was updated since your last "
-                "snapshot. Apply stays locked until a fresh rescan "
-                "completes."),
+                "Game files no longer match CDUMM's snapshot. Apply "
+                "stays locked until a fresh rescan completes."),
             duration=-1, position=InfoBarPosition.TOP, parent=self)
         return True
 
