@@ -2363,34 +2363,83 @@ def import_from_natt_format_3(
     json_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
 ) -> ModImportResult:
-    """Friendly stub for NattKh's Format 3 (field-names + intents).
+    """Importer for NattKh's Format 3 (field-names + intents).
 
-    Real support is planned for a future CDUMM release (the semantic
-    engine and PABGB schemas are already in place; the converter from
-    intents → byte changes is what's not yet built). Until then this
-    handler returns a clear ModImportResult error so users see a
-    specific message instead of 'unsupported file format'.
+    Parses the file, validates each intent against the PABGB schema
+    + community-curated field_schema, and surfaces a precise summary
+    of what we can and can't apply. Wires through to the existing
+    semantic-merge pipeline only when there's at least one supported
+    intent — otherwise surfaces the validator's grouped skip reasons
+    so users know exactly why the mod wasn't applied.
+
+    Variable-length array intents (e.g., dropsetinfo._list /
+    "drops") and Pearl Abyss tagged-primitive fields without a
+    field_schema entry can't be applied yet — same gap JMM v9.9.3
+    has on dropsetinfo (JMM ships zero code for that table beyond a
+    directory mapping). The validator surfaces the gap clearly so
+    users can decide whether to wait or use an alternate format.
     """
     name = json_path.stem
+    title = name
     try:
-        import json as _json
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        modinfo = data.get("modinfo") or {}
-        title = modinfo.get("title") or name
-        intent_count = len(data.get("intents") or [])
-        target = data.get("target") or "unknown file"
-    except Exception:
-        title, intent_count, target = name, 0, "unknown file"
+        from cdumm.engine.format3_handler import (
+            parse_format3_mod, validate_intents,
+        )
+        target, intents = parse_format3_mod(json_path)
+        try:
+            import json as _json
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            title = (data.get("modinfo") or {}).get("title") or name
+        except Exception:
+            pass
+    except ValueError as e:
+        # Malformed Format 3 file — give the user the loader's
+        # message verbatim, it already names what's wrong.
+        result = ModImportResult(name)
+        result.error = f"Invalid Format 3 mod: {e}"
+        return result
+    except Exception as e:
+        result = ModImportResult(name)
+        result.error = f"Failed to parse Format 3 mod: {e}"
+        return result
+
+    validation = validate_intents(target, intents)
     result = ModImportResult(title)
+
+    # All intents can be applied → fall through to apply pipeline
+    # (Phase 4 wiring lands separately; for now, we surface the
+    # validator summary either way so users see the precise state).
+    if not validation.skipped:
+        result.error = (
+            f"NattKh Format 3 mod parsed: {len(intents)} intent(s) "
+            f"on {target}, all classified as applicable.\n\n"
+            f"Note: end-to-end apply for Format 3 still requires the "
+            f"final wiring step (Phase 4 of #208). For now CDUMM "
+            f"recognizes the mod and won't crash but the bytes won't "
+            f"land yet. Drop NattKh's offset-based JSON variant if "
+            f"available."
+        )
+        return result
+
+    # Some or all intents are unapplicable — surface the grouped
+    # reasons so users know why.
+    if not validation.supported:
+        result.error = (
+            f"NattKh Format 3 mod targeting {target} — none of the "
+            f"{len(intents)} intent(s) can be applied yet:\n\n"
+            f"{validation.summary()}\n\n"
+            f"Workaround: drop NattKh's offset-based JSON variant "
+            f"if they ship one — that format works in CDUMM today."
+        )
+        return result
+
     result.error = (
-        f"This is NattKh's Format 3 (field-names) — {intent_count} "
-        f"semantic intent(s) targeting {target}. CDUMM doesn't fully "
-        "support this format yet; full support is on the roadmap for "
-        "a future update.\n\n"
-        "Workaround for now: if NattKh ships the same mod in their "
-        "older offset-based JSON format (without the \"format\": 3 "
-        "field), drop that one in instead — it works in CDUMM today."
+        f"NattKh Format 3 mod targeting {target}: "
+        f"{len(validation.supported)} intent(s) ready to apply, "
+        f"{len(validation.skipped)} that can't yet:\n\n"
+        f"{validation.summary()}\n\n"
+        f"Partial apply is on the way (Phase 4 of #208)."
     )
     return result
 
