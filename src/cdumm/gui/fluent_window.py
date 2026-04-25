@@ -42,6 +42,39 @@ from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_fil
 from cdumm.gui.import_context import snapshot_and_clear_import_context
 
 
+def _quiet_qprocess(proc) -> None:
+    """Suppress the brief console window flash when ``QProcess`` spawns
+    a Windows subprocess.
+
+    Background: CDUMM's exe is built ``console=False`` (no console),
+    but on Windows ``CreateProcess`` still allocates a transient
+    console handle for any GUI-targeting child unless we explicitly
+    pass ``CREATE_NO_WINDOW`` (0x08000000). The result is a "phantom
+    window" that flashes for 50-300 ms (or stays visible for the
+    whole worker run on slower machines) every time CDUMM spawns
+    itself with ``--worker``.
+
+    This helper sets ``QProcess.setCreateProcessArgumentsModifier`` to
+    OR the flag in. No-op on non-Windows platforms — that codepath is
+    never reached on Linux/macOS QProcess.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import subprocess as _sp
+        flag = getattr(_sp, "CREATE_NO_WINDOW", 0x08000000)
+
+        def _modify(args):
+            try:
+                args.flags |= flag
+            except Exception as _e:
+                logger.debug("CREATE_NO_WINDOW modifier write failed: %s", _e)
+
+        proc.setCreateProcessArgumentsModifier(_modify)
+    except Exception as e:
+        logger.debug("CREATE_NO_WINDOW modifier setup failed: %s", e)
+
+
 def _probe_console_state(tag: str) -> None:
     """Log whether the current process has a console attached. On
     Windows a windowed (console=False) exe has None; if Qt/subprocess
@@ -2495,6 +2528,7 @@ class CdummWindow(FluentWindow):
             page._progress_detail.setText(f"Analyzing {mod_path.name}...")
 
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -2562,6 +2596,7 @@ class CdummWindow(FluentWindow):
         import json as _json
 
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         exe = sys.executable
         args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
@@ -2882,6 +2917,7 @@ class CdummWindow(FluentWindow):
 
         from PySide6.QtCore import QProcess
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         self._active_worker = proc
 
         exe = sys.executable
@@ -3834,6 +3870,7 @@ class CdummWindow(FluentWindow):
 
         _probe_console_state("before import QProcess(self)")
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         _probe_console_state("after import QProcess(self)")
         self._active_worker = proc  # reuse guard flag
 
@@ -5260,6 +5297,7 @@ class CdummWindow(FluentWindow):
 
         self._active_progress = tip
         proc = QProcess(self)
+        _quiet_qprocess(proc)
         self._active_worker = proc
 
         # Pause non-essential timers

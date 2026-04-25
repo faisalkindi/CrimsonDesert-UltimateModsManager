@@ -2245,6 +2245,8 @@ class ModsPage(QWidget):
         window._active_progress = tip
 
         proc = QProcess(window)
+        from cdumm.gui.fluent_window import _quiet_qprocess
+        _quiet_qprocess(proc)
         window._active_worker = proc
 
         _buf = [""]
