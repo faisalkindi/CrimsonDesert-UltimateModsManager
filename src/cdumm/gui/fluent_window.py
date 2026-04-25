@@ -3360,7 +3360,11 @@ class CdummWindow(FluentWindow):
                             # toggle the full set later.
                             result = import_multi_variant(
                                 presets, path, game_dir, mods_dir, self._db,
+                                existing_mod_id=existing_mod_id,
                                 initial_selection=ticked_paths)
+                            if result:
+                                self._store_nexus_metadata_on_row(
+                                    int(result["mod_id"]), path)
                             if result and hasattr(self, "_activity_log") and self._activity_log:
                                 enabled_ct = sum(1 for v in result["variants"] if v["enabled"])
                                 self._activity_log.log(
@@ -3518,7 +3522,13 @@ class CdummWindow(FluentWindow):
                         mv_result = import_multi_variant(
                             prefixed_presets, source_for_name,
                             self._game_dir, mods_dir, self._db,
+                            existing_mod_id=existing_mod_id,
                             initial_selection=initial)
+                        if mv_result:
+                            self._store_nexus_metadata_on_row(
+                                int(mv_result["mod_id"]),
+                                source_for_name if isinstance(
+                                    source_for_name, Path) else path)
                         if (mv_result and hasattr(self, "_activity_log")
                                 and self._activity_log):
                             self._activity_log.log(
@@ -3691,7 +3701,13 @@ class CdummWindow(FluentWindow):
                             mv_result = import_multi_variant(
                                 mutex_presets, source_for_name,
                                 self._game_dir, mods_dir, self._db,
+                                existing_mod_id=existing_mod_id,
                                 initial_selection=initial)
+                            if mv_result:
+                                self._store_nexus_metadata_on_row(
+                                    int(mv_result["mod_id"]),
+                                    source_for_name if isinstance(
+                                        source_for_name, Path) else path)
                             if (mv_result and hasattr(self, "_activity_log")
                                     and self._activity_log):
                                 self._activity_log.log(
@@ -4434,6 +4450,49 @@ class CdummWindow(FluentWindow):
         if match:
             return match.group(1)
         return ""
+
+    def _store_nexus_metadata_on_row(self, mod_id: int,
+                                       drop_path: Path) -> None:
+        """Persist `nexus_mod_id`, `nexus_file_id`, `nexus_real_file_id`
+        on a mod row by parsing the drop filename and consuming the
+        nxm:// real-file-id map.
+
+        The QProcess-worker path does this inline in `_on_finished`.
+        Variant imports run in-process (no worker) so they need an
+        explicit metadata-storage step, otherwise the resulting row
+        keeps `nexus_mod_id=NULL` and the pill shows grey/no entry on
+        the next update check.
+        """
+        if not self._db or not mod_id:
+            return
+        try:
+            nexus_id, nexus_file_ver = _parse_nexus_filename(drop_path.stem)
+        except Exception:
+            nexus_id, nexus_file_ver = None, ""
+        real_file_id = None
+        if hasattr(self, "_nexus_real_file_id_map"):
+            real_file_id = self._nexus_real_file_id_map.pop(
+                str(drop_path), None)
+        try:
+            if nexus_id:
+                self._db.connection.execute(
+                    "UPDATE mods SET nexus_mod_id = ?, nexus_file_id = ? "
+                    "WHERE id = ?",
+                    (int(nexus_id), nexus_file_ver, int(mod_id)))
+            if real_file_id:
+                self._db.connection.execute(
+                    "UPDATE mods SET nexus_real_file_id = ? WHERE id = ?",
+                    (int(real_file_id), int(mod_id)))
+            if nexus_id or real_file_id:
+                self._db.connection.commit()
+                logger.info(
+                    "Stored Nexus metadata on variant mod_id=%d: "
+                    "nexus_mod_id=%s file_ver=%s real_file_id=%s",
+                    mod_id, nexus_id, nexus_file_ver, real_file_id)
+        except Exception as e:
+            logger.debug(
+                "Failed to store Nexus metadata for variant mod %d: %s",
+                mod_id, e)
 
     def _match_existing_by_name(self, downloaded_path: str | Path) -> int | None:
         """Return ``mods.id`` of an existing row whose name matches the
