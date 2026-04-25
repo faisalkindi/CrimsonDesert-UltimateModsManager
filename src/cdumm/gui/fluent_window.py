@@ -4274,6 +4274,32 @@ class CdummWindow(FluentWindow):
             except Exception as e:
                 logger.warning("Failed to store ASI metadata: %s", e)
 
+        # Mirror the PAZ post-import pill clear: when an ASI plugin
+        # update completes the in-memory _nexus_updates dict still
+        # marks the mod as outdated, so the pill stays red until the
+        # next 30-min background check. Flip it to GREEN now using
+        # the version we just stored.
+        if nexus_id and getattr(self, "_nexus_updates", None):
+            try:
+                from cdumm.engine.nexus_api import clear_outdated_after_update
+                new_ver = (version or "").strip()
+                self._nexus_updates = clear_outdated_after_update(
+                    self._nexus_updates, int(nexus_id), new_ver)
+                if hasattr(self, 'asi_plugins_page'):
+                    try:
+                        self.asi_plugins_page.set_nexus_updates(
+                            self._nexus_updates)
+                    except AttributeError:
+                        pass
+                if hasattr(self, 'paz_mods_page'):
+                    try:
+                        self.paz_mods_page.set_nexus_updates(
+                            self._nexus_updates)
+                    except AttributeError:
+                        pass
+            except Exception as e:
+                logger.debug("ASI pill-clear failed: %s", e)
+
     @staticmethod
     def _get_drop_version(path: Path) -> str:
         """Extract version string from a dropped mod (modinfo.json, JSON patch, or folder name)."""
