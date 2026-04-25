@@ -310,3 +310,43 @@ def _classify_intent(
         )
 
     return None
+
+
+# ── Apply (records-dict level) ──────────────────────────────────────
+
+
+def apply_intents_to_records(
+    vanilla_records: dict[int, dict[str, Any]],
+    intents: list[Format3Intent],
+) -> dict[int, dict[str, Any]]:
+    """Synthesize the "mod records" dict for the existing semantic
+    engine pipeline.
+
+    Returns ONLY records that an intent successfully modified — mirroring
+    what the differ expects from a real mod (a mod's PABGB only contains
+    records the mod authored values for; vanilla-equal records are
+    absent from the diff input).
+
+    Out-of-band intents are dropped silently here. The upstream
+    ``validate_intents`` call has already classified them and surfaced
+    reasons through ``Format3Validation.skipped``.
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for intent in intents:
+        # Phase 1 only writes 'set'. Other ops would change the record
+        # shape (add_entry, remove) or compose values (append) — neither
+        # belongs at this layer.
+        if intent.op not in _SUPPORTED_OPS:
+            continue
+        if intent.key not in vanilla_records:
+            continue
+        vanilla_rec = vanilla_records[intent.key]
+        if intent.field not in vanilla_rec:
+            # Don't invent fields — the differ would treat a phantom
+            # field as a real diff, and the rebuilder would have no
+            # schema slot for it.
+            continue
+        if intent.key not in out:
+            out[intent.key] = dict(vanilla_rec)  # shallow copy
+        out[intent.key][intent.field] = intent.new
+    return out
