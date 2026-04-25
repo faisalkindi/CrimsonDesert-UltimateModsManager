@@ -1848,7 +1848,28 @@ class CdummWindow(FluentWindow):
                 pass
         if not lines:
             return
+        # De-dupe nxm:// URLs across a 10-second window. Many Chromium
+        # builds fire registered protocol handlers TWICE for a single
+        # click (one from the page, one from the navigation hand-off),
+        # which produces two duplicate downloads and two duplicate mod
+        # rows. The atomic queue handoff above keeps appends from being
+        # dropped, but it doesn't filter same-URL re-fires. Real-world
+        # hit: a single 'Mod Manager Download' click on Better
+        # Inventory And Trade UI created mod_id=1490 AND 1491 in one
+        # drain batch.
+        recent: dict = getattr(self, "_recent_nxm_urls", {})
+        now_ts = _time.time()
+        # Forget anything older than 30s so the dict can't grow
+        # unbounded across a long session.
+        recent = {u: ts for u, ts in recent.items() if now_ts - ts < 30}
         for url in lines:
+            prior = recent.get(url)
+            if prior is not None and (now_ts - prior) < 10:
+                logger.warning(
+                    "nxm: ignoring duplicate URL fired within 10s: %s",
+                    url)
+                continue
+            recent[url] = now_ts
             try:
                 self._handle_nxm_url(url)
             except Exception as e:
@@ -1857,6 +1878,7 @@ class CdummWindow(FluentWindow):
                     title="Download Failed",
                     content=f"Could not handle {url}\n\n{e}",
                     duration=-1, position=InfoBarPosition.TOP, parent=self)
+        self._recent_nxm_urls = recent
 
     def _handle_direct_update(self, local_mod_id: int, nexus_mod_id: int,
                                file_id: int, fallback_url: str) -> None:
