@@ -2167,19 +2167,37 @@ class ModsPage(QWidget):
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
-        # Gather source_path for each selected mod. Skip any with
-        # missing/empty source_path — those were imported on an older
-        # CDUMM that didn't store sources.
-        entries: list[tuple[int, str, str]] = []  # (mod_id, name, source_path)
+        # Gather a usable source for each selected mod. Three fallback
+        # rules, in order:
+        #   1. ``source_path`` IF the folder is non-empty (PAZ-style
+        #      mod imported as a folder/archive).
+        #   2. ``json_source`` from the DB (JSON-patch mods archive
+        #      their original .json into deltas/<id>/source.json; the
+        #      source_path folder ends up empty).
+        #   3. Skip otherwise.
+        # Without rule 2, recovery's reimport pass tries to reimport
+        # JSON-patch mods from an empty folder and fails with
+        # "Found 0 file(s)" — the user's screenshot showed 17 of those.
+        import os
+        entries: list[tuple[int, str, str]] = []  # (mod_id, name, source)
         missing: list[str] = []
         for m in self._mod_manager.list_mods():
             if m["id"] not in mod_ids:
                 continue
-            sp = m.get("source_path")
-            if not sp:
+            sp = m.get("source_path") or ""
+            chosen: str | None = None
+            if sp and os.path.isdir(sp) and os.listdir(sp):
+                chosen = sp
+            elif sp and os.path.isfile(sp):
+                chosen = sp
+            else:
+                js = m.get("json_source") or ""
+                if js and os.path.isfile(js):
+                    chosen = js
+            if not chosen:
                 missing.append(m["name"])
                 continue
-            entries.append((m["id"], m["name"], sp))
+            entries.append((m["id"], m["name"], chosen))
 
         if not entries:
             if not skip_confirm:

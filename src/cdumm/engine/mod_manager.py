@@ -21,7 +21,7 @@ class ModManager:
             "SELECT id, name, mod_type, enabled, priority, import_date, "
             "game_version_hash, source_path, author, version, description, configurable, "
             "force_inplace, notes, group_id, drop_name, conflict_mode, target_language, "
-            "nexus_mod_id, nexus_file_id "
+            "nexus_mod_id, nexus_file_id, json_source "
             "FROM mods"
         )
         if mod_type:
@@ -44,6 +44,7 @@ class ModManager:
                 "target_language": row[17] if len(row) > 17 else None,
                 "nexus_mod_id": row[18] if len(row) > 18 else None,
                 "nexus_file_id": row[19] if len(row) > 19 else None,
+                "json_source": row[20] if len(row) > 20 else None,
             }
             for row in cursor.fetchall()
         ]
