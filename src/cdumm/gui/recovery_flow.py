@@ -323,7 +323,9 @@ class RecoveryFlow(QObject):
         self.chain_complete.emit()
 
     def _emit_step(self, step: str) -> None:
+        prev = self._current_step
         self._current_step = step
+        logger.info("RecoveryFlow step: %s -> %s", prev, step)
         self.step_changed.emit(step)
         self._update_progress_bar(step)
         # Each step transition writes new state to the DB (Fix
