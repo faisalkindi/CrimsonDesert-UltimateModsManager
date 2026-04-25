@@ -1,32 +1,74 @@
 ## CDUMM v3.2
 
-Bundles the v3.1.7.x hotfixes, the NexusMods API integration, and the new Game Update Recovery flow into one release.
+**CDUMM and Nexus Mods are now best friends.** Sign in once and CDUMM keeps an eye on every mod you've installed. When an author pushes an update you see a red badge on the card. Click "Mod Manager Download" on a Nexus page and it lands straight in CDUMM. Game update broke your mods? One button puts everything back together.
 
-### What's new
+This is a big release. Take a minute to read it.
 
-- **Game Update Recovery.** When Crimson Desert is patched by Steam and your mods break, CDUMM now shows a **Start Recovery** button on the banner that runs the full recovery flow in one click: verify prompt → Fix Everything → rescan → reimport → apply. Mods whose original archive is gone are automatically disabled so Apply never runs against stale patches. This replaces the five manual steps users had to remember after a Steam update. Both the startup "game was updated" path and the later "game files changed" fingerprint check now surface the same Recovery button.
+### Nexus Mods, built in (the headline)
 
-- **NexusMods integration (Phase 1).** Settings → NexusMods Integration card: paste your personal API key and CDUMM checks every 30 minutes for mod updates. Outdated mods get a red "Click To Update" pill; up-to-date mods get a green check. Premium users get one-click downloads; free users get routed to the mod's Files tab on Nexus with CDUMM's application slug approved.
+**One-click sign-in.** Open Settings, hit **Login with Nexus**, your browser pops up, you confirm it's you, done. CDUMM is connected to your Nexus account. No API keys to copy and paste. No accounts to make. CDUMM never sees your password.
 
-- **Single Sign-On with Nexus.** Click "Login with Nexus" in Settings to authorize CDUMM via your browser without pasting an API key. Uses the Nexus SSO websocket protocol; CDUMM never sees your password.
+**CDUMM tells you when your mods need updating.** Every 30 minutes CDUMM quietly checks Nexus for new versions of the mods you have installed. Outdated mods get a bright red **Click To Update** badge. Up-to-date mods get a quiet green check. The first check runs right after you sign in so you can see immediately what's stale.
 
-- **nxm:// protocol handler.** Register CDUMM as the default handler in Settings and "Mod Manager Download" buttons on Nexus pages send the file directly to CDUMM. No more manual drag-drop after downloading.
+**Download from Nexus with one click.** On any mod's Nexus page, the "Mod Manager Download" button now sends the file straight to CDUMM. No more saving the zip to your Downloads folder and dragging it in.
 
-### Fixes rolled in
+- **Premium Nexus members** get the full one-click experience — file lands in CDUMM, imports automatically.
+- **Free Nexus members** get sent to the mod's Files tab so you can grab the right file fast — still saves you several clicks.
 
-- **Import no longer rejects valid mods** (was v3.1.7.1). v3.1.7 was rejecting mods at import time with a "corrupt PAMT" error mentioning a temp-file name like `'tmp9wk9wy2h'`. Root cause: the validator was writing to a randomly-named temp file that confused the parser's filename-derived PAZ index. Fixed by using the mod's real PAMT filename for validation.
+**Cleaner Settings page.** Login is the recommended path and it leads. The old manual API key paste is still there for power users — tucked behind an "Advanced" toggle so it doesn't clutter the page.
 
-- **Apply no longer shows false "corrupt PAMT" warning** (was v3.1.7.2). v3.1.7.1 still showed an "Apply Completed with Warnings" banner after every successful Apply claiming your mods had corrupt PAMT files. The precheck producing that banner was examining the wrong file (the binary patch, not the reconstructed PAMT). The precheck is disabled; the real import and apply flows still catch truly corrupt files.
+### Game updates can't break your day anymore
 
-- **Recovery no longer explodes multi-preset mods into a sea of duplicates.** When a mod was originally imported from a folder with multiple preset JSONs (Glider Stamina ships 5, Infinite Horse ships 9), Recovery's reimport step was sending the FOLDER to the worker. The worker's multi-JSON branch then split each preset into its own mod row — turning one Glider into 5 cards and one Horse into 9. Reimport now resolves the source as `json_source` first (the user's chosen single preset) and only falls back to the folder for PAZ-archive mods. One mod stays one mod.
+Steam patches Crimson Desert overnight, you launch the game tomorrow, mods are broken. CDUMM now catches that on startup and offers you a **Start Recovery** button.
 
-- **Snapshot-drift trigger no longer false-fires after every Apply.** The drift detector was flagging `meta/0.papgt` and `meta/0.pathc` as drifted on every launch after a successful Apply, because Apply rebuilds those PAZ integrity-chain files but they aren't tracked in `mod_deltas`. The detector now skips those two files when at least one mod is applied — they're CDUMM-managed and post-apply size differs from vanilla snapshot by design. With zero applied mods they're still drift-checked normally so external tampering on a clean install is still caught.
+One click runs the whole repair: verify your game files, regenerate every mod against the new game version, and reapply them. The five-step manual recipe you used to memorize is gone.
+
+- **Catches both kinds of break.** A normal Steam patch — or any other change to your game files (antivirus rewriting things, half-finished Steam Verify, third-party tool drops) — both trigger the same Recovery banner.
+- **You see exactly where it is.** Step 1 of 4 → Step 4 of 4 with a progress bar. Cancel any time.
+- **Mods that can't be auto-recovered get safely disabled** instead of corrupting your save. CDUMM tells you which ones, and you can drop their original archive back in to fix them.
+
+### Apply is way faster
+
+Apply used to crawl on big mod sets — sometimes sitting at 0% on one file forever. Two engine rewrites:
+
+- **Conflict detection** is near-instant even with a hundred mods touching the same files.
+- **Merging mod changes** runs hundreds of times faster. Files that took minutes now take seconds.
+- **The progress bar tells the truth.** Real progress every step of the way, no more frozen "95%" mystery.
+
+### Other things you'll notice
+
+- **No more false "corrupt PAMT" warning** popping up after every Apply when nothing was actually wrong.
+- **Mods stop multiplying during Recovery.** Some mods ship multiple presets in one archive (Glider Stamina with 5 options, Infinite Horse with 9). Recovery used to clone each preset into its own card. One mod is one mod again.
+- **No more black command-prompt windows flashing** while CDUMM is working.
+- **Recovery doesn't get stuck at Step 3** anymore.
+- **Recovery doesn't false-alarm.** A bug was making the Recovery banner appear on every launch right after a successful Apply. Fixed.
+- **Cleaner error messages.** When a mod fails you see *which* mod failed instead of a generic placeholder.
+
+### Nexus update-checking polish
+
+A bunch of small fixes to the new update-checking system:
+
+- The outdated count in the bottom corner matches what you see on the cards.
+- Updating an outdated mod clears the red badge instantly — no waiting for the next check.
+- Importing the same mod twice from Nexus stops creating duplicate cards.
+- "Mod Manager Download" no longer crashes if you click it before a previous download finishes.
+- Mod files with `.zip` or `.7z` baked into their name parse correctly now.
+- Browsers that fire the download link twice (some do) get the second click ignored if it lands within 10 seconds.
+
+### ASI plugin fixes
+
+For DLL-based mods (Free Camera, Better Controller Remap, etc.):
+
+- Uninstalling a plugin now cleans up its `.ini` and other sidecar files too — no leftover ghosts.
+- If a plugin author renames their `.asi` file in a new version, CDUMM removes the old one for you.
+- Plugin `.ini` files match correctly even when authors put the version number in the file name.
+- The outdated badge on a plugin clears the moment you update it.
 
 ### After updating
 
-1. Replace your old `CDUMM3.exe` with this release.
-2. Optional: open Settings → NexusMods Integration. Click "Login with Nexus" (or paste your personal API key from https://next.nexusmods.com/settings/api-keys). Toggle nxm:// handler if you want Nexus download buttons to send files straight to CDUMM.
-3. Launch CDUMM. If Crimson Desert was updated since your last successful apply, the Recovery InfoBar appears automatically — click Start Recovery and let it run.
+1. **Replace your old `CDUMM3.exe`** with this one.
+2. **Connect to Nexus.** Settings → NexusMods Integration → click **Login with Nexus** (takes about 5 seconds in your browser). While you're there, flip on the "Mod Manager Download" handler so Nexus pages send downloads straight to CDUMM.
+3. **Launch CDUMM.** If your game files have changed since your last apply, the yellow Recovery banner appears — click Start Recovery and let it do its thing.
 
 ### Download
 
