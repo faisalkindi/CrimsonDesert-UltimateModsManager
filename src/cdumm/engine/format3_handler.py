@@ -193,7 +193,7 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
                 f"intent #{i} is not a JSON object"
             )
         # Required keys per the v3 spec example file
-        for required in ("entry", "field", "op"):
+        for required in ("entry", "key", "field", "op"):
             if required not in raw:
                 raise ValueError(
                     f"intent #{i} is missing required key '{required}'"
@@ -202,9 +202,19 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
             raise ValueError(
                 f"intent #{i} is missing 'new' (the value to set)"
             )
+        # ``key`` is the record id — silently coercing strings or
+        # truncating floats would silently target a wrong record.
+        # Refuse anything that isn't an int (booleans pass isinstance
+        # check for int in Python, so reject explicitly).
+        raw_key = raw["key"]
+        if isinstance(raw_key, bool) or not isinstance(raw_key, int):
+            raise ValueError(
+                f"intent #{i} has non-integer key {raw_key!r} — "
+                f"key must be an integer record id"
+            )
         intents.append(Format3Intent(
             entry=str(raw["entry"]),
-            key=int(raw.get("key", 0)),
+            key=raw_key,
             field=str(raw["field"]),
             op=str(raw["op"]),
             new=raw["new"],

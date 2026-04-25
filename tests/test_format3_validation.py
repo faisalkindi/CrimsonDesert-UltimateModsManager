@@ -95,6 +95,54 @@ def test_parse_rejects_intents_missing_required_keys(tmp_path):
         parse_format3_mod(p)
 
 
+def test_parse_rejects_intent_missing_key(tmp_path):
+    """``key`` is the record id — silently defaulting it to 0
+    silently nukes the wrong record. Treat it like every other
+    required field and raise, so the mod author sees the bad
+    intent and fixes it."""
+    import json
+    p = tmp_path / "no_key.json"
+    p.write_text(json.dumps({
+        "format": 3,
+        "target": "x.pabgb",
+        "intents": [{"entry": "X", "field": "y",
+                     "op": "set", "new": 42}],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="key"):
+        parse_format3_mod(p)
+
+
+def test_parse_rejects_intent_with_non_int_key(tmp_path):
+    """A string key like ``"175001"`` is a common authoring mistake.
+    Silently truncating or crashing with int(...) ValueError is bad
+    UX — surface a clear ValueError naming the intent."""
+    import json
+    p = tmp_path / "str_key.json"
+    p.write_text(json.dumps({
+        "format": 3,
+        "target": "x.pabgb",
+        "intents": [{"entry": "X", "key": "175001",
+                     "field": "y", "op": "set", "new": 42}],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="key"):
+        parse_format3_mod(p)
+
+
+def test_parse_rejects_intent_with_float_key(tmp_path):
+    """Floats silently truncate via int() — and a ``175000.5`` would
+    map to record 175000, the wrong record. Refuse explicitly."""
+    import json
+    p = tmp_path / "float_key.json"
+    p.write_text(json.dumps({
+        "format": 3,
+        "target": "x.pabgb",
+        "intents": [{"entry": "X", "key": 175001.5,
+                     "field": "y", "op": "set", "new": 42}],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="key"):
+        parse_format3_mod(p)
+
+
 # ── validate_intents — supported vs skipped split ───────────────────
 
 
