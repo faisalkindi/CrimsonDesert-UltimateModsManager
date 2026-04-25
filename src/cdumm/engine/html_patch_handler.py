@@ -807,3 +807,95 @@ def _decode_utf8(data: bytes) -> str:
     if len(data) >= 3 and data[0] == 0xEF and data[1] == 0xBB and data[2] == 0xBF:
         return data[3:].decode("utf-8")
     return data.decode("utf-8")
+
+
+# ── Overlay batch processor ──────────────────────────────────────────
+
+
+def process_html_patches_for_overlay(
+        patch_items: list[dict], game_dir) -> list[tuple[bytes, dict]]:
+    """Apply all *.html.patch / *.html.merge mods against the HTML
+    files they target and emit (content_bytes, metadata) tuples ready
+    for the overlay builder.
+
+    Both .html.patch and .html.merge run through the SAME apply
+    pipeline (the two file extensions are aliases for HTML — only the
+    parser differs for CSS/XML where merge has distinct semantics).
+
+    patch_items: list of dicts with keys mod_id, mod_name, kind
+    ('html_patch' | 'html_merge'), delta_path, file_path, priority.
+    """
+    from cdumm.engine.json_patch_handler import (
+        _find_pamt_entry, _extract_from_paz,
+    )
+
+    game_dir = Path(game_dir)
+    vanilla_dir = game_dir / "CDMods" / "vanilla"
+    if not vanilla_dir.exists():
+        vanilla_dir = game_dir
+
+    by_target: dict[str, list[dict]] = {}
+    for item in patch_items:
+        fp = (item.get("file_path") or "").strip()
+        if not fp:
+            continue
+        by_target.setdefault(fp, []).append(item)
+
+    out: list[tuple[bytes, dict]] = []
+    for target_path, items in by_target.items():
+        items.sort(key=lambda d: (
+            int(d.get("priority") or 0),
+            int(d.get("mod_id") or 0)))
+        target_basename = (target_path.split("/", 1)[-1]
+                           if "/" in target_path else target_path)
+        entry = (_find_pamt_entry(target_basename, vanilla_dir)
+                 or _find_pamt_entry(target_basename, game_dir))
+        if entry is None:
+            logger.warning("html_patch: target not found in PAMT — %s",
+                           target_path)
+            continue
+        try:
+            vanilla_bytes = _extract_from_paz(entry)
+        except Exception as e:
+            logger.error("html_patch: extract failed for %s: %s",
+                         target_path, e)
+            continue
+
+        patch_files: list[tuple[str, Path]] = []
+        for it in items:
+            dp = Path(it.get("delta_path") or "")
+            if not dp.exists():
+                logger.warning("html_patch: patch file missing: %s", dp)
+                continue
+            patch_files.append((it.get("mod_name") or dp.stem, dp))
+
+        current = bytes(vanilla_bytes)
+        if patch_files:
+            new, log = apply_patches(current, patch_files)
+            for line in log:
+                logger.info(line)
+            if new is not None:
+                current = new
+
+        if current == vanilla_bytes:
+            logger.debug("html_patch: no net change for %s, skipping",
+                         target_path)
+            continue
+
+        pamt_dir = Path(entry.paz_file).parent.name
+        meta: dict = {
+            "entry_path": entry.path,
+            "pamt_dir": pamt_dir,
+            "compression_type": entry.compression_type,
+        }
+        if getattr(entry, "encrypted", False):
+            meta["encrypted"] = True
+            meta["crypto_filename"] = entry.path.rsplit("/", 1)[-1]
+            meta["vanilla_flags"] = entry.flags & 0xFFFF
+        out.append((bytes(current), meta))
+        logger.info(
+            "html_patch: produced overlay entry for %s (%d bytes) "
+            "from %d file(s)",
+            target_path, len(current), len(items))
+
+    return out

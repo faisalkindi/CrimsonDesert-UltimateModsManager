@@ -1297,6 +1297,71 @@ class ApplyWorker(QObject):
                     logger.info("xml_patch: produced %d overlay entries from %d deltas",
                                 len(xml_entries), len(xml_rows))
 
+            _phase("Phase 1a-css: Mount-time CSS patches")
+            # CSS patch / merge mods (JMM v9.9.3 parity). Same priority
+            # transform as XML — CDUMM low priority = highest winner,
+            # handler sorts ASC and lets the last item win.
+            css_rows = self._db.connection.execute(
+                "SELECT d.mod_id, m.name, d.kind, d.delta_path, d.file_path, "
+                "m.priority FROM mod_deltas d "
+                "JOIN mods m ON m.id = d.mod_id "
+                "WHERE m.enabled = 1 AND d.kind IN ('css_patch', 'css_merge') "
+                "ORDER BY m.priority DESC, d.id ASC"
+            ).fetchall()
+            if css_rows:
+                self.progress_updated.emit(
+                    59, f"Applying CSS patches ({len(css_rows)})...")
+                from cdumm.engine.css_patch_handler import (
+                    process_css_patches_for_overlay,
+                )
+                items = [
+                    {
+                        "mod_id": mod_id, "mod_name": mod_name,
+                        "kind": kind, "delta_path": dp,
+                        "file_path": fp,
+                        "priority": cdumm_to_xml_priority(prio),
+                    }
+                    for (mod_id, mod_name, kind, dp, fp, prio) in css_rows
+                ]
+                css_entries = process_css_patches_for_overlay(
+                    items, self._game_dir)
+                self._overlay_entries.extend(css_entries)
+                if css_entries:
+                    logger.info(
+                        "css_patch: produced %d overlay entries from "
+                        "%d deltas", len(css_entries), len(css_rows))
+
+            _phase("Phase 1a-html: Mount-time HTML patches")
+            html_rows = self._db.connection.execute(
+                "SELECT d.mod_id, m.name, d.kind, d.delta_path, d.file_path, "
+                "m.priority FROM mod_deltas d "
+                "JOIN mods m ON m.id = d.mod_id "
+                "WHERE m.enabled = 1 AND d.kind IN ('html_patch', 'html_merge') "
+                "ORDER BY m.priority DESC, d.id ASC"
+            ).fetchall()
+            if html_rows:
+                self.progress_updated.emit(
+                    60, f"Applying HTML patches ({len(html_rows)})...")
+                from cdumm.engine.html_patch_handler import (
+                    process_html_patches_for_overlay,
+                )
+                items = [
+                    {
+                        "mod_id": mod_id, "mod_name": mod_name,
+                        "kind": kind, "delta_path": dp,
+                        "file_path": fp,
+                        "priority": cdumm_to_xml_priority(prio),
+                    }
+                    for (mod_id, mod_name, kind, dp, fp, prio) in html_rows
+                ]
+                html_entries = process_html_patches_for_overlay(
+                    items, self._game_dir)
+                self._overlay_entries.extend(html_entries)
+                if html_entries:
+                    logger.info(
+                        "html_patch: produced %d overlay entries from "
+                        "%d deltas", len(html_entries), len(html_rows))
+
             # Merge overlay entries that target the same (pamt_dir, entry_path).
             # Without this, two JSON mods patching iteminfo.pabgb produce two
             # separate overlay entries and only one wins in PAMT — the other

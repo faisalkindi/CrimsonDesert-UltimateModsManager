@@ -375,19 +375,43 @@ def _register_xml_patches(
     them during regular import (prevents the CB / loose-file passes from
     re-processing patch bodies as full-file replacements).
     """
+    # Detector chain: try XML first, then CSS, then HTML. Each pair
+    # is (detect_fn, derive_target_fn). The first detector that
+    # returns a non-None kind claims the file.
     from cdumm.engine.xml_patch_handler import (
-        detect_patch_file, derive_target_from_patch_path,
+        detect_patch_file as detect_xml,
+        derive_target_from_patch_path as derive_xml,
+    )
+    from cdumm.engine.css_patch_handler import (
+        detect_patch_file as detect_css,
+        derive_target_from_patch_path as derive_css,
+    )
+    from cdumm.engine.html_patch_handler import (
+        detect_patch_file as detect_html,
+        derive_target_from_patch_path as derive_html,
     )
     claimed: list[Path] = []
+    valid_kinds = {
+        "xml_patch", "xml_merge", "css_patch", "css_merge",
+        "html_patch", "html_merge",
+    }
     for f in extracted_dir.rglob("*"):
         if not f.is_file():
             continue
-        kind = detect_patch_file(f)
-        if kind not in ("xml_patch", "xml_merge"):
+        kind = None
+        derive_fn = None
+        for det, drv in ((detect_xml, derive_xml),
+                         (detect_css, derive_css),
+                         (detect_html, derive_html)):
+            kind = det(f)
+            if kind is not None:
+                derive_fn = drv
+                break
+        if kind not in valid_kinds:
             continue
-        target = derive_target_from_patch_path(f, extracted_dir)
+        target = derive_fn(f, extracted_dir)
         if not target:
-            logger.warning("xml_patch: could not derive target for %s", f)
+            logger.warning("partial_patch: could not derive target for %s", f)
             continue
 
         # Copy the patch file into deltas_dir. Unique filename: mod_id + hash
@@ -1421,13 +1445,25 @@ def _import_from_extracted(
 
 
 def _scan_xml_patches(root: Path) -> list[Path]:
-    """Lightweight detector — returns paths to XML patch / merge files
-    under ``root`` without touching the DB. Used to decide whether an
-    otherwise-empty archive actually contains patch content."""
-    from cdumm.engine.xml_patch_handler import detect_patch_file
+    """Lightweight detector — returns paths to XML / CSS / HTML
+    partial-patch files under ``root`` without touching the DB. Used
+    to decide whether an otherwise-empty archive actually contains
+    patch content. Name kept for backward compatibility; covers all
+    three handler families now."""
+    from cdumm.engine.xml_patch_handler import (
+        detect_patch_file as detect_xml,
+    )
+    from cdumm.engine.css_patch_handler import (
+        detect_patch_file as detect_css,
+    )
+    from cdumm.engine.html_patch_handler import (
+        detect_patch_file as detect_html,
+    )
     hits: list[Path] = []
     for f in root.rglob("*"):
-        if f.is_file() and detect_patch_file(f):
+        if not f.is_file():
+            continue
+        if detect_xml(f) or detect_css(f) or detect_html(f):
             hits.append(f)
     return hits
 
