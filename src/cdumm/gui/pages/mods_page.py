@@ -429,26 +429,36 @@ class ModsPage(QWidget):
         nexus_map = getattr(self, '_nexus_id_map', {})
         logger.info("set_nexus_updates: %d updates, %d mods with nexus_id, %d cards",
                      len(updates), len(nexus_map), len(self._mod_cards))
-        # Update existing cards
+        # Update existing cards. Three-state logic (Codex review
+        # finding 1 from the v3.1.8 plan):
+        #   - entry present AND has_update=True  -> RED pill (Click To Update)
+        #   - entry present AND has_update=False -> GREEN/no pill (confirmed current)
+        #   - no entry                           -> GREY/no pill (unknown)
+        # Prior code painted RED whenever an entry existed, ignoring
+        # has_update. That caused 'mod #17 still says outdated' even
+        # after check_mod_updates correctly classified it as current.
         for card in self._mod_cards:
             mod_id = card.mod_id
             nexus_id = nexus_map.get(mod_id)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(
-                    True, u.mod_url,
-                    nexus_mod_id=nexus_id,
-                    latest_file_id=getattr(u, "latest_file_id", 0))
-                # Connect update_clicked once per card. Disconnect first
-                # to dedup since Qt 6 raises if the slot isn't connected
-                # — the only legitimate failures here are TypeError
-                # (signature mismatch) and RuntimeError (no connection).
-                # Catch only those so a real wiring bug isn't masked.
-                try:
-                    card.update_clicked.disconnect(self._on_update_clicked)
-                except (TypeError, RuntimeError):
-                    pass
-                card.update_clicked.connect(self._on_update_clicked)
+                if getattr(u, "has_update", False):
+                    card.set_update_available(
+                        True, u.mod_url,
+                        nexus_mod_id=nexus_id,
+                        latest_file_id=getattr(u, "latest_file_id", 0))
+                    # Connect update_clicked once per card. Disconnect first
+                    # to dedup since Qt 6 raises if the slot isn't connected
+                    # — the only legitimate failures here are TypeError
+                    # (signature mismatch) and RuntimeError (no connection).
+                    try:
+                        card.update_clicked.disconnect(self._on_update_clicked)
+                    except (TypeError, RuntimeError):
+                        pass
+                    card.update_clicked.connect(self._on_update_clicked)
+                else:
+                    # Confirmed current — clear any prior 'red' pill.
+                    card.set_update_available(False)
             elif nexus_id:
                 card.set_update_available(False)
         # Refresh the summary bar so the Outdated counter reflects the

@@ -1252,15 +1252,22 @@ class AsiPluginsPage(QWidget):
         # Stash the plugin_name → nexus_id map so _update_stats can
         # count outdated plugins for the summary bar.
         self._nexus_id_map = nexus_map
+        # Three-state logic mirrors the PAZ mods page (see
+        # mods_page.set_nexus_updates for the full rationale): an
+        # entry with has_update=False means 'confirmed current' and
+        # must paint NO pill, not the red 'Click To Update' pill.
         for card in self._cards:
             plugin_name = card.plugin_name
             nexus_id = nexus_map.get(plugin_name)
             if nexus_id and nexus_id in updates:
                 u = updates[nexus_id]
-                card.set_update_available(
-                    True, u.mod_url,
-                    nexus_mod_id=nexus_id,
-                    latest_file_id=getattr(u, "latest_file_id", 0))
+                if getattr(u, "has_update", False):
+                    card.set_update_available(
+                        True, u.mod_url,
+                        nexus_mod_id=nexus_id,
+                        latest_file_id=getattr(u, "latest_file_id", 0))
+                else:
+                    card.set_update_available(False)
             elif nexus_id:
                 card.set_update_available(False)
         # Refresh the summary bar's Outdated count.
