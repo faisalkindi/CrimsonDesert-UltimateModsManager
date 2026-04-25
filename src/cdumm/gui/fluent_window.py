@@ -4233,11 +4233,22 @@ class CdummWindow(FluentWindow):
                             "WHERE nexus_mod_id = ? AND name != ?",
                             (nexus_id, plugin_name)).fetchall()
                         for (old_name,) in stale_rows:
-                            old_asi = (self._game_dir / "bin64"
-                                       / f"{old_name}.asi")
-                            old_ini = (self._game_dir / "bin64"
-                                       / f"{old_name}.ini")
-                            for stale in (old_asi, old_ini):
+                            bin64_dir = self._game_dir / "bin64"
+                            # Sweep every variant the old plugin could
+                            # have on disk: enabled (.asi), disabled
+                            # (.asi.disabled — from the right-click
+                            # Disable action), companion .ini, and
+                            # companion .ini.disabled. Without this
+                            # the page's scan() picks up the .disabled
+                            # variant and renders a ghost card.
+                            stale_paths = [
+                                bin64_dir / f"{old_name}.asi",
+                                bin64_dir / f"{old_name}.asi.disabled",
+                                bin64_dir / f"{old_name}.ini",
+                                bin64_dir / f"{old_name}.ini.disabled",
+                                bin64_dir / f"{old_name}.version",
+                            ]
+                            for stale in stale_paths:
                                 try:
                                     if stale.exists():
                                         stale.unlink()
