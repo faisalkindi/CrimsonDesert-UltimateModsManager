@@ -243,6 +243,13 @@ class ModImportResult:
         self.mod_type = mod_type
         self.changed_files: list[dict] = []  # [{file_path, delta_path, byte_start, byte_end}]
         self.error: str | None = None
+        # ``info`` is for non-fatal diagnostic text — surfaced to the
+        # user as a yellow InfoBar instead of a red error toast.
+        # Used by importers that successfully recognize a mod but want
+        # to flag a partial-apply state (e.g., Format 3 with mixed
+        # supported / skipped intents). UI worker treats only ``error``
+        # as fatal; ``info`` is shown alongside the success path.
+        self.info: str | None = None
         self.health_issues: list = []  # list[HealthIssue] from mod_health_check
         self.mod_id: int | None = None
         self.asi_staged: list[str] = []  # ASI file paths staged for GUI-side install
