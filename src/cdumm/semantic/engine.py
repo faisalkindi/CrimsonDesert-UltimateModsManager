@@ -174,9 +174,13 @@ class SemanticEngine:
             if new_payload is None:
                 continue
 
-            # Find payload start in entry (skip header: id + name_len + name + null)
+            # Find payload start in entry (skip header: id + name_len + name + null).
+            # entry_id width must match the PABGH key_size, otherwise the
+            # name_len read is wrong and every field after lands at the
+            # wrong byte offset.
             entry_data = vanilla_body[entry_offset:entry_end]
-            _, _, payload_start = _parse_entry_header_offset(entry_data)
+            _, _, payload_start = _parse_entry_header_offset(
+                entry_data, key_size)
 
             abs_payload_start = entry_offset + payload_start
             old_payload_len = entry_end - abs_payload_start
@@ -239,25 +243,36 @@ class SemanticEngine:
             return {}
 
 
-def _parse_entry_header_offset(entry_data: bytes) -> tuple[int, str, int]:
-    """Parse entry header. Returns (entry_id, name, payload_start_offset)."""
-    if len(entry_data) < 8:
+def _parse_entry_header_offset(entry_data: bytes,
+                               key_size: int = 4
+                               ) -> tuple[int, str, int]:
+    """Parse entry header. Returns (entry_id, name, payload_start_offset).
+
+    ``key_size`` matches the PABGH index width: u16 for storeinfo
+    / inventory style tables, u32 for dropsetinfo / iteminfo style
+    tables. Mismatch silently misaligns every field read.
+    """
+    eid_size = 2 if key_size == 2 else 4
+    eid_fmt = "<H" if key_size == 2 else "<I"
+    head_size = eid_size + 4
+
+    if len(entry_data) < head_size:
         return 0, "", 0
 
-    eid = struct.unpack_from("<I", entry_data, 0)[0]
-    nlen = struct.unpack_from("<I", entry_data, 4)[0]
+    eid = struct.unpack_from(eid_fmt, entry_data, 0)[0]
+    nlen = struct.unpack_from("<I", entry_data, eid_size)[0]
 
-    if nlen > 500 or 8 + nlen > len(entry_data):
-        return eid, "", 8
+    if nlen > 500 or head_size + nlen > len(entry_data):
+        return eid, "", head_size
 
     name = ""
     if nlen > 0:
         try:
-            name = entry_data[8:8 + nlen].decode("utf-8")
+            name = entry_data[head_size:head_size + nlen].decode("utf-8")
         except UnicodeDecodeError:
             pass
 
-    name_end = 8 + nlen
+    name_end = head_size + nlen
     payload_start = name_end + 1 if name_end < len(entry_data) and entry_data[name_end] == 0 else name_end
     return eid, name, payload_start
 

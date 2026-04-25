@@ -225,22 +225,34 @@ def parse_pabgh_index(header_bytes: bytes, table_name: str = ""
 
 # ── Record parsing ──────────────────────────────────────────────────────────
 
-def _parse_entry_header(data: bytes, offset: int
+def _parse_entry_header(data: bytes, offset: int,
+                        key_size: int = 4
                         ) -> tuple[int, str, int]:
-    """Parse entry header at offset.
+    """Parse entry header at ``offset``.
 
-    Returns (entry_id, entry_name, payload_start_offset).
+    The entry_id width matches the PABGH index ``key_size``: u16
+    for storeinfo / inventory style tables, u32 for dropsetinfo /
+    iteminfo style tables. Reading u32 unconditionally misreads
+    the name_len, which then trips the safety check and bails to
+    payload_start = offset + 8, putting every subsequent field
+    read at the wrong offset and yielding garbage values.
+
+    Returns ``(entry_id, entry_name, payload_start_offset)``.
     """
-    if offset + 8 > len(data):
+    eid_fmt = "<H" if key_size == 2 else "<I"
+    eid_size = 2 if key_size == 2 else 4
+    head_size = eid_size + 4  # entry_id + u32 name_len
+
+    if offset + head_size > len(data):
         return 0, "", offset
 
-    eid = struct.unpack_from("<I", data, offset)[0]
-    nlen = struct.unpack_from("<I", data, offset + 4)[0]
+    eid = struct.unpack_from(eid_fmt, data, offset)[0]
+    nlen = struct.unpack_from("<I", data, offset + eid_size)[0]
 
-    if nlen > 500 or offset + 8 + nlen > len(data):
-        return eid, "", offset + 8
+    if nlen > 500 or offset + head_size + nlen > len(data):
+        return eid, "", offset + head_size
 
-    name_start = offset + 8
+    name_start = offset + head_size
     name_end = name_start + nlen
 
     if nlen > 0:
@@ -349,8 +361,9 @@ def parse_records(table_name: str, body_bytes: bytes, header_bytes: bytes
 
         entry_data = body_bytes[entry_offset:entry_end]
 
-        # Parse entry header
-        eid, name, payload_start = _parse_entry_header(entry_data, 0)
+        # Parse entry header — entry_id width matches PABGH key_size.
+        eid, name, payload_start = _parse_entry_header(
+            entry_data, 0, key_size)
         payload = entry_data[payload_start:]
 
         # Parse payload using schema

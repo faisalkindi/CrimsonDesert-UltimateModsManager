@@ -360,18 +360,26 @@ import struct  # noqa: E402  -- binary writer below uses this
 from cdumm.semantic.parser import parse_pabgh_index  # noqa: E402
 
 
-def _entry_payload_offset(body: bytes, entry_offset: int) -> int | None:
+def _entry_payload_offset(body: bytes, entry_offset: int,
+                          key_size: int) -> int | None:
     """Return the absolute byte offset where the payload starts
     inside the entry at ``entry_offset``.
 
-    Entry header: u32 entry_id + u32 name_len + name UTF-8 + 0x00.
+    Entry header is ``[entry_id of key_size bytes] + [u32 name_len]
+    + name UTF-8 + 0x00``. The entry_id width must match the
+    PABGH index ``key_size`` (u16 for storeinfo / inventory style
+    tables, u32 for dropsetinfo / iteminfo style tables) — read
+    the wrong width and name_len comes out garbage, the bounds
+    check trips, and we end up writing at the wrong byte offset.
     """
-    if entry_offset + 8 > len(body):
+    eid_size = 2 if key_size == 2 else 4
+    head_size = eid_size + 4
+    if entry_offset + head_size > len(body):
         return None
-    name_len = struct.unpack_from("<I", body, entry_offset + 4)[0]
-    if name_len > 500 or entry_offset + 8 + name_len > len(body):
+    name_len = struct.unpack_from("<I", body, entry_offset + eid_size)[0]
+    if name_len > 500 or entry_offset + head_size + name_len > len(body):
         return None
-    name_end = entry_offset + 8 + name_len
+    name_end = entry_offset + head_size + name_len
     # Single byte null terminator after the name
     if name_end < len(body) and body[name_end] == 0:
         return name_end + 1
@@ -443,7 +451,7 @@ def apply_intents_to_pabgb_bytes(
         return vanilla_body
 
     schema = get_schema(table_name)
-    _, offsets = parse_pabgh_index(vanilla_header, table_name)
+    key_size, offsets = parse_pabgh_index(vanilla_header, table_name)
     if not offsets:
         return vanilla_body
 
@@ -459,7 +467,7 @@ def apply_intents_to_pabgb_bytes(
             continue
 
         entry_off = offsets[intent.key]
-        payload_off = _entry_payload_offset(body, entry_off)
+        payload_off = _entry_payload_offset(body, entry_off, key_size)
         if payload_off is None:
             continue
 
