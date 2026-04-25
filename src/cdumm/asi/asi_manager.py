@@ -250,7 +250,32 @@ class AsiManager:
         for f in self._bin64.iterdir():
             if f.suffix.lower() == ".ini" and f.stem.lower().startswith(stem):
                 return f
-        return None
+        # Reverse fallback: the .asi stem starts with an INI stem.
+        # Handles authors who bake the version into the .asi filename
+        # but keep the .ini name stable so the user's existing config
+        # carries across updates (e.g. EnhancedFlightv31.asi reads
+        # EnhancedFlight.ini). Pick the LONGEST matching INI stem and
+        # skip INIs that already belong to a different .asi plugin.
+        best: Path | None = None
+        best_len = 0
+        for f in self._bin64.iterdir():
+            if f.suffix.lower() != ".ini":
+                continue
+            ini_stem = f.stem.lower()
+            if len(ini_stem) < 4 or ini_stem == stem:
+                continue
+            if not stem.startswith(ini_stem):
+                continue
+            # Don't steal another plugin's INI: skip when an .asi (or
+            # .asi.disabled) with this exact stem also lives in bin64.
+            sibling_asi = self._bin64 / (f.stem + ASI_SUFFIX)
+            sibling_disabled = self._bin64 / (f.stem + DISABLED_SUFFIX)
+            if sibling_asi.exists() or sibling_disabled.exists():
+                continue
+            if len(ini_stem) > best_len:
+                best = f
+                best_len = len(ini_stem)
+        return best
 
     def _parse_hook_targets(self, ini_path: Path | None) -> list[str]:
         """Extract hook targets from INI config."""
