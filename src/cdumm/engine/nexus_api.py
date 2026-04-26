@@ -390,7 +390,18 @@ def _resolve_latest_file(user_file_id: int,
     by_id = {f.file_id: f for f in files}
     if user_file_id not in by_id:
         return None
-    chain = {u.old_file_id: u.new_file_id for u in file_updates}
+    # Build chain dict picking the MOST RECENT successor when the
+    # author re-linked the same old_file_id. Naive dict comprehension
+    # silently keeps whichever entry came last in iteration, which
+    # is non-deterministic across Nexus API responses. Bug from
+    # systematic-debugging review 2026-04-26.
+    chain: dict[int, int] = {}
+    chain_ts: dict[int, int] = {}
+    for u in file_updates:
+        ts = getattr(u, "uploaded_timestamp", 0) or 0
+        if u.old_file_id not in chain_ts or ts >= chain_ts[u.old_file_id]:
+            chain[u.old_file_id] = u.new_file_id
+            chain_ts[u.old_file_id] = ts
     current = user_file_id
     seen = {current}
     for _ in range(64):
@@ -399,7 +410,17 @@ def _resolve_latest_file(user_file_id: int,
             break
         seen.add(nxt)
         current = nxt
-    return by_id.get(current)
+    result = by_id.get(current)
+    # If the chain landed on an archived/deleted/old-version file
+    # (author archived the chain head without updating file_updates),
+    # treat as 'not found' so the caller falls back to name match.
+    # Otherwise the user looks current on a deprecated file.
+    # Bug from systematic-debugging review 2026-04-26.
+    if result is not None:
+        cat = getattr(result, "category_id", 0) or 0
+        if cat in _EXCLUDED_CATEGORY_IDS:
+            return None
+    return result
 
 
 def get_recently_updated(
@@ -624,7 +645,31 @@ def check_mod_updates(
                         # Treat that as a mismatch too — covers mods
                         # with weird version strings (alpha/beta/etc).
                         versions_disagree = True
-                    if versions_disagree:
+                    # GUARD against self-correction over-fire (bug
+                    # from systematic-debugging review 2026-04-26):
+                    # version disagreement on the only-available file
+                    # is just metadata drift, NOT a wrong file_id.
+                    # Only fire when SOME OTHER file in the list
+                    # matches local_ver — that's evidence the user
+                    # actually has THAT other file, not the one we
+                    # think they have.
+                    user_likely_on_other_file = False
+                    local_ver_norm = (local_ver or "").lower()
+                    for _f in files:
+                        if _f.file_id == local_file_id:
+                            continue
+                        _fv = (_f.version or "").strip()
+                        _ft = _version_to_tuple(_fv)
+                        if (local_tuple is not None
+                                and _ft is not None
+                                and _ft == local_tuple):
+                            user_likely_on_other_file = True
+                            break
+                        if (local_ver_norm and _fv
+                                and _fv.lower() == local_ver_norm):
+                            user_likely_on_other_file = True
+                            break
+                    if versions_disagree and user_likely_on_other_file:
                         logger.info(
                             "update check: nexus_real_file_id=%d for "
                             "%r looks wrong (local_ver=%r, file_ver=%r)"
@@ -847,6 +892,46 @@ def clear_outdated_after_update(
     return out
 
 
+def persist_backfill_file_ids(connection,
+                                backfill_file_ids: dict[int, int]
+                                ) -> int:
+    """Write nexus_real_file_id backfills to the mods table.
+
+    Returns count of rows actually updated. Overwrites existing
+    values when they differ — check_mod_updates already dedups
+    same-value rewrites at the engine level (Issue 1) and emits
+    self-corrected file_ids when a previous backfill latched onto
+    the wrong file (Issue 2). The persistence layer must trust the
+    engine's dict and overwrite freely; otherwise the wrong file_id
+    sticks forever and the user is permanently stuck in the
+    self-correction loop. Bug from systematic-debugging review
+    2026-04-26.
+    """
+    if not backfill_file_ids:
+        return 0
+    persisted = 0
+    for row_id, file_id in backfill_file_ids.items():
+        try:
+            cur = connection.execute(
+                "UPDATE mods SET nexus_real_file_id = ? "
+                "WHERE id = ? "
+                "AND (nexus_real_file_id IS NULL "
+                "     OR nexus_real_file_id != ?)",
+                (int(file_id), int(row_id), int(file_id)))
+            if cur.rowcount:
+                persisted += 1
+        except Exception as e:
+            logger.debug(
+                "nexus_real_file_id backfill failed for row %s: %s",
+                row_id, e)
+    if persisted:
+        try:
+            connection.commit()
+        except Exception:
+            pass
+    return persisted
+
+
 def filter_outdated(updates):
     """Keep only ``ModUpdateStatus`` entries where ``has_update=True``.
 
@@ -881,7 +966,16 @@ def _filter_files_by_name(files, local_name: str):
     Returns ``[]`` when nothing matches. Caller should leave the mod
     un-flagged in that case rather than guess.
     """
-    if not local_name or not files:
+    if not local_name:
+        # Mod imported with no name field — name match can't help.
+        # Defensive log so this surfaces in a bug report rather than
+        # silently failing every cycle. Bug from systematic-debugging
+        # review 2026-04-26.
+        logger.debug(
+            "name match skipped: mod has empty name (files=%d)",
+            len(files) if files else 0)
+        return []
+    if not files:
         return []
     # Lazy import — mod_matching pulls in the import_handler chain
     # which is heavyweight for a hot path.
@@ -991,6 +1085,11 @@ def _version_to_tuple(ver: str):
         core, pre = s, ""
     # Parse the numeric core (MAJOR.MINOR.PATCH...).
     parts = []
+    # Letter-suffix attached to the LAST numeric segment is treated
+    # as a hotfix marker — '1.0.0a' should sort BETWEEN '1.0.0' and
+    # '1.0.1' rather than collapsing to '1.0.0'. Bug from systematic-
+    # debugging review 2026-04-26.
+    trailing_suffix = ""
     for seg in core.split("."):
         seg = seg.strip()
         if not seg:
@@ -999,21 +1098,37 @@ def _version_to_tuple(ver: str):
             parts.append(int(seg))
         except ValueError:
             # Non-numeric tail like "1.0a" or "1.2 (final)" — keep the
-            # leading numeric run and stop.
+            # leading numeric run and capture the letter suffix as a
+            # hotfix marker so '1.0.0a' > '1.0.0' but < '1.0.1'.
             num = ""
+            suffix = ""
             for ch in seg:
-                if ch.isdigit():
+                if ch.isdigit() and not suffix:
                     num += ch
+                elif ch.isalpha():
+                    suffix += ch
                 else:
                     break
             if num:
                 parts.append(int(num))
+            if suffix:
+                trailing_suffix = suffix.lower()
             break
     if not parts:
         return None
     while len(parts) > 1 and parts[-1] == 0:
         parts.pop()
     core_tuple = tuple(parts)
+    # If we captured a letter suffix ('a' in '1.0.0a'), encode it as
+    # a HOTFIX marker. Hotfix sort order: '1.0.0' < '1.0.0a' <
+    # '1.0.0b' < '1.0.1'. Implementation: append a tuple to the marker
+    # so '1.0.0a' compares greater than '1.0.0' (which has marker (1,))
+    # but less than '1.0.1' (which has higher core_tuple). We use
+    # marker (1, suffix) — the leading 1 keeps it above pre-release
+    # markers (which start with 0), and 'suffix' provides ordering
+    # between hotfixes. Bug from systematic-debugging review.
+    if trailing_suffix and not pre:
+        return (core_tuple, (1, trailing_suffix))
     # Pre-release identifiers (semver §11): split on dots, classify
     # numeric vs alpha. Numeric IDs always lower than alpha (so
     # ``1.0-1 < 1.0-alpha``); the (False, n) vs (True, "alpha") wrapper

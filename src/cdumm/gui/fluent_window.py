@@ -1236,32 +1236,25 @@ class CdummWindow(FluentWindow):
             except Exception as e:
                 logger.debug("nexus_last_checked_at persist failed: %s", e)
 
-        # Backfill nexus_real_file_id for rows that got resolved via the
-        # name-match path this cycle. Once populated, the next check
-        # walks the file_updates chain for these rows instead of guessing
-        # by name — that's what flips grey-because-name-match-failed to
-        # green or red on the second check. Guard with IS NULL so we
-        # never overwrite a reliable pre-existing value.
+        # Backfill nexus_real_file_id for rows that got resolved via
+        # the name-match path this cycle. Once populated, the next
+        # check walks the file_updates chain for these rows instead
+        # of guessing by name. Self-correction also routes through
+        # this path — when an earlier backfill latched onto the
+        # wrong file_id, the engine emits a corrected value here and
+        # the helper overwrites the wrong value freely. Engine-level
+        # dedup ensures we never queue a same-value rewrite, so the
+        # overwrite is safe. Bug from systematic-debugging review
+        # 2026-04-26.
         backfill = getattr(self, "_pending_nexus_backfill", {}) or {}
         if self._db and backfill:
-            persisted = 0
-            for row_id, file_id in backfill.items():
-                try:
-                    cur = self._db.connection.execute(
-                        "UPDATE mods SET nexus_real_file_id = ? "
-                        "WHERE id = ? AND (nexus_real_file_id IS NULL "
-                        "OR nexus_real_file_id = 0)",
-                        (int(file_id), int(row_id)))
-                    if cur.rowcount:
-                        persisted += 1
-                except Exception as e:
-                    logger.debug(
-                        "nexus_real_file_id backfill failed for row %s: %s",
-                        row_id, e)
+            from cdumm.engine.nexus_api import persist_backfill_file_ids
+            persisted = persist_backfill_file_ids(
+                self._db.connection, backfill)
             if persisted:
-                self._db.connection.commit()
                 logger.info(
-                    "nexus_real_file_id: backfilled %d row(s)", persisted)
+                    "nexus_real_file_id: backfilled %d row(s)",
+                    persisted)
         self._nexus_updates = getattr(self, "_pending_nexus_updates", {})
         if hasattr(self, 'paz_mods_page'):
             self.paz_mods_page.set_nexus_updates(self._nexus_updates)
