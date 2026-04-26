@@ -483,10 +483,24 @@ def get_recently_updated(
         data = _api_request(
             f"/games/{GAME_DOMAIN}/mods/updated.json?period={period}",
             api_key)
-        return {
-            entry["mod_id"]: entry.get("latest_file_update", 0)
-            for entry in data
-        }
+        # Resilient: skip individual bad entries (None, missing
+        # mod_id, etc.) instead of failing the whole feed. Without
+        # this, one bad entry causes feed_trustworthy=False and
+        # every enabled mod hits the per-mod endpoint — significant
+        # rate-limit risk for users with 50+ mods. Round-8 review.
+        result: dict[int, int] = {}
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            mid = entry.get("mod_id")
+            if mid is None:
+                continue
+            try:
+                result[int(mid)] = int(
+                    entry.get("latest_file_update") or 0)
+            except (TypeError, ValueError):
+                continue
+        return result
     except (NexusAuthError, NexusRateLimited):
         # Let both propagate — the GUI surfaces distinct banners for
         # auth failures and rate-limit backoff; lumping either into
