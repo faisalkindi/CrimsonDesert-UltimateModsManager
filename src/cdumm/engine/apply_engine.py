@@ -215,6 +215,78 @@ def aggregate_json_mods_into_synthetic_patches(
     return synth_patch_data, per_mod_summary
 
 
+def _expand_format3_into_synth_data(
+    synth_data: dict, db, vanilla_dir, game_dir,
+    get_vanilla_entry_content, extract_sibling_entry,
+) -> None:
+    """Wire-up helper: decompose synth_data, run Format 3 expansion,
+    repack synth_data["patches"] with the extended set.
+
+    Lives here (not inside aggregate_json_mods_into_synthetic_patches)
+    so the v2 aggregator function stays load-bearing-stable. This
+    helper is the ONE place apply_engine knows about Format 3
+    expansion; the rest of the apply pipeline sees v2-shaped changes.
+    """
+    from cdumm.engine.format3_apply import expand_format3_into_aggregated
+    from cdumm.engine.json_patch_handler import (
+        _derive_pamt_dir, _find_pamt_entry,
+    )
+
+    def _vanilla_extractor(target):
+        """Resolve vanilla bytes for a Format 3 mod's target file.
+        Returns (body, header) or None on any failure."""
+        try:
+            entry = _find_pamt_entry(target, vanilla_dir)
+            if entry is None:
+                entry = _find_pamt_entry(target, game_dir)
+            if entry is None:
+                return None
+            pamt_dir = _derive_pamt_dir(entry.paz_file)
+            if not pamt_dir:
+                return None
+            file_path = f"{pamt_dir}/{Path(entry.paz_file).name}"
+            body = get_vanilla_entry_content(file_path, target)
+            if body is None:
+                return None
+            header_path = target
+            if header_path.endswith(".pabgb"):
+                header_path = header_path[:-len(".pabgb")] + ".pabgh"
+            header = extract_sibling_entry(pamt_dir, header_path)
+            if header is None:
+                return None
+            return body, header
+        except Exception:
+            logger.debug(
+                "Format 3 vanilla extraction failed for %s",
+                target, exc_info=True)
+            return None
+
+    # Decompose synth_data → mutable dicts the expansion mutates
+    aggregated = {p["game_file"]: list(p.get("changes", []))
+                  for p in synth_data.get("patches", [])}
+    signatures = {p["game_file"]: p["signature"]
+                  for p in synth_data.get("patches", [])
+                  if p.get("signature")}
+
+    pre_keys = set(aggregated.keys())
+    expand_format3_into_aggregated(
+        aggregated, signatures, db,
+        vanilla_extractor=_vanilla_extractor,
+    )
+    new_keys = set(aggregated.keys()) - pre_keys
+    if new_keys or any(len(aggregated[k]) != len(
+            next((p["changes"] for p in synth_data.get("patches", [])
+                  if p["game_file"] == k), []))
+            for k in pre_keys):
+        # Format 3 contributed something — repack
+        synth_data["patches"] = [
+            {"game_file": gf,
+             "signature": signatures.get(gf),
+             "changes": aggregated[gf]}
+            for gf in aggregated
+        ]
+
+
 def collect_enabled_json_targets(db) -> set[str]:
     """Return the set of game_files every enabled JSON mod patches.
 
@@ -1140,6 +1212,20 @@ class ApplyWorker(QObject):
                 # other doesn't.
                 synth_data, mod_summary = (
                     aggregate_json_mods_into_synthetic_patches(self._db))
+
+                # Phase 4 of #208: expand Format 3 mods alongside v2
+                # patches. Format 3 mods don't have "patches" keys, so
+                # the v2 aggregator above didn't pick them up. Resolve
+                # their intents into v2-style change dicts and append
+                # to the same synth_data so the rest of the apply
+                # pipeline doesn't need to know which side a change
+                # came from.
+                _expand_format3_into_synth_data(
+                    synth_data, self._db,
+                    self._vanilla_dir, self._game_dir,
+                    self._get_vanilla_entry_content,
+                    self._extract_sibling_entry)
+
                 logger.info(
                     "Phase 1a: aggregated %d JSON mod(s) into %d target "
                     "file(s) for single-pass patching",
