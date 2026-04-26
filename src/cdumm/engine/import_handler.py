@@ -2414,23 +2414,9 @@ def import_from_natt_format_3(
     validation = validate_intents(target, intents)
     result = ModImportResult(title)
 
-    # All intents can be applied → fall through to apply pipeline
-    # (Phase 4 wiring lands separately; for now, we surface the
-    # validator summary either way so users see the precise state).
-    if not validation.skipped:
-        result.error = (
-            f"NattKh Format 3 mod parsed: {len(intents)} intent(s) "
-            f"on {target}, all classified as applicable.\n\n"
-            f"Note: end-to-end apply for Format 3 still requires the "
-            f"final wiring step (Phase 4 of #208). For now CDUMM "
-            f"recognizes the mod and won't crash but the bytes won't "
-            f"land yet. Drop NattKh's offset-based JSON variant if "
-            f"available."
-        )
-        return result
-
-    # Some or all intents are unapplicable — surface the grouped
-    # reasons so users know why.
+    # No supported intents → surface the skip reasons, no DB row.
+    # Creating a row would put the mod in CDUMM's list as 'imported'
+    # but Apply would do nothing — worse UX than not importing.
     if not validation.supported:
         result.error = (
             f"NattKh Format 3 mod targeting {target} — none of the "
@@ -2441,14 +2427,146 @@ def import_from_natt_format_3(
         )
         return result
 
-    result.error = (
-        f"NattKh Format 3 mod targeting {target}: "
-        f"{len(validation.supported)} intent(s) ready to apply, "
-        f"{len(validation.skipped)} that can't yet:\n\n"
-        f"{validation.summary()}\n\n"
-        f"Partial apply is on the way (Phase 4 of #208)."
+    # Some or all intents are applicable → persist the mod so the
+    # apply pipeline can process it. Mirrors import_json_fast
+    # (json_patch_handler.py) but for the Format 3 file shape.
+    persist_outcome = _persist_format3_mod(
+        json_path=json_path, target=target, mod_name=title,
+        modinfo=(data.get("modinfo") or {}),
+        game_dir=game_dir, db=db, existing_mod_id=existing_mod_id,
     )
+    if persist_outcome is None:
+        # Persistence failed — couldn't resolve target file in PAMTs
+        result.error = (
+            f"NattKh Format 3 mod targeting {target}: "
+            f"validated {len(validation.supported)} applicable "
+            f"intent(s), but the target file '{target}' couldn't be "
+            f"located in your game's PAZ archives. Make sure the "
+            f"target name matches a real game data file."
+        )
+        return result
+
+    result.mod_id = persist_outcome["mod_id"]
+    result.changed_files = persist_outcome["changed_files"]
+
+    if validation.skipped:
+        result.info = (
+            f"Format 3 mod imported: {len(validation.supported)} "
+            f"intent(s) ready to apply, {len(validation.skipped)} "
+            f"can't yet:\n\n{validation.summary()}"
+        )
+    else:
+        result.info = (
+            f"Format 3 mod imported: all {len(intents)} intent(s) "
+            f"on {target} ready to apply."
+        )
     return result
+
+
+def _persist_format3_mod(
+    json_path: Path, target: str, mod_name: str,
+    modinfo: dict, game_dir: Path, db: Database,
+    existing_mod_id: int | None,
+) -> dict | None:
+    """Persist a Format 3 mod: store JSON + create mods row + lightweight
+    mod_deltas rows. Returns ``{mod_id, changed_files}`` or None when the
+    target file can't be resolved in the game's PAMT index."""
+    from cdumm.engine.json_patch_handler import (
+        _derive_pamt_dir, _find_pamt_entry,
+    )
+
+    # Resolve target into a PAMT entry so we know which PAZ it lives in.
+    # Required for mod_deltas (file_path / byte_start / byte_end) and so
+    # the apply pipeline's vanilla extractor can find it.
+    vanilla_dir = game_dir / "CDMods" / "vanilla"
+    if not vanilla_dir.exists():
+        vanilla_dir = game_dir
+    entry = _find_pamt_entry(target, vanilla_dir)
+    if entry is None:
+        entry = _find_pamt_entry(target, game_dir)
+    if entry is None:
+        return None
+    pamt_dir = _derive_pamt_dir(entry.paz_file)
+    if not pamt_dir:
+        return None
+    paz_filename = Path(entry.paz_file).name
+    paz_file_path = f"{pamt_dir}/{paz_filename}"
+
+    # Store the Format 3 JSON in CDMods/mods/. Reuse the same name-
+    # sanitization import_json_fast uses (Windows reserved chars + a
+    # short hash to disambiguate post-sanitize collisions).
+    mods_dir = game_dir / "CDMods" / "mods"
+    mods_dir.mkdir(parents=True, exist_ok=True)
+    import re as _re_fn
+    import hashlib as _hash
+    safe = _re_fn.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", mod_name).strip()
+    if not safe:
+        safe = "mod"
+    if safe != mod_name:
+        suffix = _hash.sha1(
+            mod_name.encode("utf-8", errors="replace")).hexdigest()[:8]
+        safe = f"{safe}_{suffix}"
+    json_dest = mods_dir / f"{safe}.json"
+    import shutil as _shutil
+    _shutil.copy2(json_path, json_dest)
+
+    # Game version stamp — matches import_json_fast convention so the
+    # outdated-mod guard works for Format 3 mods too.
+    game_ver_hash = None
+    try:
+        from cdumm.engine.version_detector import detect_game_version
+        game_ver_hash = detect_game_version(game_dir)
+    except Exception:
+        pass
+
+    author = modinfo.get("author")
+    version = modinfo.get("version")
+    description = modinfo.get("description")
+
+    if existing_mod_id:
+        mod_id = existing_mod_id
+        db.connection.execute(
+            "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+        db.connection.execute(
+            "UPDATE mods SET json_source = ?, "
+            "game_version_hash = ?, disabled_patches = NULL "
+            "WHERE id = ?",
+            (str(json_dest), game_ver_hash, mod_id),
+        )
+    else:
+        priority = db.connection.execute(
+            "SELECT COALESCE(MAX(priority), 0) + 1 FROM mods"
+        ).fetchone()[0]
+        cursor = db.connection.execute(
+            "INSERT INTO mods (name, mod_type, priority, author, "
+            "version, description, game_version_hash, json_source) "
+            "VALUES (?, 'paz', ?, ?, ?, ?, ?, ?)",
+            (prettify_mod_name(mod_name), priority, author, version,
+             description, game_ver_hash, str(json_dest)),
+        )
+        mod_id = cursor.lastrowid
+
+    # One lightweight mod_deltas row per target file. delta_path is
+    # empty (no actual delta on disk — apply phase derives bytes from
+    # vanilla via the Format 3 expansion in apply_engine).
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+        "byte_start, byte_end, entry_path) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (mod_id, paz_file_path, "",
+         entry.offset, entry.offset + entry.comp_size, target),
+    )
+    db.connection.commit()
+
+    return {
+        "mod_id": mod_id,
+        "changed_files": [{
+            "file_path": paz_file_path,
+            "delta_path": "",
+            "byte_start": entry.offset,
+            "byte_end": entry.offset + entry.comp_size,
+        }],
+    }
 
 
 def import_from_json_patch(
