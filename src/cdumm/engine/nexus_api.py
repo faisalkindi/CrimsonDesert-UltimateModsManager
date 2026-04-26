@@ -271,8 +271,15 @@ def get_download_link(mod_id: int, file_id: int, api_key: str,
         first = data[0]
         if isinstance(first, dict):
             return first.get("URI")
-    logger.warning("download_link: unexpected response shape: %r",
-                   type(data).__name__)
+    # Branch the log so 'empty list' (valid shape, no URI) is
+    # distinct from 'unknown shape'. Round-7 review.
+    if isinstance(data, list):
+        logger.warning(
+            "download_link: empty response (no CDN URLs returned)")
+    else:
+        logger.warning(
+            "download_link: unexpected response shape: %r",
+            type(data).__name__)
     return None
 
 
@@ -992,12 +999,29 @@ def persist_backfill_file_ids(connection,
     persisted = 0
     for row_id, file_id in backfill_file_ids.items():
         try:
+            file_id_int = int(file_id)
+            row_id_int = int(row_id)
+        except (TypeError, ValueError):
+            logger.debug(
+                "nexus_real_file_id backfill skipped "
+                "(non-integer values): row=%r file=%r",
+                row_id, file_id)
+            continue
+        # Defensive: file_id must be positive. Real backfills from
+        # check_mod_updates always pass valid file_ids, but this
+        # helper is a public API. Round-7 review.
+        if file_id_int <= 0 or row_id_int <= 0:
+            logger.debug(
+                "nexus_real_file_id backfill skipped (bad id): "
+                "row=%d file=%d", row_id_int, file_id_int)
+            continue
+        try:
             cur = connection.execute(
                 "UPDATE mods SET nexus_real_file_id = ? "
                 "WHERE id = ? "
                 "AND (nexus_real_file_id IS NULL "
                 "     OR nexus_real_file_id != ?)",
-                (int(file_id), int(row_id), int(file_id)))
+                (file_id_int, row_id_int, file_id_int))
             if cur.rowcount:
                 persisted += 1
         except Exception as e:
