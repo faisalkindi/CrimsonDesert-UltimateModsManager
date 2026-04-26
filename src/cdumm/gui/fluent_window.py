@@ -1030,8 +1030,10 @@ class CdummWindow(FluentWindow):
         self._nexus_update_timer.setInterval(30 * 60 * 1000)  # 30 minutes
         self._nexus_update_timer.timeout.connect(self._run_nexus_update_check)
         self._nexus_update_timer.start()
-        # Run first check 5 seconds after startup (let UI settle)
-        QTimer.singleShot(5000, self._run_nexus_update_check)
+        # Run first check immediately on startup. Posted to the event
+        # loop (0 ms) so it fires after the window's first paint
+        # without blocking the constructor.
+        QTimer.singleShot(0, self._run_nexus_update_check)
 
         # Module-level helpers read these attrs via getattr; initialise
         # them up-front so the first cycle doesn't have to special-case
