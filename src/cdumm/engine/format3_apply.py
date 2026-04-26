@@ -307,17 +307,56 @@ def _resolve_write_pos(
             return None
         return abs_off, size, fmt
 
-    spec = field_specs.get(intent.field)
+    # Field-name lookup: NattKh's tool strips the leading underscore
+    # from CDUMM/Pearl Abyss internal names (`_cooltime` → `cooltime`).
+    # Try the user's name first, then fall back to the underscored
+    # variant. Bug from Faisal 2026-04-26.
+    spec = field_specs.get(intent.field) or field_specs.get(
+        f"_{intent.field}")
+    target_name = (intent.field if intent.field in field_specs
+                   else f"_{intent.field}")
     if spec is None or not spec.struct_fmt or not spec.stream_size:
         return None
-    # Walk schema fields up to target, summing stream sizes
-    rel = 0
+    # Walk schema fields up to target. For each field, use its actual
+    # binary footprint so variable-length fields (CString, etc.) are
+    # consumed correctly. Pure stream_size summation breaks when any
+    # preceding field has a variable encoding. Round-N review.
+    abs_off = payload_off
     for f in schema.fields:
-        if f.name == intent.field:
-            return payload_off + rel, spec.stream_size, spec.struct_fmt
-        if not f.stream_size:
-            return None  # variable-length field blocks the walk
-        rel += f.stream_size
+        if f.name == target_name:
+            return abs_off, spec.stream_size, spec.struct_fmt
+        consumed = _consume_field_bytes(body, abs_off, f, entry_end)
+        if consumed is None:
+            return None  # unknown / unsupported variable type
+        abs_off += consumed
+        if abs_off >= entry_end:
+            return None
+    return None
+
+
+def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
+                          ) -> int | None:
+    """Return how many bytes ``spec`` consumes starting at ``off``,
+    or None if the type isn't safely walkable.
+
+    Handles fixed-size types (struct_fmt set, raw direct_NB) plus
+    CString (u32 length prefix + UTF-8 bytes). Other variable types
+    return None so callers bail rather than walk into garbage.
+    """
+    import struct as _struct
+    if spec.field_type == "CString":
+        if off + 4 > min(len(body), entry_end):
+            return None
+        slen = _struct.unpack_from("<I", body, off)[0]
+        if off + 4 + slen > min(len(body), entry_end):
+            return None
+        return 4 + slen
+    if spec.stream_size:
+        # Fixed-size field (struct_fmt set OR raw direct_NB): consume
+        # the declared stream_size verbatim.
+        return spec.stream_size
+    # stream_size=0 means the schema didn't classify this — can't
+    # walk safely.
     return None
 
 
