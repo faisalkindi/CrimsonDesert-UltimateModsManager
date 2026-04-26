@@ -13,26 +13,17 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "3.2.2",
-        "date": "2026-04-26",
-        "notes": [
-            "<b>NattKh-style field-name mods now actually apply.</b> The new field-names JSON format CDUMM started recognizing in v3.2.1 now actually changes bytes — provided a community-authored mapping file is present for the table the mod targets. CDUMM ships the engine; the mapping files come from the community. See <code>field_schema/README.md</code> in your CDUMM install for the format spec.",
-            "<b>Apply tells you when a field-name mod did nothing.</b> If a field-name mod produces zero byte changes (no matching schema, missing target file, or out-of-range value), the post-Apply banner names the mod and tells you what to do instead of leaving you wondering why the game looks the same.",
-            "<b>Find Culprit no longer crashes.</b> The 'auto-bisect to find which mod broke the game' tool was crashing on click in v3.2 because of a missing piece left over from the v3.0 rewrite. Fixed.",
-            "<b>Several invisible safety nets for field-name mods.</b> The byte writer now refuses to guess when a 4-byte schema marker matches more than once inside an entry, validates schema entries at load time (rejects negative offsets, unknown type strings, missing required fields), and bounds every write to its own entry to never spill into the next record.",
-            "<b>Engine fix that quietly improves your two-mod merges.</b> CDUMM's data-table parser was reading the wrong header width on several common tables (storeinfo, inventory). Two-mod conflict merges on those tables had been silently no-op'ing since v3.0 — now they produce real merges. You may notice cleaner results when two mods touch the same shop or inventory file.",
-            "<b>Reimport field-name mods after upgrading.</b> If you had any imported before this update, right-click each → Reimport from source so the stored state reflects the new engine. New imports after the upgrade Just Work.",
-        ],
-    },
-    {
         "version": "3.2.1",
-        "date": "2026-04-25",
+        "date": "2026-04-26",
         "notes": [
             "<b>Update-available banner is now closable.</b> The 'CDUMM vX.Y is available' strip at the top of the window now has an X button. Click it to dismiss the banner — CDUMM remembers per-version, so it won't reappear next launch (until a NEWER release lands). The About-page badge in the sidebar still shows the update so you can find it later if you change your mind.",
             "<b>Conflict warnings now name the dropped mod.</b> When two mods modify the same game file in incompatible ways and one has to be skipped, the warning used to just say '1 mod was dropped' — leaving you guessing which. Now it names both: 'Active: <winner>. Dropped: <name>'. Tells you the exact UI action to change the winner (drag to top of load order).",
-            "<b>NattKh's Format 3 mods now apply.</b> The new field-names JSON format that NattKh's GameMods switched to — the kind that says 'change <i>price</i> to 100' instead of 'change byte 24 to <code>64 00 00 00</code>' — now imports and applies end-to-end. Drop the .json straight into CDUMM, hit Apply, and the engine resolves field names against a community-maintained <code>field_schema</code> that ships next to the .exe. Tables already covered out of the box: <code>iteminfo</code>, <code>storeinfo</code>, <code>dropsetinfo</code>. More tables get added as the community contributes schemas.",
-            "<b>If a Format 3 mod can't be applied, you're told why.</b> 'Mod produced 0 byte changes — field names not in the schema for this table' shows up in the post-Apply InfoBar instead of a silent green tick. The message tells you exactly what's missing so you (or whoever asks for help) can extend the schema instead of guessing.",
-            "<b>Reimport your Format 3 mods.</b> If you imported a Format 3 .json under v3.2 (which only stored a 'coming soon' placeholder), reimport it now to land it in the apply pipeline. Existing v2-format JSON mods are unaffected.",
+            "<b>NattKh-style field-name mods now apply end-to-end.</b> The new field-names JSON format that NattKh's GameMods switched to — the kind that says 'change <i>price</i> to 100' instead of 'change byte 24 to <code>64 00 00 00</code>' — now imports and applies. Drop the .json straight into CDUMM, hit Apply, and the engine resolves field names against a <code>field_schema/</code> folder that ships next to the .exe. <b>No tables ship covered out of the box.</b> CDUMM v3.2.1 ships the engine + the format spec; the per-table mapping files come from the community. See <code>field_schema/README.md</code> next to the .exe for the JSON format and how to author one.",
+            "<b>If a field-name mod did nothing, Apply tells you why.</b> When a Format 3 mod produces zero byte changes (no schema for that table, target file missing, value out of range, schema marker ambiguous), the post-Apply InfoBar names the mod and what to do — instead of leaving you wondering why the game looks the same.",
+            "<b>Find Culprit no longer crashes.</b> The 'auto-bisect to find which mod broke the game' tool was crashing on click in v3.2 because of a missing piece left over from the v3.0 rewrite. Fixed.",
+            "<b>Several invisible safety nets for field-name mods.</b> The byte writer refuses to guess when a 4-byte schema marker matches more than once inside an entry, validates schema entries at load time (rejects negative offsets, unknown type strings, missing required fields), and bounds every write to its own entry so it can never spill into the next record.",
+            "<b>Engine fix that quietly improves your two-mod merges.</b> CDUMM's data-table parser was reading the wrong header width on several common tables (storeinfo, inventory). Two-mod conflict merges on those tables had been silently no-op'ing since v3.0 — now they produce real merges. You may notice cleaner results when two mods touch the same shop or inventory file.",
+            "<b>Reimport field-name mods after upgrading.</b> If you imported a Format 3 .json under v3.2 (which only stored a 'coming soon' placeholder), or under earlier 3.2.1 dev builds, right-click each → Reimport from source so the stored state reflects the new engine. New imports after the upgrade Just Work. Existing v2-format JSON mods are unaffected.",
         ],
     },
     {
