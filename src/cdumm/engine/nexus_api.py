@@ -351,6 +351,12 @@ def get_mod_files(mod_id: int, api_key: str
             # Fallback for non-dict responses (older API shape).
             raw_files = data or []
             raw_updates = []
+        # Resilient: skip individual non-dict entries instead of
+        # crashing the whole response. One bad entry would otherwise
+        # raise AttributeError on .get(), get caught at outer except,
+        # and drop the entire mod check. Round-9 review.
+        raw_files = [f for f in raw_files if isinstance(f, dict)]
+        raw_updates = [u for u in raw_updates if isinstance(u, dict)]
         # Defensive coercion: dict.get returns None when key exists
         # with a null value (vs default only when key missing). Sort
         # comparing None vs int raises TypeError — would silently
