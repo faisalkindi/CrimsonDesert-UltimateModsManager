@@ -1620,12 +1620,22 @@ class CdummWindow(FluentWindow):
     # ------------------------------------------------------------------
 
     def _check_for_updates(self) -> None:
-        if (
-            hasattr(self, "_update_thread")
-            and self._update_thread
-            and self._update_thread.isRunning()
-        ):
-            return
+        # Defensive: the QThread C++ object can be destroyed by Qt
+        # (e.g. parent widget teardown) before our cleanup lambda
+        # resets self._update_thread to None. The Python wrapper
+        # then holds a stale reference and isRunning() raises
+        # RuntimeError 'Internal C++ object already deleted'.
+        # Bug from priston201 issue #47 (2026-04-25). Treat the
+        # exception as 'thread is dead, ok to start a new one'.
+        existing = getattr(self, "_update_thread", None)
+        if existing is not None:
+            try:
+                still_running = existing.isRunning()
+            except RuntimeError:
+                still_running = False
+                self._update_thread = None
+            if still_running:
+                return
         from cdumm import __version__
         from cdumm.engine.update_checker import UpdateCheckWorker
 

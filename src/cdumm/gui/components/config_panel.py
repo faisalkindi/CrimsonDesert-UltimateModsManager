@@ -195,7 +195,11 @@ class ConfigPanel(QWidget):
     apply_clicked = Signal(int, list)  # mod_id, [{"label": str, "enabled": bool}]
     variants_apply_clicked = Signal(int, list)  # mod_id, [{label, filename, enabled, group}]
 
-    _PANEL_WIDTH = 400
+    # Bug from nknwn issue #48 (2026-04-26): config option labels
+    # like 'Insect_Collect_Cooldown' truncated at ~16 chars in the
+    # 400px panel. Bumped to 520 to fit typical option names without
+    # ellipsis.
+    _PANEL_WIDTH = 520
     _ANIM_DURATION = 250
 
     def __init__(self, parent=None) -> None:
