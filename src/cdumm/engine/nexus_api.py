@@ -744,7 +744,7 @@ def check_mod_updates(
                 if file_deleted_on_nexus or file_archived_on_nexus:
                     results.append(ModUpdateStatus(
                         mod_id=nexus_id,
-                        local_name=mod["name"],
+                        local_name=mod.get("name", "") or "",
                         local_version=local_ver,
                         latest_version="",
                         has_update=False,
@@ -903,7 +903,7 @@ def check_mod_updates(
         # got painted green anyway by the elif-nexus_id branch.
         results.append(ModUpdateStatus(
             mod_id=nexus_id,
-            local_name=mod["name"],
+            local_name=mod.get("name", "") or "",
             local_version=local_ver,
             latest_version=remote_ver,
             has_update=has_update,
@@ -971,6 +971,11 @@ def persist_backfill_file_ids(connection,
     sticks forever and the user is permanently stuck in the
     self-correction loop. Bug from systematic-debugging review
     2026-04-26.
+
+    Transaction-state assumption: caller is expected to be between
+    transactions when this function runs. We commit the connection
+    on success and rollback on failure — both can affect any other
+    pending writes that share the connection. Round-5 review.
     """
     if not backfill_file_ids:
         return 0
