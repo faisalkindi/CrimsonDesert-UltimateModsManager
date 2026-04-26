@@ -95,6 +95,15 @@ def expand_format3_into_aggregated(
         "ORDER BY priority DESC, id ASC"
     ).fetchall()
 
+    # Counters for the apply-time summary log line. INFO-level so
+    # bug reports include it automatically — addresses the DX
+    # review's "no measurement" finding.
+    n_mods_processed = 0
+    n_mods_changed = 0
+    n_mods_skipped = 0
+    n_bytes_changed = 0
+    files_touched: set[str] = set()
+
     for mod_id, mod_name, json_source, _priority in rows:
         try:
             jp = Path(json_source)
@@ -108,9 +117,13 @@ def expand_format3_into_aggregated(
             # for the same file.
             continue
 
+        # Confirmed Format 3 mod from here on — count it
+        n_mods_processed += 1
+
         # Validate intents against the schema + community field_schema
         validation = validate_intents(target, intents)
         if not validation.supported:
+            n_mods_skipped += 1
             logger.warning(
                 "Format 3 mod '%s' (id=%d): no supported intents "
                 "for %s — %d skipped. Mod produced 0 byte changes.",
@@ -132,6 +145,7 @@ def expand_format3_into_aggregated(
         # Extract vanilla bytes for the target file
         vanilla = vanilla_extractor(target)
         if vanilla is None:
+            n_mods_skipped += 1
             logger.warning(
                 "Format 3 mod '%s' (id=%d): vanilla extraction "
                 "failed for %s; skipping.",
@@ -151,6 +165,7 @@ def expand_format3_into_aggregated(
         changes = _intents_to_v2_changes(
             target, vanilla_body, vanilla_header, validation.supported)
         if not changes:
+            n_mods_skipped += 1
             # Don't pollute aggregated with empty lists.
             logger.debug(
                 "Format 3 mod '%s' (id=%d): all %d supported intents "
@@ -170,11 +185,28 @@ def expand_format3_into_aggregated(
             continue
 
         aggregated.setdefault(target, []).extend(changes)
+        # Update summary counters for the apply-time log line.
+        n_mods_changed += 1
+        files_touched.add(target)
+        for c in changes:
+            patched_hex = c.get("patched", "")
+            n_bytes_changed += len(patched_hex) // 2
         logger.debug(
             "Format 3 mod '%s' (id=%d): expanded %d intents into "
             "%d changes on %s",
             mod_name, mod_id, len(validation.supported),
             len(changes), target)
+
+    # Summary line — INFO level so bug reports auto-include it.
+    # The single line summarizes "did the feature do anything?" so
+    # users + maintainers can answer that question from the log
+    # without digging into per-mod debug entries.
+    logger.info(
+        "Format 3 apply: %d mod(s) processed, %d byte(s) changed "
+        "across %d file(s), %d mod(s) skipped (see warnings).",
+        n_mods_processed, n_bytes_changed,
+        len(files_touched), n_mods_skipped,
+    )
 
 
 def _intents_to_v2_changes(

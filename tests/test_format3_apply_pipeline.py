@@ -304,6 +304,64 @@ def test_unsupported_key_size_skips_format3_mod(
 # ── Smoke: end-to-end through expansion ─────────────────────────────
 
 
+# ── Apply-time summary log line ─────────────────────────────────────
+
+
+def test_apply_logs_format3_summary_line(synth_schema, tmp_path, caplog):
+    """After expand_format3_into_aggregated runs, a single summary
+    line at INFO level must record what happened: how many mods
+    processed, how many bytes changed, how many skipped. Bug
+    reports include the recent log buffer, so this auto-surfaces
+    in any future bug report — addresses DX review Pass 8 'no
+    measurement' finding."""
+    import logging
+    body, header = _build_pabgb(1, "X", 0x11111111, 0x55)
+    json_path = _write_format3(tmp_path, "pipetest.pabgb", [
+        {"entry": "X", "key": 1, "field": "_alpha",
+         "op": "set", "new": 0xCAFEBABE}
+    ])
+    db = _DBWrap(_make_db([
+        (1, "Mod1", 1, str(json_path), 1),
+    ]))
+    with caplog.at_level(logging.INFO,
+                         logger="cdumm.engine.format3_apply"):
+        expand_format3_into_aggregated(
+            {}, {}, db,
+            vanilla_extractor=lambda gf: (body, header),
+        )
+    # Find the summary line — must include both processed and bytes
+    summaries = [r.message for r in caplog.records
+                 if "Format 3 apply" in r.message]
+    assert summaries, (
+        "expected one INFO-level 'Format 3 apply: …' summary line "
+        "for bug-report visibility")
+    msg = summaries[0]
+    # Must have the three counts users + maintainers care about
+    for keyword in ("mod", "byte", "file"):
+        assert keyword in msg.lower(), (
+            f"summary missing '{keyword}': {msg!r}")
+
+
+def test_summary_logs_zero_when_no_format3_mods(
+        synth_schema, caplog):
+    """Even when zero Format 3 mods are enabled, the summary line
+    must still log — silence is ambiguous (user can't tell whether
+    the feature ran). Logging '0 mods processed' is unambiguous."""
+    import logging
+    db = _DBWrap(_make_db([]))
+    with caplog.at_level(logging.INFO,
+                         logger="cdumm.engine.format3_apply"):
+        expand_format3_into_aggregated(
+            {}, {}, db,
+            vanilla_extractor=lambda gf: None,
+        )
+    summaries = [r.message for r in caplog.records
+                 if "Format 3 apply" in r.message]
+    assert summaries
+    # Must be unambiguous about zero
+    assert "0" in summaries[0]
+
+
 # ── User-facing warnings on zero-change mods ────────────────────────
 
 
