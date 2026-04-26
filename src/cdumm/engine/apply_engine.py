@@ -218,6 +218,7 @@ def aggregate_json_mods_into_synthetic_patches(
 def _expand_format3_into_synth_data(
     synth_data: dict, db, vanilla_dir, game_dir,
     get_vanilla_entry_content, extract_sibling_entry,
+    warnings_out: list[str] | None = None,
 ) -> None:
     """Wire-up helper: decompose synth_data, run Format 3 expansion,
     repack synth_data["patches"] with the extended set.
@@ -226,6 +227,11 @@ def _expand_format3_into_synth_data(
     so the v2 aggregator function stays load-bearing-stable. This
     helper is the ONE place apply_engine knows about Format 3
     expansion; the rest of the apply pipeline sees v2-shaped changes.
+
+    ``warnings_out`` collects user-facing warnings (zero-change mods,
+    extraction failures) that the caller routes through the
+    ``warning`` Qt signal so on_apply_done renders them in the
+    InfoBar.
     """
     from cdumm.engine.format3_apply import expand_format3_into_aggregated
     from cdumm.engine.json_patch_handler import (
@@ -272,6 +278,7 @@ def _expand_format3_into_synth_data(
     expand_format3_into_aggregated(
         aggregated, signatures, db,
         vanilla_extractor=_vanilla_extractor,
+        warnings_out=warnings_out,
     )
     new_keys = set(aggregated.keys()) - pre_keys
     if new_keys or any(len(aggregated[k]) != len(
@@ -1220,11 +1227,28 @@ class ApplyWorker(QObject):
                 # to the same synth_data so the rest of the apply
                 # pipeline doesn't need to know which side a change
                 # came from.
+                f3_warnings: list[str] = []
                 _expand_format3_into_synth_data(
                     synth_data, self._db,
                     self._vanilla_dir, self._game_dir,
                     self._get_vanilla_entry_content,
-                    self._extract_sibling_entry)
+                    self._extract_sibling_entry,
+                    warnings_out=f3_warnings)
+                if f3_warnings:
+                    # Same surfacing pattern v3.2.1's skipped-patches
+                    # feature uses — InfoBar after Apply via the
+                    # warning signal.
+                    msg = (
+                        f"{len(f3_warnings)} Format 3 mod(s) produced "
+                        f"0 byte changes:\n\n"
+                        + "\n\n".join(f"- {w}" for w in f3_warnings[:5])
+                    )
+                    if len(f3_warnings) > 5:
+                        msg += (
+                            f"\n\n…and {len(f3_warnings) - 5} more "
+                            f"(see Activity log for full list)."
+                        )
+                    self.warning.emit(msg)
 
                 logger.info(
                     "Phase 1a: aggregated %d JSON mod(s) into %d target "

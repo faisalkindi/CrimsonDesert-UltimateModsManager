@@ -71,6 +71,7 @@ def expand_format3_into_aggregated(
     signatures: dict[str, str],
     db,
     vanilla_extractor: VanillaExtractor,
+    warnings_out: list[str] | None = None,
 ) -> None:
     """For each enabled mod whose json_source is a Format 3 file,
     resolve its intents into v2-style change dicts and append to
@@ -79,6 +80,13 @@ def expand_format3_into_aggregated(
     Mutates ``aggregated`` and ``signatures`` in place. Never raises.
     Logs at warning on extraction failures, malformed JSON, and
     unsupported tables; logs at debug on successful expansion.
+
+    When ``warnings_out`` is provided, appends per-mod user-facing
+    messages for cases the user needs to see (zero supported intents,
+    vanilla extraction failure). The apply_engine wire-up routes
+    these through the existing ``warning`` signal so on_apply_done
+    renders them in the post-apply InfoBar — same surfacing the
+    JMM-parity skipped-patches feature uses.
     """
     rows = db.connection.execute(
         "SELECT id, name, json_source, priority FROM mods "
@@ -108,6 +116,17 @@ def expand_format3_into_aggregated(
                 "for %s — %d skipped. Mod produced 0 byte changes.",
                 mod_name, mod_id, target,
                 len(validation.skipped))
+            if warnings_out is not None:
+                warnings_out.append(
+                    f"Format 3 mod '{mod_name}' produced 0 byte "
+                    f"changes targeting '{target}': all "
+                    f"{len(validation.skipped)} intent(s) skipped. "
+                    f"Most likely the field_schema for this table "
+                    f"doesn't yet have entries for the intent fields. "
+                    f"Add a field_schema/<table>.json file with "
+                    f"matching tid or rel_offset entries, or use the "
+                    f"mod's offset-based JSON variant if available."
+                )
             continue
 
         # Extract vanilla bytes for the target file
@@ -117,6 +136,14 @@ def expand_format3_into_aggregated(
                 "Format 3 mod '%s' (id=%d): vanilla extraction "
                 "failed for %s; skipping.",
                 mod_name, mod_id, target)
+            if warnings_out is not None:
+                warnings_out.append(
+                    f"Format 3 mod '{mod_name}' produced 0 byte "
+                    f"changes: could not extract vanilla bytes for "
+                    f"'{target}'. The target file may not exist in "
+                    f"your game's PAZ archives — check the spelling "
+                    f"or run Steam Verify if the file is missing."
+                )
             continue
         vanilla_body, vanilla_header = vanilla
 
@@ -130,6 +157,16 @@ def expand_format3_into_aggregated(
                 "resolved to zero changes (probably TID-not-found "
                 "or value out of range).",
                 mod_name, mod_id, len(validation.supported))
+            if warnings_out is not None:
+                warnings_out.append(
+                    f"Format 3 mod '{mod_name}' produced 0 byte "
+                    f"changes targeting '{target}': all "
+                    f"{len(validation.supported)} intents resolved "
+                    f"to write-failures (TID not found in target "
+                    f"entries, or value out of range for the field "
+                    f"width). Check that the field_schema entries "
+                    f"match this game version."
+                )
             continue
 
         aggregated.setdefault(target, []).extend(changes)
