@@ -410,6 +410,12 @@ def collect_paz_dir_overrides(
     ).fetchall()
 
     overrides: dict[str, dict] = {}
+    # Track which mod_ids have already produced a parse-failure warning
+    # in this call so a single broken mod that ships many NNNN dirs
+    # doesn't flood the InfoBar with the same message N times. Bug
+    # report from Faisal 2026-04-26 — Enhanced Internal Graphics fired
+    # 30+ identical warnings for one mod.
+    warned_mod_ids: set[int] = set()
     for mod_id, mod_name, priority, file_path, paz_delta_path in rows:
         # file_path looks like 'NNNN/0.paz'; sibling PAMT lives at
         # 'NNNN/0.pamt' in the same mod's deltas.
@@ -443,15 +449,16 @@ def collect_paz_dir_overrides(
             logger.debug(
                 "collect_paz_dir_overrides: skip mod %d — pamt parse "
                 "failed: %s", mod_id, e)
-            if warnings_out is not None:
+            if warnings_out is not None and mod_id not in warned_mod_ids:
                 # A2 fix: surface this to the GUI InfoBar. The silent
                 # DEBUG log made every corrupt-archive case look like
                 # "stuck at 2%" to users. Tell them what broke and
-                # what to do next.
+                # what to do next. Dedup per mod — see warned_mod_ids.
                 warnings_out.append(
                     f"Mod '{mod_name}' has a corrupt archive "
                     f"(pamt parse failed: {e}) and was skipped. "
                     "Re-import it from the original zip.")
+                warned_mod_ids.add(mod_id)
             import shutil as _shutil
             _shutil.rmtree(stage_root, ignore_errors=True)
             continue
