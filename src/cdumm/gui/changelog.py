@@ -13,6 +13,19 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.2",
+        "date": "2026-04-26",
+        "notes": [
+            "<b>Crimson Browser format mods stop spamming the warning bar.</b> Mods like r457 Graphics Tweaks were producing 30+ identical 'corrupt archive' warnings on every Apply, all bogus. CDUMM was trying to parse the mod's binary patch deltas as full index files and choking on the bytes. The mods themselves were never broken, just the false alarm. Both fixed: the false alarm is gone and the duplicate-warning flood is capped at one per mod. Thanks to Richardker2545, DerBambusbjoern, and Giony on Nexus for the report.",
+            "<b>Update detection actually works for mods with multiple file versions on the page.</b> Some mods host several versioned files at once (Fat Stacks had v1 and v2 sitting side-by-side on its Nexus page). CDUMM was latching onto the wrong file at import and then forever after reporting 'up to date' even when a real update existed. Fully fixed end-to-end: the matcher now picks the file that matches your version, the engine self-corrects when it finds a previously-wrong file ID stored, and the database actually overwrites instead of silently keeping the bad value.",
+            "<b>NattKh-style Format 3 mods import even when wrapped in a ZIP or folder.</b> The new field-name JSON format used to fail import if the .json was inside a zip or shipped in a folder. Drop them as-is now and they route through the apply pipeline correctly. The Inspect Mod dialog also recognizes them properly instead of saying 'no recognized mod format'.",
+            "<b>Update check fires the moment CDUMM opens.</b> No more 5-second wait to see whether anything's outdated. The check now posts immediately and surfaces results as soon as Nexus responds.",
+            "<b>The CDUMM auto-updater no longer rare-crashes on close-and-reopen.</b> A Qt threading edge case could crash the Check For Updates worker if the previous one had been cleaned up out from under it. Defensive fix added. Thanks to priston201 on GitHub for the bug report.",
+            "<b>Mod-config sidebar shows long option names without cutting them off.</b> Configs like 'Insect_Collect_Cooldown' or 'Plant_Collect_Bandit' no longer get clipped to '...'. Sidebar bumped from 400 to 520 pixels. Thanks to nknwn on GitHub for the report.",
+            "<b>Nexus update-check is more resilient to weird API responses.</b> When Nexus returns null timestamps, missing fields, or one bad entry mixed in with good ones, the update check now silently skips the bad entries instead of dropping the whole feed. Mostly invisible to you — its job is to keep the red 'click to update' pill working consistently.",
+        ],
+    },
+    {
         "version": "3.2.1",
         "date": "2026-04-26",
         "notes": [
