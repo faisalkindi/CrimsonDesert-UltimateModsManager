@@ -136,6 +136,18 @@ def _diagnose_archive(mod_path: Path, game_dir: Path, db_path: Path,
                 detected.append("json_patch")
                 _s(f"Detected: JSON Patch mod ({jf})")
                 _diagnose_json_patch(data, jf, game_dir, sections)
+            elif (isinstance(data, dict)
+                    and data.get("format") == 3
+                    and isinstance(data.get("intents"), list)
+                    and isinstance(data.get("target"), str)):
+                detected.append("natt_format_3")
+                n_intents = len(data.get("intents", []))
+                target = data.get("target", "?")
+                _s(f"Detected: NattKh Format 3 mod ({jf}) — "
+                   f"target {target}, {n_intents} intent(s)")
+                _s("  Note: Format 3 needs a field_schema/<table>.json "
+                   "mapping to apply. See field_schema/README.md "
+                   "next to CDUMM3.exe.")
             elif isinstance(data, dict) and "files_dir" in data:
                 detected.append("crimson_browser")
                 _s(f"Detected: Crimson Browser mod ({jf})")
