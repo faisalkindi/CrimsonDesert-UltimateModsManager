@@ -47,13 +47,21 @@ class PazEntry:
     def encrypted(self) -> bool:
         """Whether this entry is ChaCha20-encrypted.
 
-        The PAMT has no reliable encrypted flag — the heuristic (XML only)
-        misses some files. When extraction detects actual encryption,
-        set _encrypted_override = True so repack re-encrypts correctly.
+        The PAMT has no reliable encrypted flag. The engine encrypts
+        text formats inside ui/xml/ — XML, CSS, HTML, JS — and the
+        heuristic must catch all of them. v2.1.2 originally fixed
+        Dark Mode Map (CSS crash on map open) by widening this past
+        XML-only; the v3.0 rewrite silently narrowed it back to
+        '.xml' alone, regressing the fix. Bug report from
+        TheUnLuckyOnes 2026-04-26 caught it.
+
+        When extraction detects actual encryption, set
+        _encrypted_override = True so repack re-encrypts correctly.
         """
         if self._encrypted_override is not None:
             return self._encrypted_override
-        return self.path.lower().endswith('.xml')
+        return self.path.lower().endswith(
+            ('.xml', '.css', '.html', '.js'))
 
 
 _MAX_SANE_PAZ_COUNT = 4096
