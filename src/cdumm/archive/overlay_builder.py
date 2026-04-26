@@ -764,25 +764,29 @@ def build_overlay(
             decomp_size = len(content)
             flags = 0
 
-        # JMM-parity ChaCha20 overlay re-encryption.
+        # ChaCha20 overlay re-encryption.
         # When the vanilla source entry was encrypted, the overlay must be
-        # encrypted too. Callers pass the vanilla entry's *complete* flags
-        # ushort via ``metadata["vanilla_flags"]`` — JMM stores that value
-        # verbatim on the overlay (ModManager.cs:3890-3909, 4268-4273) so
-        # the game's VFS decoder sees exactly the same compression +
-        # encryption type pair it would have seen pre-mod.
+        # encrypted too. The overlay PAMT stores flags as a 16-bit ushort
+        # with a different layout than the 32-bit vanilla PAMT flags:
+        #   bits 0-3:  compression type (0=raw, 2=LZ4, etc.)
+        #   bits 4-7:  encryption type  (0=none, 3=ChaCha20)
+        # Vanilla PAMT carries paz_index in bits 0-7 of its 32-bit flags;
+        # those bits collide with the overlay's compression nibble. Bug
+        # report from TheUnLuckyOnes 2026-04-26: blindly copying
+        # vanilla_flags & 0xFFFF for Dark Mode Map's CSS yielded 0x0004
+        # (paz_index=4 in the low byte), which the game decoded as
+        # comp_type=4 (unknown) and crashed. The synthesised pair is
+        # what the game's VFS actually expects on overlay entries.
         if metadata.get("encrypted"):
             from cdumm.archive.paz_crypto import encrypt as _chacha_encrypt
             key_name = metadata.get("crypto_filename") or filename
             payload = _chacha_encrypt(payload, key_name)
             comp_size = len(payload)
-            vflags = metadata.get("vanilla_flags")
-            if vflags is not None:
-                flags = int(vflags) & 0xFFFF
-            else:
-                # Synthesize flags: keep the compression nibble we computed
-                # and add ChaCha20 type 3 in the encryption nibble.
-                flags = (flags & 0x0F) | 0x30
+            # Synthesise: compression nibble we just computed + ChaCha20
+            # type 3 in the encryption nibble. Always — ignoring
+            # vanilla_flags because vanilla and overlay have different
+            # flag layouts.
+            flags = (flags & 0x0F) | 0x30
             logger.info("overlay encrypt: %s (ChaCha20, flags=0x%04X)",
                         filename, flags)
 
