@@ -254,3 +254,108 @@ def _exe_from_command(cmd: str) -> str | None:
     if sp > 0:
         return cmd[:sp]
     return cmd or None
+
+
+def should_bind_to_existing_row(connection,
+                                  nexus_mod_id: int,
+                                  nexus_file_id: int,
+                                  downloaded_zip) -> int | None:
+    """Decide whether an nxm:// download should REPLACE an existing
+    mod row or import as a NEW one.
+
+    Returns ``existing_mod_id`` (int) when binding is safe, or
+    ``None`` when the download should be imported as a new mod.
+
+    Bug from Faisal 2026-04-26: Nexus page 208 hosts multiple
+    distinct mods (Better Subtitles + No Letterbox). The previous
+    binding logic matched on ``nexus_mod_id`` alone, replacing the
+    existing mod content with whichever sibling the user clicked
+    Mod Manager Download for. nexus_mod_id is a PAGE id, not a
+    unique mod identity.
+
+    Decision tree:
+
+    1. Find rows with matching ``nexus_mod_id``. None → return None
+       (caller imports as new).
+    2. Multiple rows → return None (existing ambiguity-warn path
+       in the caller surfaces this).
+    3. Single row found:
+       a. Stored ``nexus_real_file_id`` matches incoming → bind
+          (same file, dedupe).
+       b. Stored ``nexus_real_file_id`` set BUT differs from
+          incoming → return None (different file from same page).
+       c. Stored ``nexus_real_file_id`` is NULL/0 (legacy import,
+          never updated): peek the downloaded zip for a mod-name
+          signal. Match against existing row's name. Bind only if
+          the names look like the same mod.
+    """
+    if not nexus_mod_id:
+        return None
+    try:
+        rows = connection.execute(
+            "SELECT id, name, "
+            "COALESCE(nexus_real_file_id, 0) FROM mods "
+            "WHERE nexus_mod_id = ? ORDER BY id ASC",
+            (int(nexus_mod_id),)).fetchall()
+    except Exception:
+        return None
+    if not rows or len(rows) > 1:
+        return None
+    existing_id, existing_name, existing_file_id = rows[0]
+    existing_file_id = int(existing_file_id or 0)
+    new_file_id = int(nexus_file_id or 0)
+
+    # Strict file_id match path. When stored file_id is set, trust it.
+    if existing_file_id > 0:
+        if new_file_id == existing_file_id:
+            return int(existing_id)
+        # Different files from the same Nexus page → don't bind.
+        return None
+
+    # Legacy / unknown file_id: peek the zip to extract a name signal.
+    if downloaded_zip is None:
+        # No zip to peek; conservative: don't bind. Caller imports
+        # as new. Slight UX regression (legitimate updates create
+        # duplicate rows) but safer than the wrong-replace bug.
+        return None
+    new_name = _extract_mod_name_from_zip(downloaded_zip)
+    if not new_name:
+        return None
+    from cdumm.engine.mod_matching import is_same_mod
+    if is_same_mod(existing_name or "", new_name):
+        return int(existing_id)
+    return None
+
+
+def _extract_mod_name_from_zip(zip_path) -> str:
+    """Best-effort: extract a mod name from a downloaded zip.
+
+    Looks for ``modinfo.json`` first (any depth). Falls back to the
+    top-level folder name. Returns empty string if nothing usable.
+    """
+    import json as _json
+    import zipfile as _zf
+    from pathlib import Path as _Path
+    try:
+        with _zf.ZipFile(_Path(zip_path)) as zf:
+            names = zf.namelist()
+            for n in names:
+                if n.lower().endswith("modinfo.json"):
+                    try:
+                        with zf.open(n) as f:
+                            data = _json.load(f)
+                        if isinstance(data, dict):
+                            for k in ("name", "title"):
+                                v = data.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    return v.strip()
+                    except Exception:
+                        continue
+            # Fallback: top-level folder name
+            for n in names:
+                top = n.split("/", 1)[0]
+                if top and top != "modinfo.json":
+                    return top
+    except Exception:
+        pass
+    return ""

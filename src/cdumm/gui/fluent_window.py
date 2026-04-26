@@ -2300,20 +2300,24 @@ class CdummWindow(FluentWindow):
                 # InfoBar so they can de-dup before retrying.
                 existing_id = None
                 if self._db and nexus_mod_id:
+                    # Multi-row warning still applies: if multiple rows
+                    # share the same nexus_mod_id we surface it for the
+                    # user to dedup. The single-row binding decision now
+                    # routes through should_bind_to_existing_row which
+                    # checks file_id match (or name peek for legacy
+                    # rows). Bug from Faisal 2026-04-26: page 208 hosts
+                    # both Better Subtitles and No Letterbox; clicking
+                    # Mod Manager Download for one was replacing the
+                    # other because nexus_mod_id alone isn't unique.
                     try:
                         rows = self._db.connection.execute(
-                            "SELECT id, name FROM mods WHERE nexus_mod_id = ? "
-                            "ORDER BY id ASC",
+                            "SELECT id, name FROM mods "
+                            "WHERE nexus_mod_id = ? ORDER BY id ASC",
                             (int(nexus_mod_id),)).fetchall()
                     except Exception as e:
                         logger.debug("nxm: existing-mod lookup failed: %s", e)
                         rows = []
-                    if len(rows) == 1:
-                        existing_id = rows[0][0]
-                        logger.info(
-                            "nxm: binding download to existing mod_id=%d "
-                            "(nexus_mod_id=%d)", existing_id, nexus_mod_id)
-                    elif len(rows) > 1:
+                    if len(rows) > 1:
                         names = ", ".join(r[1] for r in rows)
                         logger.warning(
                             "nxm: %d mod rows share nexus_mod_id=%d (%s) — "
@@ -2329,6 +2333,25 @@ class CdummWindow(FluentWindow):
                                 "Right-click → Delete the duplicates if you "
                                 "want a single entry."),
                             duration=-1, position=InfoBarPosition.TOP, parent=self)
+                    elif len(rows) == 1:
+                        from cdumm.engine.nxm_handler import (
+                            should_bind_to_existing_row,
+                        )
+                        existing_id = should_bind_to_existing_row(
+                            self._db.connection,
+                            nexus_mod_id=int(nexus_mod_id),
+                            nexus_file_id=int(nexus_file_id or 0),
+                            downloaded_zip=result)
+                        if existing_id is not None:
+                            logger.info(
+                                "nxm: binding download to existing mod_id=%d "
+                                "(nexus_mod_id=%d)", existing_id, nexus_mod_id)
+                        else:
+                            logger.info(
+                                "nxm: row %d has same nexus_mod_id=%d but "
+                                "different file/name — importing as new mod "
+                                "to avoid wrong-target replace",
+                                rows[0][0], nexus_mod_id)
                 # Fallback: when no row matches by nexus_mod_id (because
                 # the existing row was imported as a local zip and never
                 # got Nexus metadata stored), match by name instead so a
