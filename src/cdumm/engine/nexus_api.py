@@ -83,6 +83,12 @@ class ModUpdateStatus:
     # taken down). Distinct from "outdated" — there's no successor
     # to upgrade to. UI can render a different badge.
     file_deleted_on_nexus: bool = False
+    # True when the user's stored nexus_real_file_id IS present on
+    # Nexus but flagged OLD_VERSION/ARCHIVED with no chain successor.
+    # Different from deleted (file still exists) but also different
+    # from outdated (there's no replacement to point at). UI can
+    # render a "deprecated" badge. Round-3 systematic-debugging fix.
+    file_archived_on_nexus: bool = False
 
 
 class NexusPremiumRequired(Exception):
@@ -631,6 +637,7 @@ def check_mod_updates(
         # the user sees the red pill. Bug from Faisal 2026-04-26
         # issue #2.
         forced_outdated_by_self_correction = False
+        file_archived_on_nexus = False
         latest = None
         if local_file_id:
             latest = _resolve_latest_file(local_file_id, files, file_updates)
@@ -650,6 +657,7 @@ def check_mod_updates(
                         "Nexus; falling back to name match",
                         local_file_id, nexus_id)
                 else:
+                    file_archived_on_nexus = True
                     logger.info(
                         "update check: chain for file_id=%d on "
                         "nexus_mod_id=%d led to an archived file "
@@ -728,6 +736,24 @@ def check_mod_updates(
                     "update check: no Nexus file matches local mod %r "
                     "(nexus_mod_id=%d, %d files on page)",
                     local_name, nexus_id, len(files))
+                # Round-3 fix: when we have a deleted/archived signal
+                # but no matching candidate, still emit a result so
+                # the UI can render the special badge. Without this
+                # the signal is lost and the UI shows generic
+                # 'unknown' state.
+                if file_deleted_on_nexus or file_archived_on_nexus:
+                    results.append(ModUpdateStatus(
+                        mod_id=nexus_id,
+                        local_name=mod["name"],
+                        local_version=local_ver,
+                        latest_version="",
+                        has_update=False,
+                        mod_url=(f"https://www.nexusmods.com/"
+                                 f"{GAME_DOMAIN}/mods/{nexus_id}"),
+                        latest_file_id=0,
+                        file_deleted_on_nexus=file_deleted_on_nexus,
+                        file_archived_on_nexus=file_archived_on_nexus,
+                    ))
                 continue
             latest_tuple_inner = None
             for f in candidates:
@@ -884,6 +910,7 @@ def check_mod_updates(
             mod_url=f"https://www.nexusmods.com/{GAME_DOMAIN}/mods/{nexus_id}",
             latest_file_id=int(getattr(latest, "file_id", 0) or 0),
             file_deleted_on_nexus=file_deleted_on_nexus,
+            file_archived_on_nexus=file_archived_on_nexus,
         ))
 
     return results, checked_mod_row_ids, now, backfill_file_ids
@@ -973,6 +1000,10 @@ def persist_backfill_file_ids(connection,
             logger.warning(
                 "nexus_real_file_id backfill commit failed "
                 "(updates may be lost): %s", e)
+            # Return 0 so the caller doesn't log a contradictory
+            # "backfilled N rows" success line right after our
+            # warning. Round-3 review.
+            return 0
     return persisted
 
 
