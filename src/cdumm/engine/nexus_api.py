@@ -561,6 +561,29 @@ def check_mod_updates(
                     "update check: file_id=%d not in files for nexus_mod_id=%d "
                     "— file may have been deleted; falling back to name match",
                     local_file_id, nexus_id)
+            else:
+                # Self-correction: if the chain walk says we're on the
+                # latest (latest.file_id == local_file_id) but the
+                # versions disagree, an earlier name-match backfill
+                # latched onto the wrong file. Force re-resolve via the
+                # name-match path below so the user gets the red
+                # 'click to update' pill instead of stuck 'current'.
+                # Bug from Faisal 2026-04-26 — Fat Stacks 1536.
+                if (latest.file_id == local_file_id
+                        and local_tuple is not None):
+                    latest_ver_tuple = _version_to_tuple(
+                        (latest.version or "").strip())
+                    if (latest_ver_tuple is not None
+                            and latest_ver_tuple != local_tuple):
+                        logger.info(
+                            "update check: nexus_real_file_id=%d for "
+                            "%r looks wrong (local_ver=%r, file_ver=%r)"
+                            " — re-doing name match",
+                            local_file_id, local_name, local_ver,
+                            latest.version)
+                        latest = None
+                        # Force backfill recompute despite stored id
+                        local_file_id = 0
 
         if latest is None:
             # Either no local_file_id stored, or it's not in the
@@ -589,9 +612,47 @@ def check_mod_updates(
             # but we just resolved one via the name-match path. Record
             # it so the caller can persist it and the next check
             # uses the reliable chain walk.
+            #
+            # When the page hosts MULTIPLE files at different versions
+            # (Fat Stacks 1536: two version-1 files + one version-2),
+            # `latest` here is the highest-version pick — correct for
+            # the has_update determination but WRONG for backfill: if
+            # the user is actually on the older file, latching the
+            # backfill to the latest makes future cycles think the
+            # user is current. Prefer to backfill the candidate whose
+            # version matches local_ver. Bug from Faisal 2026-04-26.
             if not local_file_id:
                 row_id = mod.get("id")
-                matched_file_id = int(getattr(latest, "file_id", 0) or 0)
+                backfill_target = latest
+                if local_tuple is not None:
+                    matching = [
+                        f for f in candidates
+                        if _version_to_tuple(
+                            (f.version or "").strip()) == local_tuple
+                    ]
+                    if len(matching) == 1:
+                        backfill_target = matching[0]
+                    elif len(matching) > 1:
+                        # Multiple version-matching candidates — prefer
+                        # the one that has a file_updates chain entry
+                        # pointing forward (we know there's a successor,
+                        # so the next chain walk will return it). Falls
+                        # back to lowest file_id when no successor info.
+                        chain_starts = {
+                            u.old_file_id for u in file_updates
+                        }
+                        with_chain = [
+                            f for f in matching
+                            if f.file_id in chain_starts
+                        ]
+                        if with_chain:
+                            backfill_target = min(
+                                with_chain, key=lambda f: f.file_id)
+                        else:
+                            backfill_target = min(
+                                matching, key=lambda f: f.file_id)
+                matched_file_id = int(getattr(
+                    backfill_target, "file_id", 0) or 0)
                 if (isinstance(row_id, int) and row_id > 0
                         and matched_file_id > 0):
                     backfill_file_ids[row_id] = matched_file_id
