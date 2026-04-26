@@ -395,12 +395,26 @@ def _resolve_latest_file(user_file_id: int,
     # silently keeps whichever entry came last in iteration, which
     # is non-deterministic across Nexus API responses. Bug from
     # systematic-debugging review 2026-04-26.
+    #
+    # Tiebreak when timestamps are equal (or all 0/missing): higher
+    # new_file_id wins. Newer Nexus uploads generally get higher IDs,
+    # so this is a reasonable proxy when uploaded_timestamp is absent.
+    # Crucially this makes the result deterministic regardless of API
+    # response ordering — round-2 systematic-debugging review.
     chain: dict[int, int] = {}
     chain_ts: dict[int, int] = {}
     for u in file_updates:
         ts = getattr(u, "uploaded_timestamp", 0) or 0
-        if u.old_file_id not in chain_ts or ts >= chain_ts[u.old_file_id]:
-            chain[u.old_file_id] = u.new_file_id
+        new_id = u.new_file_id
+        if u.old_file_id not in chain_ts:
+            chain[u.old_file_id] = new_id
+            chain_ts[u.old_file_id] = ts
+            continue
+        existing_ts = chain_ts[u.old_file_id]
+        existing_new = chain[u.old_file_id]
+        if ts > existing_ts or (
+                ts == existing_ts and new_id > existing_new):
+            chain[u.old_file_id] = new_id
             chain_ts[u.old_file_id] = ts
     current = user_file_id
     seen = {current}
@@ -510,7 +524,21 @@ def check_mod_updates(
     """
     import time
 
-    nexus_mods = [(m, m["nexus_mod_id"]) for m in mods if m.get("nexus_mod_id")]
+    # Coerce + validate nexus_mod_id. Naive truthiness lets the
+    # string "0" through (non-empty string) and triggers a wasted
+    # /mods/0/files.json call that always 404s. Bug from round-2
+    # systematic-debugging review.
+    def _valid_nexus_id(m: dict) -> int:
+        try:
+            v = int(m.get("nexus_mod_id") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return v if v > 0 else 0
+
+    nexus_mods = [
+        (m, _valid_nexus_id(m)) for m in mods
+        if _valid_nexus_id(m) > 0
+    ]
     if not nexus_mods:
         return [], [], int(time.time()), {}
 
@@ -607,17 +635,27 @@ def check_mod_updates(
         if local_file_id:
             latest = _resolve_latest_file(local_file_id, files, file_updates)
             if latest is None:
-                # The user's file_id is no longer in the Nexus files
-                # list — author deleted it, or the page got
-                # restructured. Promote from debug to info so it's
-                # visible in logs without being noisy.
-                logger.info(
-                    "update check: file_id=%d not in files for "
-                    "nexus_mod_id=%d — file appears deleted on Nexus; "
-                    "falling back to name match",
-                    local_file_id, nexus_id)
-                if {f.file_id for f in files} and local_file_id not in {f.file_id for f in files}:
+                # _resolve_latest_file returns None for two distinct
+                # reasons: (a) user's file_id genuinely missing from
+                # files list (deleted), or (b) chain walked TO an
+                # archived file (file still exists, OLD_VERSION).
+                # Distinguish in the log so investigations don't
+                # chase the wrong cause. Bug from round-2 review.
+                file_id_set = {f.file_id for f in files}
+                if file_id_set and local_file_id not in file_id_set:
                     file_deleted_on_nexus = True
+                    logger.info(
+                        "update check: file_id=%d not in files for "
+                        "nexus_mod_id=%d — file appears deleted on "
+                        "Nexus; falling back to name match",
+                        local_file_id, nexus_id)
+                else:
+                    logger.info(
+                        "update check: chain for file_id=%d on "
+                        "nexus_mod_id=%d led to an archived file "
+                        "(author archived without updating "
+                        "file_updates); falling back to name match",
+                        local_file_id, nexus_id)
             else:
                 # Self-correction: if the chain walk says we're on the
                 # latest (latest.file_id == local_file_id) but the
@@ -927,8 +965,14 @@ def persist_backfill_file_ids(connection,
     if persisted:
         try:
             connection.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            # Bare-pass swallowed disk-full / locked-DB / transaction
+            # rollback. Surface as warning so persistence failures
+            # are debuggable instead of silently lost. Bug from
+            # round-2 systematic-debugging review.
+            logger.warning(
+                "nexus_real_file_id backfill commit failed "
+                "(updates may be lost): %s", e)
     return persisted
 
 
