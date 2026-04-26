@@ -13,6 +13,18 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.2",
+        "date": "2026-04-26",
+        "notes": [
+            "<b>NattKh-style field-name mods now actually apply.</b> The new field-names JSON format CDUMM started recognizing in v3.2.1 now actually changes bytes — provided a community-authored mapping file is present for the table the mod targets. CDUMM ships the engine; the mapping files come from the community. See <code>field_schema/README.md</code> in your CDUMM install for the format spec.",
+            "<b>Apply tells you when a field-name mod did nothing.</b> If a field-name mod produces zero byte changes (no matching schema, missing target file, or out-of-range value), the post-Apply banner names the mod and tells you what to do instead of leaving you wondering why the game looks the same.",
+            "<b>Find Culprit no longer crashes.</b> The 'auto-bisect to find which mod broke the game' tool was crashing on click in v3.2 because of a missing piece left over from the v3.0 rewrite. Fixed.",
+            "<b>Several invisible safety nets for field-name mods.</b> The byte writer now refuses to guess when a 4-byte schema marker matches more than once inside an entry, validates schema entries at load time (rejects negative offsets, unknown type strings, missing required fields), and bounds every write to its own entry to never spill into the next record.",
+            "<b>Engine fix that quietly improves your two-mod merges.</b> CDUMM's data-table parser was reading the wrong header width on several common tables (storeinfo, inventory). Two-mod conflict merges on those tables had been silently no-op'ing since v3.0 — now they produce real merges. You may notice cleaner results when two mods touch the same shop or inventory file.",
+            "<b>Reimport field-name mods after upgrading.</b> If you had any imported before this update, right-click each → Reimport from source so the stored state reflects the new engine. New imports after the upgrade Just Work.",
+        ],
+    },
+    {
         "version": "3.2.1",
         "date": "2026-04-25",
         "notes": [
