@@ -199,11 +199,32 @@ def _find_epic_games() -> list[Path]:
     return candidates
 
 
+def _scan_for_steam_libraries(base_paths: list[Path]) -> list[Path]:
+    """Given candidate Steam library base directories, return the
+    Crimson Desert install paths inside any that contain it.
+
+    Issue #43 (Feikaz, 2026-04-25): Steam-VDF-only detection misses
+    libraries that aren't registered with the user's primary Steam
+    install (e.g. game on F:/Steam while Steam itself is on C: and
+    its libraryfolders.vdf doesn't list F:/). This helper does an
+    independent direct scan so the auto-detect catches that case.
+    """
+    found: list[Path] = []
+    for base in base_paths:
+        try:
+            game_dir = base / "steamapps" / "common" / "Crimson Desert"
+            if (game_dir / GAME_EXE).exists():
+                found.append(game_dir)
+        except OSError:
+            continue
+    return found
+
+
 def find_game_directories() -> list[Path]:
     """Search Steam, Epic Games Store, and Xbox for Crimson Desert install."""
     candidates: list[Path] = []
 
-    # Steam detection
+    # Steam detection — primary path: VDF parsing from one Steam root.
     steam_root = _find_steam_root()
     if steam_root is not None:
         vdf = steam_root / LIBRARY_FOLDERS_VDF
@@ -215,9 +236,21 @@ def find_game_directories() -> list[Path]:
             game_dir = lib_dir / "steamapps" / "common" / "Crimson Desert"
             if (game_dir / GAME_EXE).exists():
                 candidates.append(game_dir)
-                logger.info("Found Crimson Desert (Steam) at %s", game_dir)
+                logger.info("Found Crimson Desert (Steam VDF) at %s", game_dir)
     else:
         logger.info("No Steam root found in default locations")
+
+    # Steam detection — fallback: direct drive scan for common library
+    # paths. Catches Steam libraries the primary install's VDF doesn't
+    # know about (issue #43). Dedup happens at end via path resolve.
+    direct_bases = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        for prefix in ("Steam", "SteamLibrary",
+                       "Games/Steam", "Games/SteamLibrary"):
+            direct_bases.append(Path(f"{letter}:/{prefix}"))
+    for found in _scan_for_steam_libraries(direct_bases):
+        candidates.append(found)
+        logger.info("Found Crimson Desert (Steam direct scan) at %s", found)
 
     # Epic Games Store detection
     epic_candidates = _find_epic_games()
