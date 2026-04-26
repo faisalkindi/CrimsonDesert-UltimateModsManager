@@ -417,6 +417,18 @@ def collect_paz_dir_overrides(
     # 30+ identical warnings for one mod.
     warned_mod_ids: set[int] = set()
     for mod_id, mod_name, priority, file_path, paz_delta_path in rows:
+        # The cross-layer override scan only handles full-file PAZ-dir
+        # replacements. Crimson Browser converted mods (e.g. r457
+        # Graphics Tweaks, mod 602) store their PAMT/PAZ as SPRS
+        # sparse deltas which can't be parsed as standalone PAMTs.
+        # Detect by SPRS magic bytes and skip silently — they're not
+        # candidates for this scan. Bug report from Faisal 2026-04-26.
+        try:
+            with open(paz_delta_path, "rb") as _f:
+                if _f.read(4) == b"SPRS":
+                    continue
+        except OSError:
+            continue
         # file_path looks like 'NNNN/0.paz'; sibling PAMT lives at
         # 'NNNN/0.pamt' in the same mod's deltas.
         pamt_dir = file_path.split("/", 1)[0]
