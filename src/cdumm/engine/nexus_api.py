@@ -78,6 +78,11 @@ class ModUpdateStatus:
     # premium-direct-download flow so the GUI can call download_link
     # without round-tripping through the browser.
     latest_file_id: int = 0
+    # True when the user's stored nexus_real_file_id is no longer
+    # present in the Nexus file list (author deleted it, or mod was
+    # taken down). Distinct from "outdated" — there's no successor
+    # to upgrade to. UI can render a different badge.
+    file_deleted_on_nexus: bool = False
 
 
 class NexusPremiumRequired(Exception):
@@ -514,6 +519,17 @@ def check_mod_updates(
             # Feed skipped this mod AND we confirmed it was current
             # within the past week — safe to trust "no update".
             continue
+        # When the feed call itself failed we can't trust "not in
+        # feed = not updated", but the per-mod TTL is still valid:
+        # if we successfully checked this mod within the past week,
+        # don't re-hammer the per-mod endpoint just because the feed
+        # blip means we'd otherwise check ALL mods this cycle (rate
+        # limit risk on users with 50+ mods). Bug from Faisal
+        # 2026-04-26 issue #3.
+        if (not feed_trustworthy
+                and last_checked > 0
+                and (now - last_checked) < WEEK_SECONDS):
+            continue
 
         result = get_mod_files(nexus_id, api_key)
         if result is None:
@@ -553,14 +569,34 @@ def check_mod_updates(
         except (TypeError, ValueError):
             local_file_id = 0
 
+        # Track whether the user's stored file_id is gone from Nexus
+        # entirely (deleted by author / mod taken down). The result
+        # carries this so the GUI can render a 'source removed' badge
+        # rather than a generic 'unknown' state.
+        # Bug from Faisal 2026-04-26 issue #4.
+        file_deleted_on_nexus = False
+        # When self-correction triggers (chain says we're current but
+        # versions disagree), the version mismatch IS the signal that
+        # we're outdated — even when the version strings don't parse
+        # to comparable tuples. Force has_update=True downstream so
+        # the user sees the red pill. Bug from Faisal 2026-04-26
+        # issue #2.
+        forced_outdated_by_self_correction = False
         latest = None
         if local_file_id:
             latest = _resolve_latest_file(local_file_id, files, file_updates)
             if latest is None:
-                logger.debug(
-                    "update check: file_id=%d not in files for nexus_mod_id=%d "
-                    "— file may have been deleted; falling back to name match",
+                # The user's file_id is no longer in the Nexus files
+                # list — author deleted it, or the page got
+                # restructured. Promote from debug to info so it's
+                # visible in logs without being noisy.
+                logger.info(
+                    "update check: file_id=%d not in files for "
+                    "nexus_mod_id=%d — file appears deleted on Nexus; "
+                    "falling back to name match",
                     local_file_id, nexus_id)
+                if {f.file_id for f in files} and local_file_id not in {f.file_id for f in files}:
+                    file_deleted_on_nexus = True
             else:
                 # Self-correction: if the chain walk says we're on the
                 # latest (latest.file_id == local_file_id) but the
@@ -569,12 +605,26 @@ def check_mod_updates(
                 # name-match path below so the user gets the red
                 # 'click to update' pill instead of stuck 'current'.
                 # Bug from Faisal 2026-04-26 — Fat Stacks 1536.
-                if (latest.file_id == local_file_id
-                        and local_tuple is not None):
-                    latest_ver_tuple = _version_to_tuple(
-                        (latest.version or "").strip())
-                    if (latest_ver_tuple is not None
+                if latest.file_id == local_file_id:
+                    latest_ver = (latest.version or "").strip()
+                    latest_ver_tuple = _version_to_tuple(latest_ver)
+                    versions_disagree = False
+                    if (local_tuple is not None
+                            and latest_ver_tuple is not None
                             and latest_ver_tuple != local_tuple):
+                        # Tuple compare — preferred path.
+                        versions_disagree = True
+                    elif (local_ver and latest_ver
+                          and (local_tuple is None
+                               or latest_ver_tuple is None)
+                          and local_ver.lower() != latest_ver.lower()):
+                        # Bug from Faisal 2026-04-26 issue #2: at
+                        # least one side doesn't parse to a tuple but
+                        # both have non-empty strings that don't match.
+                        # Treat that as a mismatch too — covers mods
+                        # with weird version strings (alpha/beta/etc).
+                        versions_disagree = True
+                    if versions_disagree:
                         logger.info(
                             "update check: nexus_real_file_id=%d for "
                             "%r looks wrong (local_ver=%r, file_ver=%r)"
@@ -584,6 +634,7 @@ def check_mod_updates(
                         latest = None
                         # Force backfill recompute despite stored id
                         local_file_id = 0
+                        forced_outdated_by_self_correction = True
 
         if latest is None:
             # Either no local_file_id stored, or it's not in the
@@ -607,7 +658,15 @@ def check_mod_updates(
                     latest_tuple_inner = f_tuple
                     latest = f
             if latest is None:
-                continue
+                # No version-parseable candidate. Fall back to upload
+                # order — get_mod_files sorts files newest-first, so
+                # candidates[0] is the most recently uploaded file
+                # whose name matches. Better than skipping the mod
+                # entirely (which leaves the user with no signal).
+                # Bug from Faisal 2026-04-26 issue #2 — alpha/beta
+                # version strings don't parse, but we still want to
+                # detect the chain forward.
+                latest = candidates[0]
             # Backfill: this row had no nexus_real_file_id going in
             # but we just resolved one via the name-match path. Record
             # it so the caller can persist it and the next check
@@ -653,8 +712,21 @@ def check_mod_updates(
                                 matching, key=lambda f: f.file_id)
                 matched_file_id = int(getattr(
                     backfill_target, "file_id", 0) or 0)
+                # Don't queue a backfill that would just rewrite the
+                # same value already stored. Bug from Faisal 2026-04-26
+                # issue #1: when self-correction triggered but the only
+                # available backfill target is the same wrong value
+                # already in nexus_real_file_id (the v1 file is
+                # archived and excluded by name-match), the DB was
+                # getting the same wrong value rewritten on every cycle.
+                existing_id = 0
+                try:
+                    existing_id = int(mod.get("nexus_real_file_id") or 0)
+                except (TypeError, ValueError):
+                    existing_id = 0
                 if (isinstance(row_id, int) and row_id > 0
-                        and matched_file_id > 0):
+                        and matched_file_id > 0
+                        and matched_file_id != existing_id):
                     backfill_file_ids[row_id] = matched_file_id
 
         latest_tuple = _version_to_tuple((latest.version or "").strip())
@@ -673,7 +745,13 @@ def check_mod_updates(
         # but pill is red' bug (e.g. Better Radial Menus 1.5 vs 1.5.2,
         # both on file_id 5733).
         has_update = False
-        if local_file_id and latest.file_id != local_file_id:
+        if forced_outdated_by_self_correction:
+            # Self-correction caught a version mismatch on a stored
+            # file_id that earlier mistakenly latched onto the latest.
+            # The disagreement IS the signal. Bug from Faisal
+            # 2026-04-26 issue #2.
+            has_update = True
+        elif local_file_id and latest.file_id != local_file_id:
             # Author declared this as a successor — definitively
             # outdated regardless of version string parsing.
             has_update = True
@@ -722,6 +800,7 @@ def check_mod_updates(
             has_update=has_update,
             mod_url=f"https://www.nexusmods.com/{GAME_DOMAIN}/mods/{nexus_id}",
             latest_file_id=int(getattr(latest, "file_id", 0) or 0),
+            file_deleted_on_nexus=file_deleted_on_nexus,
         ))
 
     return results, checked_mod_row_ids, now, backfill_file_ids

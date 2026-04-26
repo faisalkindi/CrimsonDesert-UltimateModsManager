@@ -121,3 +121,179 @@ def test_existing_wrong_backfill_self_corrects() -> None:
         f"the corrective re-resolve should backfill the right "
         f"file_id (5037, matching local v1). Got "
         f"{backfill.get(1413)}.")
+
+
+# ── Issue 1: don't rewrite wrong backfill with same wrong value ───────
+
+
+def _archived_v1_files(mod_id: int, api_key: str):
+    """Real-world Fat Stacks state: v1 files are archived (excluded
+    by name-match), only v2 MAIN remains visible."""
+    if mod_id != 1536:
+        return ([], [])
+    files = [
+        _FakeFile(file_id=5037,
+                  name="Fat Stacks All In One Mod", version="1"),
+        _FakeFile(file_id=6111,
+                  name="Fat Stacks All In One Mod", version="2"),
+    ]
+    # Mark 5037 as OLD_VERSION (category_id=4) — gets excluded
+    files[0].__dict__["category_id"] = 4
+
+    @dataclass
+    class _FU:
+        old_file_id: int
+        new_file_id: int
+        old_file_name: str = ""
+        new_file_name: str = ""
+
+    updates = [_FU(old_file_id=5037, new_file_id=6111)]
+    return (files, updates)
+
+
+def test_self_correction_does_not_rewrite_same_wrong_value() -> None:
+    """When self-correction fires AND the only available backfill
+    target is the same wrong value already stored, don't add it to
+    backfill_file_ids. Otherwise the DB gets the same wrong value
+    rewritten on every check cycle."""
+    mods = [
+        {"id": 1413, "nexus_mod_id": 1536,
+         "name": "Fat Stacks All In One Mod",
+         "version": "1",
+         "nexus_real_file_id": 6111,  # already wrong
+         "nexus_last_checked_at": 0},
+    ]
+    with patch("cdumm.engine.nexus_api.get_recently_updated",
+               return_value={1536: 0}), \
+         patch("cdumm.engine.nexus_api.get_mod_files",
+               side_effect=_archived_v1_files):
+        results, _checked, _now, backfill = check_mod_updates(
+            mods, "key")
+
+    # Has-update path still works
+    assert results
+    assert results[0].has_update is True
+    # But we didn't queue another rewrite of the same wrong value
+    assert 1413 not in backfill, (
+        f"backfill should NOT rewrite nexus_real_file_id with the "
+        f"same wrong value (6111). Got: {backfill}")
+
+
+# ── Issue 2: self-correct even when local version doesn't parse ──────
+
+
+def _files_v_unparseable(mod_id: int, api_key: str):
+    if mod_id != 999:
+        return ([], [])
+    files = [
+        _FakeFile(file_id=7000, name="Wonky Mod", version="alpha"),
+        _FakeFile(file_id=7001, name="Wonky Mod", version="beta"),
+    ]
+
+    @dataclass
+    class _FU:
+        old_file_id: int
+        new_file_id: int
+        old_file_name: str = ""
+        new_file_name: str = ""
+
+    return (files, [_FU(old_file_id=7000, new_file_id=7001)])
+
+
+def test_self_correction_fires_when_local_version_unparseable() -> None:
+    """Local version 'alpha' doesn't parse to a tuple. But latest's
+    version 'beta' is clearly different. The self-correction must
+    fire on string-difference too, not only on tuple-difference."""
+    mods = [
+        {"id": 99, "nexus_mod_id": 999, "name": "Wonky Mod",
+         "version": "alpha",
+         "nexus_real_file_id": 7001,  # wrongly latched on latest
+         "nexus_last_checked_at": 0},
+    ]
+    with patch("cdumm.engine.nexus_api.get_recently_updated",
+               return_value={999: 0}), \
+         patch("cdumm.engine.nexus_api.get_mod_files",
+               side_effect=_files_v_unparseable):
+        results, _checked, _now, _backfill = check_mod_updates(
+            mods, "key")
+
+    assert results
+    assert results[0].has_update is True, (
+        "self-correction must fire for unparseable-but-different "
+        "version strings too — local 'alpha' vs file 'beta' are "
+        "clearly distinct even when the parser rejects them.")
+
+
+# ── Issue 3: skip recent checks even when feed fetch fails ───────────
+
+
+def test_recent_check_skipped_even_when_feed_unavailable() -> None:
+    """When get_recently_updated returns None (feed call failed),
+    the per-mod skip-if-checked-recently optimisation must STILL
+    apply. Otherwise a user with 50 mods triggers 50 sequential
+    API calls in one cycle → rate limit."""
+    import time
+    recent_check = int(time.time()) - 3600  # 1 hour ago, well within week
+    mods = [
+        {"id": i, "nexus_mod_id": 1000 + i, "name": f"Mod {i}",
+         "version": "1.0", "nexus_real_file_id": 100 + i,
+         "nexus_last_checked_at": recent_check}
+        for i in range(5)
+    ]
+    call_count = {"n": 0}
+
+    def _track_calls(mod_id, api_key):
+        call_count["n"] += 1
+        return ([_FakeFile(file_id=100 + (mod_id - 1000),
+                            name=f"Mod {mod_id - 1000}",
+                            version="1.0")], [])
+
+    with patch("cdumm.engine.nexus_api.get_recently_updated",
+               return_value=None), \
+         patch("cdumm.engine.nexus_api.get_mod_files",
+               side_effect=_track_calls):
+        check_mod_updates(mods, "key")
+
+    assert call_count["n"] == 0, (
+        f"feed unavailable + recently-checked mods should NOT hit "
+        f"the per-mod API. Got {call_count['n']} calls (expected 0).")
+
+
+# ── Issue 4: deleted-on-nexus signalled in the result ────────────────
+
+
+def _user_file_deleted(mod_id: int, api_key: str):
+    """User had file 4000, but Nexus now only has 4001 (other file)."""
+    if mod_id != 555:
+        return ([], [])
+    return ([_FakeFile(file_id=4001, name="Some Other Mod",
+                        version="2.0")], [])
+
+
+def test_user_file_deleted_on_nexus_is_flagged_in_result() -> None:
+    """When the user's nexus_real_file_id is no longer present in
+    the Nexus file list (author deleted it, or mod taken down),
+    the result must carry a clear signal so the UI can render
+    differently than 'unknown'."""
+    mods = [
+        {"id": 50, "nexus_mod_id": 555, "name": "Some Mod",
+         "version": "1.0", "nexus_real_file_id": 4000,
+         "nexus_last_checked_at": 0},
+    ]
+    with patch("cdumm.engine.nexus_api.get_recently_updated",
+               return_value={555: 0}), \
+         patch("cdumm.engine.nexus_api.get_mod_files",
+               side_effect=_user_file_deleted):
+        results, _checked, _now, _backfill = check_mod_updates(
+            mods, "key")
+
+    # Either the result is emitted with a "deleted" marker, or
+    # explicitly absent. Spec: emit a result with file_deleted=True.
+    matching = [r for r in results if getattr(r, "mod_id", 0) == 555]
+    assert matching, (
+        "deleted-file case should still emit a result so the UI "
+        "knows the mod was checked (just not normally).")
+    assert getattr(matching[0], "file_deleted_on_nexus", False) is True, (
+        "result must carry file_deleted_on_nexus=True for the "
+        "GUI to render a 'source removed' badge instead of "
+        "leaving the mod looking unknown.")
