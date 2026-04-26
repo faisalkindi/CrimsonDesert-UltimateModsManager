@@ -1000,6 +1000,17 @@ def persist_backfill_file_ids(connection,
             logger.warning(
                 "nexus_real_file_id backfill commit failed "
                 "(updates may be lost): %s", e)
+            # Roll back the pending UPDATEs so they don't get
+            # silently flushed by an unrelated later commit().
+            # Without this, return 0 lies about persistence.
+            # Round-4 review.
+            try:
+                connection.rollback()
+            except Exception as rb_err:
+                logger.warning(
+                    "nexus_real_file_id backfill rollback also "
+                    "failed (data may be inconsistent): %s",
+                    rb_err)
             # Return 0 so the caller doesn't log a contradictory
             # "backfilled N rows" success line right after our
             # warning. Round-3 review.

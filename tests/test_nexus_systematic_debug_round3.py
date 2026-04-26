@@ -71,6 +71,42 @@ def test_persist_returns_zero_when_commit_fails(tmp_path: Path) -> None:
         f"value to decide whether to log success. Got {persisted}.")
 
 
+def test_persist_rollback_on_commit_failure(tmp_path: Path) -> None:
+    """When commit raises, the helper must call rollback to discard
+    pending UPDATEs. Otherwise sqlite3 keeps them in the deferred
+    transaction and the NEXT successful commit anywhere flushes
+    them — return value would lie about persistence.
+    Bug from round-4 systematic-debugging review."""
+    rollback_called = {"n": 0}
+
+    class _ConnRaisesOnCommit:
+        def __init__(self):
+            self._real = sqlite3.connect(":memory:")
+            self._real.execute(
+                "CREATE TABLE mods (id INTEGER PRIMARY KEY, "
+                "nexus_real_file_id INTEGER)")
+            self._real.execute(
+                "INSERT INTO mods (id, nexus_real_file_id) "
+                "VALUES (1, 0)")
+            self._real.commit()
+
+        def execute(self, *args, **kwargs):
+            return self._real.execute(*args, **kwargs)
+
+        def commit(self):
+            raise sqlite3.OperationalError("locked")
+
+        def rollback(self):
+            rollback_called["n"] += 1
+            self._real.rollback()
+
+    conn = _ConnRaisesOnCommit()
+    persist_backfill_file_ids(conn, {1: 9001})
+    assert rollback_called["n"] == 1, (
+        f"commit failure must trigger rollback to discard pending "
+        f"UPDATEs. Got rollback_called={rollback_called['n']}.")
+
+
 def test_persist_returns_count_on_success(tmp_path: Path) -> None:
     """Sanity: when commit succeeds, return value still reflects
     actual update count."""
