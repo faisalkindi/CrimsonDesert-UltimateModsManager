@@ -1619,6 +1619,30 @@ def import_from_zip(
                     _store_json_patches(db, result, jp_data, game_dir)
                 return result
 
+        # NattKh's Format 3 mods (field-names + intents) ship as a
+        # single .json. detect_json_patch above checks for a
+        # 'patches' array — Format 3 doesn't have one, so it falls
+        # through here. Catch it before the rest of the detectors so
+        # the user gets the Format 3 importer's specific error
+        # ("no schema for X table") instead of the generic
+        # "no recognized format" diagnostic.
+        from cdumm.engine.json_patch_handler import is_natt_format_3
+        f3_jsons = [p for p in tmp_path.rglob("*.json")
+                    if "_asi_staging" not in p.parts
+                    and is_natt_format_3(p)]
+        if len(f3_jsons) == 1:
+            return import_from_natt_format_3(
+                json_path=f3_jsons[0], game_dir=game_dir, db=db,
+                snapshot=snapshot, deltas_dir=deltas_dir)
+        if len(f3_jsons) > 1:
+            names = ", ".join(p.name for p in f3_jsons)
+            result.error = (
+                f"This zip contains {len(f3_jsons)} Format 3 mods "
+                f"({names}). Please import them one at a time so each "
+                f"gets its own row in the mod list."
+            )
+            return result
+
         # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
         tex_info = detect_texture_mod(tmp_path)
         if tex_info is not None:
@@ -2007,6 +2031,28 @@ def import_from_folder(
                     len(result.changed_files))
         if primary_result is not None:
             return primary_result
+
+    # Format 3 (NattKh field-names) detection — same fix as
+    # import_from_zip. detect_json_patches_all only matches files
+    # with a 'patches' array; Format 3 uses 'intents' and falls
+    # through. Catch it here before texture/PAZ scans so the user
+    # gets the Format 3 importer's specific error.
+    from cdumm.engine.json_patch_handler import is_natt_format_3
+    f3_jsons = [p for p in folder_path.rglob("*.json")
+                if is_natt_format_3(p)]
+    if len(f3_jsons) == 1:
+        return import_from_natt_format_3(
+            json_path=f3_jsons[0], game_dir=game_dir, db=db,
+            snapshot=snapshot, deltas_dir=deltas_dir)
+    if len(f3_jsons) > 1:
+        result = ModImportResult(mod_name)
+        names = ", ".join(p.name for p in f3_jsons)
+        result.error = (
+            f"This folder contains {len(f3_jsons)} Format 3 mods "
+            f"({names}). Please import them one at a time so each "
+            f"gets its own row in the mod list."
+        )
+        return result
 
     # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
     tex_info = detect_texture_mod(folder_path)

@@ -251,3 +251,116 @@ def test_all_skipped_mod_does_not_create_db_row(
     assert len(rows) == 0, (
         f"all-skipped mod should not create a row, got {rows}")
     assert result.error  # error message surfacing skip reasons
+
+
+# ── ZIP-wrapped Format 3 routing (kori228 issue #41 attachment) ──────
+
+
+import zipfile
+
+
+def test_zip_containing_only_format3_json_routes_to_format3_path(
+        tmp_path, monkeypatch):
+    """The kori228 attachment from issue #41 is a .zip with a single
+    Format 3 .json inside. v3.2.1 routed it through detect_json_patch
+    (which checks for a 'patches' array) and fell through to the
+    catch-all 'no recognized format' error path — the user saw a
+    generic 'doesn't look like a CDUMM-supported mod' diagnostic.
+
+    Expected: import_from_zip detects the single Format 3 .json and
+    routes to import_from_natt_format_3, producing the SAME outcome
+    as a direct .json drop. We pass through to the Format 3 handler
+    by spying on it — confirming routing reached it."""
+    p_json = tmp_path / "_inner.json"
+    p_json.write_text(json.dumps({
+        "modinfo": {"title": "ZipFormat3"},
+        "format": 3,
+        "target": "dropsetinfo.pabgb",
+        "intents": [
+            {"entry": "X", "key": 1, "field": "_dropTagNameHash",
+             "op": "set", "new": 9999}
+        ],
+    }), encoding="utf-8")
+
+    z = tmp_path / "mod-format3.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.write(p_json, arcname="mod-format3.json")
+
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    (game_dir / "bin64").mkdir()
+    (game_dir / "bin64" / "CrimsonDesert.exe").write_bytes(b"EXE")
+
+    # Spy that short-circuits the real Format 3 handler — we only
+    # need to confirm routing reached it, not that the rest of the
+    # pipeline runs end-to-end with mock infrastructure.
+    calls = {"count": 0, "json_path": None}
+    from cdumm.engine import import_handler as ih_mod
+    from cdumm.engine.import_handler import ModImportResult
+
+    def _stub(*args, **kwargs):
+        calls["count"] += 1
+        calls["json_path"] = kwargs.get("json_path") or (
+            args[0] if args else None)
+        r = ModImportResult("ZipFormat3")
+        r.error = "[stub] Format 3 routing reached"
+        return r
+
+    monkeypatch.setattr(ih_mod, "import_from_natt_format_3", _stub)
+
+    from cdumm.engine.import_handler import import_from_zip
+    import_from_zip(
+        zip_path=z, game_dir=game_dir, db=MagicMock(),
+        snapshot=MagicMock(), deltas_dir=tmp_path)
+
+    assert calls["count"] == 1, (
+        f"Format 3 zip did not route to import_from_natt_format_3 "
+        f"(call count: {calls['count']}). Routing is broken: ZIPs "
+        f"containing only a Format 3 .json fall through to the "
+        f"generic 'no recognized format' error path.")
+    assert calls["json_path"] is not None
+    assert Path(calls["json_path"]).name == "mod-format3.json"
+
+
+def test_folder_containing_only_format3_json_routes_to_format3_path(
+        tmp_path, monkeypatch):
+    """Same routing fix for unzipped folder drops. Folders with a
+    single Format 3 .json (and no PAZ-dir siblings) must route to
+    the Format 3 handler instead of falling through to PAZ scan."""
+    folder = tmp_path / "MyFormat3Mod"
+    folder.mkdir()
+    (folder / "mod.json").write_text(json.dumps({
+        "modinfo": {"title": "FolderFormat3"},
+        "format": 3,
+        "target": "dropsetinfo.pabgb",
+        "intents": [
+            {"entry": "X", "key": 1, "field": "_dropTagNameHash",
+             "op": "set", "new": 1234}
+        ],
+    }), encoding="utf-8")
+
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    (game_dir / "bin64").mkdir()
+    (game_dir / "bin64" / "CrimsonDesert.exe").write_bytes(b"EXE")
+
+    calls = {"count": 0}
+    from cdumm.engine import import_handler as ih_mod
+    from cdumm.engine.import_handler import ModImportResult
+
+    def _stub(*args, **kwargs):
+        calls["count"] += 1
+        r = ModImportResult("FolderFormat3")
+        r.error = "[stub]"
+        return r
+
+    monkeypatch.setattr(ih_mod, "import_from_natt_format_3", _stub)
+
+    from cdumm.engine.import_handler import import_from_folder
+    import_from_folder(
+        folder_path=folder, game_dir=game_dir, db=MagicMock(),
+        snapshot=MagicMock(), deltas_dir=tmp_path)
+
+    assert calls["count"] == 1, (
+        f"Format 3 folder did not route to import_from_natt_format_3 "
+        f"(call count: {calls['count']}).")
