@@ -417,18 +417,6 @@ def collect_paz_dir_overrides(
     # 30+ identical warnings for one mod.
     warned_mod_ids: set[int] = set()
     for mod_id, mod_name, priority, file_path, paz_delta_path in rows:
-        # The cross-layer override scan only handles full-file PAZ-dir
-        # replacements. Crimson Browser converted mods (e.g. r457
-        # Graphics Tweaks, mod 602) store their PAMT/PAZ as SPRS
-        # sparse deltas which can't be parsed as standalone PAMTs.
-        # Detect by SPRS magic bytes and skip silently — they're not
-        # candidates for this scan. Bug report from Faisal 2026-04-26.
-        try:
-            with open(paz_delta_path, "rb") as _f:
-                if _f.read(4) == b"SPRS":
-                    continue
-        except OSError:
-            continue
         # file_path looks like 'NNNN/0.paz'; sibling PAMT lives at
         # 'NNNN/0.pamt' in the same mod's deltas.
         pamt_dir = file_path.split("/", 1)[0]
@@ -442,6 +430,25 @@ def collect_paz_dir_overrides(
         if pamt_row is None:
             continue
         pamt_delta_path = pamt_row[0]
+
+        # The cross-layer override scan only handles full-file PAZ-dir
+        # replacements. Crimson Browser converted mods (e.g. r457
+        # Graphics Tweaks, mod 602) store their PAMT as an SPRS sparse
+        # patch and the PAZ as a BSDIFF40 binary diff against vanilla.
+        # Neither can be parsed as a standalone PAMT or PAZ — feeding
+        # them to parse_pamt yields the bogus 'folder_size exceeds
+        # file size' rejection users were seeing in the InfoBar. Skip
+        # silently when EITHER stored delta is a sparse/binary patch.
+        # Bug report from Faisal 2026-04-26.
+        try:
+            with open(pamt_delta_path, "rb") as _f:
+                if _f.read(4) in (b"SPRS", b"BSDI"):
+                    continue
+            with open(paz_delta_path, "rb") as _f:
+                if _f.read(4) in (b"SPRS", b"BSDI"):
+                    continue
+        except OSError:
+            continue
 
         # Stored deltas land on disk as ``0036_0.pamt.newfile`` /
         # ``0036_0.paz.newfile`` — parse_pamt derives the PAZ number
