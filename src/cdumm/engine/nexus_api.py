@@ -296,12 +296,15 @@ def get_mod_info(mod_id: int, api_key: str) -> NexusModInfo | None:
     try:
         data = _api_request(
             f"/games/{GAME_DOMAIN}/mods/{mod_id}.json", api_key)
+        # Defensive: dict.get returns None when the key exists with a
+        # null value (vs default only when key missing). Coerce so
+        # downstream code gets the declared types. Round-6 review.
         return NexusModInfo(
-            mod_id=data.get("mod_id", mod_id),
-            name=data.get("name", mod_id),
-            version=data.get("version", ""),
-            author=data.get("author", ""),
-            updated_timestamp=data.get("updated_timestamp", 0),
+            mod_id=int(data.get("mod_id") or mod_id),
+            name=str(data.get("name") or ""),
+            version=str(data.get("version") or ""),
+            author=str(data.get("author") or ""),
+            updated_timestamp=int(data.get("updated_timestamp") or 0),
             url=f"https://www.nexusmods.com/{GAME_DOMAIN}/mods/{mod_id}",
         )
     except (NexusAuthError, NexusRateLimited):
@@ -341,24 +344,31 @@ def get_mod_files(mod_id: int, api_key: str
             # Fallback for non-dict responses (older API shape).
             raw_files = data or []
             raw_updates = []
+        # Defensive coercion: dict.get returns None when key exists
+        # with a null value (vs default only when key missing). Sort
+        # comparing None vs int raises TypeError — would silently
+        # drop the entire mod check. Same risk for any int field
+        # used in arithmetic / comparison. Round-6 review.
         files = [
             NexusFileInfo(
-                file_id=f.get("file_id", 0),
-                name=f.get("name", ""),
-                version=f.get("version", ""),
-                uploaded_timestamp=f.get("uploaded_timestamp", 0),
-                file_name=f.get("file_name", ""),
-                category_id=f.get("category_id", 0),
+                file_id=int(f.get("file_id") or 0),
+                name=str(f.get("name") or ""),
+                version=str(f.get("version") or ""),
+                uploaded_timestamp=int(
+                    f.get("uploaded_timestamp") or 0),
+                file_name=str(f.get("file_name") or ""),
+                category_id=int(f.get("category_id") or 0),
             ) for f in raw_files
         ]
         files.sort(key=lambda x: x.uploaded_timestamp, reverse=True)
         updates = [
             NexusFileUpdate(
-                old_file_id=u.get("old_file_id", 0),
-                new_file_id=u.get("new_file_id", 0),
-                old_file_name=u.get("old_file_name", ""),
-                new_file_name=u.get("new_file_name", ""),
-                uploaded_timestamp=u.get("uploaded_timestamp", 0),
+                old_file_id=int(u.get("old_file_id") or 0),
+                new_file_id=int(u.get("new_file_id") or 0),
+                old_file_name=str(u.get("old_file_name") or ""),
+                new_file_name=str(u.get("new_file_name") or ""),
+                uploaded_timestamp=int(
+                    u.get("uploaded_timestamp") or 0),
             ) for u in raw_updates
             if u.get("old_file_id") and u.get("new_file_id")
         ]
