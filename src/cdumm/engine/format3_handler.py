@@ -309,7 +309,20 @@ def _classify_intent(
     if intent.field in fs_entries:
         return None
 
-    spec = field_specs.get(intent.field)
+    # Prefix-fallback lookup mirrors the apply path at
+    # format3_apply.py:324. NattKh's mods strip the leading underscore
+    # from CDUMM-internal Pearl Abyss field names (`_cooltime` →
+    # `cooltime`); the loaded schema uses the prefixed form because
+    # that's what NattKh's IDA-MCP dumper produces. Try the user's
+    # form first, then fall back to the underscored variant. Bug from
+    # Faisal 2026-04-27: NoCooldownForALLItems mod's 201 intents on
+    # `cooltime`/`unk_post_cooltime_a`/`unk_post_cooltime_b` were all
+    # rejected because the validator skipped this fallback even though
+    # the writer had it.
+    spec = field_specs.get(intent.field) or field_specs.get(
+        f"_{intent.field}")
+    target_field_name = (intent.field if intent.field in field_specs
+                          else f"_{intent.field}")
     if spec is None:
         # parser.py drops variable-length fields (stream=None) from
         # the loaded schema, so the field-not-found path can't tell
@@ -358,7 +371,7 @@ def _classify_intent(
     # (CArray, CString, COptional, sub-structs, tagged variants)
     # are also reachable. Fields preceded only by truly-unknown
     # layouts (no fixed size AND no descriptor) still fail here.
-    if not _field_walker_reachable(schema, intent.field):
+    if not _field_walker_reachable(schema, target_field_name):
         return (
             f"field '{intent.field}' has a preceding variable-"
             f"length field with unknown binary layout (no fixed "
@@ -474,10 +487,19 @@ def _field_walker_reachable(schema, target_field: str) -> bool:
     ``_cooltime`` whose static offset can't be summed but whose
     runtime offset is computable from the typed schema + body bytes
     (handled by ``format3_apply._consume_field_bytes``).
+
+    Accepts both the raw mod-naming form (``cooltime``) and the
+    underscore-prefixed CDUMM-internal form (``_cooltime``) — falls
+    back to the prefixed variant if the unprefixed one isn't found.
     """
     from cdumm.semantic.pabgb_types import is_known_type
+    # Build a candidate list: try the requested name first, then the
+    # underscore-prefixed variant (NattKh-naming → schema-naming).
+    candidates = [target_field]
+    if not target_field.startswith("_"):
+        candidates.append(f"_{target_field}")
     for spec in schema.fields:
-        if spec.name == target_field:
+        if spec.name in candidates:
             return True
         if spec.stream_size:
             continue
