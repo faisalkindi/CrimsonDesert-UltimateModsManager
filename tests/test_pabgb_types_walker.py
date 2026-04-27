@@ -426,6 +426,98 @@ def test_payload_offset_no_entry_header_rejects_eof_offset():
                            no_entry_header=True) is None
 
 
+def test_coptional_subitem_with_unknown_discriminator_returns_none():
+    """Compound failure: COptional<SubItem> where flag=1 (present) and
+    the SubItem discriminator is an unknown value. The outer walker
+    should propagate the None from the inner tagged-variant lookup
+    rather than swallow it.
+    """
+    # flag=1 (Some) + discriminator=99 (not in SubItem variants)
+    body = b"\x01\x63"
+    assert consume_bytes("COptional<SubItem>", body, 0, len(body)) is None
+
+
+def test_field_walker_reachable_rejects_unknown_descriptor():
+    """The validator helper `_field_walker_reachable` must return False
+    when a preceding field has neither a fixed stream_size nor a
+    walker-known type descriptor. Pure pure-Python edge case; if this
+    regresses, validation would silently mark write-blocked intents
+    as supported."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeSpec:
+        name: str
+        stream_size: int
+        type_descriptor: str | None
+
+    @dataclass
+    class FakeSchema:
+        fields: list
+
+    from cdumm.engine.format3_handler import _field_walker_reachable
+
+    schema = FakeSchema(fields=[
+        FakeSpec(name="_first", stream_size=4, type_descriptor=None),
+        FakeSpec(name="_unknown_var", stream_size=0, type_descriptor=None),
+        FakeSpec(name="_after", stream_size=4, type_descriptor=None),
+    ])
+    # _first is reachable trivially
+    assert _field_walker_reachable(schema, "_first") is True
+    # _after is preceded by an unknown variable field — must NOT be
+    # reachable; validator should surface skip reason
+    assert _field_walker_reachable(schema, "_after") is False
+    # _unknown_var itself is reachable (we stop AT it, not past it)
+    assert _field_walker_reachable(schema, "_unknown_var") is True
+
+
+def test_schema_loader_logs_warning_for_unknown_descriptor(tmp_path, monkeypatch, caplog):
+    """When an override declares ``"type": "Bogus<u32>"`` the loader
+    must log at WARNING and ignore the override (fall back to legacy
+    NattKh behavior). Confirms the dead-code-defense path runs."""
+    import json
+    import logging
+    from cdumm.semantic import parser as parser_mod
+
+    base_path = tmp_path / "pabgb_complete_schema.json"
+    base_path.write_text(json.dumps({
+        "FakeBogusTable": [
+            {"f": "_realField", "type": "direct_u32", "stream": 4},
+        ]
+    }))
+
+    real_open = open
+
+    def patched_open(path, *args, **kwargs):
+        if "pabgb_complete_schema.json" in str(path):
+            return real_open(base_path, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", patched_open)
+    monkeypatch.setattr(
+        parser_mod, "_load_type_overrides",
+        lambda _dir: {
+            "FakeBogusTable": {
+                "_realField": {"type": "Bogus<u32>"},  # unknown grammar
+            }
+        }
+    )
+    real_exists = parser_mod.Path.exists
+    monkeypatch.setattr(
+        parser_mod.Path, "exists",
+        lambda self: True if "pabgb_complete_schema.json" in str(self)
+        else real_exists(self))
+
+    parser_mod._loaded_schemas = None
+    with caplog.at_level(logging.WARNING, logger="cdumm.semantic.parser"):
+        parser_mod._load_schemas()
+
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "Bogus<u32>" in msgs and "_realField" in msgs, (
+        f"Expected warning naming the bogus descriptor + field; "
+        f"got: {msgs!r}")
+
+
 def test_iteminfo_override_loads_with_descriptors():
     """Force a fresh schema load and verify ItemInfo's _cooltime now
     has a type_descriptor populated by the override file."""
