@@ -152,7 +152,11 @@ def is_natt_format_3(path: Path) -> bool:
     try:
         if not path.is_file() or path.suffix.lower() != ".json":
             return False
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig transparently strips a UTF-8 BOM. Without this,
+        # Format 3 mods authored in Notepad on Windows (which saves
+        # with BOM by default) would be silently misclassified as
+        # NOT Format 3. Iteration 10 systematic-debugging finding.
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError, UnicodeDecodeError):
         return False
@@ -1932,7 +1936,9 @@ def process_json_patches_for_overlay(
         logger.error("JSON source not found: %s", json_source)
         return []
 
-    patch_data = json.loads(json_path.read_text(encoding="utf-8"))
+    # utf-8-sig matches the BOM-tolerant readers elsewhere in this
+    # module so user-edited mod JSONs from Notepad don't fail apply.
+    patch_data = json.loads(json_path.read_text(encoding="utf-8-sig"))
     patches = patch_data.get("patches", [])
     if not patches:
         return []

@@ -87,7 +87,7 @@ def _raw_field_metadata(table_name: str, field_name: str) -> dict | None:
         for path in candidates:
             if path.exists():
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, "r", encoding="utf-8-sig") as f:
                         raw = json.load(f)
                     # Index by lowercase table name for matching
                     # parser.py's lowercase convention.
@@ -164,7 +164,11 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
     surfaces those messages directly.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig transparently strips a UTF-8 BOM. Mod files
+        # authored on Windows in Notepad save with BOM by default;
+        # without this they'd raise a confusing "Unexpected UTF-8
+        # BOM" error here. Iteration 10 systematic-debugging finding.
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError, UnicodeDecodeError) as e:
         raise ValueError(f"Cannot read Format 3 file: {e}") from e

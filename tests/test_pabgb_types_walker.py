@@ -394,6 +394,48 @@ def test_apply_warning_mentions_walker_bail_for_variable_length_failures():
         "variable-length walker bail. Adversarial E3 2026-04-27.")
 
 
+def test_format3_mod_with_utf8_bom_imports_correctly(tmp_path):
+    """Iteration 10 systematic-debugging finding: a Format 3 mod JSON
+    file authored on Windows (Notepad's default UTF-8 BOM) was
+    silently misclassified by is_natt_format_3 and rejected by
+    parse_format3_mod with a confusing ValueError. Mod author would
+    see "not a Format 3 file" with no hint that the BOM is the
+    culprit.
+
+    Both detection AND parse paths must transparently handle BOM via
+    utf-8-sig so user-authored mod files don't silently fail
+    classification.
+    """
+    import json
+    from cdumm.engine.json_patch_handler import is_natt_format_3
+    from cdumm.engine.format3_handler import parse_format3_mod
+
+    mod_path = tmp_path / "bom_mod.json"
+    mod_data = {
+        "modinfo": {"name": "Test"},
+        "format": 3,
+        "target": "iteminfo.pabgb",
+        "intents": [
+            {"entry": "X", "key": 1, "field": "_cooltime",
+             "op": "set", "new": 0}
+        ]
+    }
+    mod_path.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps(mod_data).encode("utf-8")
+    )
+
+    # Detection must classify it correctly
+    assert is_natt_format_3(mod_path) is True, (
+        "BOM-prefixed Format 3 mod silently classified as NOT Format 3 "
+        "— Notepad on Windows adds a BOM by default; users editing "
+        "their mod in Notepad would have it silently rejected.")
+
+    # Parse must succeed without raising
+    target, intents = parse_format3_mod(mod_path)
+    assert target == "iteminfo.pabgb"
+    assert len(intents) == 1
+
+
 def test_override_file_with_utf8_bom_loads_correctly(tmp_path, monkeypatch):
     """Iteration 9 systematic-debugging finding: override JSON files
     saved with a UTF-8 BOM (Notepad's default on Windows) silently
