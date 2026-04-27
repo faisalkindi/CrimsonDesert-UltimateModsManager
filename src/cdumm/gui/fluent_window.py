@@ -3763,6 +3763,17 @@ class CdummWindow(FluentWindow):
                         if len(_loose) >= 2:
                             folder_vars = [c["_base_dir"] for c in _loose]
                     if len(folder_vars) < 2:
+                        # Format 3 variant pack (e.g. CrimsonWings
+                        # ships 5 .field.json levels in one ZIP). Same
+                        # picker shape — surface the materialised
+                        # variant dirs so the user picks one level.
+                        from cdumm.engine.import_handler import (
+                            find_format3_variants,
+                        )
+                        _f3 = find_format3_variants(_current)
+                        if len(_f3) >= 2:
+                            folder_vars = [c["_base_dir"] for c in _f3]
+                    if len(folder_vars) < 2:
                         break  # leaf — no more variant choices to offer
 
                     fv_dialog = FolderVariantDialog(folder_vars, self)

@@ -898,6 +898,141 @@ def find_loose_file_variants(path: Path) -> list[dict]:
     return _find_loose_file_candidates(path, max_depth=5)
 
 
+# Maximum allowed ratio between max-intent-count and min-intent-count
+# variants in a Format 3 pack. CrimsonWings ships every level with the
+# same 365 intents (ratio 1.0). A pack where one variant has 10 intents
+# and another has 1000 is almost certainly not the same mod's variants.
+_F3_VARIANT_INTENT_RATIO_MAX = 2.0
+# Minimum length of the shared stem prefix. Two unrelated F3 mods often
+# share single-letter prefixes by accident; require at least 3 chars.
+_F3_VARIANT_MIN_COMMON_PREFIX = 3
+
+
+def _f3_variant_distinguishing_id(filename: str, common_prefix: str) -> str:
+    """Strip the shared prefix and known F3 suffixes from a filename
+    to surface the per-variant distinguishing piece.
+    e.g. 'CrimsonWings_10pct.field.json' with prefix 'CrimsonWings_'
+         returns '10pct'.
+    """
+    stem = filename
+    for suffix in (".field.json", ".json"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    if stem.startswith(common_prefix):
+        stem = stem[len(common_prefix):]
+    # Strip any trailing/leading punctuation that the prefix split
+    # left behind (e.g. underscore separator).
+    return stem.strip("._- ") or filename
+
+
+def _scan_format3_variant_pack(path: Path) -> list[tuple[Path, str]] | None:
+    """Pure-detection variant of `find_format3_variants` — no side
+    effects.
+
+    Returns a list of (json_path, variant_id) when the path matches
+    the variant-pack pattern. Returns None otherwise. Callers that
+    only need to ANSWER "is this a variant pack" can use this to
+    avoid the materialisation side effect.
+    """
+    from cdumm.engine.json_patch_handler import is_natt_format_3
+    f3_jsons: list[tuple[Path, dict]] = []
+    try:
+        for p in path.rglob("*.json"):
+            if not p.is_file():
+                continue
+            if "_f3_variants" in p.parts:
+                continue
+            if not is_natt_format_3(p):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+            except (OSError, ValueError, UnicodeDecodeError):
+                continue
+            f3_jsons.append((p, data))
+    except OSError:
+        return None
+
+    if len(f3_jsons) < 2:
+        return None
+    targets = {data.get("target") for _, data in f3_jsons}
+    if len(targets) != 1:
+        return None
+    names = [p.name for p, _ in f3_jsons]
+    prefix = _common_prefix(names)
+    if len(prefix) < _F3_VARIANT_MIN_COMMON_PREFIX:
+        return None
+    counts = [len(data.get("intents") or []) for _, data in f3_jsons]
+    if min(counts) <= 0:
+        return None
+    if max(counts) / min(counts) > _F3_VARIANT_INTENT_RATIO_MAX:
+        return None
+
+    return [(src, _f3_variant_distinguishing_id(src.name, prefix))
+            for src, _ in f3_jsons]
+
+
+def find_format3_variants(path: Path) -> list[dict]:
+    """Detect a Format 3 variant pack AND materialise each variant
+    into its own subdirectory so the existing folder-variant picker
+    can consume it.
+
+    A variant pack is 2+ Format 3 JSONs that:
+      * share a common stem prefix of at least 3 characters
+      * all declare the same `target` table
+      * have similar intent counts (max/min ratio <= 2.0)
+
+    Returns:
+        [{"id": "10pct", "_base_dir": Path(<path>/_f3_variants/10pct)}]
+
+    Empty list when the conditions are not met.
+
+    SIDE EFFECT: writes into `path/_f3_variants/`. Use only on a temp
+    extraction directory, not the user's source folder. Use
+    `_scan_format3_variant_pack` for read-only detection.
+    """
+    import shutil as _shutil
+    detected = _scan_format3_variant_pack(path)
+    if not detected:
+        return []
+
+    materialise_root = path / "_f3_variants"
+    try:
+        materialise_root.mkdir(exist_ok=True)
+    except OSError as e:
+        logger.warning("Could not create F3 variant staging dir: %s", e)
+        return []
+
+    out: list[dict] = []
+    for src_path, variant_id in detected:
+        variant_dir = materialise_root / variant_id
+        try:
+            variant_dir.mkdir(exist_ok=True)
+            dst = variant_dir / src_path.name
+            if not dst.exists():
+                _shutil.copy2(src_path, dst)
+        except OSError as e:
+            logger.warning("Could not materialise F3 variant %s: %s",
+                           variant_id, e)
+            continue
+        out.append({"id": variant_id, "_base_dir": variant_dir})
+
+    return out
+
+
+def _common_prefix(strings: list[str]) -> str:
+    """Longest common leading substring across all strings."""
+    if not strings:
+        return ""
+    s1 = min(strings)
+    s2 = max(strings)
+    for i, ch in enumerate(s1):
+        if i >= len(s2) or s2[i] != ch:
+            return s1[:i]
+    return s1
+
+
 def detect_loose_file_mod(path: Path) -> dict | None:
     """Detect mods that ship loose game files with a mod.json metadata file.
 
@@ -1804,6 +1939,25 @@ def import_from_zip(
                 json_path=f3_jsons[0], game_dir=game_dir, db=db,
                 snapshot=snapshot, deltas_dir=deltas_dir)
         if len(f3_jsons) > 1:
+            # Variant pack (CrimsonWings: 10pct/25pct/50pct/75pct/
+            # infinite of one mod) is detected via stem prefix +
+            # same target + similar intent counts. The GUI's variant
+            # picker handles those before the worker runs, so reaching
+            # here with a variant-pack shape means the user dropped
+            # the ZIP through a non-picker path. Give a specific
+            # message naming the variants. True multi-mod packs
+            # (different targets / unrelated mods) get the original
+            # "import one at a time" guidance.
+            f3_pack = _scan_format3_variant_pack(tmp_path)
+            if f3_pack:
+                ids = ", ".join(vid for _, vid in f3_pack)
+                result.error = (
+                    f"This zip contains {len(f3_pack)} variants of "
+                    f"one Format 3 mod ({ids}). Drop the zip on the "
+                    f"main window to pick one variant, or extract the "
+                    f"zip and import only the variant JSON you want."
+                )
+                return result
             names = ", ".join(p.name for p in f3_jsons)
             result.error = (
                 f"This zip contains {len(f3_jsons)} Format 3 mods "
@@ -2215,6 +2369,16 @@ def import_from_folder(
             snapshot=snapshot, deltas_dir=deltas_dir)
     if len(f3_jsons) > 1:
         result = ModImportResult(mod_name)
+        f3_pack = _scan_format3_variant_pack(folder_path)
+        if f3_pack:
+            ids = ", ".join(vid for _, vid in f3_pack)
+            result.error = (
+                f"This folder contains {len(f3_pack)} variants of "
+                f"one Format 3 mod ({ids}). Drop the folder on the "
+                f"main window to pick a variant, or import only the "
+                f"specific variant JSON you want."
+            )
+            return result
         names = ", ".join(p.name for p in f3_jsons)
         result.error = (
             f"This folder contains {len(f3_jsons)} Format 3 mods "
