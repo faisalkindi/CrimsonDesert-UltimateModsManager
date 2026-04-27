@@ -353,6 +353,18 @@ def test_ordered_fields_typo_refuses_to_load_table(tmp_path, monkeypatch, caplog
             "the typo loudly.")
 
 
+def test_consume_bytes_rejects_negative_offset():
+    """Superpowers review SECURITY: ``struct.unpack_from(buf, -4)``
+    returns plausible bytes from the buffer's end instead of raising.
+    The walker must reject negative offsets up front so corrupted
+    cumulative offsets can't produce silent reads from unrelated
+    data."""
+    body = b"\x00" * 100
+    assert consume_bytes("u32", body, -1, len(body)) is None
+    assert consume_bytes("CString", body, -4, len(body)) is None
+    assert consume_bytes("CArray<u32>", body, -8, len(body)) is None
+
+
 def test_payload_offset_no_entry_header_rejects_eof_offset():
     """Adversarial CONSENSUS-2: ``_payload_offset(no_entry_header=True)``
     used `entry_off <= len(body)`, allowing the boundary value
