@@ -1136,14 +1136,71 @@ def import_from_7z(
                                       mod_name, existing_mod_id)
 
 
+_FIND_7Z_DEFAULT_PATHS: list[str] = [
+    r"C:\Program Files\7-Zip\7z.exe",
+    r"C:\Program Files (x86)\7-Zip\7z.exe",
+]
+
+# Documented registry locations the official 7-Zip installer writes:
+#   HKLM\SOFTWARE\7-Zip\Path                 (admin / system install)
+#   HKCU\Software\7-Zip\Path                 (user install)
+#   HKLM\SOFTWARE\WOW6432Node\7-Zip\Path     (32-bit on 64-bit Windows)
+# Value is the install directory. The exe is `<dir>\7z.exe`.
+_FIND_7Z_REGISTRY_KEYS: list[tuple[str, str]] = [
+    ("HKEY_LOCAL_MACHINE", r"SOFTWARE\7-Zip"),
+    ("HKEY_CURRENT_USER", r"Software\7-Zip"),
+    ("HKEY_LOCAL_MACHINE", r"SOFTWARE\WOW6432Node\7-Zip"),
+]
+
+
+def _find_7z_in_registry() -> str | None:
+    """Read the 7-Zip install path from the Windows registry.
+
+    Returns the absolute path to `7z.exe` if any documented key
+    points at a directory containing the executable, else None.
+    Silently returns None on non-Windows platforms.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    hives = {
+        "HKEY_LOCAL_MACHINE": winreg.HKEY_LOCAL_MACHINE,
+        "HKEY_CURRENT_USER": winreg.HKEY_CURRENT_USER,
+    }
+    for hive_name, sub in _FIND_7Z_REGISTRY_KEYS:
+        hive = hives.get(hive_name)
+        if hive is None:
+            continue
+        try:
+            with winreg.OpenKey(hive, sub) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+        except (FileNotFoundError, OSError):
+            continue
+        if not value:
+            continue
+        candidate = Path(value) / "7z.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _find_7z() -> str | None:
-    """Locate the 7-Zip executable on Windows."""
-    for candidate in [
-        r"C:\Program Files\7-Zip\7z.exe",
-        r"C:\Program Files (x86)\7-Zip\7z.exe",
-    ]:
+    """Locate the 7-Zip executable on Windows.
+
+    Search order:
+      1. Default install paths (Program Files / Program Files (x86))
+      2. Windows registry — covers Scoop, custom installs, NanaZip,
+         and any case where 7-Zip isn't on PATH (the installer does
+         not add itself to PATH by default).
+      3. PATH lookup via shutil.which.
+    """
+    for candidate in _FIND_7Z_DEFAULT_PATHS:
         if Path(candidate).exists():
             return candidate
+    from_registry = _find_7z_in_registry()
+    if from_registry:
+        return from_registry
     return shutil.which("7z")
 
 
