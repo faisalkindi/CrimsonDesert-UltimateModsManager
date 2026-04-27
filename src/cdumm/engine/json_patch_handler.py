@@ -63,6 +63,56 @@ def _prettify(name: str) -> str:
     return prettify_mod_name(name)
 
 
+_PABGB_DATA_TABLE_EXTS = (".pabgb", ".pabgh", ".pamt")
+
+
+def _should_reject_partial_pabgb(game_file: str, applied: int,
+                                  mismatched: int,
+                                  patch_data: dict) -> bool:
+    """Decide whether a partial-mismatch import on a data-table file
+    must be rejected.
+
+    Default behavior: ANY mismatch on .pabgb / .pabgh / .pamt rejects.
+    Reason: shipping half-patched data tables crashes the game when
+    paired-array fields drift (Kliff Wears Damiane V2 reference case
+    — 458/464 patches applied, 6 mismatched, game crashed on splash).
+
+    Opt-in escape: mod author sets `allow_partial_apply: true` at the
+    top level of the patch JSON OR inside `modinfo`. Cost-only or
+    scalar-only mods (e.g. Refinement Cost Reforged: 7959/7976 verified
+    on multichangeinfo.pabgb) can bypass this gate and accept the risk
+    that mismatched changes will be skipped.
+
+    Returns True to reject the import, False to allow it through.
+    """
+    if mismatched <= 0:
+        return False
+    gf_lower = game_file.lower()
+    if not any(gf_lower.endswith(ext) for ext in _PABGB_DATA_TABLE_EXTS):
+        return False
+    if _allow_partial_apply(patch_data):
+        logger.warning(
+            "Partial apply allowed for %s: %d/%d patches verified, "
+            "%d skipped (mod set allow_partial_apply=true).",
+            game_file, applied, applied + mismatched, mismatched)
+        return False
+    return True
+
+
+def _allow_partial_apply(patch_data: dict) -> bool:
+    """Read the `allow_partial_apply` opt-in flag from either the
+    patch JSON top level or its `modinfo` block. Returns False if
+    neither is set or the value is not truthy."""
+    if not isinstance(patch_data, dict):
+        return False
+    if patch_data.get("allow_partial_apply") is True:
+        return True
+    modinfo = patch_data.get("modinfo")
+    if isinstance(modinfo, dict) and modinfo.get("allow_partial_apply") is True:
+        return True
+    return False
+
+
 # ── Inline value editing helpers ──────────────────────────────────────
 
 _VALUE_FORMATS = {
@@ -1602,11 +1652,11 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         # Kliff Wears Damiane V2 is the reference case: 458/464 patches
         # apply, 6 miss, a 4.6 MB delta gets stored, user enables it,
         # game crashes on splash. Abort the import with a clear error.
-        gf_lower = game_file.lower()
-        is_data_table = (gf_lower.endswith(".pabgb")
-                         or gf_lower.endswith(".pabgh")
-                         or gf_lower.endswith(".pamt"))
-        if mismatched > 0 and is_data_table:
+        # Authors of cost-only / scalar-only mods (e.g. Refinement Cost
+        # Reforged, 7959/7976 verified) can opt-in via
+        # `allow_partial_apply: true` to bypass this gate.
+        if mismatched > 0 and _should_reject_partial_pabgb(
+                game_file, applied, mismatched, patch_data):
             game_ver = patch_data.get("game_version", "unknown")
             logger.error(
                 "JSON import: aborting — %d of %d patches mismatched on "
