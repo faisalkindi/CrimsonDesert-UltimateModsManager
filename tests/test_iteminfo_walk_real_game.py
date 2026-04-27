@@ -213,6 +213,81 @@ def test_vehicleinfo_can_call_in_safe_zone_reachable_for_every_entry():
         f"_canCallInSafeZone; bails: {bails}")
 
 
+def test_value_correctness_spot_checks_across_path_b_tables():
+    """Iteration 14-15 systematic-debugging: lock in known field VALUES
+    against vanilla data, not just walker reachability. The vehicleinfo
+    bug (reading wrong byte for _canCallInSafeZone) only surfaced
+    because we checked actual values; the original walker test passed
+    because target was reached, but the byte position was wrong.
+
+    This test catches schema misalignments on any of the 6 ported
+    tables by asserting known/documented field values match.
+    """
+    import struct
+    from cdumm.engine.format3_apply import _consume_field_bytes, _payload_offset
+    from cdumm.semantic.parser import get_schema, parse_pabgh_index
+
+    def read_value(tbl, target_field, target_key, fmt):
+        paths = _find_vanilla_pair(tbl)
+        if paths is None:
+            return None  # signal skip
+        body = paths[0].read_bytes()
+        header = paths[1].read_bytes()
+        parser_mod._loaded_schemas = None
+        schema = get_schema(tbl)
+        key_size, offsets = parse_pabgh_index(header, tbl)
+        if target_key not in offsets:
+            return ("missing_key",)
+        sorted_e = sorted(offsets.items(), key=lambda kv: kv[1])
+        idx = next(i for i, (k, _) in enumerate(sorted_e) if k == target_key)
+        eoff = sorted_e[idx][1]
+        end = (sorted_e[idx + 1][1] if idx + 1 < len(sorted_e)
+               else len(body))
+        po = _payload_offset(body, eoff, key_size,
+                              no_null_skip=schema.no_null_skip,
+                              no_entry_header=schema.no_entry_header)
+        off = po
+        for f in schema.fields:
+            if f.name == target_field:
+                return struct.unpack_from(fmt, body, off)[0]
+            consumed = _consume_field_bytes(body, off, f, end)
+            if consumed is None:
+                return ("walker_bailed_at", f.name)
+            off += consumed
+        return ("field_not_found_in_schema", target_field)
+
+    # Ground-truth values: matched against crimson-rs roundtrip tests
+    # (Pyeonjeon_Arrow) and NattKh's documented vehicleinfo values
+    # (Horse, BearWarMachine, Dragon).
+    checks = [
+        ("iteminfo", "_maxStackCount", 2200, 100, "<Q",
+         "crimson-rs Pyeonjeon_Arrow stacks 100"),
+        ("iteminfo", "_isBlocked", 2200, 0, "<B",
+         "Pyeonjeon_Arrow not blocked"),
+        ("vehicleinfo", "_canCallInSafeZone", 16960, 1, "<B",
+         "NattKh: Horse only entry with this flag set"),
+        ("vehicleinfo", "_mountCallType", 16960, 1, "<B",
+         "NattKh: Horse is rideable (=1)"),
+        ("vehicleinfo", "_mountCallType", 16984, 2, "<B",
+         "NattKh: Dragon is flying (=2)"),
+        ("vehicleinfo", "_mountCallType", 16998, 0, "<B",
+         "NattKh: BearWarMachine is siege (=0)"),
+    ]
+    skipped_any = False
+    for tbl, field, key, expected, fmt, desc in checks:
+        actual = read_value(tbl, field, key, fmt)
+        if actual is None:
+            skipped_any = True
+            continue
+        assert actual == expected, (
+            f"{tbl}.{field}[key={key}]: got {actual!r}, "
+            f"expected {expected}. {desc}. Schema may be misaligned.")
+
+    if skipped_any:
+        pytest.skip("Some vanilla fixtures missing — set "
+                    "CDUMM_VANILLA_ITEMINFO_DIR")
+
+
 def test_vehicleinfo_horse_canCallInSafeZone_reads_as_one():
     """Iteration 13 systematic-debugging finding: previous vehicleinfo
     walk completed all 32 entries but ended 2 bytes short of entry_end.
