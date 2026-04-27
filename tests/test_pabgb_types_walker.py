@@ -394,6 +394,33 @@ def test_apply_warning_mentions_walker_bail_for_variable_length_failures():
         "variable-length walker bail. Adversarial E3 2026-04-27.")
 
 
+def test_consume_field_bytes_legacy_fixed_path_rejects_past_eof():
+    """Iteration 6 systematic-debugging finding: the legacy fixed-stream-
+    size branch in `_consume_field_bytes` returns ``spec.stream_size``
+    blindly without verifying the bytes actually fit before EOF or
+    `entry_end`. The walker branch checks bounds; the legacy branch
+    doesn't. Production callers compare the return value to entry_end
+    AFTER advancing, so they'd catch a bad write — but the consume
+    accounting itself is wrong.
+    """
+    from cdumm.engine.format3_apply import _consume_field_bytes
+    from cdumm.semantic.parser import FieldSpec
+
+    fixed_spec = FieldSpec(name="y", stream_size=4,
+                            field_type="direct_u32", struct_fmt="I")
+    body = b"\x00" * 9
+    # Inside body — must consume 4
+    assert _consume_field_bytes(body, 0, fixed_spec, len(body)) == 4
+    assert _consume_field_bytes(body, 5, fixed_spec, len(body)) == 4
+    # At EOF — must return None (no bytes left)
+    assert _consume_field_bytes(body, 9, fixed_spec, len(body)) is None
+    assert _consume_field_bytes(body, 6, fixed_spec, len(body)) is None  # only 3 bytes left, need 4
+    # Past EOF — must return None
+    assert _consume_field_bytes(body, 100, fixed_spec, len(body)) is None
+    # Past entry_end (within body) — must return None
+    assert _consume_field_bytes(body, 5, fixed_spec, 7) is None  # entry_end=7, off+4=9 > 7
+
+
 def test_consume_field_bytes_legacy_cstring_path_rejects_negative_offset():
     """Iteration 5 systematic-debugging finding: the legacy CString path
     in `_consume_field_bytes` (used for fields without a type_descriptor

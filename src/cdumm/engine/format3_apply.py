@@ -385,7 +385,13 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
         return 4 + slen
     if spec.stream_size:
         # Fixed-size field (struct_fmt set OR raw direct_NB): consume
-        # the declared stream_size verbatim.
+        # the declared stream_size IF it fits within the entry payload
+        # AND the buffer. Iteration 6 systematic-debugging finding —
+        # the previous unconditional `return spec.stream_size` would
+        # report a successful consume even past EOF, breaking
+        # downstream offset accounting.
+        if off + spec.stream_size > min(entry_end, len(body)):
+            return None
         return spec.stream_size
     # stream_size=0 means the schema didn't classify this — can't
     # walk safely.
