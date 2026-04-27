@@ -126,6 +126,95 @@ def test_v2_single_patch_with_many_distinct_bracket_groups_returns_false(tmp_pat
         "Cog must hide.")
 
 
+def test_variant_mod_in_db_keeps_cog(tmp_path):
+    """Bug from Faisal 2026-04-27 round 4: NPC Trust Gain has a
+    `variants` column in DB (multi-variant mod: 'Trust Me 2x', '10x',
+    '20x' — user picks one). The merged.json has 2 patches across
+    different game_files, so `_detect_preset_groups` returns None.
+    My json-source-only helper hid the cog — but the cog opens a
+    legitimate variant picker for this mod.
+
+    The cog visibility logic must ALSO honor the `variants` DB
+    column. When variants is set, the cog opens
+    `show_variant_mod(variants=...)` which is meaningful, regardless
+    of what's inside the json_source.
+    """
+    # Mirror the composite decision the GUI builders make in
+    # mods_page.py: variants wins → json_source helper → DB flag.
+    def cog_visibility(mod_dict):
+        from cdumm.gui.pages.mods_page import (
+            _json_source_has_configurable_content,
+        )
+        if mod_dict.get("variants"):
+            return True
+        json_src = mod_dict.get("json_source")
+        if json_src:
+            return _json_source_has_configurable_content(json_src)
+        return bool(mod_dict.get("configurable"))
+
+    # NPC Trust Gain shape: variants set, json_source has 2 patches
+    # across different game_files (helper would otherwise return False).
+    json_path = tmp_path / "merged.json"
+    json_path.write_text(json.dumps({
+        "patches": [
+            {"game_file": "iteminfo.pabgb",
+             "changes": [{"label": "trust gain", "offset": 0,
+                          "original": "01", "patched": "ff"}]},
+            {"game_file": "npcinfo.pabgb",
+             "changes": [{"label": "npc trust mod", "offset": 0,
+                          "original": "02", "patched": "ff"}]},
+        ]
+    }))
+    mod_with_variants = {
+        "configurable": 0,
+        "json_source": str(json_path),
+        "variants": '[{"label":"Trust Me 10x","filename":"x10.json","group":0},'
+                    '{"label":"Trust Me 2x","filename":"x2.json","group":0}]',
+    }
+    assert cog_visibility(mod_with_variants) is True
+
+    # Without variants, the same json_source would not qualify
+    # (different game_files, no preset group detected).
+    mod_without_variants = {
+        "configurable": 0,
+        "json_source": str(json_path),
+        "variants": None,
+    }
+    assert cog_visibility(mod_without_variants) is False
+
+
+def test_list_mods_returns_variants_column(tmp_path):
+    """Regression guard: `list_mods` must surface the `variants`
+    column so the GUI can use it for cog visibility. Without this,
+    the production code's `mod.get("variants")` is always falsy and
+    the cog hides on multi-variant mods like NPC Trust Gain."""
+    from cdumm.engine.mod_manager import ModManager
+    from cdumm.storage.database import Database
+
+    db_path = tmp_path / "test.db"
+    db = Database(db_path)
+    db.initialize()
+
+    # Insert a multi-variant mod row mirroring NPC Trust Gain.
+    variants_json = (
+        '[{"label":"Trust Me 10x","filename":"x10.json","group":0},'
+        '{"label":"Trust Me 2x","filename":"x2.json","group":0}]'
+    )
+    db.connection.execute(
+        "INSERT INTO mods (name, mod_type, enabled, priority, variants) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("NPC Trust Gain", "paz", 1, 0, variants_json),
+    )
+    db.connection.commit()
+
+    mm = ModManager(db, tmp_path / "deltas")
+    mods = mm.list_mods()
+    assert len(mods) == 1
+    assert mods[0]["variants"] == variants_json, (
+        "list_mods must include the variants column so the GUI can "
+        "decide cog visibility for multi-variant mods.")
+
+
 def test_v2_multi_patch_with_distinct_bracket_groups_returns_true(tmp_path):
     """Multi-patch mod where each patch has a different bracket-group
     prefix IS a real preset choice (preset_groups pattern 1). The

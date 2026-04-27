@@ -730,7 +730,10 @@ class ModsPage(QWidget):
 
             # Check if configurable
             # Cog visibility:
-            #  * If the mod has a json_source, the helper is
+            #  * If the mod has variants (multi-variant pick-one mod
+            #    like NPC Trust Gain: 2x/10x/20x), the cog opens a
+            #    legitimate variant picker — show it.
+            #  * Else if the mod has a json_source, the helper is
             #    authoritative — overrides the DB `configurable` flag
             #    so stale flags from earlier scans (e.g. Infinite
             #    Horse: configurable=1 from old has_labeled_changes
@@ -739,11 +742,14 @@ class ModsPage(QWidget):
             #    folder-variant mods, archive variants, etc. where
             #    the cog opens a non-JSON panel).
             #  Bug from Faisal 2026-04-27.
-            json_src = self._mod_manager.get_json_source(mod_id)
-            if json_src:
-                has_config = _json_source_has_configurable_content(json_src)
+            if mod.get("variants"):
+                has_config = True
             else:
-                has_config = bool(mod.get("configurable"))
+                json_src = self._mod_manager.get_json_source(mod_id)
+                if json_src:
+                    has_config = _json_source_has_configurable_content(json_src)
+                else:
+                    has_config = bool(mod.get("configurable"))
 
             # Extract version: drop_name (clean) → DB version → ?
             # drop_name has cleaner naming from NexusMods/folder names
@@ -874,11 +880,14 @@ class ModsPage(QWidget):
             pending = "Apply to Deactivate"
 
         # See cog-visibility comment in the left-column builder.
-        json_src = self._mod_manager.get_json_source(mod_id)
-        if json_src:
-            has_config = _json_source_has_configurable_content(json_src)
+        if mod.get("variants"):
+            has_config = True
         else:
-            has_config = bool(mod.get("configurable"))
+            json_src = self._mod_manager.get_json_source(mod_id)
+            if json_src:
+                has_config = _json_source_has_configurable_content(json_src)
+            else:
+                has_config = bool(mod.get("configurable"))
 
         display_ver = ""
         dn = mod.get("drop_name") or ""
@@ -2058,11 +2067,14 @@ class ModsPage(QWidget):
             # context menu doesn't offer a "Configure..." that opens
             # an empty panel.
             # See cog-visibility comment in the left-column builder.
-            json_src = self._mod_manager.get_json_source(mod_id)
-            if json_src:
-                has_config = _json_source_has_configurable_content(json_src)
+            if mod.get("variants"):
+                has_config = True
             else:
-                has_config = bool(mod.get("configurable"))
+                json_src = self._mod_manager.get_json_source(mod_id)
+                if json_src:
+                    has_config = _json_source_has_configurable_content(json_src)
+                else:
+                    has_config = bool(mod.get("configurable"))
             if has_config:
                 menu.addAction(Action(FluentIcon.SETTING, "Configure...", triggered=lambda: self._on_config_clicked(mod_id)))
 

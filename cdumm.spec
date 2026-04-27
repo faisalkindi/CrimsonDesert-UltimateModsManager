@@ -34,6 +34,7 @@ a = Analysis(
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
            ('src/cdumm/translations', 'cdumm/translations'),
            ('schemas/pabgb_complete_schema.json', 'schemas'),
+           ('schemas/pabgb_type_overrides.json', 'schemas'),
            ('field_schema/README.md', 'field_schema'),
            ('assets/fonts/Oxanium-VariableFont_wght.ttf', 'assets/fonts'),
            ('assets/cdumm-logo.png', 'assets'),
