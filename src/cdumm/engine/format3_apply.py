@@ -357,7 +357,6 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
       3. Legacy ``stream_size`` for fixed-size fields.
       4. None (caller must bail).
     """
-    import struct as _struct
     descriptor = getattr(spec, "type_descriptor", None)
     if descriptor:
         from cdumm.semantic.pabgb_types import consume_bytes
@@ -365,7 +364,13 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
     if spec.field_type == "CString":
         if off + 4 > min(len(body), entry_end):
             return None
-        slen = _struct.unpack_from("<I", body, off)[0]
+        slen = struct.unpack_from("<I", body, off)[0]
+        # Defensive 10MB cap mirroring pabgb_types.consume_bytes; a
+        # garbage slen=0xFFFFFFFF passes the bounds check trivially
+        # because off+4+4294967295 overflows the comparison only after
+        # int promotion, but the cap makes the failure intent explicit.
+        if slen > 10_000_000:
+            return None
         if off + 4 + slen > min(len(body), entry_end):
             return None
         return 4 + slen

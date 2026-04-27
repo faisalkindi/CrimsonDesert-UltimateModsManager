@@ -227,18 +227,18 @@ def test_fieldinfo_can_call_vehicle_reachable_for_every_entry():
 
 
 def test_stageinfo_complete_count_reachable_for_majority():
-    """Stageinfo override reaches `_completeCount` for ~93%+ of entries.
-    The remaining 6.5% hit edge cases in `_sequencerDesc` (optional-object
-    variant NattKh's parser also can't decode) and earlier list fields
-    where the walker's offset slips. Asserts a hard floor of 90% so
-    regressions are caught while not blocking on the known unreversed
-    edge cases."""
+    """Stageinfo override reaches `_completeCount` for 93.5% of entries
+    (verified empirically 2026-04-27: 47186/50463). The remaining 6.5%
+    hit `_sequencerDesc` optional-object variant NattKh's parser also
+    can't decode. Asserts a hard floor of 93% so a regression dropping
+    to 92% would flag — Requirements review caught the original 90%
+    floor as too loose to detect realistic regressions."""
     total, target_reached, walked_full, bails = _walk_table(
         "stageinfo", "_completeCount")
     coverage = target_reached / total
-    assert coverage >= 0.90, (
+    assert coverage >= 0.93, (
         f"stageinfo: only {target_reached}/{total} ({coverage:.1%}) "
-        f"entries reached _completeCount; expected >=90%. "
+        f"entries reached _completeCount; expected >=93%. "
         f"Bails: {dict(sorted(bails.items(), key=lambda x: -x[1])[:5])}")
 
 

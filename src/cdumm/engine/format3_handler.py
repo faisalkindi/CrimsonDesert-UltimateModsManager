@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,7 @@ from cdumm.engine.field_schema import (
     load_field_schema,
     locate_field,
 )
-from cdumm.semantic.parser import get_schema, has_schema
+from cdumm.semantic.parser import get_schema, has_schema, parse_pabgh_index
 
 logger = logging.getLogger(__name__)
 
@@ -347,18 +348,21 @@ def _classify_intent(
             f"needs a TID-based field schema and lands in Phase 2"
         )
 
-    # Final check: the writer locates fields by walking the schema
-    # in order, summing stream_sizes. If any preceding field has
-    # stream_size=0 (variable-length), the walk bails and the
-    # writer silently skips. The validator must surface this case
-    # so 'supported' truly means 'will be written'.
-    if _field_offset_in_payload(schema, intent.field) is None:
+    # Final check: the apply pipeline reaches a field by walking
+    # the schema, consuming each preceding field's bytes. With
+    # Path B's pabgb_types walker, fields with a known descriptor
+    # (CArray, CString, COptional, sub-structs, tagged variants)
+    # are also reachable. Fields preceded only by truly-unknown
+    # layouts (no fixed size AND no descriptor) still fail here.
+    if not _field_walker_reachable(schema, intent.field):
         return (
-            f"field '{intent.field}' is preceded by a variable-"
-            f"length field; its byte offset can't be computed "
-            f"without reading variable-length contents first. "
-            f"Author can add a field_schema entry with rel_offset "
-            f"or tid to bypass the schema walk."
+            f"field '{intent.field}' has a preceding variable-"
+            f"length field with unknown binary layout (no fixed "
+            f"size and no walker-known type descriptor). Author "
+            f"can add a field_schema entry with rel_offset or tid "
+            f"to bypass the schema walk, or extend "
+            f"schemas/pabgb_type_overrides.json with a descriptor "
+            f"for the blocking field."
         )
 
     return None
@@ -407,11 +411,6 @@ def apply_intents_to_records(
 # ── Apply (binary level) ────────────────────────────────────────────
 
 
-import struct  # noqa: E402  -- binary writer below uses this
-
-from cdumm.semantic.parser import parse_pabgh_index  # noqa: E402
-
-
 def _entry_payload_offset(body: bytes, entry_offset: int,
                           key_size: int) -> int | None:
     """Return the absolute byte offset where the payload starts
@@ -445,6 +444,10 @@ def _field_offset_in_payload(
     their stream sizes. Returns ``(offset_in_payload, spec)`` or
     None if the field doesn't exist or any preceding field has
     unknown layout (which would invalidate the offset).
+
+    Static-only walker — returns None as soon as any preceding field
+    is variable-length (stream_size=0). The validator uses
+    :func:`_field_walker_reachable` for the relaxed Path B check.
     """
     offset = 0
     for spec in schema.fields:
@@ -452,12 +455,33 @@ def _field_offset_in_payload(
             return offset, spec
         if not spec.stream_size:
             # Variable-length / unknown field before our target
-            # invalidates the byte offset — we cannot find the
-            # target deterministically without parsing the
-            # variable-length field's contents first.
+            # invalidates the static byte offset.
             return None
         offset += spec.stream_size
     return None
+
+
+def _field_walker_reachable(schema, target_field: str) -> bool:
+    """Return True when the runtime byte walker can reach ``target_field``
+    at apply time. Path B added: a preceding field with a known
+    ``type_descriptor`` counts as walkable even when ``stream_size=0``.
+
+    The validator uses this to surface "supported" for fields like
+    ``_cooltime`` whose static offset can't be summed but whose
+    runtime offset is computable from the typed schema + body bytes
+    (handled by ``format3_apply._consume_field_bytes``).
+    """
+    from cdumm.semantic.pabgb_types import is_known_type
+    for spec in schema.fields:
+        if spec.name == target_field:
+            return True
+        if spec.stream_size:
+            continue
+        if spec.type_descriptor and is_known_type(spec.type_descriptor):
+            continue
+        # Truly unknown — neither a fixed size nor a walker-known type.
+        return False
+    return False
 
 
 def _pack_value(value, spec) -> bytes | None:
