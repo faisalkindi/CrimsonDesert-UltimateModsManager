@@ -37,6 +37,44 @@ from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
 
+
+def _json_source_has_configurable_content(json_source) -> bool:
+    """Return True when ``json_source`` points at a JSON mod that has
+    REAL per-change toggles to show in the config panel.
+
+    The cog visibility logic auto-flags any mod with a ``json_source``
+    as configurable. That was right for v2 byte-patch JSON mods (which
+    have ``patches[*].changes`` the renderer turns into toggles).
+    It's wrong for Format 3 mods, which carry ``intents`` and zero
+    ``patches`` — the panel renders nothing and the user clicks into
+    an empty cog. Bug from Faisal 2026-04-27.
+
+    Returns False for: missing/unreadable file, malformed JSON,
+    Format 3 (``"format": 3`` or ``"intents"`` key with no
+    ``patches``), and v2-shaped files with an empty ``patches`` array.
+    """
+    if not json_source:
+        return False
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        p = _Path(json_source)
+        if not p.exists() or not p.is_file():
+            return False
+        with open(p, "r", encoding="utf-8-sig") as f:
+            data = _json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    # Format 3: has `intents`, doesn't have configurable `patches`.
+    if data.get("format") == 3 or "intents" in data:
+        return False
+    patches = data.get("patches")
+    if not isinstance(patches, list) or len(patches) == 0:
+        return False
+    return True
+
 def _dbg(msg: str) -> None:
     pass
 
@@ -660,7 +698,11 @@ class ModsPage(QWidget):
             has_config = bool(mod.get("configurable"))
             if not has_config:
                 json_src = self._mod_manager.get_json_source(mod_id)
-                has_config = json_src is not None
+                # Only flag if the json_source has REAL per-change
+                # toggles. Format 3 mods carry `intents` and zero
+                # `patches`; the cog would open an empty panel.
+                # Bug from Faisal 2026-04-27.
+                has_config = _json_source_has_configurable_content(json_src)
 
             # Extract version: drop_name (clean) → DB version → ?
             # drop_name has cleaner naming from NexusMods/folder names
@@ -793,7 +835,7 @@ class ModsPage(QWidget):
         has_config = bool(mod.get("configurable"))
         if not has_config:
             json_src = self._mod_manager.get_json_source(mod_id)
-            has_config = json_src is not None
+            has_config = _json_source_has_configurable_content(json_src)
 
         display_ver = ""
         dn = mod.get("drop_name") or ""
@@ -1968,10 +2010,14 @@ class ModsPage(QWidget):
         if not multi:
             menu.addSeparator()
 
-            # Configure (if configurable)
+            # Configure (if configurable). Format 3 mods don't have
+            # per-change toggles; helper filters them out so the
+            # context menu doesn't offer a "Configure..." that opens
+            # an empty panel.
             has_config = bool(mod.get("configurable"))
             if not has_config:
-                has_config = self._mod_manager.get_json_source(mod_id) is not None
+                json_src = self._mod_manager.get_json_source(mod_id)
+                has_config = _json_source_has_configurable_content(json_src)
             if has_config:
                 menu.addAction(Action(FluentIcon.SETTING, "Configure...", triggered=lambda: self._on_config_clicked(mod_id)))
 
