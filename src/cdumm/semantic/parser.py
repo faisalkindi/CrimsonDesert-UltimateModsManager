@@ -135,7 +135,10 @@ def _load_schemas() -> dict[str, TableSchema]:
         return _loaded_schemas
 
     try:
-        with open(schema_path, "r", encoding="utf-8") as f:
+        # utf-8-sig matches the override loader so a BOM-prefixed
+        # base schema (e.g. edited via Notepad) doesn't silently
+        # disable semantic parsing.
+        with open(schema_path, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
     except Exception as e:
         logger.warning("Failed to load PABGB schema: %s", e)
@@ -280,7 +283,12 @@ def _load_type_overrides(schemas_dir: Path) -> dict[str, dict[str, dict]]:
         if not p.exists():
             continue
         try:
-            with open(p, "r", encoding="utf-8") as f:
+            # utf-8-sig transparently strips a leading BOM if present.
+            # Notepad on Windows saves with BOM by default, so a user
+            # editing the override file there would silently disable
+            # all overrides without this. Iteration 9 systematic-
+            # debugging finding 2026-04-27.
+            with open(p, "r", encoding="utf-8-sig") as f:
                 raw = json.load(f)
         except Exception as e:
             logger.warning("Failed to load type overrides at %s: %s", p, e)

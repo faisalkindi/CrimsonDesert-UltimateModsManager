@@ -394,6 +394,68 @@ def test_apply_warning_mentions_walker_bail_for_variable_length_failures():
         "variable-length walker bail. Adversarial E3 2026-04-27.")
 
 
+def test_override_file_with_utf8_bom_loads_correctly(tmp_path, monkeypatch):
+    """Iteration 9 systematic-debugging finding: override JSON files
+    saved with a UTF-8 BOM (Notepad's default on Windows) silently
+    failed to load — json.load raises and the loader falls back to
+    no overrides without the user knowing their override file was
+    rejected.
+
+    Loader must accept BOM-prefixed JSON via utf-8-sig encoding so a
+    user editing pabgb_type_overrides.json in Notepad doesn't get
+    silently disabled overrides.
+    """
+    import json
+    import logging
+    from cdumm.semantic import parser as parser_mod
+
+    schema_path = tmp_path / "pabgb_complete_schema.json"
+    overrides_path = tmp_path / "pabgb_type_overrides.json"
+    schema_path.write_text(json.dumps({
+        "BomTestTable": [
+            {"f": "_field", "type": "direct_15B", "stream": 15},
+        ]
+    }))
+    # Write override WITH UTF-8 BOM prefix
+    overrides_path.write_bytes(
+        b"\xef\xbb\xbf"
+        + json.dumps({
+            "BomTestTable": {"_field": {"type": "u32"}}
+        }).encode("utf-8")
+    )
+
+    real_open = open
+    real_exists = parser_mod.Path.exists
+
+    def patched_open(p, *args, **kwargs):
+        path_str = str(p)
+        if "pabgb_complete_schema.json" in path_str:
+            return real_open(schema_path, *args, **kwargs)
+        if "pabgb_type_overrides.json" in path_str:
+            return real_open(overrides_path, *args, **kwargs)
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", patched_open)
+    monkeypatch.setattr(
+        parser_mod.Path, "exists",
+        lambda self: True if (
+            "pabgb_complete_schema.json" in str(self)
+            or "pabgb_type_overrides.json" in str(self)
+        ) else real_exists(self))
+
+    parser_mod._loaded_schemas = None
+    schemas = parser_mod._load_schemas()
+    table = schemas.get("bomtesttable")
+    assert table is not None, "BomTestTable failed to load"
+    # The override should have applied — _field has type_descriptor='u32'
+    # If the BOM caused override loading to fail, type_descriptor is None.
+    field_spec = table.fields[0]
+    assert field_spec.type_descriptor == "u32", (
+        f"BOM-prefixed override silently failed to load. "
+        f"_field has type_descriptor={field_spec.type_descriptor!r} "
+        f"(expected 'u32'). Use utf-8-sig encoding to strip BOM.")
+
+
 def test_consume_field_bytes_legacy_fixed_path_rejects_past_eof():
     """Iteration 6 systematic-debugging finding: the legacy fixed-stream-
     size branch in `_consume_field_bytes` returns ``spec.stream_size``
