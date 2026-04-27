@@ -353,6 +353,26 @@ def test_ordered_fields_typo_refuses_to_load_table(tmp_path, monkeypatch, caplog
             "the typo loudly.")
 
 
+def test_payload_offset_no_entry_header_rejects_eof_offset():
+    """Adversarial CONSENSUS-2: ``_payload_offset(no_entry_header=True)``
+    used `entry_off <= len(body)`, allowing the boundary value
+    ``entry_off == len(body)`` through. A subsequent walk would try to
+    read past EOF. The check should be `<` not `<=` so EOF itself
+    returns None.
+    """
+    from cdumm.engine.format3_apply import _payload_offset
+    body = b"\x00" * 10
+    # Valid offset
+    assert _payload_offset(body, 5, key_size=2,
+                           no_entry_header=True) == 5
+    # Past-EOF must return None
+    assert _payload_offset(body, 11, key_size=2,
+                           no_entry_header=True) is None
+    # Exact-EOF must ALSO return None — there's no field to read here
+    assert _payload_offset(body, 10, key_size=2,
+                           no_entry_header=True) is None
+
+
 def test_iteminfo_override_loads_with_descriptors():
     """Force a fresh schema load and verify ItemInfo's _cooltime now
     has a type_descriptor populated by the override file."""

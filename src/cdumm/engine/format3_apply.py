@@ -247,12 +247,18 @@ def _intents_to_v2_changes(
         name = _entry_name(vanilla_body, off, key_size)
         entry_bounds[k] = (off, end, name)
 
+    no_null_skip = getattr(schema, "no_null_skip", False)
+    no_entry_header = getattr(schema, "no_entry_header", False)
+
     out: list[dict] = []
     for intent in intents:
         if intent.key not in entry_bounds:
             continue
         entry_off, entry_end, entry_name = entry_bounds[intent.key]
-        payload_off = _payload_offset(vanilla_body, entry_off, key_size)
+        payload_off = _payload_offset(
+            vanilla_body, entry_off, key_size,
+            no_null_skip=no_null_skip,
+            no_entry_header=no_entry_header)
         if payload_off is None:
             continue
 
@@ -339,11 +345,19 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
     """Return how many bytes ``spec`` consumes starting at ``off``,
     or None if the type isn't safely walkable.
 
-    Handles fixed-size types (struct_fmt set, raw direct_NB) plus
-    CString (u32 length prefix + UTF-8 bytes). Other variable types
-    return None so callers bail rather than walk into garbage.
+    Resolution order:
+      1. ``spec.type_descriptor`` (Path B override) — delegate to
+         ``pabgb_types.consume_bytes`` for full PABGB primitive +
+         CArray + COptional + tagged-variant + sub-struct support.
+      2. Legacy ``CString`` literal in ``spec.field_type``.
+      3. Legacy ``stream_size`` for fixed-size fields.
+      4. None (caller must bail).
     """
     import struct as _struct
+    descriptor = getattr(spec, "type_descriptor", None)
+    if descriptor:
+        from cdumm.semantic.pabgb_types import consume_bytes
+        return consume_bytes(descriptor, body, off, entry_end)
     if spec.field_type == "CString":
         if off + 4 > min(len(body), entry_end):
             return None
@@ -361,8 +375,33 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
 
 
 def _payload_offset(body: bytes, entry_off: int,
-                    key_size: int) -> "int | None":
-    """Same logic as format3_handler._entry_payload_offset."""
+                    key_size: int,
+                    no_null_skip: bool = False,
+                    no_entry_header: bool = False) -> "int | None":
+    """Return the byte offset where the entry's first payload field starts.
+
+    Three modes (in priority order):
+
+    * ``no_entry_header=True`` — payload IS the entry; return ``entry_off``
+      verbatim. Required for tables like RegionInfo where ``_key`` and
+      ``_stringKey`` are regular schema fields (no separate header).
+
+    * ``no_null_skip=True`` — skip the standard entry header (entry_id +
+      name_len + name) but do NOT skip a trailing zero byte. Required for
+      ItemInfo, VehicleInfo, FieldInfo, StageInfo where the byte after
+      the name is a real ``_isBlocked`` u8 field, not padding.
+
+    * Default — legacy heuristic from ``format3_handler``: skip a single
+      0 byte after the name when present. Works for tables where the
+      post-name byte is genuinely padding.
+    """
+    if no_entry_header:
+        # Strict `<` so EOF itself is rejected — there's no field to
+        # read at exactly `len(body)`. Adversarial review CONSENSUS-2
+        # 2026-04-27. The walker's per-primitive bounds checks would
+        # also catch a subsequent read, but rejecting up front
+        # surfaces malformed PAMT offsets at the right layer.
+        return entry_off if 0 <= entry_off < len(body) else None
     eid_size = 2 if key_size == 2 else 4
     head_size = eid_size + 4
     if entry_off + head_size > len(body):
@@ -371,6 +410,8 @@ def _payload_offset(body: bytes, entry_off: int,
     if name_len > 500 or entry_off + head_size + name_len > len(body):
         return None
     name_end = entry_off + head_size + name_len
+    if no_null_skip:
+        return name_end
     if name_end < len(body) and body[name_end] == 0:
         return name_end + 1
     return name_end
