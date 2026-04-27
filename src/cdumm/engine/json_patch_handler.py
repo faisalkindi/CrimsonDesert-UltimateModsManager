@@ -873,7 +873,16 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             if not patched_hex:
                 logger.warning("Change at offset %d has no 'patched' field, skipping", offset)
                 continue
-            patched_bytes = bytes.fromhex(patched_hex)
+            try:
+                patched_bytes = bytes.fromhex(patched_hex)
+            except ValueError as e:
+                logger.warning(
+                    "Change at offset %d has malformed hex in 'patched' "
+                    "(%r): %s — skipping", offset, patched_hex, e)
+                _record_skip(change, offset, None,
+                             f"malformed hex in 'patched': {e}")
+                mismatched += 1
+                continue
 
             if offset + len(patched_bytes) > len(data):
                 logger.warning("Patch at offset %d exceeds file size %d, skipping",
@@ -881,7 +890,17 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 continue
 
             if "original" in change:
-                original_bytes = bytes.fromhex(change["original"])
+                try:
+                    original_bytes = bytes.fromhex(change["original"])
+                except ValueError as e:
+                    logger.warning(
+                        "Change at offset %d has malformed hex in "
+                        "'original' (%r): %s — skipping",
+                        offset, change["original"], e)
+                    _record_skip(change, offset, None,
+                                 f"malformed hex in 'original': {e}")
+                    mismatched += 1
+                    continue
                 size_delta = len(patched_bytes) - len(original_bytes)
                 actual = data[offset:offset + len(original_bytes)]
                 if actual != original_bytes:
@@ -1001,8 +1020,18 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     _record_skip(change, offset, actual, "byte mismatch")
                     continue
 
-            # Track size delta for replace ops that change size
-            old_len = len(bytes.fromhex(change["original"])) if "original" in change else len(patched_bytes)
+            # Track size delta for replace ops that change size.
+            # The line 884 fromhex above is what catches malformed
+            # 'original' first; this branch is only reachable with
+            # valid hex. Wrap defensively against future refactors —
+            # cheap and keeps the apply loop crash-proof.
+            if "original" in change:
+                try:
+                    old_len = len(bytes.fromhex(change["original"]))
+                except ValueError:
+                    old_len = len(patched_bytes)
+            else:
+                old_len = len(patched_bytes)
             data[offset:offset + old_len] = patched_bytes
             writes.append((original_offset, len(patched_bytes) - old_len))
             written_ranges.append(
