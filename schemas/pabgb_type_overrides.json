@@ -173,6 +173,7 @@
     "_repairDataList": {"type": "CArray<RepairData>"}
   },
   "VehicleInfo": {
+    "_meta_note": "_unkPostVehicleCharKey discovered via iteration 13 systematic-debugging. NattKh's vehicleinfo_parser.py was 2 bytes short of entry_end and her _mountCallType / _canCallInSafeZone field labels actually pointed at the wrong byte positions (always 0 in observed data). Empirical truth: Horse (key=16960) has _canCallInSafeZone=1, which matches reading position +6 from end of entry, not +1. The 2 mystery bytes between _vehicleCharKey and _mountCallType are unknown but always 00 00 in vanilla data (Wyvern is the one exception with 03 00).",
     "_no_null_skip": true,
     "_ordered_fields": [
       "_isBlocked", "_field4", "_fieldType",
@@ -180,6 +181,7 @@
       "_enumPairBlock2", "_field10", "_field11", "_field12",
       "_field13", "_playList", "_callVehicleVoxelType",
       "_field16", "_field17", "_vehicleCharKey",
+      "_unkPostVehicleCharKey",
       "_mountCallType", "_canCallInSafeZone", "_altitudeCap"
     ],
     "_isBlocked": {"type": "u8"},
@@ -198,6 +200,7 @@
     "_field16": {"type": "u8"},
     "_field17": {"type": "u8"},
     "_vehicleCharKey": {"type": "u32"},
+    "_unkPostVehicleCharKey": {"type": "u16"},
     "_mountCallType": {"type": "u8"},
     "_canCallInSafeZone": {"type": "u8"},
     "_altitudeCap": {"type": "f32"}

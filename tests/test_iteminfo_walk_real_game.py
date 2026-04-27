@@ -213,6 +213,54 @@ def test_vehicleinfo_can_call_in_safe_zone_reachable_for_every_entry():
         f"_canCallInSafeZone; bails: {bails}")
 
 
+def test_vehicleinfo_horse_canCallInSafeZone_reads_as_one():
+    """Iteration 13 systematic-debugging finding: previous vehicleinfo
+    walk completed all 32 entries but ended 2 bytes short of entry_end.
+    Investigation showed `_mountCallType` and `_canCallInSafeZone` were
+    pointing at the WRONG bytes — there are 2 unknown bytes between
+    `_vehicleCharKey` and `_mountCallType` that the schema missed.
+
+    Empirical truth (NattKh: "_canCallInSafeZone — only Horse=1 in
+    vanilla"). Verifies schema correctly identifies Horse's flag value.
+    """
+    import struct
+    paths = _find_vanilla_pair("vehicleinfo")
+    if paths is None:
+        pytest.skip("vehicleinfo fixture not available")
+    body = paths[0].read_bytes()
+    header = paths[1].read_bytes()
+
+    parser_mod._loaded_schemas = None
+    schema = get_schema("vehicleinfo")
+
+    key_size, offsets = parse_pabgh_index(header, "vehicleinfo")
+    HORSE_KEY = 16960
+    assert HORSE_KEY in offsets, "Horse entry not in pabgh"
+    sorted_offs = sorted(offsets.items(), key=lambda kv: kv[1])
+    horse_idx = next(i for i, (k, _) in enumerate(sorted_offs) if k == HORSE_KEY)
+    horse_off = sorted_offs[horse_idx][1]
+    horse_end = (sorted_offs[horse_idx + 1][1]
+                 if horse_idx + 1 < len(sorted_offs) else len(body))
+
+    payload_off = _payload_offset(body, horse_off, key_size,
+                                   no_null_skip=schema.no_null_skip,
+                                   no_entry_header=schema.no_entry_header)
+    off = payload_off
+    can_call_value = None
+    for f in schema.fields:
+        if f.name == "_canCallInSafeZone":
+            can_call_value = body[off]
+            break
+        consumed = _consume_field_bytes(body, off, f, horse_end)
+        off += consumed
+
+    assert can_call_value == 1, (
+        f"Horse._canCallInSafeZone read as {can_call_value} but "
+        f"NattKh's documented vanilla value is 1. The vehicleinfo "
+        f"schema is reading the wrong byte position — likely missing "
+        f"~2 bytes between _vehicleCharKey and _mountCallType.")
+
+
 def test_fieldinfo_can_call_vehicle_reachable_for_every_entry():
     """Fieldinfo override walks fields 1-19 for every entry. Target
     `_canCallVehicle` (field 20 in IDA order, index 18 in payload) is
