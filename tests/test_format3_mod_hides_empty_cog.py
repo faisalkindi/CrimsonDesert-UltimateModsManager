@@ -44,21 +44,109 @@ def test_format3_json_source_returns_false(tmp_path):
         "list. Cog must hide so users don't click into nothing.")
 
 
-def test_v2_byte_patch_with_changes_returns_true(tmp_path):
-    """A v2 byte-patch mod with `patches[*].changes` IS configurable —
-    each change becomes a per-row toggle. Regression guard."""
-    mod_path = tmp_path / "v2_mod.json"
+def test_v2_with_same_bracket_prefix_returns_false(tmp_path):
+    """Bug from Faisal 2026-04-27 (round 2): Better Radial Menus,
+    CD Inventory Expander, Even Faster Vanilla Animations Trimmer
+    all have 2 changes that share ONE bracket prefix
+    (`[Trust] ...`, `Character defaultSlot ...`, `[FASTER VANILLA]
+    ...`). Those are TWO PARTS OF ONE FEATURE, not independent
+    toggles. Cog must hide.
+
+    Existing `preset_picker.has_labeled_changes` already encodes this
+    rule. The cog visibility helper must defer to the same rule.
+    """
+    mod_path = tmp_path / "single_feature.json"
     mod_path.write_text(json.dumps({
         "patches": [
             {
-                "label": "Stack 999",
+                "game_file": "iteminfo.pabgb",
                 "changes": [
-                    {"label": "Item A", "rel_offset": 0,
-                     "original": "01", "patched": "ff"},
-                    {"label": "Item B", "rel_offset": 4,
-                     "original": "02", "patched": "ff"},
+                    {"label": "[Trust] Talk Gain 5 -> 50",
+                     "offset": 0, "original": "05", "patched": "32"},
+                    {"label": "[Trust] Other Talk Gain",
+                     "offset": 4, "original": "06", "patched": "33"},
                 ]
             }
+        ]
+    }))
+    assert _json_source_has_configurable_content(str(mod_path)) is False, (
+        "Two changes sharing one bracket prefix = parts of one "
+        "feature, not configurable. Cog must hide.")
+
+
+def test_v2_with_unlabeled_changes_returns_false(tmp_path):
+    """A v2 mod with no labels (or all empty labels) has nothing
+    meaningful to display — cog must hide."""
+    mod_path = tmp_path / "unlabeled.json"
+    mod_path.write_text(json.dumps({
+        "patches": [
+            {
+                "game_file": "iteminfo.pabgb",
+                "changes": [
+                    {"offset": 0, "original": "01", "patched": "ff"},
+                    {"offset": 4, "original": "02", "patched": "ff"},
+                ]
+            }
+        ]
+    }))
+    assert _json_source_has_configurable_content(str(mod_path)) is False
+
+
+def test_v2_single_patch_with_many_distinct_bracket_groups_returns_false(tmp_path):
+    """Bug from Faisal 2026-04-27 round 3: Infinite Horse has 1 patch,
+    24 changes, 15 distinct bracket prefixes (`[Horse]`, `[HorseRush]`,
+    `[HorseSwim]`, ...). The existing `has_labeled_changes` returns
+    True because of the 15 distinct prefixes, but the user views them
+    as ONE FEATURE ('infinite horse'), not 15 independent toggles.
+
+    The cog visibility helper must follow the same mental model the
+    user expects: cog = explicit preset/variant/mutex CHOICE, not
+    'this mod happens to have multiple labeled changes I could
+    disable individually'.
+
+    Single-patch mods don't qualify for the cog regardless of how
+    many bracket prefixes they have. Multi-patch mods with distinct
+    bracket-prefix groups still do (preset_groups pattern 1).
+    """
+    mod_path = tmp_path / "single_patch_many_groups.json"
+    changes = [
+        {"label": f"[{group}] change {i}", "offset": i * 4,
+         "original": "00", "patched": "01"}
+        for i, group in enumerate([
+            "Horse", "HorseRush", "HorseSwim", "HorseFly",
+            "HorseSit", "HorseDrift", "HorseKick", "HorseDouble"
+        ])
+    ]
+    mod_path.write_text(json.dumps({
+        "patches": [{"game_file": "skill.pabgb", "changes": changes}]
+    }))
+    assert _json_source_has_configurable_content(str(mod_path)) is False, (
+        "Single-patch mod with N distinct bracket prefixes is one "
+        "feature with N parts, not N independent toggles. "
+        "Cog must hide.")
+
+
+def test_v2_multi_patch_with_distinct_bracket_groups_returns_true(tmp_path):
+    """Multi-patch mod where each patch has a different bracket-group
+    prefix IS a real preset choice (preset_groups pattern 1). The
+    user picks which patch(es) to apply. Regression guard."""
+    mod_path = tmp_path / "multi_patch_groups.json"
+    mod_path.write_text(json.dumps({
+        "patches": [
+            {
+                "game_file": "iteminfo.pabgb",
+                "changes": [
+                    {"label": "[Easy] tier 1", "offset": 0,
+                     "original": "01", "patched": "ff"},
+                ]
+            },
+            {
+                "game_file": "iteminfo.pabgb",
+                "changes": [
+                    {"label": "[Hard] tier 2", "offset": 8,
+                     "original": "02", "patched": "ff"},
+                ]
+            },
         ]
     }))
     assert _json_source_has_configurable_content(str(mod_path)) is True

@@ -43,15 +43,24 @@ def _json_source_has_configurable_content(json_source) -> bool:
     REAL per-change toggles to show in the config panel.
 
     The cog visibility logic auto-flags any mod with a ``json_source``
-    as configurable. That was right for v2 byte-patch JSON mods (which
-    have ``patches[*].changes`` the renderer turns into toggles).
-    It's wrong for Format 3 mods, which carry ``intents`` and zero
-    ``patches`` — the panel renders nothing and the user clicks into
-    an empty cog. Bug from Faisal 2026-04-27.
+    as configurable. That over-flags two classes:
+
+    1. Format 3 mods (carry ``intents``, no ``patches`` — panel
+       renders nothing). Bug from Faisal 2026-04-27 round 1.
+    2. Single-feature v2 mods where all labels share one bracket
+       prefix (Better Radial Menus' ``[Trust] Talk Gain 5 -> 50`` +
+       ``[Trust] Other Talk Gain`` — TWO PARTS OF ONE FEATURE, not
+       independent toggles). Bug from Faisal 2026-04-27 round 2.
+
+    The same heuristic is already centralised in
+    ``preset_picker.has_labeled_changes`` (used by the configurable_
+    scanner at import time). This helper defers to it so the cog's
+    appearance matches what the import-time decision would have
+    set the ``configurable`` flag to.
 
     Returns False for: missing/unreadable file, malformed JSON,
-    Format 3 (``"format": 3`` or ``"intents"`` key with no
-    ``patches``), and v2-shaped files with an empty ``patches`` array.
+    Format 3, empty patches, single-bracket-prefix labels, fewer than
+    10 plain labels, or any other case `has_labeled_changes` rejects.
     """
     if not json_source:
         return False
@@ -73,7 +82,32 @@ def _json_source_has_configurable_content(json_source) -> bool:
     patches = data.get("patches")
     if not isinstance(patches, list) or len(patches) == 0:
         return False
-    return True
+    # Stricter than has_labeled_changes: cog requires an EXPLICIT
+    # user choice (multi-patch preset groups OR mutex offset groups
+    # within one patch). Bug from Faisal 2026-04-27 round 3: Infinite
+    # Horse (1 patch, 24 changes, 15 distinct bracket prefixes
+    # `[Horse]`, `[HorseRush]`, `[HorseSwim]`...) was flagged
+    # configurable by has_labeled_changes because of the 15 prefixes.
+    # But the user views them as ONE feature ("infinite horse"), not
+    # 15 independent toggles. Single-patch mods don't qualify for
+    # the cog regardless of bracket-prefix count.
+    try:
+        from cdumm.gui.preset_picker import (
+            _detect_preset_groups, _detect_mutex_offset_groups,
+        )
+        # Pattern 1: 2+ patches with distinct bracket-group prefixes
+        # all sharing one game_file (real preset choice).
+        if _detect_preset_groups(data) is not None:
+            return True
+        # Pattern 2: changes within one patch sharing a (game_file,
+        # offset) — mutex options the user picks ONE of.
+        if _detect_mutex_offset_groups(data):
+            return True
+    except Exception:
+        # If helpers can't be imported, fall back to conservative
+        # "no cog" rather than over-flag.
+        pass
+    return False
 
 def _dbg(msg: str) -> None:
     pass
@@ -695,14 +729,21 @@ class ModsPage(QWidget):
             _dbg(f"Card build: id={mod_id} name={mod['name'][:20]} enabled={mod['enabled']} applied={applied} → game={game_status} pending={pending}")
 
             # Check if configurable
-            has_config = bool(mod.get("configurable"))
-            if not has_config:
-                json_src = self._mod_manager.get_json_source(mod_id)
-                # Only flag if the json_source has REAL per-change
-                # toggles. Format 3 mods carry `intents` and zero
-                # `patches`; the cog would open an empty panel.
-                # Bug from Faisal 2026-04-27.
+            # Cog visibility:
+            #  * If the mod has a json_source, the helper is
+            #    authoritative — overrides the DB `configurable` flag
+            #    so stale flags from earlier scans (e.g. Infinite
+            #    Horse: configurable=1 from old has_labeled_changes
+            #    semantics) don't keep the cog around.
+            #  * If no json_source, fall back to the DB flag (covers
+            #    folder-variant mods, archive variants, etc. where
+            #    the cog opens a non-JSON panel).
+            #  Bug from Faisal 2026-04-27.
+            json_src = self._mod_manager.get_json_source(mod_id)
+            if json_src:
                 has_config = _json_source_has_configurable_content(json_src)
+            else:
+                has_config = bool(mod.get("configurable"))
 
             # Extract version: drop_name (clean) → DB version → ?
             # drop_name has cleaner naming from NexusMods/folder names
@@ -832,10 +873,12 @@ class ModsPage(QWidget):
         elif not mod["enabled"] and applied:
             pending = "Apply to Deactivate"
 
-        has_config = bool(mod.get("configurable"))
-        if not has_config:
-            json_src = self._mod_manager.get_json_source(mod_id)
+        # See cog-visibility comment in the left-column builder.
+        json_src = self._mod_manager.get_json_source(mod_id)
+        if json_src:
             has_config = _json_source_has_configurable_content(json_src)
+        else:
+            has_config = bool(mod.get("configurable"))
 
         display_ver = ""
         dn = mod.get("drop_name") or ""
@@ -2014,10 +2057,12 @@ class ModsPage(QWidget):
             # per-change toggles; helper filters them out so the
             # context menu doesn't offer a "Configure..." that opens
             # an empty panel.
-            has_config = bool(mod.get("configurable"))
-            if not has_config:
-                json_src = self._mod_manager.get_json_source(mod_id)
+            # See cog-visibility comment in the left-column builder.
+            json_src = self._mod_manager.get_json_source(mod_id)
+            if json_src:
                 has_config = _json_source_has_configurable_content(json_src)
+            else:
+                has_config = bool(mod.get("configurable"))
             if has_config:
                 menu.addAction(Action(FluentIcon.SETTING, "Configure...", triggered=lambda: self._on_config_clicked(mod_id)))
 
