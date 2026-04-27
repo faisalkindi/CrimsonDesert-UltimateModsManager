@@ -309,8 +309,13 @@ def should_bind_to_existing_row(connection,
     # heuristics that exist to disambiguate sibling-mod-on-same-page
     # vs update-of-existing-mod aren't needed and actively hurt
     # (e.g. renamed mods fail name comparison; updated mods fail
-    # file_id comparison). Verify the row still exists defensively
-    # so a between-click-and-download deletion doesn't re-create it.
+    # file_id comparison). Verify the row still exists defensively;
+    # if it's gone (deleted between click and download arriving),
+    # return None directly — do NOT fall through to the heuristic.
+    # The heuristic could bind to a SIBLING row sharing nexus_mod_id
+    # and corrupt it. User intent was specific; if that row is gone,
+    # they get a new mod, not a wrong-target replace. Iteration 5
+    # systematic-debugging finding 2026-04-27.
     if intended_mod_id:
         try:
             row = connection.execute(
@@ -320,8 +325,8 @@ def should_bind_to_existing_row(connection,
             return None
         if row is not None:
             return int(intended_mod_id)
-        # Row was deleted between click and download arriving —
-        # fall through to heuristic so caller imports as new.
+        # Row missing → caller imports as new (skip heuristic).
+        return None
     if not nexus_mod_id:
         return None
     try:

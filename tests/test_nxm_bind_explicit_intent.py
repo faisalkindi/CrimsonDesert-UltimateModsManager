@@ -112,6 +112,55 @@ def test_explicit_intent_rejects_nonexistent_row():
         "be honored — return None so caller imports as new")
 
 
+def test_explicit_intent_missing_row_does_not_bind_to_sibling():
+    """Iteration 5 systematic-debugging: when intended_mod_id is set
+    but the target row is gone (deleted mid-download), the helper
+    must NOT fall through to the heuristic — that could find a
+    SIBLING row sharing nexus_mod_id and bind to it, replacing the
+    wrong mod. The user expressed intent to update a SPECIFIC row;
+    if that row is gone, they get a new mod, NOT a wrong-target
+    replace.
+    """
+    conn = _make_conn()
+    # Sibling row (still present, sharing nexus_mod_id=1126)
+    conn.execute(
+        "INSERT INTO mods (id, name, nexus_mod_id, nexus_real_file_id) "
+        "VALUES (1500, 'Other Horse Mod', 1126, 6171)")
+    conn.commit()
+    # User clicked Update on row 1424 (Horse X) but that row no
+    # longer exists. Heuristic would match nexus_mod_id=1126 +
+    # file_id=6171 → bind to row 1500. WRONG.
+    decision = should_bind_to_existing_row(
+        conn, nexus_mod_id=1126, nexus_file_id=6171,
+        downloaded_zip=None, intended_mod_id=1424)
+    assert decision is None, (
+        "When intended_mod_id is set but the row is missing, the "
+        "helper must NOT fall through to a heuristic that could "
+        "bind to a sibling row. User intent was specific. Got: %r"
+        % decision)
+
+
+def test_asi_plugin_update_with_zero_intent_uses_heuristic():
+    """ASI page calls _handle_direct_update(0, nexus_mod_id, ...) when
+    a plugin update arrives — there's no CDUMM mod row to bind to.
+    The 0 must NOT bypass the heuristic (which would falsely return 0
+    as an existing_id, corrupting the import flow).
+    """
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO mods (id, name, nexus_mod_id, nexus_real_file_id) "
+        "VALUES (1500, 'Some Plugin Wrapper', 999, 7777)")
+    conn.commit()
+    # ASI page passes 0 → must not bind row 0, must fall through.
+    decision = should_bind_to_existing_row(
+        conn, nexus_mod_id=999, nexus_file_id=7777,
+        downloaded_zip=None, intended_mod_id=0)
+    assert decision == 1500, (
+        "intended_mod_id=0 from ASI page must fall through to "
+        "the heuristic, which then matches by file_id → bind to "
+        "existing row 1500. Got: %r" % decision)
+
+
 def test_explicit_intent_zero_or_none_falls_through_to_heuristic():
     """When intended_mod_id is 0 or None (fresh nxm:// click from
     Nexus website with no local intent), the helper must use the
