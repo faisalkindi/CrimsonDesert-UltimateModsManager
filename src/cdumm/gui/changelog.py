@@ -13,6 +13,25 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.3",
+        "date": "2026-04-27",
+        "notes": [
+            "<b>Field-name JSON mods finally apply to your game.</b> The new modding format (the kind that says \"change <i>cooltime</i> to 0\" instead of \"change byte 1632 to <code>00 00 00 00</code>\") was announced in v3.2.1 and import-supported in v3.2.2 — but no schemas shipped, so dropping one of these mods got you a clean error message and not much else. This release is the breakthrough: six game tables are now covered, and a mod targeting one of them imports, applies, and works in your game.",
+            "<b>What this unlocks.</b> Items (durability, stack size, drop rates, costs, item flags), mounts and horses (speed, stamina, jump, \"can call in safe zone\"), terrain and zones (field info, stage info, region info), and the part of character data mounts use. NoCooldownForALLItems is the test case — worked nowhere a week ago, works now. Skill data, NPC info, item pools, and other tables aren't covered yet — mods targeting those still get a clean \"no schema for this table yet\" message naming exactly what's missing, so anyone can add it. See <code>field_schema/README.md</code> next to CDUMM3.exe.",
+            "<b>Why this matters going forward.</b> The new format survives game patches. When Pearl Abyss shifts bytes around in an update, byte-offset mods break and need every author to repush. Field-name mods just keep working — the field's meaning didn't change, only its location, and CDUMM tracks the location for you.",
+            "<b>One broken mod can't kill your whole loadout anymore.</b> A single mod with a corrupt change used to abort the entire Apply — every other mod skipped, every patch undone. Now CDUMM skips just the broken change, tells you which mod and which entry was wrong, and applies the rest cleanly. Thanks to ZirconX1 on Nexus.",
+            "<b>Multi-version mod packs let you pick which version you want.</b> Mods like CrimsonWings ship five strength levels (10%, 25%, 50%, 75%, infinite) as five files in one zip. Drop the zip, pick a level, done. Thanks to gleglezao on Nexus.",
+            "<b>Uninstalling an ASI mod cleans up properly.</b> Companion files used to get left behind in your game folder if their names didn't match the .asi exactly. They're tracked at install now and removed cleanly on uninstall. Shared loader files (winmm.dll etc.) are intentionally left alone — those belong to the loader, not any one mod. Thanks to enowai on Nexus.",
+            "<b>RAR mods import even if 7-Zip is in an unusual place.</b> Scoop, NanaZip, portable copies, custom paths — all detected via the Windows registry now, not just the standard Program Files location. Thanks to femdogga on Nexus.",
+            "<b>Multi-language mod packs install correctly.</b> Mods that ship one zip per language inside a parent zip used to fail with \"no recognized format\". They unpack automatically now. Thanks to femdogga on Nexus.",
+            "<b>Updates land on the right card.</b> Clicking \"Mod Manager Download\" to update a renamed mod no longer creates a duplicate card next to the old one.",
+            "<b>No more confusing \"crash\" log when you close CDUMM normally.</b> Closing the app the usual way was leaving behind a crash-pre-qt.log file every time, even when nothing actually crashed. Real crashes still get logged.",
+            "<b>The configuration gear only shows up when there's a real choice to make.</b> Mods with nothing to configure no longer display an empty cog when you click it. Variant pickers and preset choices still get the gear as before.",
+            "<b>For mod authors: a new \"apply what fits, skip what doesn't\" flag.</b> A mod that's mostly compatible — only a handful of values drifted in a recent game patch — can now ship <code>\"allow_partial_apply\": true</code> at the top of its JSON. CDUMM applies the verified changes, skips the mismatched ones with a clear log, and tells the user. Without the flag, mismatches still reject so a half-broken mod can't crash your game silently. Thanks to XxDman10311xX on Nexus (Refinement Cost Reforged).",
+            "<b>Heads up: did a Format 3 mod fail before?</b> Try reimporting it. If it targets one of the six covered tables, it'll work now. If you get a \"no schema\" message, that's honest — the table just isn't covered yet, and the message names what's missing. Existing v2 byte-offset JSON mods are unaffected.",
+        ],
+    },
+    {
         "version": "3.2.2",
         "date": "2026-04-26",
         "notes": [
