@@ -319,14 +319,28 @@ def should_bind_to_existing_row(connection,
     if intended_mod_id:
         try:
             row = connection.execute(
-                "SELECT id FROM mods WHERE id = ?",
+                "SELECT id, COALESCE(nexus_mod_id, 0) FROM mods "
+                "WHERE id = ?",
                 (int(intended_mod_id),)).fetchone()
         except Exception:
             return None
-        if row is not None:
-            return int(intended_mod_id)
-        # Row missing → caller imports as new (skip heuristic).
-        return None
+        if row is None:
+            # Row missing → caller imports as new (skip heuristic).
+            return None
+        # Iteration 6 systematic-debugging defensive guard: if the
+        # intended row has a non-NULL nexus_mod_id that DIFFERS from
+        # the URL's, the (URL, intent) pair is internally inconsistent
+        # (a programming bug elsewhere produced a mismatched click).
+        # Don't silently bind a download for mod page X into a row
+        # for mod page Y — that would corrupt the row.
+        # Legacy rows with NULL/0 nexus_mod_id pass: this is exactly
+        # the case where the user is linking a local-zip import to a
+        # Nexus update, and the bind itself fills in the gap.
+        stored_nexus_id = int(row[1] or 0)
+        url_nexus_id = int(nexus_mod_id or 0)
+        if stored_nexus_id and url_nexus_id and stored_nexus_id != url_nexus_id:
+            return None
+        return int(intended_mod_id)
     if not nexus_mod_id:
         return None
     try:

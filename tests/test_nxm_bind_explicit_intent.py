@@ -112,6 +112,56 @@ def test_explicit_intent_rejects_nonexistent_row():
         "be honored — return None so caller imports as new")
 
 
+def test_explicit_intent_must_match_url_nexus_mod_id():
+    """Iteration 6 systematic-debugging: defensive sanity check —
+    if intended_mod_id points at a row whose nexus_mod_id differs
+    from the URL's nexus_mod_id, the call is internally inconsistent
+    (a programming bug elsewhere produced a wrong (url, intent)
+    pair). Don't silently corrupt the row by binding a download
+    for mod page X into a row for mod page Y.
+    """
+    conn = _make_conn()
+    # Row 1500 belongs to nexus_mod_id=999 (some unrelated mod page)
+    conn.execute(
+        "INSERT INTO mods (id, name, nexus_mod_id, nexus_real_file_id) "
+        "VALUES (1500, 'Unrelated Mod', 999, 7777)")
+    conn.commit()
+
+    # Caller passes URL nexus_mod_id=208 but intended_mod_id=1500
+    # whose stored nexus_mod_id=999. Mismatch — must NOT bind, the
+    # download would corrupt row 1500's content.
+    decision = should_bind_to_existing_row(
+        conn, nexus_mod_id=208, nexus_file_id=5099,
+        downloaded_zip=None, intended_mod_id=1500)
+    assert decision is None, (
+        "intended_mod_id row's nexus_mod_id (999) doesn't match "
+        "URL's nexus_mod_id (208). Must reject defensively to "
+        "avoid binding a wrong-page download into the row. "
+        f"Got: {decision!r}")
+
+
+def test_explicit_intent_legacy_null_nexus_mod_id_row_still_binds():
+    """When the intended row has NULL nexus_mod_id (legacy local-zip
+    import that never got Nexus metadata stored), the explicit intent
+    should still bind. The user explicitly told us to update this
+    row; the missing nexus_mod_id isn't a contradiction, just a gap
+    that the bind itself will fill in (the import path stores
+    nexus_real_file_id afterwards)."""
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO mods (id, name, nexus_mod_id, nexus_real_file_id) "
+        "VALUES (1600, 'Legacy Mod', NULL, NULL)")
+    conn.commit()
+
+    decision = should_bind_to_existing_row(
+        conn, nexus_mod_id=300, nexus_file_id=8888,
+        downloaded_zip=None, intended_mod_id=1600)
+    assert decision == 1600, (
+        "Legacy NULL nexus_mod_id row + explicit intent must bind "
+        "(this is exactly the case where the user wants to link "
+        "their local-zip mod to a Nexus update). Got: %r" % decision)
+
+
 def test_explicit_intent_missing_row_does_not_bind_to_sibling():
     """Iteration 5 systematic-debugging: when intended_mod_id is set
     but the target row is gone (deleted mid-download), the helper
