@@ -15,8 +15,12 @@ def test_handle_nxm_url_wraps_parse_with_try():
                encoding="utf-8")
     i = src.find("def _handle_nxm_url(")
     assert i != -1
-    # First ~1000 chars of the method body.
-    scope = src[i:i + 1000]
+    # First ~1800 chars of the method body — bumped from 1000 after
+    # 2026-04-27 docstring expansion (intended_mod_id parameter)
+    # pushed the parse_nxm_url call past the prior window. Window
+    # is still tight enough to catch a real regression where the
+    # try/except disappears.
+    scope = src[i:i + 1800]
     # parse_nxm_url call must be followed by (or wrapped in) a try.
     assert re.search(r"except\s+NxmUrlError", scope), (
         "_handle_nxm_url must catch NxmUrlError so malformed URLs "

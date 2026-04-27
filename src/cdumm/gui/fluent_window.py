@@ -1968,6 +1968,13 @@ class CdummWindow(FluentWindow):
         a ``download_link.json`` response for premium users and fall
         back to the browser via :class:`NexusPremiumRequired` for free
         users, which opens ``fallback_url`` (the mod's Files tab).
+
+        ``local_mod_id`` is passed through to :meth:`_handle_nxm_url`
+        as ``intended_mod_id`` so the binding decision in the
+        completion handler can short-circuit heuristics that fail
+        for renamed mods (e.g. "Horse X" → "Legendary Horse Body
+        Size Increase") or genuine version updates with a different
+        file_id than the stored one. Bug from Faisal 2026-04-27.
         """
         if not nexus_mod_id or not file_id:
             # We don't have enough info to synthesise the URL (probably
@@ -1984,9 +1991,10 @@ class CdummWindow(FluentWindow):
             "direct update: local_mod_id=%d nexus_mod_id=%d file_id=%d "
             "(skipping browser handover)",
             local_mod_id, nexus_mod_id, file_id)
-        self._handle_nxm_url(synth_url)
+        self._handle_nxm_url(synth_url, intended_mod_id=local_mod_id)
 
-    def _handle_nxm_url(self, url: str) -> None:
+    def _handle_nxm_url(self, url: str,
+                         intended_mod_id: int | None = None) -> None:
         """Resolve an ``nxm://`` URL into a downloaded file + import queue.
 
         Runs the :func:`get_download_link` API call AND the CDN download
@@ -1994,6 +2002,15 @@ class CdummWindow(FluentWindow):
         marshalled back to the main thread via
         :meth:`PySide6.QtCore.QMetaObject.invokeMethod` and fed into the
         standard drop flow.
+
+        ``intended_mod_id`` (Path-explicit-intent fix, 2026-04-27): when
+        the caller knows which existing local mod row this download is
+        meant to update (e.g. the click-to-update pill), pass it here.
+        It threads through the completion queue and short-circuits the
+        binding heuristic in :meth:`_finish_nxm_download`. Without it
+        (a fresh nxm:// click from Nexus website with no local intent),
+        the existing heuristic disambiguates sibling-mod-on-same-page
+        vs update-of-existing-mod from the URL alone.
         """
         from cdumm.engine.nxm_handler import parse_nxm_url, NxmUrlError
         from cdumm.storage.config import Config
@@ -2186,7 +2203,8 @@ class CdummWindow(FluentWindow):
                 # next update check can walk the file_updates chain
                 # to find which file supersedes this one.
                 self._nxm_completion_queue.put(
-                    (result, error, parsed.mod_id, parsed.file_id))
+                    (result, error, parsed.mod_id, parsed.file_id,
+                     intended_mod_id))
                 from PySide6.QtCore import QMetaObject, Qt as _Qt
                 QMetaObject.invokeMethod(
                     self, "_finish_nxm_download",
@@ -2219,7 +2237,8 @@ class CdummWindow(FluentWindow):
             return
         while True:
             try:
-                result, err, nexus_mod_id, nexus_file_id = q.get_nowait()
+                (result, err, nexus_mod_id, nexus_file_id,
+                 intended_mod_id) = q.get_nowait()
             except _queue.Empty:
                 return
             if err is not None:
@@ -2299,7 +2318,30 @@ class CdummWindow(FluentWindow):
                 # again. Surface the ambiguity to the user via an
                 # InfoBar so they can de-dup before retrying.
                 existing_id = None
-                if self._db and nexus_mod_id:
+                # Explicit-intent fast path: when the user clicked
+                # "Click To Update" on a specific local mod card, the
+                # binding target is unambiguous — skip both the multi-
+                # row ambiguity warning AND the heuristic. Bug from
+                # Faisal 2026-04-27: clicking Update on Horse X (row
+                # 1424) was creating a duplicate "Legendary Horse Body
+                # Size Increase" card because the heuristic name
+                # comparison failed for renamed mods.
+                if intended_mod_id and self._db:
+                    from cdumm.engine.nxm_handler import (
+                        should_bind_to_existing_row,
+                    )
+                    existing_id = should_bind_to_existing_row(
+                        self._db.connection,
+                        nexus_mod_id=int(nexus_mod_id or 0),
+                        nexus_file_id=int(nexus_file_id or 0),
+                        downloaded_zip=result,
+                        intended_mod_id=intended_mod_id)
+                    if existing_id is not None:
+                        logger.info(
+                            "nxm: explicit-intent bind to mod_id=%d "
+                            "(skipping heuristic — user clicked Update "
+                            "on this specific row)", existing_id)
+                if existing_id is None and self._db and nexus_mod_id:
                     # Multi-row warning still applies: if multiple rows
                     # share the same nexus_mod_id we surface it for the
                     # user to dedup. The single-row binding decision now
@@ -2341,7 +2383,8 @@ class CdummWindow(FluentWindow):
                             self._db.connection,
                             nexus_mod_id=int(nexus_mod_id),
                             nexus_file_id=int(nexus_file_id or 0),
-                            downloaded_zip=result)
+                            downloaded_zip=result,
+                            intended_mod_id=intended_mod_id)
                         if existing_id is not None:
                             logger.info(
                                 "nxm: binding download to existing mod_id=%d "

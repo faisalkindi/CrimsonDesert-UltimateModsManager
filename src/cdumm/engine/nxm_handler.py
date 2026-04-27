@@ -259,12 +259,27 @@ def _exe_from_command(cmd: str) -> str | None:
 def should_bind_to_existing_row(connection,
                                   nexus_mod_id: int,
                                   nexus_file_id: int,
-                                  downloaded_zip) -> int | None:
+                                  downloaded_zip,
+                                  intended_mod_id: int | None = None
+                                  ) -> int | None:
     """Decide whether an nxm:// download should REPLACE an existing
     mod row or import as a NEW one.
 
     Returns ``existing_mod_id`` (int) when binding is safe, or
     ``None`` when the download should be imported as a new mod.
+
+    ``intended_mod_id`` (Path-explicit-intent fix, 2026-04-27):
+    when set to a non-zero value AND that row exists, the helper
+    bypasses every heuristic and returns ``intended_mod_id``
+    directly. This is the click-to-update path: the user clicked
+    "Update" on a SPECIFIC card, so the binding target is
+    unambiguous. Heuristics like "did the file_id match?" or
+    "did the name match?" are irrelevant — the user already pointed
+    at the row to update.
+
+    Without ``intended_mod_id`` (a fresh nxm:// click from the
+    Nexus website with no local intent), falls through to the
+    heuristic decision tree:
 
     Bug from Faisal 2026-04-26: Nexus page 208 hosts multiple
     distinct mods (Better Subtitles + No Letterbox). The previous
@@ -273,7 +288,7 @@ def should_bind_to_existing_row(connection,
     Mod Manager Download for. nexus_mod_id is a PAGE id, not a
     unique mod identity.
 
-    Decision tree:
+    Decision tree (no explicit intent):
 
     1. Find rows with matching ``nexus_mod_id``. None → return None
        (caller imports as new).
@@ -289,6 +304,24 @@ def should_bind_to_existing_row(connection,
           signal. Match against existing row's name. Bind only if
           the names look like the same mod.
     """
+    # Explicit-intent fast path. When the user clicked "Click To
+    # Update" on a specific local mod, that intent is unambiguous —
+    # heuristics that exist to disambiguate sibling-mod-on-same-page
+    # vs update-of-existing-mod aren't needed and actively hurt
+    # (e.g. renamed mods fail name comparison; updated mods fail
+    # file_id comparison). Verify the row still exists defensively
+    # so a between-click-and-download deletion doesn't re-create it.
+    if intended_mod_id:
+        try:
+            row = connection.execute(
+                "SELECT id FROM mods WHERE id = ?",
+                (int(intended_mod_id),)).fetchone()
+        except Exception:
+            return None
+        if row is not None:
+            return int(intended_mod_id)
+        # Row was deleted between click and download arriving —
+        # fall through to heuristic so caller imports as new.
     if not nexus_mod_id:
         return None
     try:
