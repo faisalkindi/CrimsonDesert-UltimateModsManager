@@ -1,5 +1,6 @@
 """ASI plugin management — scan, install, enable/disable, conflict detection, config open."""
 import configparser
+import json
 import logging
 import os
 import shutil
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 ASI_SUFFIX = ".asi"
 DISABLED_SUFFIX = ".asi.disabled"
 ASI_LOADER_NAMES = {"winmm.dll", "version.dll", "dinput8.dll", "dsound.dll"}
+SIDECAR_SUFFIX = ".cdumm-files.json"
 
 
 @dataclass
@@ -89,56 +91,132 @@ class AsiManager:
         """Install ASI mod from a file or folder into bin64/.
 
         Copies .asi, .ini, and ASI loader .dll files.
+        Writes a sidecar manifest `<plugin>.cdumm-files.json` listing
+        every file copied EXCEPT shared loader DLLs (which other mods
+        depend on). Uninstall reads the sidecar to remove exactly the
+        files this mod added.
+
         Returns list of installed file names.
         """
         installed: list[str] = []
+        # Files this specific mod owns (excludes shared loader DLLs).
+        owned: list[str] = []
+        # Plugin name = stem of the .asi we copy. Falls back to the
+        # source folder name if multiple .asi end up here (rare).
+        plugin_name: str | None = None
         self._bin64.mkdir(parents=True, exist_ok=True)
 
         if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
-            # Single .asi file — also grab all companion files from same dir
             shutil.copy2(source, self._bin64 / source.name)
             installed.append(source.name)
+            owned.append(source.name)
+            plugin_name = source.stem
             for f in source.parent.iterdir():
                 if f == source or not f.is_file():
                     continue
                 if f.suffix.lower() == ".ini":
                     shutil.copy2(f, self._bin64 / f.name)
                     installed.append(f.name)
+                    owned.append(f.name)
                 elif f.name.lower() in ASI_LOADER_NAMES:
                     if not (self._bin64 / f.name).exists():
                         shutil.copy2(f, self._bin64 / f.name)
                         installed.append(f.name)
+                        # NOT owned — shared between mods.
         elif source.is_dir():
             for f in source.rglob("*"):
                 if not f.is_file():
                     continue
-                if f.suffix.lower() in (ASI_SUFFIX, ".ini"):
+                ext = f.suffix.lower()
+                if ext == ASI_SUFFIX:
                     shutil.copy2(f, self._bin64 / f.name)
                     installed.append(f.name)
+                    owned.append(f.name)
+                    if plugin_name is None:
+                        plugin_name = f.stem
+                elif ext == ".ini":
+                    shutil.copy2(f, self._bin64 / f.name)
+                    installed.append(f.name)
+                    owned.append(f.name)
                 elif f.name.lower() in ASI_LOADER_NAMES:
                     if not (self._bin64 / f.name).exists():
                         shutil.copy2(f, self._bin64 / f.name)
                         installed.append(f.name)
+                        # NOT owned — shared between mods.
+
+        if plugin_name and owned:
+            sidecar = self._bin64 / f"{plugin_name}{SIDECAR_SUFFIX}"
+            try:
+                sidecar.write_text(
+                    json.dumps({"version": 1, "files": sorted(set(owned))},
+                               indent=2),
+                    encoding="utf-8",
+                )
+            except OSError as e:
+                logger.warning("Could not write ASI sidecar %s: %s", sidecar, e)
 
         if installed:
             logger.info("Installed ASI files: %s", installed)
         return installed
 
     def uninstall(self, plugin: AsiPlugin) -> list[str]:
-        """Remove ASI plugin and all companion INI files from bin64/.
+        """Remove ASI plugin and every file the install recorded.
+
+        Reads the sidecar manifest `<plugin>.cdumm-files.json` to
+        determine exactly which files to delete. Falls back to the
+        legacy stem-prefix heuristic for plugins installed before
+        sidecars existed (so existing installs survive the upgrade).
 
         Returns list of deleted file names.
         """
         deleted: list[str] = []
-        if plugin.path.exists():
-            plugin.path.unlink()
-            deleted.append(plugin.path.name)
-        # Delete all INI files matching this plugin name
-        stem = plugin.name.lower()
-        for f in self._bin64.iterdir():
-            if f.suffix.lower() == ".ini" and f.stem.lower().startswith(stem):
-                f.unlink()
-                deleted.append(f.name)
+        sidecar = self._bin64 / f"{plugin.name}{SIDECAR_SUFFIX}"
+
+        sidecar_files: list[str] | None = None
+        if sidecar.exists():
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                files = data.get("files")
+                if isinstance(files, list) and all(isinstance(f, str) for f in files):
+                    sidecar_files = files
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Could not read ASI sidecar %s: %s — "
+                               "falling back to legacy uninstall", sidecar, e)
+
+        if sidecar_files is not None:
+            for name in sidecar_files:
+                target = self._bin64 / name
+                if target.exists():
+                    try:
+                        target.unlink()
+                        deleted.append(name)
+                    except OSError as e:
+                        logger.warning("Could not delete %s: %s", target, e)
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
+            # The .asi might be on disk under the disabled name. The
+            # sidecar tracks only the as-installed name, so cover both.
+            disabled = self._bin64 / (plugin.name + DISABLED_SUFFIX)
+            if disabled.exists():
+                try:
+                    disabled.unlink()
+                    deleted.append(disabled.name)
+                except OSError:
+                    pass
+        else:
+            # Legacy path: pre-sidecar install. Delete the .asi and
+            # any .ini whose stem starts with the plugin name.
+            if plugin.path.exists():
+                plugin.path.unlink()
+                deleted.append(plugin.path.name)
+            stem = plugin.name.lower()
+            for f in self._bin64.iterdir():
+                if f.suffix.lower() == ".ini" and f.stem.lower().startswith(stem):
+                    f.unlink()
+                    deleted.append(f.name)
+
         if deleted:
             logger.info("Uninstalled ASI: %s (%s)", plugin.name, deleted)
         return deleted
