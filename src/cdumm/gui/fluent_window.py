@@ -2413,7 +2413,13 @@ class CdummWindow(FluentWindow):
                 # Expander' was a local-zip import with NULL nexus_mod_id;
                 # clicking 'Mod Manager Download' on Nexus created a
                 # second row 1487 alongside the original 1406.
-                if existing_id is None and self._db:
+                #
+                # Iteration 11 systematic-debugging: if intended_mod_id
+                # was set but rejected, also skip this name-match
+                # fallback — it could bind to a similarly-named sibling
+                # and cause the same wrong-target replace this whole
+                # branch was added to prevent.
+                if existing_id is None and not intended_mod_id and self._db:
                     try:
                         existing_id = self._match_existing_by_name(result)
                         if existing_id is not None:
