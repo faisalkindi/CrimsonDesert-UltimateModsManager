@@ -394,6 +394,29 @@ def test_apply_warning_mentions_walker_bail_for_variable_length_failures():
         "variable-length walker bail. Adversarial E3 2026-04-27.")
 
 
+def test_consume_field_bytes_legacy_cstring_path_rejects_negative_offset():
+    """Iteration 5 systematic-debugging finding: the legacy CString path
+    in `_consume_field_bytes` (used for fields without a type_descriptor
+    override) raises ``struct.error`` on negative offsets — the walker
+    branch has a guard but the legacy branch doesn't. Same defensive
+    class as the consume_bytes negative-offset fix.
+    """
+    import struct
+    from cdumm.engine.format3_apply import _consume_field_bytes
+    from cdumm.semantic.parser import FieldSpec
+
+    cstring_spec = FieldSpec(name="x", stream_size=0,
+                              field_type="CString", struct_fmt=None)
+    body = struct.pack("<I", 5) + b"hello"
+    # Negative offset must return None, NOT crash.
+    assert _consume_field_bytes(body, -1, cstring_spec, len(body)) is None
+    assert _consume_field_bytes(body, -100, cstring_spec, len(body)) is None
+    # Also: stream_size path
+    fixed_spec = FieldSpec(name="y", stream_size=4,
+                            field_type="direct_u32", struct_fmt="I")
+    assert _consume_field_bytes(body, -1, fixed_spec, len(body)) is None
+
+
 def test_consume_bytes_rejects_negative_offset():
     """Superpowers review SECURITY: ``struct.unpack_from(buf, -4)``
     returns plausible bytes from the buffer's end instead of raising.

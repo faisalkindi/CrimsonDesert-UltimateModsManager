@@ -357,6 +357,15 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
       3. Legacy ``stream_size`` for fixed-size fields.
       4. None (caller must bail).
     """
+    # Defensive negative-offset guard mirroring pabgb_types.consume_bytes.
+    # struct.unpack_from with a negative offset reads from the buffer's
+    # end and raises struct.error when there aren't enough bytes — the
+    # exception would propagate up. In production callers always pass
+    # non-negative offsets, but this keeps the legacy path symmetric
+    # with the walker's defenses. Iteration 5 systematic-debugging
+    # finding 2026-04-27.
+    if off < 0:
+        return None
     descriptor = getattr(spec, "type_descriptor", None)
     if descriptor:
         from cdumm.semantic.pabgb_types import consume_bytes
