@@ -177,10 +177,14 @@ def expand_format3_into_aggregated(
                     f"Format 3 mod '{mod_name}' produced 0 byte "
                     f"changes targeting '{target}': all "
                     f"{len(validation.supported)} intents resolved "
-                    f"to write-failures (TID not found in target "
-                    f"entries, or value out of range for the field "
-                    f"width). Check that the field_schema entries "
-                    f"match this game version."
+                    f"to write-failures. Possible causes: the byte "
+                    f"walker bailed on a variable-length field "
+                    f"(e.g. a tagged-variant entry whose "
+                    f"discriminator value isn't yet decoded — common "
+                    f"for stageinfo's _sequencerDesc), TID not found "
+                    f"in target entries, or value out of range for "
+                    f"the field width. Check the CDUMM log for "
+                    f"per-intent debug lines."
                 )
             continue
 

@@ -353,6 +353,42 @@ def test_ordered_fields_typo_refuses_to_load_table(tmp_path, monkeypatch, caplog
             "the typo loudly.")
 
 
+def test_apply_warning_mentions_walker_bail_for_variable_length_failures():
+    """Adversarial review E3: when validation passes but apply-time
+    walker bails on a variable-length field (e.g. StageInfo
+    `_sequencerDesc` optional-object variant=1+), the user-facing
+    warning at the "0 changes resolved" path must mention walker
+    failure / variable-length walking. Old message only said
+    'TID not found' / 'value out of range', leaving mod authors with
+    no clue which class of failure they hit.
+
+    Targeted assertion against the SPECIFIC warning string built
+    inside expand_format3_into_aggregated rather than the whole
+    module text (which has many unrelated 'variable' mentions).
+    """
+    from cdumm.engine.format3_apply import expand_format3_into_aggregated
+    import inspect
+    src = inspect.getsource(expand_format3_into_aggregated)
+    # Slice to only the post-validation, zero-changes warning block
+    marker = "produced 0 byte"
+    # Two such warnings exist; the second (post intent walking) is the
+    # one E3 targets. Locate occurrences and confirm at least one
+    # nearby block mentions walker / variable-length walking.
+    occurrences = [i for i in range(len(src))
+                   if src.startswith(marker, i)]
+    assert len(occurrences) >= 2, (
+        "expected at least two 'produced 0 byte' warning blocks")
+    # Check the SECOND occurrence's surrounding ~600 chars — that's
+    # the runtime walker-bail one.
+    second = occurrences[1]
+    surrounding = src[second:second + 600].lower()
+    assert ("walker" in surrounding
+            or "variable-length field" in surrounding), (
+        "format3_apply runtime warning must surface walker-bail "
+        "failures so mod authors know it's not just TID/range. "
+        "Adversarial E3 2026-04-27.")
+
+
 def test_consume_bytes_rejects_negative_offset():
     """Superpowers review SECURITY: ``struct.unpack_from(buf, -4)``
     returns plausible bytes from the buffer's end instead of raising.
