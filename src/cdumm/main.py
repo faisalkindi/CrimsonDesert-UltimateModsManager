@@ -44,7 +44,15 @@ def _emergency_crash_dump(exc: BaseException) -> None:
     excepthook is installed, writing a plain-text traceback to
     %LOCALAPPDATA%\\cdumm\\crash-pre-qt.log (or %TEMP% as fallback) so
     the user has something to paste.
+
+    Skips ``SystemExit`` (clean exit, including normal close) and
+    ``KeyboardInterrupt`` (Ctrl+C) — those are NOT crashes. Bug from
+    Faisal 2026-04-27: every normal exit was leaving a misleading
+    `Traceback ... SystemExit: 0` file that users (and the bug-report
+    tool) interpreted as a crash. Phantom bug reports followed.
     """
+    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+        return
     import traceback
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     payload = "".join(tb)
