@@ -2341,7 +2341,16 @@ class CdummWindow(FluentWindow):
                             "nxm: explicit-intent bind to mod_id=%d "
                             "(skipping heuristic — user clicked Update "
                             "on this specific row)", existing_id)
-                if existing_id is None and self._db and nexus_mod_id:
+                # Heuristic path: only runs when explicit intent
+                # WASN'T provided. If intended_mod_id was set but
+                # rejected by should_bind_to_existing_row (deleted
+                # row or nexus_mod_id mismatch — see iterations 5/6),
+                # we deliberately do NOT fall back to the heuristic
+                # — that could bind to a sibling row sharing
+                # nexus_mod_id and replace the wrong mod. User intent
+                # was specific; missing/inconsistent → import as new.
+                if (existing_id is None and not intended_mod_id
+                        and self._db and nexus_mod_id):
                     # Multi-row warning still applies: if multiple rows
                     # share the same nexus_mod_id we surface it for the
                     # user to dedup. The single-row binding decision now
@@ -2379,12 +2388,13 @@ class CdummWindow(FluentWindow):
                         from cdumm.engine.nxm_handler import (
                             should_bind_to_existing_row,
                         )
+                        # No intent here (the if-guard above ensures
+                        # intended_mod_id is falsy on this branch).
                         existing_id = should_bind_to_existing_row(
                             self._db.connection,
                             nexus_mod_id=int(nexus_mod_id),
                             nexus_file_id=int(nexus_file_id or 0),
-                            downloaded_zip=result,
-                            intended_mod_id=intended_mod_id)
+                            downloaded_zip=result)
                         if existing_id is not None:
                             logger.info(
                                 "nxm: binding download to existing mod_id=%d "
