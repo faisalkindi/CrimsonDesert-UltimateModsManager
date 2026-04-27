@@ -1131,9 +1131,112 @@ def import_from_7z(
             result.error = f"Failed to extract 7z: {e}"
             return result
 
+        # Unpack any nested archives so format detectors see folders.
+        _extract_nested_archives(tmp_path)
+
         # Delegate to import_from_zip's internal logic (same flow)
         return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
                                       mod_name, existing_mod_id)
+
+
+_NESTED_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
+_NESTED_EXTRACT_MAX_DEPTH = 5  # zip-bomb / runaway-recursion guard
+
+
+def _extract_nested_archives(extracted_dir: Path,
+                              _depth: int = 0) -> None:
+    """Walk `extracted_dir` and unpack any inner .zip / .7z / .rar
+    archives into same-stem sibling directories. Recurses up to
+    _NESTED_EXTRACT_MAX_DEPTH levels.
+
+    Behavior:
+      * Inner archive `english.zip` becomes directory `english/`,
+        and `english.zip` is removed.
+      * If `english/` already exists, the unpacked dir is named
+        `english_1/`, `english_2/`, etc. (no clobbering).
+      * Corrupt archives are skipped with a warning, not raised —
+        a single bad inner zip must not abort the whole import.
+      * 7z and rar inner archives are unpacked via the same
+        py7zr / 7-Zip executable paths the top-level importers
+        use.
+    """
+    if _depth >= _NESTED_EXTRACT_MAX_DEPTH:
+        logger.warning("Nested-archive extraction depth limit (%d) reached at %s",
+                       _NESTED_EXTRACT_MAX_DEPTH, extracted_dir)
+        return
+
+    inner_archives: list[Path] = []
+    for f in extracted_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() in _NESTED_ARCHIVE_EXTS:
+            inner_archives.append(f)
+
+    if not inner_archives:
+        return
+
+    logger.info("Nested archives found at depth %d: %d file(s)",
+                _depth, len(inner_archives))
+
+    any_extracted = False
+    for archive in inner_archives:
+        if not archive.exists():
+            # A previous iteration may have removed it (shouldn't
+            # happen given the gather-first-then-extract loop, but
+            # cheap guard against future refactors).
+            continue
+        target = archive.parent / archive.stem
+        if target.exists():
+            i = 1
+            while (archive.parent / f"{archive.stem}_{i}").exists():
+                i += 1
+            target = archive.parent / f"{archive.stem}_{i}"
+        try:
+            target.mkdir(parents=True)
+        except OSError as e:
+            logger.warning("Could not create nested-extract dir %s: %s", target, e)
+            continue
+
+        ext = archive.suffix.lower()
+        try:
+            if ext == ".zip":
+                with zipfile.ZipFile(archive) as zf:
+                    zf.extractall(target)
+            elif ext == ".7z":
+                import py7zr
+                with py7zr.SevenZipFile(archive, 'r') as z:
+                    z.extractall(target)
+            elif ext == ".rar":
+                seven_z = _find_7z()
+                if not seven_z:
+                    logger.warning("Skipping nested .rar (no 7-Zip found): %s",
+                                   archive.name)
+                    target.rmdir()
+                    continue
+                _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                proc = subprocess.run(
+                    [seven_z, "x", str(archive), f"-o{target}", "-y"],
+                    capture_output=True, timeout=120,
+                    creationflags=_no_window,
+                )
+                if proc.returncode != 0:
+                    logger.warning("Nested .rar extraction failed for %s",
+                                   archive.name)
+                    shutil.rmtree(target, ignore_errors=True)
+                    continue
+        except (zipfile.BadZipFile, Exception) as e:
+            logger.warning("Skipping corrupt nested archive %s: %s",
+                           archive.name, e)
+            shutil.rmtree(target, ignore_errors=True)
+            continue
+
+        archive.unlink()
+        any_extracted = True
+
+    if any_extracted:
+        # Recurse: an inner archive may itself have contained
+        # archives (zip-of-zip-of-zip). Bounded by _depth guard.
+        _extract_nested_archives(extracted_dir, _depth=_depth + 1)
 
 
 _FIND_7Z_DEFAULT_PATHS: list[str] = [
@@ -1239,6 +1342,9 @@ def import_from_rar(
         except Exception as e:
             result.error = f"Failed to extract RAR: {e}"
             return result
+
+        # Unpack any nested archives so format detectors see folders.
+        _extract_nested_archives(tmp_path)
 
         return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
                                       mod_name, existing_mod_id)
@@ -1552,6 +1658,12 @@ def import_from_zip(
             result.error = f"Failed to extract zip: {e}"
             logger.error("Zip extraction failed: %s", e, exc_info=True)
             return result
+
+        # Unpack any nested archives (language packs, multi-variant
+        # bundles) so the format detectors below see folders, not
+        # archives. Bug from Faisal 2026-04-27 — Display take and
+        # steal price ships 5 inner ZIPs (one per language).
+        _extract_nested_archives(tmp_path)
 
         # Stage ASI files separately for GUI-side install (mixed ZIP support)
         asi_staging = tmp_path / "_asi_staging"
