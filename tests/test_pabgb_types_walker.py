@@ -376,17 +376,22 @@ def test_apply_warning_mentions_walker_bail_for_variable_length_failures():
     # nearby block mentions walker / variable-length walking.
     occurrences = [i for i in range(len(src))
                    if src.startswith(marker, i)]
-    assert len(occurrences) >= 2, (
-        "expected at least two 'produced 0 byte' warning blocks")
-    # Check the SECOND occurrence's surrounding ~600 chars — that's
-    # the runtime walker-bail one.
-    second = occurrences[1]
-    surrounding = src[second:second + 600].lower()
-    assert ("walker" in surrounding
-            or "variable-length field" in surrounding), (
-        "format3_apply runtime warning must surface walker-bail "
-        "failures so mod authors know it's not just TID/range. "
-        "Adversarial E3 2026-04-27.")
+    assert len(occurrences) >= 3, (
+        "expected at least three 'produced 0 byte' warning blocks "
+        f"(validation skip, vanilla extract fail, walker bail) — "
+        f"found {len(occurrences)}")
+    # Search ANY of the warning blocks for the walker / variable-length
+    # mention. The runtime walker-bail block is typically last but
+    # ordering shouldn't be assumed brittle.
+    matched = False
+    for occ in occurrences:
+        block = src[occ:occ + 700].lower()
+        if "walker" in block or "variable-length field" in block:
+            matched = True
+            break
+    assert matched, (
+        "No 'produced 0 byte' warning block mentions walker / "
+        "variable-length walker bail. Adversarial E3 2026-04-27.")
 
 
 def test_consume_bytes_rejects_negative_offset():
