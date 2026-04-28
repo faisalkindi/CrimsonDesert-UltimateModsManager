@@ -13,6 +13,13 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.4",
+        "date": "2026-04-28",
+        "notes": [
+            "<b>BC7 texture mods no longer show as rainbow noise.</b> Mods that ship single-mip BC7 textures (common for UI elements, icons, HUD bars) were producing scrambled multi-coloured noise in-game after CDUMM applied them. CDUMM was writing the texture's 148-byte DX10 header correctly but flagging the entry as a layout the game reads with a 128-byte header — the 20-byte mismatch shifted every pixel by 20 bytes and the result looked like static. Now ships the texture bytes raw at the same layout vanilla BC7 textures use, so the game's loader reads them correctly. Thanks to BANDU on Nexus for the report and the clear repro.",
+        ],
+    },
+    {
         "version": "3.2.3",
         "date": "2026-04-27",
         "notes": [
