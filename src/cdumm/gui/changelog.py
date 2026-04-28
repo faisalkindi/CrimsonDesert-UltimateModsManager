@@ -16,7 +16,8 @@ CHANGELOG = [
         "version": "3.2.4",
         "date": "2026-04-28",
         "notes": [
-            "<b>BC7 texture mods no longer show as rainbow noise.</b> Mods that ship single-mip BC7 textures (common for UI elements, icons, HUD bars) were producing scrambled multi-coloured noise in-game after CDUMM applied them. CDUMM was writing the texture's 148-byte DX10 header correctly but flagging the entry as a layout the game reads with a 128-byte header — the 20-byte mismatch shifted every pixel by 20 bytes and the result looked like static. Now ships the texture bytes raw at the same layout vanilla BC7 textures use, so the game's loader reads them correctly. Thanks to BANDU on Nexus for the report and the clear repro.",
+            "<b>BC7 texture mods no longer show as rainbow noise.</b> Mods that ship single-mip BC7 textures (common for UI elements, icons, HUD bars) were producing scrambled multi-coloured noise in-game after CDUMM applied them. CDUMM was writing the texture's 148-byte DX10 header correctly but flagging the entry as a layout the game reads with a 128-byte header — the 20-byte mismatch shifted every pixel by 20 bytes and the result looked like static. Now ships the texture bytes raw at the same layout vanilla BC7 textures use, so the game's loader reads them correctly. Thanks to BANDU on Nexus for the report.",
+            "<b>Field-name JSON mods that target by short name (like \"iteminfo.pabgb\") now apply.</b> Some Format 3 mods, including exports from CrimsonGameMods v3 that target item buffs and equip data, were failing with \"could not extract vanilla bytes\" even on a clean game install with verified files. The mod's target is the file's short name; CDUMM's vanilla extraction was only matching against the full path the game stores (e.g. \"gamedata/iteminfo.pabgb\"). The lookup now tries both, so short-name targets resolve correctly. Thanks to Matrixz on Nexus.",
         ],
     },
     {
