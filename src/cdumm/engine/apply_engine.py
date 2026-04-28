@@ -2501,12 +2501,21 @@ class ApplyWorker(QObject):
         return merged_deltas
 
     def _extract_sibling_entry(self, pamt_dir: str, entry_path: str) -> bytes | None:
-        """Extract a sibling entry (e.g., .pabgh) from the same PAZ directory."""
+        """Extract a sibling entry (e.g., .pabgh) from the same PAZ
+        directory.
+
+        Like ``_get_vanilla_entry_content``, accepts either the
+        exact PAMT path or a basename. Format 3 callers compute the
+        sibling header path from the user's basename target
+        ("iteminfo.pabgb" -> "iteminfo.pabgh"); without basename
+        fallback, the PAMT entry stored as
+        "gamedata/iteminfo.pabgh" wouldn't match.
+        """
         try:
             from cdumm.archive.paz_parse import parse_pamt
             from cdumm.engine.json_patch_handler import _extract_from_paz
 
-            # Try vanilla backup first, then game dir
+            entry_basename = entry_path.rsplit("/", 1)[-1]
             for base in [self._vanilla_dir, self._game_dir]:
                 pamt_path = base / pamt_dir / "0.pamt"
                 if not pamt_path.exists():
@@ -2514,6 +2523,9 @@ class ApplyWorker(QObject):
                 entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
                 for e in entries:
                     if e.path == entry_path:
+                        return _extract_from_paz(e)
+                for e in entries:
+                    if e.path.rsplit("/", 1)[-1] == entry_basename:
                         return _extract_from_paz(e)
         except Exception:
             pass
@@ -2683,19 +2695,35 @@ class ApplyWorker(QObject):
         return result
 
     def _get_vanilla_entry_content(self, file_path: str, entry_path: str) -> bytes | None:
-        """Get vanilla decompressed content for a specific PAMT entry."""
+        """Get vanilla decompressed content for a specific PAMT entry.
+
+        Accepts ``entry_path`` as either the exact PAMT path
+        (e.g. "gamedata/iteminfo.pabgb") OR a basename
+        ("iteminfo.pabgb"). Format 3 mods target by basename, so
+        exact-match-only would silently fail to extract vanilla
+        bytes for them.
+        """
         try:
             from cdumm.archive.paz_parse import parse_pamt
             from cdumm.engine.json_patch_handler import _extract_from_paz
 
             pamt_dir = file_path.split("/")[0]
+            entry_basename = entry_path.rsplit("/", 1)[-1]
             for base in [self._vanilla_dir, self._game_dir]:
                 pamt_path = base / pamt_dir / "0.pamt"
                 if not pamt_path.exists():
                     continue
                 entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                # Prefer exact path match.
                 for e in entries:
                     if e.path == entry_path:
+                        return _extract_from_paz(e)
+                # Fall back to basename match — mirrors
+                # _find_pamt_entry's behavior (json_patch_handler.py
+                # :1462) so callers passing a Format-3 basename
+                # target resolve correctly.
+                for e in entries:
+                    if e.path.rsplit("/", 1)[-1] == entry_basename:
                         return _extract_from_paz(e)
         except Exception:
             pass
