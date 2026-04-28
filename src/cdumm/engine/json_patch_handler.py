@@ -692,8 +692,21 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     previously only debug-logged them so users thought silent skips
     meant the mod worked when in fact it didn't fully apply).
 
+    Stale-signature fallback: when ``signature`` is provided but every
+    patch fails sig-relative AND would succeed against absolute
+    offsets, the function falls back to absolute mode. This catches
+    mods authored against absolute offsets that left a stale
+    ``signature`` field in the JSON (Max Inventory Storage v1.04.02
+    is the reference case from issues #54 / #53).
+
     Returns (applied_count, mismatched_count, relocated_count).
     """
+    # Snapshot the original buffer so we can fall back to absolute-
+    # offset interpretation if the signature-aware run produces zero
+    # applies (mod has a stale signature field).
+    _orig_data = bytes(data) if signature else None
+    _orig_skipped_len = len(skipped_out) if skipped_out is not None else 0
+
     def _record_skip(change: dict, offset_val: int | None,
                      actual: bytes | None, reason: str) -> None:
         if skipped_out is None:
@@ -1037,6 +1050,50 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             written_ranges.append(
                 (original_offset, original_offset + old_len))
             applied += 1
+
+    # Stale-signature fallback. If a signature was provided AND the
+    # signature-aware apply produced zero successes plus at least
+    # one mismatch, the mod author likely intended absolute offsets
+    # but left a stale `signature` field. Restore the buffer and
+    # retry without the signature; if absolute does strictly better,
+    # keep that result. (Max Inventory Storage v1.04.02 — issues
+    # #54 / #53.)
+    if (signature
+            and applied == 0
+            and mismatched > 0
+            and _orig_data is not None):
+        # Restore data to its pre-apply state for the fallback.
+        data[:] = _orig_data
+        # Roll back any skipped_out entries the sig-relative pass
+        # appended so the absolute pass starts from the caller's
+        # original list state.
+        if skipped_out is not None and len(skipped_out) > _orig_skipped_len:
+            del skipped_out[_orig_skipped_len:]
+        # Recurse without signature. Other anchors (record_offsets,
+        # name_offsets) stay intact.
+        fb_applied, fb_mismatched, fb_relocated = _apply_byte_patches(
+            data, changes,
+            signature=None,
+            vanilla_data=vanilla_data,
+            record_offsets=record_offsets,
+            name_offsets=name_offsets,
+            inserts_out=inserts_out,
+            skipped_out=skipped_out,
+        )
+        if fb_applied > 0:
+            logger.warning(
+                "Stale-signature fallback engaged: signature-relative "
+                "apply produced 0/%d patches; absolute apply landed "
+                "%d/%d. The mod likely ships a stale `signature` "
+                "field; using absolute offsets.",
+                applied + mismatched, fb_applied,
+                fb_applied + fb_mismatched)
+            return fb_applied, fb_mismatched, fb_relocated
+        # Absolute also failed — re-restore the sig-relative skip
+        # records so the user sees the original failure shape, then
+        # return the original (zero-success) result.
+        # No state restore needed for the buffer (it was never
+        # successfully written to in either pass).
 
     return applied, mismatched, relocated
 
