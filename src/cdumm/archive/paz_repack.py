@@ -261,8 +261,21 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
             is_dx10 = fourcc == b"DX10" and len(plaintext) >= 148
             mip_count = max(1, struct.unpack_from("<I", plaintext, 28)[0]) if len(plaintext) >= 32 else 1
 
-            if allow_size_change and is_dx10 and mip_count > 1:
-                # DX10 multi-mip: raw passthrough, no compression
+            if allow_size_change and is_dx10:
+                # DX10 (BC7 / DXGI 70+): raw passthrough at comp_type=1.
+                # Bug from BANDU 2026-04-28: single-mip BC7 textures
+                # were taking the partial-payload branch below, which
+                # writes a 148-byte DX10 header followed by an LZ4
+                # body. The game's PAZ loader reads comp_type=1 as
+                # "128-byte header + LZ4 body", so the 20 bytes of
+                # DX10 extension at offset 128-147 got fed to the LZ4
+                # decoder as garbage prefix, shifting pixel decoding
+                # by 20 bytes — rainbow-noise output.
+                # Vanilla 0012/0.pamt's BC7 entries (e.g. multi-mip
+                # material_noise_common.dds) use this raw-passthrough
+                # layout and work correctly. Drop the previous
+                # `mip_count > 1` guard so single-mip BC7 takes the
+                # same path.
                 payload = plaintext
                 actual_comp_size = len(payload)
                 actual_orig_size = len(payload)
