@@ -15,12 +15,14 @@
 
 ---
 
-## New in v3.2
+## New in v3.2.4
 
-- **NexusMods is now built in.** Sign in once, CDUMM watches every mod you've installed and lights up a red badge when an update lands. Click "Mod Manager Download" on a Nexus page and the file goes straight in — no Save As, no drag-drop.
-- **One-click Game Update Recovery.** Steam patches Crimson Desert overnight, your mods break in the morning? CDUMM catches that on launch and a single button runs the whole repair: verify, refresh every mod against the new game files, reapply.
-- **Apply is way faster.** Engine rewrites make conflict detection near-instant and merging mod changes hundreds of times faster on big mod sets. No more "stuck at 0% on 0008/0.paz".
-- **Cleaner Settings + in-app Patch Notes.** Login with Nexus is the recommended path and leads. View any prior version's notes any time from Settings → About.
+- **Field-name JSON mods finally apply (v3.2.3).** The new format that says "change `cooltime` to 0" instead of "change byte 1632 to `00 00 00 00`" now applies for six game tables: items, mounts, terrain, stages, regions, and mount character data. Previously imports worked but apply produced no changes; now they actually take effect in-game.
+- **One broken mod can't kill your whole loadout (v3.2.3).** A single mod with a corrupt change used to abort the entire Apply. Now CDUMM skips just the broken change, names which mod and entry was wrong, and applies everything else cleanly.
+- **BC7 texture mods no longer show as rainbow noise (v3.2.4).** Single-mip BC7 textures (UI elements, HUD bars, icons) had a 20-byte header layout mismatch that scrambled pixel decoding. Fixed.
+- **Multi-version mod packs now show a picker (v3.2.3).** Mods like CrimsonWings ship five strength levels in one zip; drop the zip, pick a level, done.
+- **NexusMods built-in (v3.2).** Sign in once, CDUMM watches every mod you've installed and lights up a red badge when an update lands. Click "Mod Manager Download" on a Nexus page and the file goes straight in.
+- **One-click Game Update Recovery (v3.2).** Steam patches Crimson Desert, your mods break? CDUMM catches it on launch and a single button runs the whole repair: verify, refresh every mod against the new game files, reapply.
 
 ---
 
@@ -41,16 +43,18 @@ Your original game files are **never modified**. Mods are applied through an ove
 
 | Format | Description |
 |--------|-------------|
-| `.zip` / `.7z` / `.rar` | Archives — auto-extracted and detected |
+| `.zip` / `.7z` / `.rar` | Archives — auto-extracted, including nested zips for multi-language packs |
 | Folders | Loose directories with PAZ/PAMT files or Crimson Browser mods |
-| `.json` | JSON byte-patch mods (compatible with JSON Mod Manager) |
-| `.dds` | DDS texture mods with full PATHC index registration |
+| `.json` (byte-patch) | Offset-based JSON mods (`offset`, `original`, `patched`) |
+| `.field.json` (field-name) | Field-name JSON mods — six tables covered (items, mounts, terrain, stages, regions, mount character) |
+| `.dds` | DDS texture mods with full PATHC index registration (BC1/BC3/BC4/BC5/BC7) |
 | `OG_*.xml` | XML full replacement mods |
-| `.asi` | ASI plugins — auto-detected, installed to `bin64/` |
+| `.asi` | ASI plugins — auto-detected, installed to `bin64/` with clean uninstall tracking |
 | `.bnk` | Wwise soundbank mods |
 | `.bat` / `.py` | Script installers — runs in console, captures changes |
 | `.bsdiff` / `.xdelta` | Binary patches |
 | Mixed archives | ZIPs with ASI + PAZ content — auto-separated |
+| Multi-variant packs | Mods that ship multiple versions in one zip — variant picker appears |
 
 ---
 
@@ -68,18 +72,24 @@ Your original game files are **never modified**. Mods are applied through an ove
 - **Mods that can't be auto-recovered get safely disabled** instead of corrupting your save. CDUMM tells you which ones so you can drop their original archive back in.
 
 ### Performance
-- **Apply is hundreds of times faster on big mod sets** (v3.2). Conflict detection went from O(E²) to O(E log E); cross-mod byte merging is now chunk-wise instead of byte-by-byte.
+- **Apply is hundreds of times faster on big mod sets** (v3.2). Conflict detection is near-instant; cross-mod byte merging runs hundreds of times faster than the v3.1 line.
 - **Batch import** — drop dozens of mods at once, single-process import
 - **Fast apply** — overlay cache + Rust native engine, applies in seconds
-- **48 MB exe** — single standalone binary, no install needed
+- **~50 MB exe** — single standalone binary, no install needed
+
+### Resilience
+- **One bad mod can't kill the apply** (v3.2.3) — broken changes are skipped with a clear log naming the mod, the rest of your stack still applies
+- **Fix Everything** — one click restores clean vanilla state if anything goes sideways
+- **Atomic apply** — partial failures roll back; no half-applied state on disk
 
 ### Mod Management
 - **Entry-level composition** — multiple mods safely modify the same PAZ file
-- **Semantic merging** — field-level diffing for 322 PABGB data table schemas
+- **Semantic merging** — field-level diffing for PABGB data tables
 - **Conflict detection** — see exactly what overlaps and why
 - **Override mode** — mod authors can declare conflict winners in `modinfo.json`
+- **Partial apply opt-in** (v3.2.3) — authors can mark a mod as "apply what fits" for cost-only / scalar tweaks
 - **Load order** — drag-and-drop reordering with folder groups
-- **Configurable mods** — preset picker for multi-variant mods, per-patch toggle
+- **Configurable mods** — preset picker for multi-variant mods, per-patch toggle, multi-version pack picker (v3.2.3)
 
 ### Game Integration
 - **Auto-detection** — finds your game on Steam, Epic Games, or Xbox Game Pass
@@ -99,7 +109,7 @@ Your original game files are **never modified**. Mods are applied through an ove
 - **Verify game state** — scan all files, see vanilla vs modded
 - **One-click revert** — restores all files including PATHC and PAMTs
 - **Crash recovery** — atomic commits with `.pre-apply` markers
-- **Find Problem Mod** — delta debugging wizard finds which mod crashes the game
+- **Find Culprit** — auto-bisect tool that finds which mod crashes the game by toggling halves on and off until stable
 
 ---
 
@@ -159,7 +169,22 @@ CDUMM supports these fields in `modinfo.json`:
 - `conflict_mode: "override"` — your mod always wins conflicts regardless of load order
 - `target_language` — marks the mod as a language/localization mod, shows a badge
 
-JSON patches support `editable_value` metadata for inline value editing in the config panel.
+### JSON byte-patch flags
+
+```json
+{
+  "patches": [...],
+  "allow_partial_apply": true
+}
+```
+
+- `allow_partial_apply: true` (v3.2.3) — when some bytes drift after a game patch, CDUMM will apply the verified changes and skip the mismatched ones with a clear log instead of rejecting the whole mod. Useful for cost-only / scalar mods like Refinement Cost Reforged. Default is `false` — mismatches still reject so a half-broken mod can't crash structural data tables.
+
+JSON patches also support `editable_value` metadata for inline value editing in the config panel.
+
+### Field-name JSON mods (Format 3)
+
+CDUMM supports the new field-name JSON format for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), and mount character data (`characterinfo.pabgb`). Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
 
 ---
 
@@ -170,7 +195,10 @@ JSON patches support `editable_value` metadata for inline value editing in the c
 - **993499094** — PATHC texture format reference
 - **callmeslinkycd** — Crimson Desert PATHC Tool
 - **p1xel8ted** — Performance analysis
+- **NattKh** — Field-name JSON mod format reference
+- **Potter420 (corin)** — `crimson-rs` ItemInfo schema port (MIT)
 - **HaZt** — German translation
+- **Kyo-70** — Brazilian Portuguese translation
 
 ---
 
