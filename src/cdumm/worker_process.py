@@ -232,7 +232,8 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
                     pass
             _emit({"type": "batch_item", "index": idx, "name": result.name,
                    "mod_id": result.mod_id, "mod_type": result.mod_type,
-                   "error": None, "asi_staged": result.asi_staged or []})
+                   "error": None, "asi_staged": result.asi_staged or [],
+                   "info": getattr(result, "info", None)})
         else:
             _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
                    "error": "Import returned no result"})

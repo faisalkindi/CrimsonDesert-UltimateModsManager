@@ -3225,6 +3225,21 @@ class CdummWindow(FluentWindow):
                     content=f"{ok} imported, {fail} failed.",
                     duration=5000, position=InfoBarPosition.TOP, parent=self)
 
+            # Surface non-fatal partial-skip warnings collected from
+            # the batch (multi-file mods that imported but skipped
+            # some files due to byte mismatch). Round-10 systematic-
+            # debugging fix.
+            _info_msgs = [r.get("info") for r in _batch_results
+                          if r.get("info")]
+            if _info_msgs:
+                InfoBar.warning(
+                    title=tr("main.import_complete"),
+                    content=" • ".join(_info_msgs[:3]) + (
+                        f" • +{len(_info_msgs) - 3} more"
+                        if len(_info_msgs) > 3 else ""),
+                    duration=12000, position=InfoBarPosition.TOP,
+                    parent=self)
+
             self._log_activity("import", tr("activity.msg_batch_imported", ok=ok, fail=fail))
             # Process any remaining items (shouldn't be any, but safety)
             QTimer.singleShot(100, self._process_next_import)
