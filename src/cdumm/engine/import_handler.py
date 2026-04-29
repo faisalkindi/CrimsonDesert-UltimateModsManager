@@ -2887,7 +2887,19 @@ def _persist_format3_mod(
         safe = f"{safe}_{suffix}"
     json_dest = mods_dir / f"{safe}.json"
     import shutil as _shutil
-    _shutil.copy2(json_path, json_dest)
+    # Skip the copy when source already lives at the destination —
+    # this happens during Reimport-from-source for Format 3 mods,
+    # where the stored source_path IS the previously-archived copy
+    # in CDMods/mods/. Without this guard, shutil.copy2 attempts a
+    # copy-to-self and fails with WinError 32 on Windows whenever
+    # any process (CDUMM's apply worker, Defender) holds the file.
+    # Bug from Matrixz on Nexus 2026-04-28.
+    try:
+        is_same = (json_path.resolve() == json_dest.resolve())
+    except OSError:
+        is_same = False
+    if not is_same:
+        _shutil.copy2(json_path, json_dest)
 
     # Game version stamp — matches import_json_fast convention so the
     # outdated-mod guard works for Format 3 mods too.
