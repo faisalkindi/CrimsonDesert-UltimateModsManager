@@ -280,12 +280,48 @@ def validate_intents(
     return result
 
 
+def _diagnose_unsupported_intent(field: str, new_value) -> str | None:
+    """Return a clear "not yet supported" message for the two
+    Format 3 intent shapes that can't be written by v3.2.x:
+
+      1. Dotted-path fields (``parent.child``) — need nested
+         struct walking + snake_case/camelCase normalization.
+      2. List-of-dicts values (e.g. ``enchant_data_list = [{...}]``)
+         — need byte-shift propagation through the rest of the
+         entry when the list length changes.
+
+    Returns None for any other shape (primitive, simple int array,
+    string) so the caller can fall through to the existing
+    field_schema / PABGB-schema lookup path. Bug from UnLuckyLust
+    on GitHub #55.
+    """
+    if "." in (field or ""):
+        return (
+            f"field '{field}' targets a nested struct sub-field "
+            f"(dotted path). Format 3 nested-field writes are "
+            f"coming in v3.3 — primitive top-level fields work in "
+            f"v3.2.x. Ask the mod author to flatten this intent "
+            f"or use the byte-offset JSON variant if available."
+        )
+    if isinstance(new_value, list) and new_value and isinstance(
+            new_value[0], dict):
+        return (
+            f"field '{field}' is a variable-length list-of-dicts "
+            f"(e.g. enchant_data_list, equip_passive_skill_list). "
+            f"Rewriting these requires byte-shift propagation "
+            f"that lands in v3.3. Skipping for now; other intents "
+            f"in the same mod still apply."
+        )
+    return None
+
+
 def _classify_intent(
     intent: Format3Intent, schema, field_specs: dict,
     fs_entries: dict, table_name: str
 ) -> str | None:
     """Return ``None`` if the intent is supported, otherwise a
-    human-readable reason for skipping it.
+    human-readable reason for skipping it. See _diagnose_unsupported_intent
+    for the deferred-feature catalogue.
 
     Resolution order: field_schema (community-curated) takes
     precedence over the PABGB engine schema, mirroring JMM's
@@ -304,6 +340,18 @@ def _classify_intent(
             f"op '{intent.op}' not supported in Phase 1 "
             f"(only 'set' is implemented)"
         )
+
+    # Format 3 nested writes (dotted paths and list-of-dicts) are
+    # deferred to v3.3. Catch them here so users get a clear
+    # message instead of a misleading "add a field_schema entry"
+    # (which they can't — these need writer-side support, not
+    # schema-side metadata).
+    nested_msg = _diagnose_unsupported_intent(
+        intent.field,
+        getattr(intent, "new", None),
+    )
+    if nested_msg:
+        return nested_msg
 
     # Community-curated field_schema wins
     if intent.field in fs_entries:
