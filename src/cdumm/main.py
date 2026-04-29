@@ -69,6 +69,93 @@ def _emergency_crash_dump(exc: BaseException) -> None:
 _lock_fh = None
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Return True if a process with the given PID exists and is
+    not a zombie. Defensive against psutil import failures."""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except Exception:
+        return False  # Fail-open: treat unknown as dead so we recover
+
+
+def try_acquire_gui_lock(app_data: Path) -> tuple[bool, str]:
+    """Attempt to acquire CDUMM's single-instance GUI lock.
+
+    Reads any existing ``.gui_lock`` file. If it contains a PID of a
+    LIVE process, refuses (returns ``(False, 'another_running')``).
+    If the PID is dead, empty, or unparseable, treats the lock file
+    as stale and clears it before re-acquiring.
+
+    Returns:
+        (acquired, reason) where reason is one of:
+          ``'fresh'``                — first acquisition, no prior file
+          ``'stale_pid_replaced'``   — stale lock cleared and re-taken
+          ``'another_running'``      — live PID found, refused
+          ``'io_error'``             — couldn't open / lock the file
+                                       (permissions, AV interference)
+    """
+    global _lock_fh
+    lock_path = app_data / ".gui_lock"
+    app_data.mkdir(parents=True, exist_ok=True)
+
+    # Inspect any prior lock to determine if it's stale.
+    stale = False
+    fresh = not lock_path.exists()
+    if lock_path.exists():
+        try:
+            content = lock_path.read_text(encoding="utf-8").strip()
+            if not content:
+                stale = True
+            else:
+                try:
+                    prior_pid = int(content)
+                    stale = not _is_pid_alive(prior_pid)
+                except ValueError:
+                    stale = True  # garbage / corrupt content
+        except OSError:
+            stale = False  # treat read failure as conservative
+
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            _lock_fh = open(lock_path, "w", encoding="utf-8")
+            try:
+                msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                # Another process has byte 1 of this file locked.
+                # Distinguish stale (PID dead) from real (PID alive).
+                _lock_fh.close()
+                _lock_fh = None
+                return (False, "another_running" if not stale else "io_error")
+            _lock_fh.write(str(os.getpid()))
+            _lock_fh.flush()
+            atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
+        else:
+            import fcntl
+            _lock_fh = open(lock_path, "w", encoding="utf-8")
+            try:
+                fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                _lock_fh.close()
+                _lock_fh = None
+                return (False, "another_running" if not stale else "io_error")
+            _lock_fh.write(str(os.getpid()))
+            _lock_fh.flush()
+            atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
+    except (OSError, ImportError):
+        # Couldn't open the file at all (permissions, AV, missing
+        # platform module). Different from "another instance".
+        _lock_fh = None
+        return (False, "io_error")
+
+    if fresh:
+        return (True, "fresh")
+    if stale:
+        return (True, "stale_pid_replaced")
+    return (True, "fresh")  # No prior file by the time we got here
+
+
 def setup_logging(app_data: Path) -> None:
     app_data.mkdir(parents=True, exist_ok=True)
     log_file = app_data / "cdumm.log"
@@ -160,35 +247,34 @@ def main() -> int:
 
     # Single instance check — prevent two GUI windows
     global _lock_fh
-    _lock_file = APP_DATA_DIR / ".gui_lock"
-    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        # Try to acquire exclusive lock on the file (Windows only)
-        if sys.platform == "win32":
-            import msvcrt
-            _lock_fh = open(_lock_file, "w")
-            msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
-            _lock_fh.write(str(os.getpid()))
-            _lock_fh.flush()
-            atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
+    acquired, reason = try_acquire_gui_lock(APP_DATA_DIR)
+    if acquired:
+        if reason == "stale_pid_replaced":
+            logger.info(
+                "GUI lock had stale PID — previous CDUMM exited "
+                "without cleanup. Acquired fresh lock.")
+    else:
+        # Could not acquire — another instance running, or
+        # filesystem refused the open. Bring existing window to
+        # front if reason is 'another_running', otherwise exit
+        # silently with a logged error.
+        if reason == "another_running":
+            logger.info("Another CDUMM instance is already running, exiting")
+            if sys.platform == "win32":
+                import ctypes
+                from cdumm import __version__
+                hwnd = ctypes.windll.user32.FindWindowW(None, f"CDUMM v{__version__}")
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
         else:
-            # Unix: use fcntl file locking
-            import fcntl
-            _lock_fh = open(_lock_file, "w")
-            fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            _lock_fh.write(str(os.getpid()))
-            _lock_fh.flush()
-            atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
-    except (OSError, IOError, ImportError):
-        # Another GUI instance holds the lock — bring it to front and exit
-        logger.info("Another CDUMM instance is already running, exiting")
-        if sys.platform == "win32":
-            import ctypes
-            from cdumm import __version__
-            hwnd = ctypes.windll.user32.FindWindowW(None, f"CDUMM v{__version__}")
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            logger.error(
+                "Could not acquire GUI lock (reason=%s). The "
+                "lock file at %s may have wrong permissions, or "
+                "an antivirus is holding it open. Try deleting "
+                "%s and re-launching.",
+                reason, APP_DATA_DIR / ".gui_lock",
+                APP_DATA_DIR / ".gui_lock")
         return 0
 
     # Initialize i18n (English default, reloads with user preference after DB is ready)
