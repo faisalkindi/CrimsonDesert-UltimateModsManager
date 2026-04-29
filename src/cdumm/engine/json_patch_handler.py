@@ -723,15 +723,27 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     relocated = 0
     base_offset = 0
     if signature:
-        sig_bytes = bytes.fromhex(signature)
-        idx = bytes(data).find(sig_bytes)
-        if idx < 0:
-            logger.error("Signature %s not found in data (%d bytes)",
-                         signature[:40] + "..." if len(signature) > 40 else signature,
-                         len(data))
-            return 0, 0, 0
-        base_offset = idx + len(sig_bytes)
-        logger.info("Signature found at offset %d, patches relative to %d",
+        try:
+            sig_bytes = bytes.fromhex(signature)
+        except ValueError as e:
+            # Malformed signature (typo, "0x" prefix, odd length).
+            # Treat as no signature so absolute offsets apply
+            # naturally. Bug from round-5 systematic debugging.
+            logger.warning(
+                "Malformed signature hex %r (%s) — treating as "
+                "absent and using absolute offsets.",
+                signature[:60], e)
+            signature = None
+            sig_bytes = None
+        else:
+            idx = bytes(data).find(sig_bytes)
+            if idx < 0:
+                logger.error("Signature %s not found in data (%d bytes)",
+                             signature[:40] + "..." if len(signature) > 40 else signature,
+                             len(data))
+                return 0, 0, 0
+            base_offset = idx + len(sig_bytes)
+            logger.info("Signature found at offset %d, patches relative to %d",
                      idx, base_offset)
 
     applied = 0

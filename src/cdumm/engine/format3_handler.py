@@ -280,6 +280,31 @@ def validate_intents(
     return result
 
 
+def _snake_to_camel(name: str) -> str:
+    """Convert ``foo_bar_baz`` to ``fooBarBaz``.
+
+    Pure-string transform that mirrors the engine-internal naming
+    convention. Underscores between letters become camelCase
+    boundaries. Names without underscores pass through unchanged.
+    Leading/trailing underscores are preserved (so callers can
+    layer the +underscore-prefix step independently).
+    """
+    if "_" not in name:
+        return name
+    # Track leading underscores so we can preserve them.
+    head = ""
+    body = name
+    while body.startswith("_"):
+        head += "_"
+        body = body[1:]
+    # Split body on _, lower-case-then-capitalize each subsequent piece.
+    parts = body.split("_")
+    if not parts:
+        return name
+    camel = parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:] if p)
+    return head + camel
+
+
 def _diagnose_unsupported_intent(field: str, new_value) -> str | None:
     """Return a clear "not yet supported" message for the two
     Format 3 intent shapes that can't be written by v3.2.x:
@@ -357,20 +382,29 @@ def _classify_intent(
     if intent.field in fs_entries:
         return None
 
-    # Prefix-fallback lookup mirrors the apply path at
-    # format3_apply.py:324. NattKh's mods strip the leading underscore
-    # from CDUMM-internal Pearl Abyss field names (`_cooltime` →
-    # `cooltime`); the loaded schema uses the prefixed form because
-    # that's what NattKh's IDA-MCP dumper produces. Try the user's
-    # form first, then fall back to the underscored variant. Bug from
-    # Faisal 2026-04-27: NoCooldownForALLItems mod's 201 intents on
-    # `cooltime`/`unk_post_cooltime_a`/`unk_post_cooltime_b` were all
-    # rejected because the validator skipped this fallback even though
-    # the writer had it.
-    spec = field_specs.get(intent.field) or field_specs.get(
-        f"_{intent.field}")
-    target_field_name = (intent.field if intent.field in field_specs
-                          else f"_{intent.field}")
+    # Prefix + camelCase fallback lookup. NattKh-style mods use
+    # snake_case field names without the underscore prefix. The
+    # schema/overrides use camelCase WITH the prefix (engine-internal
+    # form, e.g. `_gimmickInfo`). Try four shapes in order:
+    #   1. exact (user's `cooltime`)
+    #   2. +underscore  (user's `cooltime` → schema `_cooltime`)
+    #   3. snake→camel  (user's `gimmick_info` → `gimmickInfo`)
+    #   4. snake→camel +underscore (`gimmick_info` → `_gimmickInfo`)
+    # Originally just (1)+(2): NoCooldownForALLItems was the trigger
+    # (commit 7c9fb05). Round-5 systematic-debugging found Matrixz's
+    # mod hits (4) for `gimmick_info` and `item_charge_type`.
+    candidate_names = [intent.field, f"_{intent.field}"]
+    if "_" in intent.field:
+        camel = _snake_to_camel(intent.field)
+        if camel != intent.field:
+            candidate_names.extend([camel, f"_{camel}"])
+    spec = None
+    target_field_name = intent.field
+    for name in candidate_names:
+        if name in field_specs:
+            spec = field_specs[name]
+            target_field_name = name
+            break
     if spec is None:
         # parser.py drops variable-length fields (stream=None) from
         # the loaded schema, so the field-not-found path can't tell

@@ -317,14 +317,25 @@ def _resolve_write_pos(
             return None
         return abs_off, size, fmt
 
-    # Field-name lookup: NattKh's tool strips the leading underscore
-    # from CDUMM/Pearl Abyss internal names (`_cooltime` → `cooltime`).
-    # Try the user's name first, then fall back to the underscored
-    # variant. Bug from Faisal 2026-04-26.
-    spec = field_specs.get(intent.field) or field_specs.get(
-        f"_{intent.field}")
-    target_name = (intent.field if intent.field in field_specs
-                   else f"_{intent.field}")
+    # Field-name lookup: NattKh-style mods use snake_case without
+    # the leading underscore; the schema/overrides use camelCase
+    # with prefix (`_gimmickInfo`). Mirror the validator's four-shape
+    # lookup at format3_handler.py: exact / +underscore /
+    # snake→camel / snake→camel + underscore. Round-5 systematic-
+    # debugging finding (Matrixz mod's gimmick_info / item_charge_type).
+    from cdumm.engine.format3_handler import _snake_to_camel
+    candidate_names = [intent.field, f"_{intent.field}"]
+    if "_" in intent.field:
+        camel = _snake_to_camel(intent.field)
+        if camel != intent.field:
+            candidate_names.extend([camel, f"_{camel}"])
+    spec = None
+    target_name = intent.field
+    for n in candidate_names:
+        if n in field_specs:
+            spec = field_specs[n]
+            target_name = n
+            break
     if spec is None or not spec.struct_fmt or not spec.stream_size:
         return None
     # Walk schema fields up to target. For each field, use its actual
