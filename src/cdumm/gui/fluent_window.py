@@ -4056,6 +4056,14 @@ class CdummWindow(FluentWindow):
                     self._import_result_name = msg.get("name", path.stem)
                     self._import_result_error = None
                     self._import_result_asi_staged = msg.get("asi_staged", [])
+                    # Non-fatal info banner — set by importers when a
+                    # mod imported successfully but with notable
+                    # caveats (e.g., multi-file partial-skip with N
+                    # files dropped due to byte mismatch). Surfaced
+                    # post-import as a yellow InfoBar so users see
+                    # the warning without it being treated as an
+                    # error. Round-9 systematic-debugging fix.
+                    self._import_result_info = msg.get("info")
                     # Capture the PRIMARY mod id so post-import updates
                     # (drop_name, nexus_id, game_version_hash, priority,
                     # enabled) land on the right row. Compound imports
@@ -4387,6 +4395,17 @@ class CdummWindow(FluentWindow):
                     title=tr("main.import_complete"),
                     content=tr("main.import_success", name=name),
                     duration=4000, position=InfoBarPosition.TOP, parent=self)
+            # Surface non-fatal info banner from the importer so the
+            # user sees partial-skip warnings (multi-file mods that
+            # imported with some files dropped) without it being
+            # treated as an error. Round-9 systematic-debugging fix.
+            _info = getattr(self, '_import_result_info', None)
+            if _info:
+                InfoBar.warning(
+                    title=tr("main.import_complete"),
+                    content=_info, duration=10000,
+                    position=InfoBarPosition.TOP, parent=self)
+                self._import_result_info = None
             self._log_activity("import", tr("activity.msg_imported_mod", name=name))
             QTimer.singleShot(100, self._process_next_import)
 

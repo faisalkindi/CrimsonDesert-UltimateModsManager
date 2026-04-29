@@ -76,7 +76,8 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
     elif result:
         _emit({"type": "done", "name": result.name, "mod_id": result.mod_id,
                "mod_type": result.mod_type, "error": None,
-               "asi_staged": result.asi_staged or []})
+               "asi_staged": result.asi_staged or [],
+               "info": getattr(result, "info", None)})
     else:
         _emit({"type": "error", "msg": "Import returned no result"})
 
