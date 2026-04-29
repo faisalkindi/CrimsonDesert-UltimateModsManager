@@ -154,6 +154,41 @@ def test_garbage_pid_acquires_cleanly(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="msvcrt is Windows-only")
+def test_corrupt_lock_with_pid_zero_treated_as_stale(tmp_path):
+    """Edge case from round-8 audit: psutil.pid_exists(0) returns
+    True on Windows (System Idle Process is PID 0). If the lock
+    file gets corrupted to literal "0", CDUMM would treat that
+    as a live competing instance forever. Real CDUMM PIDs are
+    always >= 4 on Windows; treat PID 0 (and other system PIDs
+    we'd never legitimately write) as stale."""
+    from cdumm.main import try_acquire_gui_lock
+
+    lock_path = tmp_path / ".gui_lock"
+    lock_path.write_text("0")
+
+    acquired, reason = try_acquire_gui_lock(tmp_path)
+    assert acquired is True, (
+        f"Lock with PID '0' (System Idle Process) must be treated "
+        f"as stale — CDUMM never has that PID. reason={reason}")
+    assert reason == "stale_pid_replaced"
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="msvcrt is Windows-only")
+def test_corrupt_lock_with_negative_pid_treated_as_stale(tmp_path):
+    """A negative PID is impossible on real OSes — treat as stale."""
+    from cdumm.main import try_acquire_gui_lock
+
+    lock_path = tmp_path / ".gui_lock"
+    lock_path.write_text("-1")
+
+    acquired, reason = try_acquire_gui_lock(tmp_path)
+    assert acquired is True
+    assert reason == "stale_pid_replaced"
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="msvcrt is Windows-only")
 def test_acquired_lock_writes_current_pid(tmp_path):
     """After successful acquisition, the lock file must contain
     THIS process's PID so the next launch can check liveness."""

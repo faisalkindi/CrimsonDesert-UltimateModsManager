@@ -71,7 +71,17 @@ _lock_fh = None
 
 def _is_pid_alive(pid: int) -> bool:
     """Return True if a process with the given PID exists and is
-    not a zombie. Defensive against psutil import failures."""
+    not a zombie. Defensive against psutil import failures.
+
+    CDUMM never writes PID <= 0 to its lock file — real Windows
+    PIDs are >= 4 (System Idle is 0, System is 4, then user
+    processes). Treat any PID we'd never legitimately write as
+    not-alive so a corrupt lock file with "0" doesn't pin CDUMM
+    on the System Idle Process forever (psutil.pid_exists(0)
+    returns True on Windows). Round-8 systematic-debugging.
+    """
+    if pid <= 4:
+        return False
     try:
         import psutil
         return psutil.pid_exists(pid)
