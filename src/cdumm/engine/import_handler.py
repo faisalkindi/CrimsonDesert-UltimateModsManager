@@ -1645,6 +1645,23 @@ def _import_from_extracted(
                 return result
             result = ModImportResult(jp_name)
             result.changed_files = entr_result["changed_files"]
+            # Surface per-file skips as a non-fatal info banner so
+            # multi-file mods (Faster NPC Animations etc.) tell the
+            # user which specific files were skipped due to byte
+            # drift. Bug from round-7 systematic-debugging: the
+            # multi-file partial-skip fix added skipped_files to
+            # the result but the GUI saw nothing.
+            _skipped = entr_result.get("skipped_files") or []
+            if _skipped:
+                _names = ", ".join(s.get("game_file", "?")
+                                   for s in _skipped[:3])
+                if len(_skipped) > 3:
+                    _names += f", +{len(_skipped) - 3} more"
+                result.info = (
+                    f"Imported, but {len(_skipped)} file(s) skipped "
+                    f"due to byte mismatch — these likely need an "
+                    f"update from the mod author: {_names}"
+                )
             if jp_data.get("patches"):
                 _store_json_patches(db, result, jp_data, game_dir)
             return result
@@ -1919,6 +1936,18 @@ def import_from_zip(
                     return result
                 result = ModImportResult(jp_name)
                 result.changed_files = entr_result["changed_files"]
+                _skipped = entr_result.get("skipped_files") or []
+                if _skipped:
+                    _names = ", ".join(s.get("game_file", "?")
+                                       for s in _skipped[:3])
+                    if len(_skipped) > 3:
+                        _names += f", +{len(_skipped) - 3} more"
+                    result.info = (
+                        f"Imported, but {len(_skipped)} file(s) "
+                        f"skipped due to byte mismatch — these "
+                        f"likely need an update from the mod "
+                        f"author: {_names}"
+                    )
                 if jp_data.get("patches"):
                     _store_json_patches(db, result, jp_data, game_dir)
                 return result
