@@ -366,6 +366,17 @@ def _classify_intent(
             f"(only 'set' is implemented)"
         )
 
+    # A malformed mod JSON can produce field=None / field=42 /
+    # field="" — every downstream lookup expects a non-empty
+    # string. Surface a clean per-intent skip so other intents in
+    # the same mod still apply. Round-14 systematic-debugging.
+    if not isinstance(intent.field, str) or not intent.field:
+        return (
+            f"intent has no `field` name set "
+            f"(got {type(intent.field).__name__}={intent.field!r}); "
+            f"every Format 3 intent must specify which field to write"
+        )
+
     # Format 3 nested writes (dotted paths and list-of-dicts) are
     # deferred to v3.3. Catch them here so users get a clear
     # message instead of a misleading "add a field_schema entry"
