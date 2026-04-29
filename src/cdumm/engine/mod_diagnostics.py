@@ -283,6 +283,34 @@ def _check_nesting(names: list[str], sections: list[str]) -> None:
 
 # ── JSON patch diagnosis ──────────────────────────────────────────────
 
+
+def _validate_change_structure(change, change_index: int) -> list[str]:
+    """Return a list of issues for a single v2 patch change.
+
+    A well-formed v2 change has at least ONE of:
+      * ``offset`` (classic byte-offset patch)
+      * ``entry`` (entry-anchored patch)
+      * ``record_key`` (record-anchored patch)
+
+    These three locator types are alternatives — a change with just
+    ``offset`` is fully valid, even though it has no ``entry``.
+    Bug from lycusz/jscrump1278 on GitHub #56 (2026-04-29): the
+    pre-fix code flagged every change without ``entry`` as
+    ``ISSUE``, producing 299 false-positive warnings on a mod
+    whose 299 changes were all classic-byte-offset (and all
+    verified cleanly against vanilla).
+    """
+    if not isinstance(change, dict):
+        return ["not a dict"]
+    has_offset = "offset" in change
+    has_entry = "entry" in change
+    has_record_key = "record_key" in change
+    if not (has_offset or has_entry or has_record_key):
+        return ["no target — missing both 'offset' and 'entry' "
+                "(change has nowhere to write to)"]
+    return []
+
+
 def _diagnose_json_patch(data: dict, source: str, game_dir: Path,
                          sections: list[str]) -> None:
     _s = sections.append
@@ -329,10 +357,8 @@ def _diagnose_json_patch(data: dict, source: str, game_dir: Path,
         # Validate change structure
         bad_changes = []
         for j, c in enumerate(changes):
-            if not isinstance(c, dict):
-                bad_changes.append(f"Change {j+1}: not a dict")
-            elif "entry" not in c:
-                bad_changes.append(f"Change {j+1}: missing 'entry' key")
+            for issue in _validate_change_structure(c, j):
+                bad_changes.append(f"Change {j+1}: {issue}")
         if bad_changes:
             for bc in bad_changes[:3]:
                 _s(f"    ISSUE: {bc}")
