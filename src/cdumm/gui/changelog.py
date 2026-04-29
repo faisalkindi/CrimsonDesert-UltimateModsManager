@@ -13,6 +13,17 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.5",
+        "date": "2026-04-29",
+        "notes": [
+            "<b>Mods that work in older managers but failed here with \"byte patches don't match\" now apply.</b> Some mods ship a leftover \"signature\" header in their JSON that's stale — meaning the offsets in the mod are actually meant to be absolute but the signature points at a wrong spot in the current game. Before, CDUMM trusted the signature blindly and rejected the whole mod. Now CDUMM detects this case (signature-relative apply produces zero matches but absolute would work), falls back to absolute offsets, and applies the mod cleanly with a clear log line. Max Inventory Storage v1.04.02 is the test case — 10 of 10 patches apply now where 0 of 9 applied before. Thanks to ecbrown777 and jeffersonalves71 on GitHub.",
+            "<b>CDUMM no longer fails to start if a previous launch crashed without cleanup.</b> Sshuvzz reported \"logo flash for 2 seconds, then nothing\" even after restarting the PC. CDUMM was checking a leftover lock file but didn't notice the recorded process was already dead — so launches kept thinking another instance was running. Now CDUMM checks if the recorded process is actually alive; if it's dead or the file is empty/corrupt, the lock is treated as stale and CDUMM acquires it cleanly. Real running instances still block as before. Thanks to Sshuvzz on Nexus.",
+            "<b>NattKh-style mods with multi-word field names now apply.</b> Mods exported from CrimsonGameMods using snake-case field names like <i>gimmick_info</i> or <i>item_charge_type</i> were silently rejected because the game's internal schema uses camelCase (<i>_gimmickInfo</i>, <i>_itemChargeType</i>). CDUMM now bridges the two case styles in both the validator and the writer. Earlier short names like <i>cooltime</i> already worked; this completes the coverage. Thanks to Matrixz on Nexus.",
+            "<b>Field-name mods with nested or list values get a clear \"coming in v3.3\" message.</b> Some NattKh exports include intents like <i>enchant_data_list = [{...}]</i> or <i>docking_child_data.gimmick_info_key</i>. Those need writer-side support that lands in v3.3 — CDUMM now says exactly that instead of the misleading \"add a field_schema entry\" message. Other intents in the same mod still apply normally. Thanks to UnLuckyLust on GitHub.",
+            "<b>A mod with a malformed signature no longer takes down the apply.</b> If a mod's <i>signature</i> field has a typo, a leading \"0x\", or an odd number of hex characters, CDUMM now logs a clear warning and treats the mod as if no signature were present (absolute offsets). Before, this would crash the entire apply for that file before any patches even ran. Found during this round's systematic-debugging sweep.",
+        ],
+    },
+    {
         "version": "3.2.4",
         "date": "2026-04-28",
         "notes": [
