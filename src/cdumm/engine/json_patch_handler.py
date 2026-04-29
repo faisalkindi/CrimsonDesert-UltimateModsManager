@@ -1618,6 +1618,14 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             "%d: %s", mod_id, _archive_exc)
 
     changed_files = []
+    # Per-file failures accumulated during the loop. A file ends up
+    # here when ALL of its patches mismatched; the GUI surfaces this
+    # list as "X of Y files skipped" so users see WHICH file was
+    # incompatible without rejecting the whole multi-file mod.
+    # Bug from Faisal 2026-04-29: Faster NPC Animations (Instant)
+    # ships 116 files; v3.2.4 rejected the whole mod when any single
+    # one failed all-mismatch.
+    skipped_files: list[dict] = []
     entry_cache: dict[str, PazEntry] = {}
 
     # ── AIO performance fix ──────────────────────────────────────────
@@ -1733,16 +1741,25 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             logger.info("Applied %d/%d patches to %s (mismatched=%d)",
                          applied, len(changes), game_file, mismatched)
 
-        # All patches failed due to byte mismatch → game version incompatibility
+        # All patches failed for THIS file due to byte mismatch.
+        # For a single-file mod, this is a genuine version-incompat
+        # rejection. For a multi-file mod, this might be ONE bad
+        # file out of many — accumulate it and continue so the
+        # other files still apply. Final whole-mod rejection happens
+        # post-loop if changed_files stays empty AND every file
+        # ended up here.
         if mismatched > 0 and applied == 0 and bytes(modified) == plaintext:
             game_ver = patch_data.get("game_version", "unknown")
-            logger.error("All %d patches mismatched for %s — mod targets game version %s",
-                         mismatched, game_file, game_ver)
-            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
-            db.connection.commit()
-            return {"changed_files": [], "version_mismatch": True,
-                    "game_file": game_file, "game_version": game_ver,
-                    "mismatched": mismatched}
+            logger.warning(
+                "All %d patches mismatched for %s — file skipped "
+                "(mod targets game version %s).",
+                mismatched, game_file, game_ver)
+            skipped_files.append({
+                "game_file": game_file,
+                "mismatched": mismatched,
+                "reason": "all_patches_mismatched",
+            })
+            continue
 
         # PARTIAL mismatch on a data-table (.pabgb / .pabgh / .pamt):
         # Shipping half-patched data crashes the game (socket counts vs
@@ -1874,14 +1891,40 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         logger.warning("Failed to archive JSON source: %s", e)
 
     if not changed_files:
-        # No changes produced — clean up the mod entry instead of leaving a zombie
+        # No changes produced. Two distinct reasons matter to the user:
+        #  (a) ALL files in the mod failed with version mismatches —
+        #      the mod is genuinely incompatible with the current game
+        #      build. Surface as version_mismatch so the importer
+        #      shows the same banner the single-file path always did.
+        #  (b) Mod parsed but produced empty patches (zero changes).
+        #      Same removal as before.
         db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
         db.connection.commit()
+        if skipped_files:
+            game_ver = patch_data.get("game_version", "unknown")
+            logger.error(
+                "All %d files in this mod failed with byte mismatches "
+                "— mod targets game version %s.",
+                len(skipped_files), game_ver)
+            return {
+                "changed_files": [],
+                "version_mismatch": True,
+                "game_file": skipped_files[0].get("game_file", "?"),
+                "game_version": game_ver,
+                "mismatched": sum(s.get("mismatched", 0)
+                                  for s in skipped_files),
+                "skipped_files": skipped_files,
+            }
         logger.info("Removed empty mod entry %d (no changes)", mod_id)
         return {"mod_id": None, "changed_files": [], "name": mod_name}
 
     db.connection.commit()
-    return {"mod_id": mod_id, "changed_files": changed_files, "name": mod_name}
+    return {
+        "mod_id": mod_id,
+        "changed_files": changed_files,
+        "name": mod_name,
+        "skipped_files": skipped_files,
+    }
 
 
 # ── Mount-time patching (Phase 3) ──────────────────────────────────
