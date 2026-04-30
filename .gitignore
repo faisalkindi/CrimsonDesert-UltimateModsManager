@@ -16,6 +16,14 @@ venv/
 native/target/
 *.pyd
 *.pdb
+# Vendored Rust extensions (third-party, MPL-2.0) ARE tracked despite
+# the *.pyd rule above so PyInstaller can bundle them on fresh checkouts.
+!src/cdumm/_vendor/**/*.pyd
+
+# External test fixtures: third-party mod files downloaded for the
+# format3 / dropset / iteminfo / skill writer tests. Tests skip when
+# absent so it's safe to leave these uncommitted.
+tests/_test_mods_external/
 
 # Claude Code project-local permission file
 .claude/
