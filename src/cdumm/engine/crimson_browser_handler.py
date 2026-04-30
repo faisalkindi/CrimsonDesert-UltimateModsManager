@@ -36,14 +36,19 @@ def fix_xml_format(data: bytes) -> bytes:
     crashes the game's parser.
     """
     fixed = data
+    # Strip any leading BOM first so the declaration check below sees
+    # the actual XML content. Without this, files that already have
+    # `BOM + <?xml ...?>` keep their declaration forever — the game's
+    # parser then crashes on what looks like a "fixed" file. Idempotent.
+    if fixed.startswith(b'\xef\xbb\xbf'):
+        fixed = fixed[3:]
     # Remove XML declaration if present
     if fixed.startswith(b'<?xml'):
         nl = fixed.find(b'\n')
         if nl >= 0:
             fixed = fixed[nl + 1:]
     # Add UTF-8 BOM
-    if not fixed.startswith(b'\xef\xbb\xbf'):
-        fixed = b'\xef\xbb\xbf' + fixed
+    fixed = b'\xef\xbb\xbf' + fixed
     # Normalize line endings to CRLF
     fixed = fixed.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
     return fixed
