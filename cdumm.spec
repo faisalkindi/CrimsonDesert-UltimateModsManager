@@ -20,6 +20,33 @@ if _native_spec and _native_spec.submodule_search_locations and len(_native_spec
 elif _native_spec and _native_spec.origin:
     _native_binaries.append((_native_spec.origin, '.'))
 
+# Vendored crimson_rs Rust extension (NattKh, MPL-2.0).
+# Lives at src/cdumm/_vendor/crimson_rs/ and is loaded lazily by
+# cdumm.engine.crimson_rs_loader at runtime. PyInstaller needs the
+# .pyd binary AND the Python wrapper files bundled in their original
+# layout so `sys.path.insert(_vendor)` + `import crimson_rs` works
+# inside the frozen exe.
+_crimson_rs_dir = os.path.join('src', 'cdumm', '_vendor', 'crimson_rs')
+_crimson_rs_binaries = []
+_crimson_rs_datas = []
+if os.path.isdir(_crimson_rs_dir):
+    for f in os.listdir(_crimson_rs_dir):
+        full = os.path.join(_crimson_rs_dir, f)
+        if not os.path.isfile(full):
+            continue
+        if f.endswith('.pyd') or f.endswith('.so') or f.endswith('.dll'):
+            _crimson_rs_binaries.append((full, 'cdumm/_vendor/crimson_rs'))
+        else:
+            _crimson_rs_datas.append((full, 'cdumm/_vendor/crimson_rs'))
+
+# Vendored NattKh skillinfo_parser.py (MPL-2.0). Pure Python, just
+# bundle the .py file alongside crimson_rs. Loaded lazily by
+# cdumm.engine.skill_writer.
+_skill_parser_py = os.path.join('src', 'cdumm', '_vendor',
+                                'nattkh_skillinfo_parser.py')
+if os.path.isfile(_skill_parser_py):
+    _crimson_rs_datas.append((_skill_parser_py, 'cdumm/_vendor'))
+
 # qfluentwidgets resources (icons, stylesheets, compiled Qt resources)
 _qfw_datas = collect_data_files('qfluentwidgets')
 
@@ -30,7 +57,7 @@ _qflw_datas, _qflw_binaries, _qflw_hiddenimports = collect_all('qframelesswindow
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=_xxhash_binaries + _native_binaries + _qflw_binaries,
+    binaries=_xxhash_binaries + _native_binaries + _crimson_rs_binaries + _qflw_binaries,
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
            ('src/cdumm/translations', 'cdumm/translations'),
            ('schemas/pabgb_complete_schema.json', 'schemas'),
@@ -46,7 +73,7 @@ a = Analysis(
            ('assets/store-steam-white.svg', 'assets'),
            ('assets/store-xbox-white.svg', 'assets'),
            ('assets/store-epic-white.svg', 'assets'),
-           ] + _qfw_datas + _qflw_datas,
+           ] + _crimson_rs_datas + _qfw_datas + _qflw_datas,
     hiddenimports=[
         'cdumm.cli',
         'cdumm.worker_process',

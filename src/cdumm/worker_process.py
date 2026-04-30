@@ -467,11 +467,11 @@ def _run_verify(game_dir: str, db_path: str) -> None:
 
         actual_size = game_file.stat().st_size
         if actual_size != snap_size:
-            results["modded"].append(f"{file_path} — size {actual_size} != vanilla {snap_size}")
+            results["modded"].append(f"{file_path}: size {actual_size} != vanilla {snap_size}")
         else:
             actual_hash, _ = hash_file(game_file)
             if actual_hash != snap_hash:
-                results["modded"].append(f"{file_path} — content differs (same size)")
+                results["modded"].append(f"{file_path}: content differs (same size)")
             else:
                 results["vanilla"].append(file_path)
 
@@ -514,8 +514,8 @@ def _run_check_mods(game_dir: str, db_path: str) -> None:
                 actual_size = src.stat().st_size
                 if actual_size != expected_size:
                     issues.append([mod_name,
-                        f"{fp} size changed ({expected_size} -> {actual_size}) — "
-                        f"game updated, mod needs re-importing"])
+                        f"{fp} size changed ({expected_size} -> {actual_size}). "
+                        f"Game updated, mod needs re-importing"])
     except Exception:
         pass
 
@@ -595,11 +595,11 @@ def _run_fix(game_dir: str, vanilla_dir: str, db_path: str,
         # Don't touch it. Report this honestly so users see that
         # CDUMM respected the Steam-verified state.
         _emit({"type": "progress", "pct": 35,
-               "msg": "Steam-verified — skipping revert to preserve "
+               "msg": "Steam-verified, skipping revert to preserve "
                       "clean game files"})
         results.append({
             "title": "Revert Skipped (Steam-verified)",
-            "desc": "Game files are already clean per Steam — no "
+            "desc": "Game files are already clean per Steam, no "
                     "revert needed.",
             "color": "#A3BE8C",
         })
@@ -697,6 +697,38 @@ def _run_diagnose(mod_path: str, game_dir: str, db_path: str,
 
 # ── Entry point ───────────────────────────────────────────────────────
 
+def _run_self_check() -> None:
+    """Reports the runtime status of vendored extensions so smoke
+    tests can verify the frozen exe bundles them correctly.
+
+    Emits one `done` payload with `{ok: bool, crimson_rs: bool,
+    skill_parser: bool, errors: dict[str, str]}`.
+    """
+    out: dict = {"ok": True, "crimson_rs": False, "skill_parser": False,
+                 "errors": {}}
+    try:
+        from cdumm.engine.crimson_rs_loader import get_crimson_rs
+        mod = get_crimson_rs()
+        out["crimson_rs"] = mod is not None
+        if mod is None:
+            out["ok"] = False
+            out["errors"]["crimson_rs"] = "loader returned None"
+    except Exception as e:
+        out["ok"] = False
+        out["errors"]["crimson_rs"] = repr(e)
+    try:
+        from cdumm.engine.skill_writer import _get_parser
+        parser = _get_parser()
+        out["skill_parser"] = parser is not None
+        if parser is None:
+            out["ok"] = False
+            out["errors"]["skill_parser"] = "loader returned None"
+    except Exception as e:
+        out["ok"] = False
+        out["errors"]["skill_parser"] = repr(e)
+    _emit({"type": "done", **out})
+
+
 def worker_main(args: list[str]) -> None:
     """Entry point for --worker subprocess mode."""
     # Redirect logging to stderr AND to a log file for post-mortem debugging
@@ -756,6 +788,9 @@ def worker_main(args: list[str]) -> None:
             # diagnose <mod_path> <game_dir> <db_path> [original_error]
             _run_diagnose(args[1], args[2], args[3],
                           args[4] if len(args) > 4 else "")
+        elif cmd == "self_check":
+            # self_check (no args) — reports vendored extension status
+            _run_self_check()
         else:
             _emit({"type": "error", "msg": f"Unknown worker command: {cmd}"})
             sys.exit(1)
