@@ -11,6 +11,31 @@ logger = logging.getLogger(__name__)
 
 ASI_SUFFIX = ".asi"
 DISABLED_SUFFIX = ".asi.disabled"
+
+
+def _stem_from_installed(name: str) -> str | None:
+    """Return the bare plugin stem from an installed file name, or
+    None if the file isn't a plugin .asi.
+
+    Handles both `Foo.asi` and `Foo.asi.disabled` forms so callers
+    that look up `asi_plugin_state` by name (PRIMARY KEY = stem)
+    work regardless of which extension the install landed on.
+    """
+    lo = name.lower()
+    if lo.endswith(DISABLED_SUFFIX):
+        return name[: -len(DISABLED_SUFFIX)]
+    if lo.endswith(".asi"):
+        return name[: -len(".asi")]
+    return None
+
+
+def _resolve_version_filename(name: str) -> str | None:
+    """Map an installed plugin file name to the matching `.version`
+    sidecar filename. Returns None for non-plugin files."""
+    stem = _stem_from_installed(name)
+    if stem is None:
+        return None
+    return f"{stem}.version"
 ASI_LOADER_NAMES = {"winmm.dll", "version.dll", "dinput8.dll", "dsound.dll"}
 SIDECAR_SUFFIX = ".cdumm-files.json"
 
@@ -106,10 +131,38 @@ class AsiManager:
         plugin_name: str | None = None
         self._bin64.mkdir(parents=True, exist_ok=True)
 
+        # Update-over-disabled handling: when an existing plugin with
+        # the same stem is currently disabled, the on-disk file is
+        # `<stem>.asi.disabled`. Without intervention, a fresh install
+        # writes `<stem>.asi` next to the disabled one, so `scan()`
+        # reports two plugins with the same name (one enabled, one
+        # disabled). Two fixes happen here:
+        #   1. Remove the stale `.asi.disabled` sibling.
+        #   2. Land the new payload AS DISABLED so the user's
+        #      explicit "I turned this off" choice survives the
+        #      update. Returns the actual destination path.
+        # Bug from Faisal 2026-04-30.
+        def _resolve_dest_for_asi(stem: str, default_name: str) -> Path:
+            stale = self._bin64 / f"{stem}{DISABLED_SUFFIX}"
+            if stale.exists():
+                try:
+                    stale.unlink()
+                    logger.info(
+                        "Removed stale disabled sibling on update: %s",
+                        stale.name)
+                except OSError as e:
+                    logger.warning(
+                        "Could not remove stale disabled sibling %s: %s",
+                        stale.name, e)
+                # Land new payload as disabled to preserve user state.
+                return self._bin64 / f"{stem}{DISABLED_SUFFIX}"
+            return self._bin64 / default_name
+
         if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
-            shutil.copy2(source, self._bin64 / source.name)
-            installed.append(source.name)
-            owned.append(source.name)
+            dest = _resolve_dest_for_asi(source.stem, source.name)
+            shutil.copy2(source, dest)
+            installed.append(dest.name)
+            owned.append(dest.name)
             plugin_name = source.stem
             for f in source.parent.iterdir():
                 if f == source or not f.is_file():
@@ -129,9 +182,10 @@ class AsiManager:
                     continue
                 ext = f.suffix.lower()
                 if ext == ASI_SUFFIX:
-                    shutil.copy2(f, self._bin64 / f.name)
-                    installed.append(f.name)
-                    owned.append(f.name)
+                    dest = _resolve_dest_for_asi(f.stem, f.name)
+                    shutil.copy2(f, dest)
+                    installed.append(dest.name)
+                    owned.append(dest.name)
                     if plugin_name is None:
                         plugin_name = f.stem
                 elif ext == ".ini":
