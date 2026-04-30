@@ -143,7 +143,7 @@ def _diagnose_archive(mod_path: Path, game_dir: Path, db_path: Path,
                 detected.append("natt_format_3")
                 n_intents = len(data.get("intents", []))
                 target = data.get("target", "?")
-                _s(f"Detected: NattKh Format 3 mod ({jf}) — "
+                _s(f"Detected: NattKh Format 3 mod ({jf}), "
                    f"target {target}, {n_intents} intent(s)")
                 _s("  Note: Format 3 needs a field_schema/<table>.json "
                    "mapping to apply. See field_schema/README.md "
