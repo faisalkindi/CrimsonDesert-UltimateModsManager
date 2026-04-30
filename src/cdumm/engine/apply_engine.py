@@ -2250,6 +2250,18 @@ class ApplyWorker(QObject):
                         continue
                 else:
                     continue
+                # Propagate mod_name from the delta dict so the size-merge
+                # fallback warning at _merge_same_target_overlay_entries can
+                # name the actual mod that got dropped, not "mod #0".
+                # DerBambusbjoern report 2026-04-30: dropsetinfo conflict
+                # warning showed "Dropped: 'mod #0'" because metadata lost
+                # the name during routing.
+                if "mod_name" not in metadata:
+                    name_from_d = d.get("mod_name")
+                    if name_from_d:
+                        metadata["mod_name"] = name_from_d
+                if "priority" not in metadata and "priority" in d:
+                    metadata["priority"] = d["priority"]
                 self._overlay_entries.append((content, metadata))
                 logger.info("Routed to overlay: %s in %s from %s",
                             entry_path, file_path, d.get("mod_name", "?"))
