@@ -27,6 +27,21 @@ from cdumm.i18n import tr
 logger = logging.getLogger(__name__)
 
 
+def compute_picker_labels(
+    presets: list[tuple[Path, dict]],
+) -> list[str]:
+    """Thin wrapper around `variant_handler.compute_variant_labels`.
+
+    Kept here so callers in the GUI layer have a single import
+    surface. The canonical algorithm lives in engine/variant_handler
+    so `build_variants_metadata` can use the same logic to populate
+    the persisted `label` field (cog panel must show the same
+    disambiguated names the picker showed).
+    """
+    from cdumm.engine.variant_handler import compute_variant_labels
+    return compute_variant_labels(presets)
+
+
 def find_json_presets(path: Path) -> list[tuple[Path, dict]]:
     """Find all valid JSON patch files in a path.
 
@@ -539,12 +554,19 @@ class PresetPickerDialog(MessageBoxBase):
         first_of_group_seen: set[int] = set()
         has_any_default = False
 
+        # Disambiguate labels across the whole preset set so the user
+        # can tell apart variants whose JSON `name` collides (e.g.
+        # Character Creator's six FemaleAnimations.json files under
+        # different race folders).
+        disambiguated_labels = compute_picker_labels(self._presets)
+
         for i, (file_path, data) in enumerate(self._presets):
-            name = data.get("name", file_path.stem)
             desc = data.get("description", "")
             patch_count = sum(
                 len(p.get("changes", [])) for p in data.get("patches", []))
 
+            name = disambiguated_labels[i] if i < len(
+                disambiguated_labels) else data.get("name", file_path.stem)
             label = name
             if desc:
                 label += f"\n{desc[:80]}"

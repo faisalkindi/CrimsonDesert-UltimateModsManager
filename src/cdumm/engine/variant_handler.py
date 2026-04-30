@@ -159,6 +159,113 @@ def detect_conflict_groups(variant_data: list[dict]) -> list[int]:
 
 # ── Import helpers ──────────────────────────────────────────────────
 
+def compute_variant_labels(
+    presets: list[tuple[Path, dict]],
+) -> list[str]:
+    """Return one display label per preset.
+
+    Each label is `data.get("name")` (or `path.stem` if name is missing).
+    When two or more presets resolve to the same label, the shallowest
+    parent-folder depth that makes the colliding set unique is found
+    and that hint is appended in parens.
+
+    Used by both the picker dialog (so users can tell variants apart
+    at install time) and the cog panel (so they stay distinguishable
+    in the variants metadata persisted on the mod row).
+
+    ZapZockt 2026-04-26 (GitHub #49): Character Creator v4.9 ships
+    six JSONs all called "Female Animations" / "Male Animations".
+    Without this, every UI surface showed three indistinguishable
+    rows.
+    """
+    raw: list[str] = []
+    for path, data in presets:
+        name = (data.get("name") or path.stem)
+        if isinstance(name, str):
+            name = name.strip()
+        else:
+            name = path.stem
+        raw.append(name or path.stem)
+
+    counts: dict[str, int] = {}
+    for n in raw:
+        counts[n] = counts.get(n, 0) + 1
+
+    colliding: dict[str, list[int]] = {}
+    for i, base in enumerate(raw):
+        if counts.get(base, 0) > 1:
+            colliding.setdefault(base, []).append(i)
+
+    out: list[str] = list(raw)
+    for base, idxs in colliding.items():
+        parents_for: list[list[str]] = [
+            [p for p in presets[i][0].parts[:-1]
+             if p and p not in (".", "/", "\\")]
+            for i in idxs
+        ]
+        max_depth = max((len(pf) for pf in parents_for), default=0)
+        chosen: list[str] = ["" for _ in idxs]
+        for depth in range(1, max_depth + 1):
+            hints = [
+                pf[-depth] if depth <= len(pf) else ""
+                for pf in parents_for
+            ]
+            if len(set(hints)) == len(hints):
+                chosen = hints
+                break
+        else:
+            chosen = ["/".join(pf) for pf in parents_for]
+        for i, hint in zip(idxs, chosen):
+            out[i] = f"{base} ({hint})" if hint else base
+    return out
+
+
+def _disambiguate_basenames(
+    presets: list[tuple[Path, dict]],
+) -> dict[Path, str]:
+    """Map each preset's source path to a unique on-disk filename.
+
+    When two or more presets share a basename (e.g. several
+    `FemaleAnimations.json` files under different parent folders),
+    prefix with parent folder name(s) so each preset gets a distinct
+    name on disk.
+
+    Bug from ZapZockt 2026-04-26 (GitHub #49): Character Creator v4.9
+    ships six JSONs all called FemaleAnimations.json or
+    MaleAnimations.json. Without this, copy_variants_to_mod_dir
+    overwrote them all into one file.
+    """
+    name_counts: dict[str, int] = {}
+    for path, _ in presets:
+        name_counts[path.name] = name_counts.get(path.name, 0) + 1
+
+    out: dict[Path, str] = {}
+    for path, _ in presets:
+        if name_counts[path.name] <= 1:
+            out[path] = path.name
+            continue
+        parts = list(path.parts)
+        # Walk up parents, prefixing with each, until the resulting
+        # name is unique across the preset set.
+        prefix_parts: list[str] = []
+        for i in range(len(parts) - 2, -1, -1):
+            prefix_parts.insert(0, parts[i])
+            candidate = "__".join(prefix_parts) + "__" + path.name
+            # Sanitize: strip drive letters / colons / slashes that
+            # the OS won't accept as filename characters.
+            safe = candidate.replace(":", "").replace("/", "_")
+            safe = safe.replace("\\", "_")
+            if safe not in out.values():
+                out[path] = safe
+                break
+        else:
+            # All parent paths exhausted, fall back to a hash suffix.
+            import hashlib
+            digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
+            out[path] = f"{path.stem}__{digest}{path.suffix}"
+    return out
+
+
 def build_variants_metadata(
     presets: list[tuple[Path, dict]],
     initial_selection: set[Path] | None = None,
@@ -177,8 +284,11 @@ def build_variants_metadata(
     selection = initial_selection or set()
     seen_groups: set[int] = set()
     variants: list[dict] = []
+    disamb = _disambiguate_basenames(presets)
+    disamb_labels = compute_variant_labels(presets)
     for idx, ((path, data), group) in enumerate(zip(presets, group_ids)):
-        label = (data.get("name") or path.stem).strip()
+        label = disamb_labels[idx] if idx < len(
+            disamb_labels) else (data.get("name") or path.stem).strip()
         version = data.get("version")
         author = data.get("author")
         description = data.get("description")
@@ -208,7 +318,7 @@ def build_variants_metadata(
 
         variants.append({
             "label": label,
-            "filename": path.name,
+            "filename": disamb.get(path, path.name),
             "version": version,
             "author": author,
             "description": description,
@@ -225,16 +335,19 @@ def copy_variants_to_mod_dir(
     """Copy each picked JSON into ``<mod_dir>/variants/`` (unique names).
 
     Returns the variants directory path. Existing files are overwritten so
-    a re-import refreshes stale patch data.
+    a re-import refreshes stale patch data. When two presets share a
+    basename, parent-folder prefixes are added to keep both copies on
+    disk (see ``_disambiguate_basenames``).
     """
     vdir = mod_dir / "variants"
     vdir.mkdir(parents=True, exist_ok=True)
+    disamb = _disambiguate_basenames(presets)
     for src_path, _data in presets:
-        dest = vdir / src_path.name
+        dest = vdir / disamb.get(src_path, src_path.name)
         try:
             shutil.copy2(src_path, dest)
         except Exception as e:
-            logger.error("variant copy failed (%s → %s): %s", src_path, dest, e)
+            logger.error("variant copy failed (%s, %s): %s", src_path, dest, e)
     return vdir
 
 

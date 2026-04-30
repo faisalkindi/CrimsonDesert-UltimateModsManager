@@ -255,6 +255,53 @@ class ModImportResult:
         self.asi_staged: list[str] = []  # ASI file paths staged for GUI-side install
 
 
+def install_companion_asis(extract_dir: Path, asi_mgr) -> list:
+    """Install any .asi files found anywhere under `extract_dir`.
+
+    Used by the variant-pack import path (which extracts the zip
+    itself and never goes through `import_from_zip`). Without this,
+    mixed zips that ship `.asi` alongside JSON variants would import
+    the JSONs but leave the ASI uninstalled.
+
+    Bug from ZapZockt 2026-04-26 (GitHub #49, Character Creator v4.9):
+    the zip ships CharacterCreator.asi + multiple FemaleAnimations.json
+    files. The picker handled the JSONs; the ASI was silently dropped.
+
+    Stages only the `.asi` plus its same-stem companion `.ini`
+    (e.g. `Foo.asi` + `Foo.ini`) into a curated subdir before calling
+    `asi_mgr.install`. Passing the raw extract_dir would let
+    AsiManager rglob and sweep every `.ini` in the tree, including
+    JSON-variant config .ini files that don't belong in bin64.
+
+    Returns whatever `asi_mgr.install` returns (list of installed
+    plugin identifiers), or `[]` if no ASIs were present.
+    """
+    if not extract_dir or not Path(extract_dir).is_dir():
+        return []
+    extract_dir = Path(extract_dir)
+    asi_files = [p for p in extract_dir.rglob("*.asi") if p.is_file()]
+    if not asi_files:
+        return []
+    try:
+        import tempfile as _tmp
+        import shutil as _sh
+        staging = Path(_tmp.mkdtemp(prefix="cdumm_companion_asi_"))
+        try:
+            for asi in asi_files:
+                _sh.copy2(asi, staging / asi.name)
+                # Companion .ini: same stem in same directory.
+                companion = asi.with_suffix(".ini")
+                if companion.is_file():
+                    _sh.copy2(companion, staging / companion.name)
+            return asi_mgr.install(staging) or []
+        finally:
+            _sh.rmtree(staging, ignore_errors=True)
+    except Exception as e:
+        logger.error("install_companion_asis failed for %s: %s",
+                     extract_dir, e, exc_info=True)
+        return []
+
+
 def detect_format(path: Path) -> str:
     """Detect import format: 'zip', '7z', 'folder', 'script', 'json_patch', 'bsdiff', or 'unknown'."""
     if path.is_dir():
@@ -1633,7 +1680,7 @@ def _import_from_extracted(
                 mismatched = entr_result.get("mismatched", 0)
                 result.error = (
                     f"This mod is incompatible with the current game version. "
-                    f"{mismatched} byte patches don't match — the game data has "
+                    f"{mismatched} byte patches don't match. The game data has "
                     f"changed since this mod was created (mod targets version "
                     f"{game_ver}). The mod author needs to update it.")
                 return result
@@ -1925,7 +1972,7 @@ def import_from_zip(
                     mismatched = entr_result.get("mismatched", 0)
                     result.error = (
                         f"This mod is incompatible with the current game version. "
-                        f"{mismatched} byte patches don't match — the game data has "
+                        f"{mismatched} byte patches don't match. The game data has "
                         f"changed since this mod was created (mod targets version "
                         f"{game_ver}). The mod author needs to update it.")
                     return result
@@ -2352,7 +2399,7 @@ def import_from_folder(
                     mismatched = entr_result.get("mismatched", 0)
                     result.error = (
                         f"This mod is incompatible with the current game version. "
-                        f"{mismatched} byte patches don't match — the game data has "
+                        f"{mismatched} byte patches don't match. The game data has "
                         f"changed since this mod was created (mod targets version "
                         f"{game_ver}). The mod author needs to update it.")
                     primary_result = result
@@ -2827,11 +2874,11 @@ def import_from_natt_format_3(
     # but Apply would do nothing — worse UX than not importing.
     if not validation.supported:
         result.error = (
-            f"NattKh Format 3 mod targeting {target} — none of the "
-            f"{len(intents)} intent(s) can be applied yet:\n\n"
+            f"NattKh Format 3 mod targeting {target}: none of the "
+            f"{len(intents)} intent(s) can be applied yet.\n\n"
             f"{validation.summary()}\n\n"
             f"Workaround: drop NattKh's offset-based JSON variant "
-            f"if they ship one — that format works in CDUMM today."
+            f"if they ship one. That format works in CDUMM today."
         )
         return result
 
@@ -3042,7 +3089,7 @@ def import_from_json_patch(
             mismatched = entr_result.get("mismatched", 0)
             result.error = (
                 f"This mod is incompatible with the current game version. "
-                f"{mismatched} byte patches don't match — the game data has "
+                f"{mismatched} byte patches don't match. The game data has "
                 f"changed since this mod was created (mod targets version "
                 f"{game_ver}). The mod author needs to update it.")
             return result

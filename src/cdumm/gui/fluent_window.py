@@ -3000,7 +3000,10 @@ class CdummWindow(FluentWindow):
 
                     installed = asi_mgr.install(install_src)
                     if installed:
-                        asi_count += len([f for f in installed if f.endswith('.asi')])
+                        from cdumm.asi.asi_manager import _stem_from_installed
+                        asi_count += sum(
+                            1 for f in installed
+                            if _stem_from_installed(f) is not None)
                         # Version lookup still uses the original drop path so
                         # the NexusMods filename parser has the real name.
                         self._store_asi_version(p, installed)
@@ -3139,7 +3142,10 @@ class CdummWindow(FluentWindow):
                             logger.warning("Batch result: ASI install from %s failed: %s", sd, _e)
                             installed = []
                         if installed:
-                            asi_total += sum(1 for f in installed if f.endswith('.asi'))
+                            from cdumm.asi.asi_manager import _stem_from_installed
+                            asi_total += sum(
+                                1 for f in installed
+                                if _stem_from_installed(f) is not None)
                             try:
                                 self._store_asi_version(bp, installed)
                             except Exception:
@@ -3552,6 +3558,7 @@ class CdummWindow(FluentWindow):
                         # start enabled; the rest are off but accessible via
                         # the cog. Skip the normal import-worker path.
                         from cdumm.engine.variant_handler import import_multi_variant
+                        from cdumm.engine.import_handler import install_companion_asis
                         try:
                             game_dir = self._game_dir
                             mods_dir = game_dir / "CDMods" / "mods"
@@ -3572,6 +3579,19 @@ class CdummWindow(FluentWindow):
                                     f"Imported variant mod: {result['mod_name']}",
                                     f"{len(result['variants'])} variants "
                                     f"({enabled_ct} enabled)")
+                            # Mixed-zip companion ASIs: variant path
+                            # bypasses the import worker, so any .asi
+                            # files that came along in the archive
+                            # never get installed. ZapZockt #49.
+                            if tmp_extract:
+                                from cdumm.asi.asi_manager import AsiManager
+                                _amgr = AsiManager(self._game_dir / "bin64")
+                                _asi_done = install_companion_asis(
+                                    tmp_extract, _amgr)
+                                if _asi_done:
+                                    logger.info(
+                                        "Mixed-zip companion ASIs installed: %s",
+                                        _asi_done)
                             if result:
                                 self._refresh_all()
                         except Exception as e:
@@ -3583,6 +3603,24 @@ class CdummWindow(FluentWindow):
                         self._process_next_import()
                         return
                     # Single-select → fall through the normal import worker
+                    # but first, install any companion ASIs from the
+                    # extracted archive (the worker only sees the JSON
+                    # we forward, so it can't stage them itself).
+                    # ZapZockt #49.
+                    if tmp_extract:
+                        try:
+                            from cdumm.asi.asi_manager import AsiManager
+                            _amgr_sg = AsiManager(self._game_dir / "bin64")
+                            _asi_done_sg = install_companion_asis(
+                                tmp_extract, _amgr_sg)
+                            if _asi_done_sg:
+                                logger.info(
+                                    "Mixed-zip companion ASIs installed (single): %s",
+                                    _asi_done_sg)
+                        except Exception as _e_asi:
+                            logger.warning(
+                                "Single-select companion ASI install failed: %s",
+                                _e_asi)
                     path = selected[0][0]
                 else:
                     self._configurable_source = None
@@ -3739,6 +3777,26 @@ class CdummWindow(FluentWindow):
                                 f"alternatives (1 enabled)")
                         if mv_result:
                             self._refresh_all()
+                        # Mixed-zip companion ASI install (archive-wide
+                        # mutex branch). ZapZockt #49 case where the
+                        # archive may carry both JSON variants and a
+                        # companion .asi.
+                        if _tmp_extract_for_picker is not None:
+                            try:
+                                from cdumm.engine.import_handler import (
+                                    install_companion_asis)
+                                from cdumm.asi.asi_manager import AsiManager
+                                _amgr_aw = AsiManager(self._game_dir / "bin64")
+                                _asi_aw = install_companion_asis(
+                                    _tmp_extract_for_picker, _amgr_aw)
+                                if _asi_aw:
+                                    logger.info(
+                                        "Mixed-zip companion ASIs (archive-mutex): %s",
+                                        _asi_aw)
+                            except Exception as _e_asi_aw:
+                                logger.warning(
+                                    "Archive-mutex companion ASI install failed: %s",
+                                    _e_asi_aw)
                     except Exception as _amv_e:
                         logger.error(
                             "archive-wide import_multi_variant "
@@ -3929,12 +3987,30 @@ class CdummWindow(FluentWindow):
                                     f"alternatives (1 enabled)")
                             if mv_result:
                                 self._refresh_all()
+                            # Mixed-zip companion ASI install (mutex-folder
+                            # branch). ZapZockt #49.
+                            if _tmp_extract_for_picker is not None:
+                                try:
+                                    from cdumm.engine.import_handler import (
+                                        install_companion_asis)
+                                    from cdumm.asi.asi_manager import AsiManager
+                                    _amgr_mx = AsiManager(self._game_dir / "bin64")
+                                    _asi_mx = install_companion_asis(
+                                        _tmp_extract_for_picker, _amgr_mx)
+                                    if _asi_mx:
+                                        logger.info(
+                                            "Mixed-zip companion ASIs (mutex): %s",
+                                            _asi_mx)
+                                except Exception as _e_asi_mx:
+                                    logger.warning(
+                                        "Mutex companion ASI install failed: %s",
+                                        _e_asi_mx)
                         except Exception as _mv_e:
                             logger.error(
                                 "Mutex import_multi_variant failed: %s",
                                 _mv_e, exc_info=True)
                         # Clean up the variant-picker pre-extract temp
-                        # immediately — we're not going through the
+                        # immediately, we're not going through the
                         # worker path that normally handles it.
                         if _tmp_extract_for_picker is not None:
                             import shutil
@@ -4477,14 +4553,17 @@ class CdummWindow(FluentWindow):
             orig = getattr(self, '_original_drop_path', path)
             drop_ver = self._get_drop_version(orig)
             if drop_ver:
+                from cdumm.asi.asi_manager import _resolve_version_filename
                 bin64 = self._game_dir / "bin64"
                 for asi_name in installed:
-                    if asi_name.endswith('.asi'):
-                        ver_file = bin64 / (asi_name.replace('.asi', '.version'))
-                        try:
-                            ver_file.write_text(drop_ver, encoding='utf-8')
-                        except Exception:
-                            pass
+                    ver_filename = _resolve_version_filename(asi_name)
+                    if ver_filename is None:
+                        continue
+                    ver_file = bin64 / ver_filename
+                    try:
+                        ver_file.write_text(drop_ver, encoding='utf-8')
+                    except Exception:
+                        pass
 
             # Store version in asi_plugin_state DB
             self._store_asi_version(orig, installed)
@@ -4527,10 +4606,11 @@ class CdummWindow(FluentWindow):
             real_file_id = 0
         if not version and not nexus_id and not real_file_id:
             return
+        from cdumm.asi.asi_manager import _stem_from_installed
         for fname in installed_files:
-            if not fname.endswith('.asi'):
+            plugin_name = _stem_from_installed(fname)
+            if plugin_name is None:
                 continue
-            plugin_name = fname.replace('.asi', '')
             try:
                 # Always INSERT OR IGNORE first so a row exists, then UPDATE
                 # the individual columns only when we have real values.
