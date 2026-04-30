@@ -104,6 +104,19 @@ def expand_format3_into_aggregated(
     n_bytes_changed = 0
     files_touched: set[str] = set()
 
+    # Cross-mod accumulator for whole-table writer targets (iteminfo,
+    # skill). Each whole-table writer emits ONE byte change covering
+    # the entire .pabgb body, so per-mod dispatch can't compose: when
+    # mod_A and mod_B both target iteminfo.pabgb, applying A then B
+    # would reset the buffer to vanilla via the apply path's
+    # "vanilla-remnant" recovery branch and discard A's edits. Fix:
+    # collect intents from ALL mods first, dispatch once with the
+    # union, emit a single change. Bug from systematic-debugging
+    # round on test_iteminfo_multi_mod_compose.
+    _WHOLE_TABLE_TARGETS = {"iteminfo.pabgb", "skill.pabgb"}
+    whole_table_intents: dict[str, list] = {}
+    whole_table_mod_names: dict[str, list[str]] = {}
+
     for mod_id, mod_name, json_source, _priority in rows:
         try:
             jp = Path(json_source)
@@ -126,7 +139,7 @@ def expand_format3_into_aggregated(
             n_mods_skipped += 1
             logger.warning(
                 "Format 3 mod '%s' (id=%d): no supported intents "
-                "for %s — %d skipped. Mod produced 0 byte changes.",
+                "for %s, %d skipped. Mod produced 0 byte changes.",
                 mod_name, mod_id, target,
                 len(validation.skipped))
             if warnings_out is not None:
@@ -155,11 +168,21 @@ def expand_format3_into_aggregated(
                     f"Format 3 mod '{mod_name}' produced 0 byte "
                     f"changes: could not extract vanilla bytes for "
                     f"'{target}'. The target file may not exist in "
-                    f"your game's PAZ archives — check the spelling "
+                    f"your game's PAZ archives, check the spelling "
                     f"or run Steam Verify if the file is missing."
                 )
             continue
         vanilla_body, vanilla_header = vanilla
+
+        # Whole-table writer targets: defer dispatch to the post-loop
+        # phase so all mods' intents land in a single parse+serialize.
+        if target in _WHOLE_TABLE_TARGETS:
+            whole_table_intents.setdefault(target, []).extend(
+                validation.supported)
+            whole_table_mod_names.setdefault(target, []).append(mod_name)
+            n_mods_changed += 1  # provisional; recounted below if no bytes
+            files_touched.add(target)
+            continue
 
         # Convert each supported intent into a v2-style change dict
         changes = _intents_to_v2_changes(
@@ -201,6 +224,53 @@ def expand_format3_into_aggregated(
             mod_name, mod_id, len(validation.supported),
             len(changes), target)
 
+    # Whole-table writer dispatch: parse vanilla once, apply ALL
+    # collected intents from every contributing mod, serialize once,
+    # emit a SINGLE change. This is what makes multi-mod composition
+    # work for iteminfo / skill.
+    for target, batched in whole_table_intents.items():
+        if not batched:
+            continue
+        contributing_mods = whole_table_mod_names.get(target, [])
+        vanilla = vanilla_extractor(target)
+        if vanilla is None:
+            logger.warning(
+                "Format 3 whole-table writer: vanilla extraction "
+                "failed for %s, skipping %d intent(s) from %d mod(s)",
+                target, len(batched), len(contributing_mods))
+            if warnings_out is not None:
+                warnings_out.append(
+                    f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
+                    f"could not apply: vanilla bytes for '{target}' "
+                    f"could not be extracted from your game's PAZ "
+                    f"archives. Run Steam Verify if the file is missing."
+                )
+            continue
+        vanilla_body, vanilla_header = vanilla
+        changes = _intents_to_v2_changes(
+            target, vanilla_body, vanilla_header, batched)
+        if not changes:
+            logger.debug(
+                "Format 3 whole-table writer for %s: %d intent(s) "
+                "produced 0 changes", target, len(batched))
+            if warnings_out is not None:
+                warnings_out.append(
+                    f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
+                    f"produced 0 byte changes for '{target}'. "
+                    f"Possible causes: the vendored writer (crimson_rs / "
+                    f"NattKh skill parser) failed to load, or all "
+                    f"target item/skill keys in the mod are missing "
+                    f"from this game version's table."
+                )
+            continue
+        aggregated.setdefault(target, []).extend(changes)
+        for c in changes:
+            n_bytes_changed += len(c.get("patched", "")) // 2
+        logger.info(
+            "Format 3 whole-table writer for %s: applied %d intents "
+            "across %d mod(s) in one pass",
+            target, len(batched), len(contributing_mods))
+
     # Summary line — INFO level so bug reports auto-include it.
     # The single line summarizes "did the feature do anything?" so
     # users + maintainers can answer that question from the log
@@ -224,8 +294,38 @@ def _intents_to_v2_changes(
     synthetic_patches`` aggregates from real v2 mods.
     """
     table_name = identify_table_from_path(target) or _strip_pabgb(target)
-    if not has_schema(table_name):
-        return []
+    from cdumm.engine.format3_handler import LIST_WRITERS
+
+    has_cdumm_schema = has_schema(table_name)
+    # Tables without a CDUMM PABGB schema are still processable when
+    # ALL their intents target a registered list writer (e.g. skill.pabgb
+    # via the vendored NattKh skillinfo_parser). The writer is the
+    # source of truth for the binary layout.
+    if not has_cdumm_schema:
+        all_writer_routable = bool(intents) and all(
+            (table_name, i.field) in LIST_WRITERS for i in intents
+        )
+        if not all_writer_routable:
+            return []
+        # Whole-table writer dispatch only — skip per-record path
+        # entirely. No need for PABGH parse, name index, etc.
+        out: list[dict] = []
+        if table_name == "iteminfo":
+            from cdumm.engine.iteminfo_writer import (
+                build_iteminfo_intent_change,
+            )
+            change = build_iteminfo_intent_change(vanilla_body, list(intents))
+            if change is not None:
+                out.append(change)
+        elif table_name == "skill":
+            from cdumm.engine.skill_writer import (
+                build_skill_intent_change,
+            )
+            change = build_skill_intent_change(
+                vanilla_body, vanilla_header, list(intents))
+            if change is not None:
+                out.append(change)
+        return out
 
     key_size, offsets = parse_pabgh_index(vanilla_header, table_name)
     if not offsets:
@@ -255,10 +355,63 @@ def _intents_to_v2_changes(
     no_entry_header = getattr(schema, "no_entry_header", False)
 
     out: list[dict] = []
+    # Whole-table writers (iteminfo, skill) batch all their intents
+    # into one offset=0 change for the entire .pabgb body.
+    iteminfo_batch: list = []
+    skill_batch: list = []
+
+    # When a mod mixes primitive intents and list-of-dict intents on
+    # the same iteminfo target, the primitive's per-record change
+    # would be silently overwritten by the whole-file change (the
+    # whole-file applies first by sort order, leaving the primitive's
+    # `original` bytes mismatched against the new buffer). Route ALL
+    # iteminfo intents through the writer when any list intent is
+    # present so they compose in one parsed-dict pass. Bug from
+    # systematic-debugging round on test_iteminfo_mixed_intents.
+    iteminfo_force_batch = (
+        table_name == "iteminfo" and any(
+            (table_name, i.field) in LIST_WRITERS for i in intents
+        )
+    )
+    skill_force_batch = (
+        table_name == "skill" and any(
+            (table_name, i.field) in LIST_WRITERS for i in intents
+        )
+    )
+
     for intent in intents:
         if intent.key not in entry_bounds:
             continue
         entry_off, entry_end, entry_name = entry_bounds[intent.key]
+
+        # Batched whole-table writer dispatch (forced for iteminfo /
+        # skill when any list-writer intent exists in the same mod).
+        if iteminfo_force_batch and table_name == "iteminfo":
+            iteminfo_batch.append(intent)
+            continue
+        if skill_force_batch and table_name == "skill":
+            skill_batch.append(intent)
+            continue
+        # Per-list-writer-only path (no primitives mixed in).
+        if (table_name == "iteminfo"
+                and (table_name, intent.field) in LIST_WRITERS):
+            iteminfo_batch.append(intent)
+            continue
+        if (table_name == "skill"
+                and (table_name, intent.field) in LIST_WRITERS):
+            skill_batch.append(intent)
+            continue
+
+        # Per-record list writer dispatch (e.g. dropsetinfo.drops):
+        # one change emitted per intent, anchored at the entry name.
+        if (table_name, intent.field) in LIST_WRITERS:
+            change = _build_list_writer_change(
+                table_name, intent, vanilla_body, entry_off, entry_end,
+                entry_name)
+            if change is not None:
+                out.append(change)
+            continue
+
         payload_off = _payload_offset(
             vanilla_body, entry_off, key_size,
             no_null_skip=no_null_skip,
@@ -293,7 +446,63 @@ def _intents_to_v2_changes(
             "patched": new_bytes.hex(),
             "label": f"{intent.entry}.{intent.field}",
         })
+
+    # Flush the iteminfo batch (whole-table writer): all collected
+    # intents become a single offset=0 change covering the full
+    # iteminfo.pabgb body.
+    if iteminfo_batch:
+        from cdumm.engine.iteminfo_writer import (
+            build_iteminfo_intent_change,
+        )
+        iteminfo_change = build_iteminfo_intent_change(
+            vanilla_body, iteminfo_batch)
+        if iteminfo_change is not None:
+            out.append(iteminfo_change)
+
+    # Same for skill: NattKh's skillinfo_parser needs the .pabgh
+    # header to walk records, so we forward `vanilla_header` here.
+    if skill_batch:
+        from cdumm.engine.skill_writer import (
+            build_skill_intent_change,
+        )
+        skill_change = build_skill_intent_change(
+            vanilla_body, vanilla_header, skill_batch)
+        if skill_change is not None:
+            out.append(skill_change)
+
     return out
+
+
+def _build_list_writer_change(
+    table_name: str,
+    intent,
+    vanilla_body: bytes,
+    entry_off: int,
+    entry_end: int,
+    entry_name: str,
+) -> "dict | None":
+    """Dispatch a list-of-dict intent to its registered writer module.
+
+    Currently registered:
+      ('dropsetinfo', 'drops') -> dropset_writer.build_drops_replacement_change
+
+    Returns a v2-style change dict suitable for the aggregator, or
+    None on parse failure / wrong intent shape.
+    """
+    record_bytes = vanilla_body[entry_off:entry_end]
+    if table_name == "dropsetinfo" and intent.field == "drops":
+        from cdumm.engine.dropset_writer import (
+            build_drops_replacement_change,
+        )
+        if not isinstance(intent.new, list):
+            return None
+        return build_drops_replacement_change(
+            record_bytes,
+            intent_key=intent.key,
+            intent_entry=entry_name or intent.entry,
+            new_drops_json=intent.new,
+        )
+    return None
 
 
 def _resolve_write_pos(

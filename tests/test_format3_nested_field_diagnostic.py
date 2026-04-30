@@ -27,8 +27,8 @@ from __future__ import annotations
 
 def test_dotted_path_intent_message_names_the_limitation():
     """An intent with a dotted field name (`parent.child`) gets a
-    message that says nested writes aren't supported yet, not a
-    misleading 'add a field_schema entry'."""
+    message that says nested writes aren't implemented for this
+    field, not a misleading 'add a field_schema entry'."""
     from cdumm.engine.format3_handler import _diagnose_unsupported_intent
 
     msg = _diagnose_unsupported_intent(
@@ -40,19 +40,24 @@ def test_dotted_path_intent_message_names_the_limitation():
     assert "nested" in msg_lower or "dotted" in msg_lower or "sub-field" in msg_lower, (
         f"Message should explain dotted-path is not yet supported. "
         f"Got: {msg!r}")
-    assert "v3.3" in msg or "future" in msg_lower or "coming" in msg_lower, (
-        f"Message should set the timeline expectation. Got: {msg!r}")
+    assert "not implemented" in msg_lower or "yet" in msg_lower, (
+        f"Message should make clear the limitation is current "
+        f"(not implemented yet). Got: {msg!r}")
 
 
 def test_list_of_dicts_intent_message_names_the_limitation():
-    """An intent setting a list-of-dicts (e.g. enchant_data_list)
-    gets a message that explains variable-length list rewriting
-    needs byte-shift propagation that lands in v3.3."""
+    """An intent setting a list-of-dicts on a table without a
+    registered list writer gets a message explaining the table
+    doesn't have a writer yet. Tables with a registered writer
+    (e.g. dropsetinfo.drops, iteminfo.enchant_data_list) should
+    NOT receive this message."""
     from cdumm.engine.format3_handler import _diagnose_unsupported_intent
 
+    # A made-up table with no writer registered drives the skip path.
     msg = _diagnose_unsupported_intent(
-        field="enchant_data_list",
-        new_value=[{"level": 0, "buy_price_list": []}],
+        field="some_list_field",
+        new_value=[{"k": 1}, {"k": 2}],
+        table_name="totally_made_up_table",
     )
     assert msg is not None
     msg_lower = msg.lower()
@@ -60,8 +65,30 @@ def test_list_of_dicts_intent_message_names_the_limitation():
             or "variable-length" in msg_lower), (
         f"Message should explain list/array rewriting limitation. "
         f"Got: {msg!r}")
-    assert "v3.3" in msg or "future" in msg_lower or "coming" in msg_lower, (
+    assert "writer" in msg_lower or "yet" in msg_lower, (
         f"Got: {msg!r}")
+
+    # dropsetinfo.drops HAS a writer registered; should return None.
+    none_msg = _diagnose_unsupported_intent(
+        field="drops",
+        new_value=[{"item_key": 1, "rates": 0}],
+        table_name="dropsetinfo",
+    )
+    assert none_msg is None, (
+        f"dropsetinfo.drops has a registered list writer; "
+        f"_diagnose_unsupported_intent should return None, got: "
+        f"{none_msg!r}")
+
+    # iteminfo.enchant_data_list also has a writer registered now.
+    none_msg2 = _diagnose_unsupported_intent(
+        field="enchant_data_list",
+        new_value=[{"level": 0, "buy_price_list": []}],
+        table_name="iteminfo",
+    )
+    assert none_msg2 is None, (
+        f"iteminfo.enchant_data_list has a registered list writer; "
+        f"_diagnose_unsupported_intent should return None, got: "
+        f"{none_msg2!r}")
 
 
 def test_primitive_intent_returns_none():

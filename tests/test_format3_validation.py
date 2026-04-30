@@ -146,22 +146,26 @@ def test_parse_rejects_intent_with_float_key(tmp_path):
 # ── validate_intents — supported vs skipped split ───────────────────
 
 
-def test_validate_kori228_drops_intents_all_skipped():
-    """All 695 intents in the example target ``drops``, which is
-    NattKh's friendly name for the schema's ``_list`` variable-
-    length array. Phase 1 cannot apply variable-length array
-    fields — every intent must be reported as skipped with a
-    reason a user can act on."""
+def test_validate_kori228_drops_intents_all_supported():
+    """All 695 intents in the example target `drops` on
+    `dropsetinfo.pabgb`. With the dropset_writer module registered
+    in `LIST_WRITERS`, the validator must now classify these as
+    supported (not skipped). The apply-time expander dispatches each
+    intent to `build_drops_replacement_change` and emits a
+    record-replacement byte change.
+
+    Previous behavior: all 695 skipped with a "list-of-dicts coming
+    in v3.3" message (because writer-side support was missing).
+    """
     target, intents = parse_format3_mod(
         FIXTURE_DIR / "dropsetinfo_5x_drops.json")
     result = validate_intents(target, intents)
     assert isinstance(result, Format3Validation)
-    assert len(result.supported) == 0, (
-        "Phase 1 cannot apply variable-length array fields like "
-        "'drops'; all 695 must be skipped")
-    assert len(result.skipped) == 695
-    # Every skip must carry a non-empty reason for UI surfacing
-    assert all(reason for _, reason in result.skipped)
+    assert len(result.supported) == 695, (
+        f"All 695 drops intents on dropsetinfo should be supported, "
+        f"got {len(result.supported)} supported / "
+        f"{len(result.skipped)} skipped")
+    assert len(result.skipped) == 0
 
 
 def test_validate_unknown_target_table_skips_everything():
@@ -238,19 +242,20 @@ def test_validate_variable_length_field_skipped_with_phase_note():
 
 def test_validate_mixed_supported_and_skipped_partitions_correctly():
     """A mod with one applicable + one inapplicable intent must
-    return both lists populated — partial application beats all-
-    or-nothing."""
+    return both lists populated. We use a field with NO writer to
+    force a skip (`madeupField` for the unsupported case;
+    `dropsetinfo.drops` is now supported via dropset_writer)."""
     intents = [
         Format3Intent(entry="X", key=1,
                       field="_dropRollCount", op="set", new=5),
         Format3Intent(entry="X", key=1,
-                      field="drops", op="set", new=[]),
+                      field="madeupField", op="set", new=42),
     ]
     result = validate_intents("dropsetinfo.pabgb", intents)
     assert len(result.supported) == 1
     assert len(result.skipped) == 1
     assert result.supported[0].field == "_dropRollCount"
-    assert result.skipped[0][0].field == "drops"
+    assert result.skipped[0][0].field == "madeupField"
 
 
 # ── Format3Validation summary ───────────────────────────────────────
@@ -305,19 +310,20 @@ def test_validator_skips_intent_when_writer_cannot_resolve_offset(
 
 
 def test_validation_summary_text_lists_skip_reasons():
-    """``Format3Validation.summary()`` must produce a human-
-    readable, deterministic block listing the skip count and the
-    distinct reasons. UI uses this directly."""
+    """`Format3Validation.summary()` must produce a human-readable,
+    deterministic block listing the skip count and the distinct
+    reasons. UI uses this directly. Use fields that ARE skipped
+    (no writer registered) to drive the summary path."""
     intents = [
-        Format3Intent(entry="X", key=1, field="drops",
-                      op="set", new=[]),
-        Format3Intent(entry="X", key=2, field="drops",
-                      op="set", new=[]),
-        Format3Intent(entry="X", key=3, field="madeupField",
+        Format3Intent(entry="X", key=1, field="madeupFieldA",
+                      op="set", new=0),
+        Format3Intent(entry="X", key=2, field="madeupFieldA",
+                      op="set", new=0),
+        Format3Intent(entry="X", key=3, field="madeupFieldB",
                       op="set", new=0),
     ]
     result = validate_intents("dropsetinfo.pabgb", intents)
     summary = result.summary()
     assert "3" in summary  # the count
     assert "skipped" in summary.lower()
-    assert "drops" in summary  # mentions an offending field
+    assert "madeupField" in summary  # mentions an offending field

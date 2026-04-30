@@ -94,13 +94,31 @@ def test_detect_format_returns_natt_format_3_for_format_3_file(f3_file: Path):
     assert detect_format(f3_file) == "natt_format_3"
 
 
-def test_friendly_stub_returns_clear_error_message(f3_file: Path, tmp_path: Path):
-    """The import stub must return a ModImportResult with an error
-    that names Format 3 explicitly AND points to the workaround
-    (offset-based version of the same mod)."""
+def test_friendly_stub_returns_clear_error_message(tmp_path: Path):
+    """When NONE of a Format 3 mod's intents have a writer (no
+    schema for the table AND no list writer registered), the import
+    stub must return a ModImportResult with an error that names
+    Format 3 explicitly AND points to the workaround (offset-based
+    version of the same mod).
+
+    Use a synthetic target with no schema so every intent skips.
+    `dropsetinfo.drops` is now supported via the dropset_writer, so
+    we use an unrecognised table to drive the all-skipped path."""
     from cdumm.engine.import_handler import import_from_natt_format_3
     from cdumm.engine.snapshot_manager import SnapshotManager
     from cdumm.storage.database import Database
+
+    # Synthetic Format 3 file targeting a table CDUMM has no schema for.
+    f3_file = tmp_path / "unknown_table_mod.json"
+    _write_json(f3_file, {
+        "modinfo": {"title": "Sample", "version": "1.0"},
+        "format": 3,
+        "target": "totally_made_up_table.pabgb",
+        "intents": [{
+            "entry": "X", "key": 1, "field": "anything",
+            "op": "set", "new": 42,
+        }],
+    })
 
     db = Database(tmp_path / "db.sqlite")
     db.initialize()

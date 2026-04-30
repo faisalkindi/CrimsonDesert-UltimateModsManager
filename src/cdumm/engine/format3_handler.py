@@ -175,7 +175,7 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
 
     if not isinstance(data, dict) or data.get("format") != 3:
         raise ValueError(
-            "Not a Format 3 file — missing or wrong "
+            "Not a Format 3 file: missing or wrong "
             "\"format\": 3 marker"
         )
 
@@ -215,7 +215,7 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
         raw_key = raw["key"]
         if isinstance(raw_key, bool) or not isinstance(raw_key, int):
             raise ValueError(
-                f"intent #{i} has non-integer key {raw_key!r} — "
+                f"intent #{i} has non-integer key {raw_key!r}, "
                 f"key must be an integer record id"
             )
         intents.append(Format3Intent(
@@ -254,12 +254,27 @@ def validate_intents(
     table_name = _table_name_from_target(target)
 
     if not has_schema(table_name):
+        # If every intent in this batch has a registered list writer
+        # for this table, we don't actually need the PABGB schema.
+        # The list writer is the source of truth for the binary
+        # layout. Used for skill.pabgb where the schema isn't loaded
+        # but the vendored skill parser handles writes.
+        all_have_writer = bool(intents) and all(
+            (table_name, i.field) in LIST_WRITERS for i in intents
+        )
+        if all_have_writer:
+            for intent in intents:
+                result.supported.append(intent)
+            return result
         reason = (
             f"target '{target}' has no schema in CDUMM "
             f"(table '{table_name}' not in pabgb_complete_schema.json)"
         )
         for intent in intents:
-            result.skipped.append((intent, reason))
+            if (table_name, intent.field) in LIST_WRITERS:
+                result.supported.append(intent)
+            else:
+                result.skipped.append((intent, reason))
         return result
 
     schema = get_schema(table_name)
@@ -305,37 +320,96 @@ def _snake_to_camel(name: str) -> str:
     return head + camel
 
 
-def _diagnose_unsupported_intent(field: str, new_value) -> str | None:
-    """Return a clear "not yet supported" message for the two
-    Format 3 intent shapes that can't be written by v3.2.x:
+# Registry of (table_name, field) tuples that have a custom
+# list-writer dispatching to a dedicated module. Add entries here
+# as new list-of-dict writers are implemented. Used by both the
+# validator (so the field passes classification) and the apply-time
+# expander (so the change actually gets emitted).
+LIST_WRITERS: dict[tuple[str, str], str] = {
+    # Per-record dropset writer (CDUMM native parser).
+    ("dropsetinfo", "drops"):
+        "dropset_writer.build_drops_replacement_change",
+    # Iteminfo whole-table writer (vendored crimson_rs Rust extension).
+    # The full list of iteminfo list-of-dict fields the writer
+    # accepts is in `iteminfo_writer.SUPPORTED_FIELDS`. We mirror the
+    # commonly-used ones here so validation accepts them; the writer
+    # itself is the source of truth for what's actually applicable.
+    ("iteminfo", "enchant_data_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "equip_passive_skill_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "occupied_equip_slot_data_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "item_tag_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "consumable_type_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "item_use_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "item_icon_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "sealable_item_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "sealable_character_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "sealable_gimmick_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "sealable_gimmick_tag_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "sealable_tribe_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "sealable_money_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "transmutation_material_gimmick_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "transmutation_material_item_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "transmutation_material_item_group_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "multi_change_info_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    ("iteminfo", "gimmick_tag_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
+    # Skill whole-table writer (vendored NattKh skillinfo_parser).
+    ("skill", "_useResourceStatList"):
+        "skill_writer.build_skill_intent_change",
+    ("skill", "_buffLevelList"):
+        "skill_writer.build_skill_intent_change",
+}
 
-      1. Dotted-path fields (``parent.child``) — need nested
-         struct walking + snake_case/camelCase normalization.
-      2. List-of-dicts values (e.g. ``enchant_data_list = [{...}]``)
-         — need byte-shift propagation through the rest of the
-         entry when the list length changes.
 
-    Returns None for any other shape (primitive, simple int array,
-    string) so the caller can fall through to the existing
-    field_schema / PABGB-schema lookup path. Bug from UnLuckyLust
-    on GitHub #55.
+def _diagnose_unsupported_intent(
+    field: str, new_value, table_name: str = "",
+) -> str | None:
+    """Return a clear "not yet supported" message for Format 3
+    intent shapes that can't be written, OR None if the intent is
+    supported (either as a primitive or via a registered list writer).
+
+    Two unsupported shapes:
+      1. Dotted-path fields (``parent.child``): nested struct walking
+         not implemented yet.
+      2. List-of-dicts values where (table, field) is NOT in
+         LIST_WRITERS: needs a dedicated serializer per table.
     """
     if "." in (field or ""):
         return (
             f"field '{field}' targets a nested struct sub-field "
-            f"(dotted path). Format 3 nested-field writes are "
-            f"coming in v3.3 — primitive top-level fields work in "
-            f"v3.2.x. Ask the mod author to flatten this intent "
-            f"or use the byte-offset JSON variant if available."
+            f"(dotted path). Format 3 nested-field writes are not "
+            f"implemented for this field yet. Ask the mod author "
+            f"to flatten this intent or use the byte-offset JSON "
+            f"variant if available."
         )
     if isinstance(new_value, list) and new_value and isinstance(
             new_value[0], dict):
+        # Table-specific list-writer registered? Allow.
+        tn = (table_name or "").lower().replace(".pabgb", "")
+        if (tn, field) in LIST_WRITERS:
+            return None
         return (
             f"field '{field}' is a variable-length list-of-dicts "
             f"(e.g. enchant_data_list, equip_passive_skill_list). "
-            f"Rewriting these requires byte-shift propagation "
-            f"that lands in v3.3. Skipping for now; other intents "
-            f"in the same mod still apply."
+            f"This table doesn't have a list writer yet. Other "
+            f"intents in the same mod still apply."
         )
     return None
 
@@ -385,9 +459,17 @@ def _classify_intent(
     nested_msg = _diagnose_unsupported_intent(
         intent.field,
         getattr(intent, "new", None),
+        table_name=table_name,
     )
     if nested_msg:
         return nested_msg
+
+    # List writer dispatch: this (table, field) pair has a registered
+    # serializer (e.g. dropsetinfo.drops). The validator must accept
+    # the intent so the apply-time expander can land the bytes.
+    tn_norm = (table_name or "").lower().replace(".pabgb", "")
+    if (tn_norm, intent.field) in LIST_WRITERS:
+        return None
 
     # Community-curated field_schema wins
     if intent.field in fs_entries:
@@ -433,8 +515,8 @@ def _classify_intent(
             )
         return (
             f"field '{intent.field}' has no field_schema entry "
-            f"and isn't in the PABGB record schema — "
-            f"author needs to add a field_schema/{table_name}.json "
+            f"and isn't in the PABGB record schema. "
+            f"Author needs to add a field_schema/{table_name}.json "
             f"entry mapping '{intent.field}' to a tid or rel_offset"
         )
 
