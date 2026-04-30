@@ -321,7 +321,11 @@ class ModCard(CardWidget):
             lang_badge.setMinimumWidth(45)
             lang_badge.setMaximumWidth(55)
             lang_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            _lang_colors = {"bg": "#6366F1", "fg": "#FFFFFF"} if isDarkTheme() else {"bg": "#818CF8", "fg": "#FFFFFF"}
+            _lang_colors = (
+                {"bg": "#6366F1", "text": "#FFFFFF", "border": "#4F46E5"}
+                if isDarkTheme()
+                else {"bg": "#818CF8", "text": "#FFFFFF", "border": "#6366F1"}
+            )
             lang_badge.setStyleSheet(_pill_qss(_lang_colors))
             root.addWidget(lang_badge)
             root.addSpacing(6)
@@ -333,7 +337,11 @@ class ModCard(CardWidget):
             ovr_badge.setMinimumWidth(75)
             ovr_badge.setMaximumWidth(75)
             ovr_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            _ovr_colors = {"bg": "#DC2626", "fg": "#FFFFFF"} if isDarkTheme() else {"bg": "#EF4444", "fg": "#FFFFFF"}
+            _ovr_colors = (
+                {"bg": "#DC2626", "text": "#FFFFFF", "border": "#B91C1C"}
+                if isDarkTheme()
+                else {"bg": "#EF4444", "text": "#FFFFFF", "border": "#DC2626"}
+            )
             ovr_badge.setStyleSheet(_pill_qss(_ovr_colors))
             root.addWidget(ovr_badge)
             root.addSpacing(6)
