@@ -336,6 +336,32 @@ def _has_vanilla_backup(file_paths: list[str], vanilla_dir: Path) -> bool:
     return False
 
 
+def _resolve_vanilla_backup_display(
+    json_source: str | None,
+    file_paths: list[str],
+    vanilla_dir: Path | None,
+) -> str:
+    """Render the `vanilla_backup=` value for a mod row in the bug report.
+
+    PAZ mods have rows in `mod_deltas` listing the game files they
+    target. For those, "yes" if at least one target has a vanilla
+    backup on disk, otherwise "no". JSON-source mount-time mods
+    legitimately have zero `mod_deltas` rows (they apply from the
+    JSON at apply time, not from pre-computed deltas), so the
+    file-paths-based backup check always returned False for them.
+    That made the field actively misleading; "n/a (mount-time)" is
+    accurate for those.
+
+    Bug from Robhood19 (Nexus, 2026-04-29): user saw `vanilla_backup=no`
+    on his JSON mods and assumed his backups were missing. They
+    weren't, the field was wrong-shaped for the mount-time case.
+    """
+    if json_source and not file_paths:
+        return "n/a (mount-time)"
+    return "yes" if _has_vanilla_backup(
+        file_paths, vanilla_dir) else "no"
+
+
 def _exe_info(exe_path: Path) -> str:
     """Summarize game exe path, size, mtime for quick 'is this the exe you think' check."""
     if not exe_path or not exe_path.exists():
@@ -562,8 +588,8 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                     file_paths = [r[0] for r in db.connection.execute(
                         "SELECT DISTINCT file_path FROM mod_deltas WHERE mod_id = ?",
                         (mid,)).fetchall()]
-                    has_backup = (_has_vanilla_backup(file_paths, vanilla_dir)
-                                   if vanilla_dir else False)
+                    backup_display = _resolve_vanilla_backup_display(
+                        json_source, file_paths, vanilla_dir)
                     src_status = "?"
                     if source_path:
                         src_status = ("ok" if Path(source_path).exists()
@@ -576,7 +602,7 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                         f"{was_applied}{cfg_flag}")
                     body.append(
                         f"        source={src_status}  "
-                        f"vanilla_backup={'yes' if has_backup else 'no'}")
+                        f"vanilla_backup={backup_display}")
                     if drop_name:
                         body.append(f"        drop_name={drop_name}")
                     # JSON-patch mods (both preset-picker singletons and

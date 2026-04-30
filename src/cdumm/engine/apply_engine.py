@@ -39,6 +39,50 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+def _build_silent_apply_failure_message(
+    mod_summary: list[dict],
+) -> str:
+    """Build the user-facing warning shown when every enabled JSON
+    mod produced 0 overlay entries at apply time.
+
+    `mod_summary` comes from `aggregate_json_mods_into_synthetic_patches`
+    and lists per-mod contributions: name, priority, targets, change
+    count. The warning names each contributing mod (skipping mods that
+    contributed 0 changes already) plus their target files, and points
+    at Fix Everything as the next step.
+
+    Bug from Robhood19 (Nexus, 2026-04-29): the previous warning just
+    said "X JSON mods produced no game changes" without naming which
+    mods or files; users had no way to act.
+    """
+    contributors = [
+        m for m in mod_summary
+        if m.get("change_count", 0) > 0 and m.get("targets")
+    ]
+    if not contributors:
+        return (
+            "Enabled JSON mods produced no game changes at apply. "
+            "Run Settings > Fix Everything to rebuild vanilla backups, "
+            "then re-Apply. If the warning persists, the mods are "
+            "likely outdated for your current game version."
+        )
+    lines = []
+    for m in contributors:
+        targets = ", ".join(m["targets"])
+        lines.append(f"  - '{m['mod_name']}' targets {targets}")
+    detail = "\n".join(lines)
+    return (
+        f"{len(contributors)} JSON mod(s) were enabled but produced "
+        f"no game changes:\n{detail}\n\n"
+        f"Most likely cause: the patch bytes don't match your current "
+        f"game version (the game was updated after the mod was made), "
+        f"so every patch was skipped. Try Settings > Fix Everything "
+        f"to rebuild vanilla backups, then re-Apply. If the same "
+        f"warning shows up again, the mods are outdated and need a "
+        f"fresh release from their authors."
+    )
+
+
 def _rewrite_mount_error_with_mod_names(
     raw_error: str, targets_to_mods: dict[str, list[str]]
 ) -> str:
@@ -1404,10 +1448,7 @@ class ApplyWorker(QObject):
                 # overlay at all — the user thought their mods applied but
                 # mount-time extraction failed silently for every target.
                 if len(self._overlay_entries) == overlay_count_before:
-                    msg = (f"{len(json_mods)} JSON mod(s) were enabled but "
-                           "produced no game changes. Check the log for "
-                           "mount-time errors, then run "
-                           "Settings → Fix Everything to rebuild vanilla backups.")
+                    msg = _build_silent_apply_failure_message(mod_summary)
                     logger.error("APPLY_SILENT_FAILURE: %s", msg)
                     self._soft_warnings.append(msg)
                     self.warning.emit(msg)
