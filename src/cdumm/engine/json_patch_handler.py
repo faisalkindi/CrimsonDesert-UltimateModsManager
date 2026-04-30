@@ -730,7 +730,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             # Treat as no signature so absolute offsets apply
             # naturally. Bug from round-5 systematic debugging.
             logger.warning(
-                "Malformed signature hex %r (%s) — treating as "
+                "Malformed signature hex %r (%s), treating as "
                 "absent and using absolute offsets.",
                 signature[:60], e)
             signature = None
@@ -903,7 +903,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             except ValueError as e:
                 logger.warning(
                     "Change at offset %d has malformed hex in 'patched' "
-                    "(%r): %s — skipping", offset, patched_hex, e)
+                    "(%r): %s, skipping", offset, patched_hex, e)
                 _record_skip(change, offset, None,
                              f"malformed hex in 'patched': {e}")
                 mismatched += 1
@@ -920,7 +920,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 except ValueError as e:
                     logger.warning(
                         "Change at offset %d has malformed hex in "
-                        "'original' (%r): %s — skipping",
+                        "'original' (%r): %s, skipping",
                         offset, change["original"], e)
                     _record_skip(change, offset, None,
                                  f"malformed hex in 'original': {e}")
@@ -987,7 +987,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                                     fb_orig, len(original_bytes),
                                     written_ranges):
                                 logger.debug(
-                                    "Fallback offset 0x%X skipped — lands in "
+                                    "Fallback offset 0x%X skipped, lands in "
                                     "a range this pass already wrote to",
                                     fb_orig)
                                 continue
@@ -1008,7 +1008,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     elif len(viable_fbs) > 1:
                         logger.warning(
                             "Fallback offset ambiguous for entry=%r: %d "
-                            "candidates match (0x%s) — skipping rather than "
+                            "candidates match (0x%s), skipping rather than "
                             "patching wrong bytes",
                             change.get("entry"), len(viable_fbs),
                             ", 0x".join(f"{o:X}" for o in viable_fbs))
@@ -1039,7 +1039,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             relocated += 1
                             continue
 
-                    logger.warning("Original mismatch at %d: expected %s, got %s — skipping patch",
+                    logger.warning("Original mismatch at %d: expected %s, got %s, skipping patch",
                                    offset, change["original"], actual.hex())
                     mismatched += 1
                     _record_skip(change, offset, actual, "byte mismatch")
@@ -1262,18 +1262,16 @@ def convert_json_patch_to_paz(patch_data: dict, game_dir: Path, work_dir: Path) 
         # Strict-abort for data-table files (.pabgb / .pabgh / .pamt) at
         # IMPORT time too: if any patch mismatches, refuse to store a
         # half-patched delta. Kliff Wears Damiane V2 and similar mods
-        # ship absolute offsets that drift between game versions — the
+        # ship absolute offsets that drift between game versions, the
         # mount-time guard catches a json_source-driven apply but this
         # path pre-computes deltas during import and the mount guard
         # never fires. Raising makes the import fail cleanly with a
         # user-visible error instead of shipping a crash-causing file.
-        gf_lower = game_file.lower()
-        is_data_table = (gf_lower.endswith(".pabgb")
-                         or gf_lower.endswith(".pabgh")
-                         or gf_lower.endswith(".pamt"))
-        if mismatched > 0 and is_data_table:
+        # Honors `allow_partial_apply` opt-in via the shared helper.
+        if mismatched > 0 and _should_reject_partial_pabgb(
+                game_file, applied, mismatched, patch_data):
             logger.error(
-                "JSON import: aborting — %d of %d patches mismatched "
+                "JSON import: aborting, %d of %d patches mismatched "
                 "against vanilla %s. Data tables cannot be partially "
                 "applied (causes game crashes). Mod likely built for a "
                 "different game version.",
@@ -1507,7 +1505,7 @@ def _derive_pamt_dir(paz_file: str | Path) -> str:
     name = Path(paz_file).parent.name
     if not name:
         logger.warning(
-            "_derive_pamt_dir: empty pamt_dir for paz_file=%r — "
+            "_derive_pamt_dir: empty pamt_dir for paz_file=%r, "
             "overlay metadata may be invalid", str(paz_file))
     return name
 
@@ -1751,7 +1749,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         if mismatched > 0 and applied == 0 and bytes(modified) == plaintext:
             game_ver = patch_data.get("game_version", "unknown")
             logger.warning(
-                "All %d patches mismatched for %s — file skipped "
+                "All %d patches mismatched for %s, file skipped "
                 "(mod targets game version %s).",
                 mismatched, game_file, game_ver)
             skipped_files.append({
@@ -1774,7 +1772,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                 game_file, applied, mismatched, patch_data):
             game_ver = patch_data.get("game_version", "unknown")
             logger.error(
-                "JSON import: aborting — %d of %d patches mismatched on "
+                "JSON import: aborting, %d of %d patches mismatched on "
                 "data table %s. Shipping a partial data table crashes "
                 "the game. Mod was built for game version %s.",
                 mismatched, applied + mismatched, game_file, game_ver)
@@ -1903,8 +1901,8 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         if skipped_files:
             game_ver = patch_data.get("game_version", "unknown")
             logger.error(
-                "All %d files in this mod failed with byte mismatches "
-                "— mod targets game version %s.",
+                "All %d files in this mod failed with byte mismatches, "
+                "mod targets game version %s.",
                 len(skipped_files), game_ver)
             return {
                 "changed_files": [],
@@ -2236,12 +2234,12 @@ def process_json_patches_for_overlay(
             skipped_out=skipped_out)
 
         if applied == 0 and mismatched > 0:
-            logger.warning("mount-time: all patches mismatched for '%s' — game update?",
+            logger.warning("mount-time: all patches mismatched for '%s' (game update?)",
                           game_file)
             if errors_out is not None:
                 errors_out.append(
                     f"{Path(json_source).stem}: all {mismatched} patches "
-                    f"mismatched against vanilla {game_file} — the mod "
+                    f"mismatched against vanilla {game_file}. The mod "
                     f"was built for a different game version.")
             continue
 
@@ -2252,13 +2250,18 @@ def process_json_patches_for_overlay(
         # mods crash the game before the main menu. Better to refuse
         # the apply and tell the user the mod is incompatible than to
         # ship a half-patched iteminfo.pabgb.
-        gf_lower = game_file.lower()
-        is_data_table = (gf_lower.endswith(".pabgb")
-                         or gf_lower.endswith(".pabgh")
-                         or gf_lower.endswith(".pamt"))
-        if mismatched > 0 and is_data_table:
+        # Mod authors who know their patch set is independent of paired
+        # count fields can opt-in via `allow_partial_apply: true`. The
+        # decision lives in `_should_reject_partial_pabgb` so all three
+        # rejection sites (import-time strict check, ENTR import,
+        # mount-time apply) share the same opt-in semantics. Bug from
+        # Faisal 2026-04-29: the apply-time guard was hardcoded to
+        # always reject, so the import-time opt-in didn't help in
+        # practice.
+        if mismatched > 0 and _should_reject_partial_pabgb(
+                game_file, applied, mismatched, patch_data):
             logger.error(
-                "mount-time: aborting overlay for '%s' — %d of %d patches "
+                "mount-time: aborting overlay for '%s', %d of %d patches "
                 "mismatched against vanilla. Data tables cannot be partially "
                 "applied (causes game crashes). Mod likely built for a "
                 "different game version.",
@@ -2270,7 +2273,7 @@ def process_json_patches_for_overlay(
                     f"{applied + mismatched} patches don't match vanilla "
                     f"{game_file}. Shipping a partial data table would "
                     f"crash the game. This mod was likely built for a "
-                    f"different game version — check the mod page for an "
+                    f"different game version, check the mod page for an "
                     f"updated release.")
             continue
 
@@ -2333,7 +2336,7 @@ def process_json_patches_for_overlay(
                     pabgh_entry_for_fixup = _find_pamt_entry(pabgh_file, game_dir)
             if pabgh_entry_for_fixup is None:
                 logger.warning(
-                    "mount-time: inserts into %s but no companion .pabgh found — "
+                    "mount-time: inserts into %s but no companion .pabgh found, "
                     "overlay will ship vanilla .pabgh, game may read stale offsets",
                     game_file,
                 )
