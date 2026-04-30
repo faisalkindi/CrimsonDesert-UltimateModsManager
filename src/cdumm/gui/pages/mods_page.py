@@ -1982,18 +1982,29 @@ class ModsPage(QWidget):
             self._config_panel.close_panel()
             return
 
-        # Standard per-change toggle mode
+        # Standard per-change toggle mode. Use each entry's ORIGINAL
+        # patch index (emitted by ConfigPanel as `index`), not the
+        # enumerate position in `patches`. The panel groups toggles
+        # before editables, so enumerate positions don't match the
+        # patch list the apply engine sees.
+        def _patch_index(p, fallback):
+            i = p.get("index")
+            return i if isinstance(i, int) else fallback
+
         disabled_indices = [
-            i for i, p in enumerate(patches)
+            _patch_index(p, fallback)
+            for fallback, p in enumerate(patches)
             if not p.get("enabled", True) and "value" not in p
         ]
         self._mod_manager.set_disabled_patches(mod_id, disabled_indices)
 
-        # Save custom values from inline editing
+        # Save custom values from inline editing, keyed by original
+        # patch index.
         custom_values = {}
-        for i, p in enumerate(patches):
+        for fallback, p in enumerate(patches):
             if "value" in p and p["value"] is not None:
-                custom_values[str(i)] = p["value"]
+                idx = _patch_index(p, fallback)
+                custom_values[str(idx)] = p["value"]
         if custom_values:
             self._mod_manager.set_custom_values(mod_id, custom_values)
 

@@ -662,11 +662,27 @@ class ConfigPanel(QWidget):
             self.variants_apply_clicked.emit(self._mod_id, out)
             return
 
+        # Emit each entry tagged with its ORIGINAL patch index so
+        # mods_page can key custom_values by patch position rather
+        # than by emitted-list position. Without `index`, mixing
+        # toggles + editables in one mod silently misaligned the
+        # custom_values dict (an editable's value got stored under
+        # an unrelated toggle's slot, then apply-time looked up the
+        # real index and found nothing).
         result = []
         for idx, cb in sorted(self._toggles.items()):
-            result.append({"label": self._labels[idx], "enabled": cb.isChecked()})
+            result.append({
+                "index": idx,
+                "label": self._labels[idx],
+                "enabled": cb.isChecked(),
+            })
         for idx, sb in sorted(self._value_inputs.items()):
-            result.append({"label": self._labels[idx], "enabled": True, "value": sb.value()})
+            result.append({
+                "index": idx,
+                "label": self._labels[idx],
+                "enabled": True,
+                "value": sb.value(),
+            })
         self.apply_clicked.emit(self._mod_id, result)
 
     # ------------------------------------------------------------------
