@@ -503,7 +503,10 @@ def _detect_xml_replacements(extracted_dir: Path) -> list[dict]:
     results = []
     for f in extracted_dir.rglob("*.xml"):
         stem = f.stem  # e.g. "OG_inventory__mymod"
-        if not stem.startswith("OG_"):
+        # Case-insensitive prefix check — Linux-authored mods may
+        # ship `og_foo__bar.xml`. Windows is case-insensitive, so
+        # accept either.
+        if len(stem) < 3 or stem[:3].upper() != "OG_":
             continue
         # Split on __ (double underscore) to separate target name from suffix
         rest = stem[3:]  # remove "OG_" prefix
@@ -515,6 +518,253 @@ def _detect_xml_replacements(extracted_dir: Path) -> list[dict]:
         results.append({"source_path": f, "target_name": target_name})
         logger.info("Detected OG_ XML replacement: %s -> %s", f.name, target_name)
     return results
+
+
+def _detect_plain_xml_replacements(extracted_dir: Path) -> list[dict]:
+    """Detect plain `.xml` files (no `OG_` prefix, no Crimson Browser
+    manifest) that may be full-file replacements at vanilla basenames.
+
+    Some mod authors ship gamepad / UI XML mods as raw XML files in a
+    folder with a `modinfo.json`, relying on the basename matching a
+    vanilla PAMT entry. The caller is responsible for verifying each
+    `target_name` actually exists in the game's PAMT before
+    registering, so non-matching XML files (readmes, UI snippets that
+    don't replace any vanilla file) get filtered out.
+
+    Returns list of `{source_path, target_name}` dicts.
+    """
+    results = []
+    for f in extracted_dir.rglob("*.xml"):
+        stem = f.stem
+        # OG_-prefixed files are handled by `_detect_xml_replacements`,
+        # don't double-process them here.
+        if len(stem) >= 3 and stem[:3].upper() == "OG_":
+            continue
+        # Skip XML files inside numbered PAZ dirs (those are PAZ mod
+        # content, not loose replacements at the top level).
+        if any(p.isdigit() and len(p) == 4 for p in f.parts):
+            continue
+        results.append({"source_path": f, "target_name": f.name})
+    return results
+
+
+def _import_og_xml_as_mod(
+    og_xml: list[dict],
+    game_dir: Path,
+    db,
+    deltas_dir: Path,
+    mod_name: str,
+    existing_mod_id: int | None = None,
+    modinfo: dict | None = None,
+) -> ModImportResult | None:
+    """Convert a list of OG_ XML replacements into a real PAZ-style
+    mod with a row in `mods` and one row per resolved entry in
+    `mod_deltas`. Returns the populated result on success, or None
+    when none of the OG_ targets resolve against the game's PAMT
+    (caller falls through to other detectors).
+    """
+    from cdumm.engine.json_patch_handler import _find_pamt_entry
+    from cdumm.engine.crimson_browser_handler import fix_xml_format
+
+    resolved: list[tuple[dict, "object"]] = []
+    skipped: list[str] = []
+    for og in og_xml:
+        # Reject obviously-empty OG_ files. A 0-byte (or near-empty)
+        # XML file would land as a 3-byte BOM-only "XML" after the
+        # CRLF/BOM fixup and brick the target file with no diagnostic.
+        try:
+            size = og["source_path"].stat().st_size
+        except OSError:
+            size = 0
+        if size < 16:
+            logger.warning(
+                "OG_ XML file too small (%d bytes), skipping: %s",
+                size, og["source_path"].name)
+            skipped.append(f"{og['source_path'].name} (empty)")
+            continue
+        entry = _find_pamt_entry(og["target_name"], game_dir)
+        if entry is None:
+            logger.warning(
+                "OG_ XML target not found in game: %s", og["target_name"])
+            skipped.append(f"{og['source_path'].name} (no target)")
+            continue
+        resolved.append((og, entry))
+
+    if not resolved:
+        return None
+
+    # Pull author metadata from modinfo if present, else fall back
+    author = (modinfo or {}).get("author", "") if modinfo else ""
+    version = (modinfo or {}).get("version", "1.0") if modinfo else "1.0"
+    description = (modinfo or {}).get("description", "") if modinfo else ""
+    if modinfo and modinfo.get("name"):
+        mod_name = modinfo["name"]
+    conflict_mode = "normal"
+    if modinfo:
+        cm = modinfo.get("conflict_mode", "normal")
+        if isinstance(cm, str) and cm.strip().lower() in ("normal", "override"):
+            conflict_mode = cm.strip().lower()
+    target_language = (modinfo or {}).get("target_language") if modinfo else None
+
+    # Stamp the mod with the current game version so the
+    # outdated-mod sweep (`bug_report.py:158`, `version_detector.py`)
+    # can flag this mod after the next game patch. Other importers
+    # all do this; without it, OG_ mods get silently excluded.
+    try:
+        from cdumm.engine.version_detector import detect_game_version
+        game_ver_hash = detect_game_version(game_dir)
+    except Exception:
+        game_ver_hash = None
+
+    # Trust the modinfo display name verbatim; only auto-prettify the
+    # zip stem fallback. Otherwise "OG Compass" becomes "O G Compass".
+    display_name = (
+        modinfo["name"]
+        if modinfo and modinfo.get("name")
+        else prettify_mod_name(mod_name)
+    )
+
+    # Insert the mod row (or reuse on update)
+    if existing_mod_id is not None:
+        mod_id = existing_mod_id
+        db.connection.execute(
+            "UPDATE mods SET name=?, author=?, version=?, description=?, "
+            "conflict_mode=?, target_language=?, game_version_hash=? "
+            "WHERE id=?",
+            (display_name, author, version, description,
+             conflict_mode, target_language, game_ver_hash, mod_id))
+        # Wipe stale deltas for this mod. Delete the rows now (commit
+        # at the end), but defer the rmtree until after the new deltas
+        # are written + committed — otherwise a mid-loop exception
+        # rolls back the DB but leaves the on-disk files gone.
+        db.connection.execute(
+            "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+        _old_delta_dir_to_clean = deltas_dir / str(mod_id)
+    else:
+        priority = _next_priority(db)
+        cursor = db.connection.execute(
+            "INSERT INTO mods (name, mod_type, priority, author, version, "
+            "description, conflict_mode, target_language, game_version_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (display_name, "paz", priority, author, version,
+             description, conflict_mode, target_language, game_ver_hash))
+        mod_id = cursor.lastrowid
+        _old_delta_dir_to_clean = None
+
+    mod_delta_dir = deltas_dir / str(mod_id)
+    mod_delta_dir.mkdir(parents=True, exist_ok=True)
+
+    result = ModImportResult(mod_name)
+    result.mod_id = mod_id
+
+    # When re-importing an existing mod, write each new delta to a
+    # `.entr.new` sibling first, then atomically rename to `.entr`
+    # only after commit succeeds. Without this, a mid-loop write
+    # failure rolls back the DB but leaves overwritten `.entr` files —
+    # the restored old DB rows then reference filenames whose contents
+    # are from the failed new import (silent corruption).
+    pending_renames: list[tuple[Path, Path]] = []  # (final, .new)
+    try:
+        for og, entry in resolved:
+            xml_bytes = og["source_path"].read_bytes()
+            try:
+                xml_bytes = fix_xml_format(xml_bytes)
+            except Exception:
+                pass
+            # Per-mod subdir prevents cross-mod silent overwrite. Per-target
+            # filename keeps two OG_ files in the SAME mod from clobbering
+            # each other (their targets differ, so safe_names differ).
+            safe_name = og["target_name"].replace("/", "_") + ".entr"
+            final_delta_path = mod_delta_dir / safe_name
+            if existing_mod_id is not None and final_delta_path.exists():
+                staging_path = final_delta_path.with_suffix(".entr.new")
+                staging_path.write_bytes(xml_bytes)
+                pending_renames.append((final_delta_path, staging_path))
+            else:
+                final_delta_path.write_bytes(xml_bytes)
+
+            db.connection.execute(
+                "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+                "byte_start, byte_end, entry_path) VALUES (?, ?, ?, ?, ?, ?)",
+                (mod_id, entry.paz_file, str(final_delta_path),
+                 entry.offset, entry.offset + entry.comp_size, entry.path))
+            result.changed_files.append({
+                "file_path": entry.paz_file,
+                "entry_path": entry.path,
+                "delta_path": str(final_delta_path),
+            })
+            logger.info(
+                "OG_ XML replacement registered: %s -> %s (mod_id=%d)",
+                og["source_path"].name, og["target_name"], mod_id)
+        db.connection.commit()
+    except Exception:
+        db.connection.rollback()
+        # Clean up any `.entr.new` staging files we wrote — leave the
+        # old `.entr` files intact for the restored DB rows.
+        for _, staging_path in pending_renames:
+            try:
+                staging_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    # Commit succeeded — atomically swap each `.entr.new` into place.
+    # If any swap fails, surface the partial state on result.info so
+    # the user knows to re-import. Without this, the apply pipeline
+    # would silently use stale content for the unrenamed entries.
+    import os as _os
+    rename_failures: list[str] = []
+    for final_path, staging_path in pending_renames:
+        try:
+            _os.replace(str(staging_path), str(final_path))
+        except OSError as e:
+            rename_failures.append(staging_path.name)
+            logger.warning(
+                "Failed to swap %s into place: %s",
+                staging_path.name, e)
+            try:
+                staging_path.unlink()
+            except OSError:
+                pass
+    if rename_failures:
+        names = ", ".join(rename_failures[:3])
+        if len(rename_failures) > 3:
+            names += f", +{len(rename_failures) - 3} more"
+        partial_warn = (
+            f"WARNING: {len(rename_failures)} OG_ XML file(s) could "
+            f"not be installed atomically: {names}. The mod is "
+            f"imported but apply may use stale content for those "
+            f"entries — re-import to fix."
+        )
+        result.info = (
+            f"{result.info}\n{partial_warn}" if result.info else partial_warn)
+
+    # Commit succeeded — now selectively remove stale `.entr` files
+    # left over from a previous import of this same mod_id (existing
+    # mod path). We only delete `.entr` files NOT in the new delta
+    # set, preserving any sibling source archives (source.json etc).
+    if _old_delta_dir_to_clean is not None and _old_delta_dir_to_clean.exists():
+        kept = {Path(cf["delta_path"]).name for cf in result.changed_files}
+        for f in _old_delta_dir_to_clean.glob("*.entr"):
+            if f.is_file() and f.name not in kept:
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(
+                        "Failed to remove stale OG_ delta %s: %s", f, e)
+
+    if skipped:
+        # Surface skip reasons so the user knows why the imported mod
+        # has fewer changes than the OG_ files in the ZIP.
+        names = ", ".join(skipped[:3])
+        if len(skipped) > 3:
+            names += f", +{len(skipped) - 3} more"
+        result.info = (
+            f"Imported {len(resolved)} OG_ XML replacement(s); "
+            f"{len(skipped)} skipped: {names}"
+        )
+
+    return result
 
 
 def _try_paz_entry_import(
@@ -1864,45 +2114,70 @@ def import_from_zip(
         # steal price ships 5 inner ZIPs (one per language).
         _extract_nested_archives(tmp_path)
 
-        # Stage ASI files separately for GUI-side install (mixed ZIP support)
-        asi_staging = tmp_path / "_asi_staging"
-        for f in list(tmp_path.rglob("*")):
-            if not f.is_file():
-                continue
-            if f.suffix.lower() in (".asi", ".ini"):
-                # Skip files inside staging dir itself
+        # Stage ASI files separately for GUI-side install (mixed ZIP support).
+        # Stage into a per-import subdir under deltas_dir (persistent), NOT
+        # tmp_path — the tempfile context auto-deletes when this function
+        # returns, which would wipe the staged files before the GUI handler
+        # can copy them. The per-import UUID subdir prevents collisions when
+        # two imports run back-to-back (or, in the worker model, in
+        # parallel). Also: only stage `.ini` files whose stem matches a
+        # sibling `.asi`, so game data .ini files (e.g. 0008/foo.ini) aren't
+        # stolen.
+        import uuid as _uuid
+        asi_staging = deltas_dir / "_asi_staging" / _uuid.uuid4().hex
+        # Pre-scan: collect basenames of all .asi files for the .ini filter.
+        _all_files = [f for f in tmp_path.rglob("*") if f.is_file()]
+        _asi_stems = {
+            f.stem.lower() for f in _all_files if f.suffix.lower() == ".asi"
+        }
+        try:
+            for f in _all_files:
                 if "_asi_staging" in f.parts:
                     continue
-                asi_staging.mkdir(exist_ok=True)
+                ext = f.suffix.lower()
+                if ext == ".asi":
+                    pass  # always stage
+                elif ext == ".ini" and f.stem.lower() in _asi_stems:
+                    pass  # companion INI for an ASI we're staging
+                else:
+                    continue
+                asi_staging.mkdir(parents=True, exist_ok=True)
                 import shutil
                 shutil.move(str(f), str(asi_staging / f.name))
                 result.asi_staged.append(str(asi_staging / f.name))
                 logger.info("Staged ASI file for GUI install: %s", f.name)
+        except OSError as _stage_err:
+            # Permission denied, file locked, cross-device — fail the
+            # import gracefully instead of letting the exception bubble
+            # up uncaught and confuse the GUI. Surface to result.info
+            # so the user sees a yellow banner explaining the partial
+            # state, not a silent skip of expected ASI files.
+            logger.warning(
+                "ASI staging failed: %s — continuing with PAZ-only import",
+                _stage_err)
+            stage_msg = (
+                f"Some ASI plugin files could not be staged ({_stage_err}). "
+                f"PAZ-only import continued; copy ASI files to bin64/ "
+                f"manually if needed."
+            )
+            result.info = (
+                f"{result.info}\n{stage_msg}" if result.info else stage_msg)
+        # Local copy preserved across any later `result = ...` reassignments.
+        _carryover_asi_staged = list(result.asi_staged)
 
-        # Check for OG_ XML replacement files and convert to standard deltas
+        # Check for OG_ XML replacement files and register them as a
+        # full mod (mods row + mod_deltas rows). Falls through if none
+        # of the OG_ targets resolve against the game's PAMT.
         og_xml = _detect_xml_replacements(tmp_path)
         if og_xml:
-            from cdumm.engine.json_patch_handler import _find_pamt_entry
-            from cdumm.engine.crimson_browser_handler import fix_xml_format
-            og_work = Path(tmp) / "_og_xml_converted"
-            og_work.mkdir(exist_ok=True)
-            for og in og_xml:
-                entry = _find_pamt_entry(og["target_name"], game_dir)
-                if entry is None:
-                    logger.warning("OG_ XML target not found in game: %s", og["target_name"])
-                    continue
-                xml_bytes = og["source_path"].read_bytes()
-                # Apply BOM/CRLF fixup for game compatibility
-                try:
-                    xml_bytes = fix_xml_format(xml_bytes)
-                except Exception:
-                    pass  # use raw bytes if fixup fails
-                # Save as full-file ENTR delta
-                safe_name = og["target_name"].replace("/", "_") + ".entr"
-                delta_path = deltas_dir / safe_name
-                delta_path.parent.mkdir(parents=True, exist_ok=True)
-                delta_path.write_bytes(xml_bytes)
-                logger.info("OG_ XML replacement delta created: %s -> %s", og["source_path"].name, og["target_name"])
+            og_modinfo = _read_modinfo(tmp_path)
+            og_result = _import_og_xml_as_mod(
+                og_xml, game_dir, db, deltas_dir, mod_name,
+                existing_mod_id=existing_mod_id, modinfo=og_modinfo,
+            )
+            if og_result is not None:
+                og_result.asi_staged = list(_carryover_asi_staged)
+                return og_result
 
         # Check for Crimson Browser format and convert if needed
         cb_manifest = detect_crimson_browser(tmp_path)
@@ -1929,6 +2204,30 @@ def import_from_zip(
                     except Exception as e:
                         logger.debug("Sibling JSON scan after CB failed: %s", e)
                 return result
+
+        # Plain XML drop: some mod authors ship gamepad / UI XML mods
+        # as raw `.xml` files in a folder with a `modinfo.json`, no
+        # OG_ prefix and no Crimson Browser manifest. Match by PAMT
+        # basename. Only fires when there's no other format signal
+        # (no PAZ NNNN/ dirs, no JSON patches at the root). Source:
+        # RockNBeard report 2026-04-30, Standard Gamepad Layout
+        # (Nexus mod 1489).
+        plain_xml = _detect_plain_xml_replacements(tmp_path)
+        if plain_xml:
+            has_paz_dirs = any(
+                d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                for d in tmp_path.rglob("*") if d.is_dir()
+            )
+            has_json_patches = detect_json_patch(tmp_path) is not None
+            if not has_paz_dirs and not has_json_patches:
+                plain_modinfo = _read_modinfo(tmp_path)
+                plain_result = _import_og_xml_as_mod(
+                    plain_xml, game_dir, db, deltas_dir, mod_name,
+                    existing_mod_id=existing_mod_id, modinfo=plain_modinfo,
+                )
+                if plain_result is not None:
+                    plain_result.asi_staged = list(_carryover_asi_staged)
+                    return plain_result
 
         # Check for loose file mod (files/NNNN/ structure)
         lfm = detect_loose_file_mod(tmp_path)
@@ -1959,6 +2258,7 @@ def import_from_zip(
             if entr_result is None:
                 # JSON patch detected but failed — don't fall through to slow PAZ scan
                 result = ModImportResult(jp_name)
+                result.asi_staged = list(_carryover_asi_staged)
                 target_files = [p.get("game_file", "?") for p in jp_data.get("patches", [])]
                 result.error = (
                     f"JSON patch mod detected but failed to process. "
@@ -1968,6 +2268,7 @@ def import_from_zip(
             if entr_result is not None:
                 if entr_result.get("version_mismatch"):
                     result = ModImportResult(jp_name)
+                    result.asi_staged = list(_carryover_asi_staged)
                     game_ver = entr_result.get("game_version", "unknown")
                     mismatched = entr_result.get("mismatched", 0)
                     result.error = (
@@ -1982,6 +2283,7 @@ def import_from_zip(
                         "Nothing to apply.")
                     return result
                 result = ModImportResult(jp_name)
+                result.asi_staged = list(_carryover_asi_staged)
                 result.changed_files = entr_result["changed_files"]
                 _skipped = entr_result.get("skipped_files") or []
                 if _skipped:
@@ -2097,6 +2399,11 @@ def import_from_zip(
         result = _process_extracted_files(
             tmp_path, game_dir, db, snapshot, deltas_dir, mod_name,
             existing_mod_id=existing_mod_id, modinfo=modinfo)
+        # _process_extracted_files builds a fresh ModImportResult — re-attach
+        # any ASI files we staged at the top of import_from_zip so the GUI
+        # handler still gets the install list.
+        if _carryover_asi_staged:
+            result.asi_staged = list(_carryover_asi_staged)
 
     return result
 
@@ -3274,10 +3581,33 @@ def _process_extracted_files(
     if modinfo and modinfo.get("name"):
         mod_name = prettify_mod_name(modinfo["name"])
 
-    conflict_mode = modinfo.get("conflict_mode", "normal") if modinfo else "normal"
+    raw_cm = modinfo.get("conflict_mode", "normal") if modinfo else "normal"
+    conflict_mode = (raw_cm or "").strip().lower() if isinstance(raw_cm, str) else "normal"
     if conflict_mode not in ("normal", "override"):
+        if raw_cm and raw_cm != "normal":
+            logger.warning(
+                "Invalid conflict_mode %r in modinfo.json, defaulting to 'normal'",
+                raw_cm)
         conflict_mode = "normal"
-    target_language = modinfo.get("target_language") if modinfo else None
+    # Quick win F6: normalise language code to a short lowercase string
+    # so EN / en don't bucket separately and "english" doesn't overflow
+    # the 55px badge.
+    raw_lang = modinfo.get("target_language") if modinfo else None
+    if isinstance(raw_lang, str):
+        raw_lang = raw_lang.strip().lower()
+        if not raw_lang:
+            target_language = None
+        elif len(raw_lang) > 12:
+            # 12 chars covers extended BCP47 tags like `zh-Hant-TW`
+            # (10) and `sr-Latn-RS` (10) without truncation.
+            logger.warning(
+                "target_language %r too long, truncating to 12 chars",
+                raw_lang)
+            target_language = raw_lang[:12]
+        else:
+            target_language = raw_lang
+    else:
+        target_language = None
 
     # Stamp with current game version so we can detect outdated mods later
     game_ver_hash = None

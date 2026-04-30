@@ -702,6 +702,19 @@ class CdummWindow(FluentWindow):
         self._deltas_dir = self._cdmods_dir / "deltas"
         self._vanilla_dir = self._cdmods_dir / "vanilla"
         self._migrate_from_appdata()
+        # Sweep any stale per-import staging dirs from a prior crash.
+        # Each mixed-ZIP import creates `deltas/_asi_staging/<uuid>/`.
+        # The GUI handler removes the subdir on success, but a worker
+        # crash or app kill mid-import leaves it behind forever.
+        try:
+            asi_staging_root = self._deltas_dir / "_asi_staging"
+            if asi_staging_root.is_dir():
+                import shutil as _sh
+                for sub in asi_staging_root.iterdir():
+                    if sub.is_dir():
+                        _sh.rmtree(sub, ignore_errors=True)
+        except OSError:
+            pass
         self._worker_thread: QThread | None = None
         self._needs_apply = False
         self._applied_state: dict[int, bool] = {}
@@ -4462,16 +4475,25 @@ class CdummWindow(FluentWindow):
                     from cdumm.asi.asi_manager import AsiManager
                     _asi_mgr = AsiManager(self._game_dir / "bin64")
                     from pathlib import Path as _P
+                    _staging_parents: set[_P] = set()
                     for asi_path in asi_staged:
                         p = _P(asi_path)
                         if p.exists() and p.suffix.lower() == ".asi":
                             import shutil
                             shutil.copy2(str(p), str(_asi_mgr._bin64 / p.name))
                             asi_count += 1
+                            _staging_parents.add(p.parent)
                         elif p.exists() and p.suffix.lower() == ".ini":
                             import shutil
                             shutil.copy2(str(p), str(_asi_mgr._bin64 / p.name))
+                            _staging_parents.add(p.parent)
                     logger.info("Installed %d ASI plugin(s) from mixed ZIP", asi_count)
+                    # Clean up the per-import staging subdir(s) so they
+                    # don't pile up under deltas_dir/_asi_staging/.
+                    import shutil as _sh
+                    for parent in _staging_parents:
+                        if parent.exists() and parent.parent.name == "_asi_staging":
+                            _sh.rmtree(parent, ignore_errors=True)
                 except Exception as e:
                     logger.warning("Failed to install staged ASI files: %s", e)
 
