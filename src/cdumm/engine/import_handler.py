@@ -1566,9 +1566,16 @@ def import_from_7z(
         # Unpack any nested archives so format detectors see folders.
         _extract_nested_archives(tmp_path)
 
-        # Delegate to import_from_zip's internal logic (same flow)
-        return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
-                                      mod_name, existing_mod_id)
+        # Stage ASI plugins (mirrors import_from_zip).
+        asi_staged = _stage_asi_files(tmp_path, deltas_dir)
+
+        # Delegate to the shared post-extraction logic
+        result = _import_from_extracted(
+            tmp_path, game_dir, db, snapshot, deltas_dir,
+            mod_name, existing_mod_id)
+        if asi_staged and not result.asi_staged:
+            result.asi_staged = list(asi_staged)
+        return result
 
 
 _NESTED_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
@@ -1739,6 +1746,48 @@ def _find_7z() -> str | None:
     return shutil.which("7z")
 
 
+def _stage_asi_files(tmp_path: Path, deltas_dir: Path) -> list[str]:
+    """Move `.asi` plugins (and matching companion `.ini` configs)
+    out of `tmp_path` into a per-import staging subdir under
+    `deltas_dir/_asi_staging/<uuid>/`.
+
+    Used by `import_from_rar` and `import_from_7z` so mixed mods
+    (ASI + PAZ in one archive) get the same handling as ZIP imports.
+    Returns a list of absolute paths to the staged files.
+
+    Only `.ini` files whose stem matches a sibling `.asi` are picked
+    up; game-data `.ini` files inside numbered PAZ dirs are left
+    alone. The persistent location ensures the staged files survive
+    after the caller's tempfile.TemporaryDirectory auto-deletes.
+    """
+    import uuid as _uuid
+    asi_staging = deltas_dir / "_asi_staging" / _uuid.uuid4().hex
+    _all_files = [f for f in tmp_path.rglob("*") if f.is_file()]
+    _asi_stems = {
+        f.stem.lower() for f in _all_files if f.suffix.lower() == ".asi"
+    }
+    staged: list[str] = []
+    for f in _all_files:
+        if "_asi_staging" in f.parts:
+            continue
+        ext = f.suffix.lower()
+        if ext == ".asi":
+            pass
+        elif ext == ".ini" and f.stem.lower() in _asi_stems:
+            pass
+        else:
+            continue
+        try:
+            asi_staging.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.move(str(f), str(asi_staging / f.name))
+            staged.append(str(asi_staging / f.name))
+            logger.info("Staged ASI file for GUI install: %s", f.name)
+        except OSError as e:
+            logger.warning("ASI staging failed for %s: %s", f.name, e)
+    return staged
+
+
 def import_from_rar(
     archive_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
@@ -1778,8 +1827,17 @@ def import_from_rar(
         # Unpack any nested archives so format detectors see folders.
         _extract_nested_archives(tmp_path)
 
-        return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
-                                      mod_name, existing_mod_id)
+        # Stage ASI plugins to a persistent dir BEFORE format detection
+        # so mixed RAR mods (ASI + PAZ in one archive) get their ASI
+        # half installed by the GUI handler. Mirrors import_from_zip.
+        asi_staged = _stage_asi_files(tmp_path, deltas_dir)
+
+        result = _import_from_extracted(
+            tmp_path, game_dir, db, snapshot, deltas_dir,
+            mod_name, existing_mod_id)
+        if asi_staged and not result.asi_staged:
+            result.asi_staged = list(asi_staged)
+        return result
 
 
 _LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".css", ".html", ".thtml",
@@ -1963,6 +2021,72 @@ def _import_from_extracted(
                 _store_json_patches(db, result, jp_data, game_dir)
             return result
         # Fall through if ENTR import failed
+
+    # OG_ XML full-replacement detection. Mirrors `import_from_zip`'s
+    # block so RAR/7z imports get the same format coverage as ZIP.
+    og_xml = _detect_xml_replacements(tmp_path)
+    if og_xml:
+        og_modinfo = _read_modinfo(tmp_path)
+        og_result = _import_og_xml_as_mod(
+            og_xml, game_dir, db, deltas_dir, mod_name,
+            existing_mod_id=existing_mod_id, modinfo=og_modinfo,
+        )
+        if og_result is not None:
+            return og_result
+
+    # Plain XML drop format (raw .xml files at vanilla basenames).
+    plain_xml = _detect_plain_xml_replacements(tmp_path)
+    if plain_xml:
+        has_paz_dirs = any(
+            d.is_dir() and d.name.isdigit() and len(d.name) == 4
+            for d in tmp_path.rglob("*") if d.is_dir()
+        )
+        has_json_patches = detect_json_patch(tmp_path) is not None
+        if not has_paz_dirs and not has_json_patches:
+            plain_modinfo = _read_modinfo(tmp_path)
+            plain_result = _import_og_xml_as_mod(
+                plain_xml, game_dir, db, deltas_dir, mod_name,
+                existing_mod_id=existing_mod_id, modinfo=plain_modinfo,
+            )
+            if plain_result is not None:
+                return plain_result
+
+    # Format 3 (NattKh field-name) detection. The same JSON dropped as
+    # a ZIP would land in `import_from_zip`'s Format 3 branch; without
+    # this block, RAR/7z imports of the same mod errored with "no
+    # recognized format". Source: Lovexvirus007's Can It Stack JSON V3
+    # 2026-05-01.
+    from cdumm.engine.json_patch_handler import is_natt_format_3
+    f3_jsons = [p for p in tmp_path.rglob("*.json")
+                if is_natt_format_3(p)]
+    if len(f3_jsons) == 1:
+        return import_from_natt_format_3(
+            json_path=f3_jsons[0], game_dir=game_dir, db=db,
+            snapshot=snapshot, deltas_dir=deltas_dir,
+            existing_mod_id=existing_mod_id,
+        )
+    if len(f3_jsons) > 1:
+        # Variant pack messaging mirrored from import_from_zip's flow
+        # so RAR/7z drops of multi-Format-3 archives get the same
+        # "drop on main window to pick" guidance instead of falling
+        # through to the generic "no recognized format" error.
+        f3_pack = _scan_format3_variant_pack(tmp_path)
+        if f3_pack:
+            ids = ", ".join(vid for _, vid in f3_pack)
+            result.error = (
+                f"This archive contains {len(f3_pack)} variants of "
+                f"one Format 3 mod ({ids}). Drop the archive on the "
+                f"main window to pick one variant, or extract the "
+                f"archive and import only the variant JSON you want."
+            )
+            return result
+        names = ", ".join(p.name for p in f3_jsons)
+        result.error = (
+            f"This archive contains {len(f3_jsons)} Format 3 mods "
+            f"({names}). Please import them one at a time so each "
+            f"gets its own row in the mod list."
+        )
+        return result
 
     # Check for DDS texture mod
     tex_info = detect_texture_mod(tmp_path)
