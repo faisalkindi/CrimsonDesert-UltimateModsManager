@@ -97,7 +97,13 @@ class AsiManager:
         if plugin.enabled:
             return
         new_path = plugin.path.with_name(plugin.name + ASI_SUFFIX)
-        plugin.path.rename(new_path)
+        # os.replace is atomic on Windows even when the destination
+        # already exists (e.g., a stale .asi sibling left after a
+        # crash). Path.rename() raises FileExistsError on Windows in
+        # that case and leaves the plugin in an indeterminate state.
+        # Round 8 audit catch.
+        import os as _os
+        _os.replace(str(plugin.path), str(new_path))
         plugin.path = new_path
         plugin.enabled = True
         logger.info("Enabled ASI: %s", plugin.name)
@@ -107,7 +113,8 @@ class AsiManager:
         if not plugin.enabled:
             return
         new_path = plugin.path.with_name(plugin.name + DISABLED_SUFFIX)
-        plugin.path.rename(new_path)
+        import os as _os
+        _os.replace(str(plugin.path), str(new_path))
         plugin.path = new_path
         plugin.enabled = False
         logger.info("Disabled ASI: %s", plugin.name)
