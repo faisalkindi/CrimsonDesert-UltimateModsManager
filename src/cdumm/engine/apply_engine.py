@@ -240,6 +240,18 @@ def aggregate_json_mods_into_synthetic_patches(
             if not game_file:
                 continue
             all_changes = patch.get("changes", [])
+            # Apply custom values BEFORE the disabled filter so both
+            # operations key by ORIGINAL patch index. Earlier this
+            # ran custom_values on the already-filtered list, which
+            # used enumerate-by-filtered-position keys; if any patch
+            # before an editable was disabled, the editable's stored
+            # value (keyed by original index per FIX 4) silently
+            # missed and the patch fell back to the mod author's
+            # default. Round 4 mount-time audit MEDIUM-2.
+            if custom_vals:
+                from cdumm.engine.json_patch_handler import (
+                    apply_custom_values)
+                all_changes = apply_custom_values(all_changes, custom_vals)
             # Per-mod disabled_patches filter (flat indexed across all
             # of THIS mod's changes, matching how the picker records it).
             filtered = []
@@ -247,10 +259,6 @@ def aggregate_json_mods_into_synthetic_patches(
                 if flat_idx not in disabled:
                     filtered.append(c)
                 flat_idx += 1
-            if custom_vals:
-                from cdumm.engine.json_patch_handler import (
-                    apply_custom_values)
-                filtered = apply_custom_values(filtered, custom_vals)
             if not filtered:
                 continue
 
