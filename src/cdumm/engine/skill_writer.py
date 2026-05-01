@@ -92,18 +92,29 @@ def build_skill_intent_change(
 
     by_key = {e["key"]: e for e in entries}
     applied = 0
+    skipped_op = 0
+    skipped_key = 0
+    skipped_field = 0
     for intent in intents:
         if intent.key not in by_key:
+            skipped_key += 1
             logger.debug(
                 "skill writer: key %d not in table, skipping", intent.key)
             continue
         if intent.field not in SUPPORTED_FIELDS:
-            logger.debug(
-                "skill writer: field %r not supported", intent.field)
+            skipped_field += 1
+            logger.warning(
+                "skill writer: field %r not supported (only %s); "
+                "intent on key=%d dropped",
+                intent.field, ", ".join(sorted(SUPPORTED_FIELDS)),
+                intent.key)
             continue
         if intent.op != "set":
-            logger.debug(
-                "skill writer: op %r not supported (only 'set')", intent.op)
+            skipped_op += 1
+            logger.warning(
+                "skill writer: op %r not supported (only 'set'); "
+                "intent on key=%d field=%r dropped",
+                intent.op, intent.key, intent.field)
             continue
         try:
             by_key[intent.key][intent.field] = intent.new
@@ -114,6 +125,13 @@ def build_skill_intent_change(
                 "failed: %s", intent.key, intent.field, e)
 
     if applied == 0:
+        skip_total = skipped_op + skipped_key + skipped_field
+        if skip_total:
+            logger.warning(
+                "skill writer: 0 of %d intent(s) applied "
+                "(%d non-'set' op, %d unknown key, %d unknown field). "
+                "No change emitted.",
+                skip_total, skipped_op, skipped_key, skipped_field)
         return None
 
     try:
@@ -125,9 +143,26 @@ def build_skill_intent_change(
     if new_pabgb == vanilla_body:
         return None
 
+    skip_total = skipped_op + skipped_key + skipped_field
+    if skip_total:
+        skip_summary_parts = []
+        if skipped_op:
+            skip_summary_parts.append(f"{skipped_op} non-'set' op")
+        if skipped_key:
+            skip_summary_parts.append(f"{skipped_key} unknown key")
+        if skipped_field:
+            skip_summary_parts.append(f"{skipped_field} unknown field")
+        skip_summary = ", ".join(skip_summary_parts)
+        label = (
+            f"skill Format 3 intents ({applied} applied, "
+            f"{skip_total} skipped: {skip_summary})"
+        )
+    else:
+        label = f"skill Format 3 intents ({applied} applied)"
+
     return {
         "offset": 0,
         "original": vanilla_body.hex(),
         "patched": new_pabgb.hex(),
-        "label": f"skill Format 3 intents ({applied} applied)",
+        "label": label,
     }

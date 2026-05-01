@@ -103,16 +103,27 @@ def build_iteminfo_intent_change(
 
     by_key = {it["key"]: it for it in items}
     applied = 0
+    skipped_op = 0
+    skipped_key = 0
+    skipped_field = 0
     for intent in intents:
         if intent.key not in by_key:
+            skipped_key += 1
             logger.debug(
                 "iteminfo writer: key %d not in table, skipping intent",
                 intent.key)
             continue
         if intent.op != "set":
-            logger.debug(
-                "iteminfo writer: op %r not supported (only 'set')",
-                intent.op)
+            # WARNING (not debug) because it's a real intent the mod
+            # author wrote that gets silently dropped — bug reports
+            # should capture this. Users targeting `max_stack_count
+            # op="add" new=10` (relative bump) need to know it ran as
+            # nothing.
+            skipped_op += 1
+            logger.warning(
+                "iteminfo writer: op %r not supported (only 'set'); "
+                "intent on key=%d field=%r dropped",
+                intent.op, intent.key, intent.field)
             continue
         item = by_key[intent.key]
         # Resolve field name: try direct (snake_case-no-prefix from
@@ -120,9 +131,14 @@ def build_iteminfo_intent_change(
         # of camelCase for schema-style names like `_isBlocked`.
         target_field = _resolve_field_name(intent.field, item)
         if target_field is None:
-            logger.debug(
+            skipped_field += 1
+            logger.warning(
                 "iteminfo writer: field %r not in ItemInfo dict for "
-                "key=%d, skipping", intent.field, intent.key)
+                "key=%d, skipping (likely a primitive name the writer "
+                "doesn't expose; per-record path would handle it but "
+                "this intent was force-batched into the whole-table "
+                "writer because another intent on iteminfo uses a "
+                "list-of-dict field)", intent.field, intent.key)
             continue
         try:
             item[target_field] = intent.new
@@ -133,6 +149,13 @@ def build_iteminfo_intent_change(
                 "failed: %s", intent.key, intent.field, e)
 
     if applied == 0:
+        skip_total = skipped_op + skipped_key + skipped_field
+        if skip_total:
+            logger.warning(
+                "iteminfo writer: 0 of %d intent(s) applied "
+                "(%d non-'set' op, %d unknown key, %d unknown field). "
+                "No change emitted.",
+                skip_total, skipped_op, skipped_key, skipped_field)
         return None
 
     try:
@@ -146,9 +169,26 @@ def build_iteminfo_intent_change(
         # `set` to the same value). No change to emit.
         return None
 
+    skip_total = skipped_op + skipped_key + skipped_field
+    if skip_total:
+        skip_summary_parts = []
+        if skipped_op:
+            skip_summary_parts.append(f"{skipped_op} non-'set' op")
+        if skipped_key:
+            skip_summary_parts.append(f"{skipped_key} unknown key")
+        if skipped_field:
+            skip_summary_parts.append(f"{skipped_field} unknown field")
+        skip_summary = ", ".join(skip_summary_parts)
+        label = (
+            f"iteminfo Format 3 intents ({applied} applied, "
+            f"{skip_total} skipped: {skip_summary})"
+        )
+    else:
+        label = f"iteminfo Format 3 intents ({applied} applied)"
+
     return {
         "offset": 0,
         "original": vanilla_body.hex(),
         "patched": new_bytes.hex(),
-        "label": f"iteminfo Format 3 intents ({applied} applied)",
+        "label": label,
     }
