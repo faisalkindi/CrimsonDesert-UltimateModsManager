@@ -262,11 +262,24 @@ def detect_json_patches_all(path: Path) -> list[dict]:
             if (isinstance(data, dict)
                     and "patches" in data
                     and isinstance(data["patches"], list)
-                    and len(data["patches"]) > 0
-                    and "game_file" in data["patches"][0]
-                    and "changes" in data["patches"][0]):
-                data["_json_path"] = candidate
-                valid.append(data)
+                    and len(data["patches"]) > 0):
+                # Validate at least one patch entry has the required
+                # shape, not just patches[0]. Earlier the check was
+                # `patches[0] in dict and "game_file" in patches[0]`,
+                # which raised TypeError when patches[0] was None or
+                # a non-dict (caught by the outer except, dropping
+                # the whole file). Now a malformed first entry no
+                # longer hides valid sibling entries. Round 10 audit.
+                any_valid = False
+                for p in data["patches"]:
+                    if (isinstance(p, dict)
+                            and "game_file" in p
+                            and "changes" in p):
+                        any_valid = True
+                        break
+                if any_valid:
+                    data["_json_path"] = candidate
+                    valid.append(data)
         except Exception:
             continue
 
