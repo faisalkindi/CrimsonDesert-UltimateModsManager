@@ -234,6 +234,16 @@ def create_dds_record(dds_path: Path, record_size: int) -> bytes:
     data = dds_path.read_bytes()
     if not data.startswith(b"DDS "):
         raise ValueError(f"Not a valid DDS file: {dds_path}")
+    # A valid DDS file must include the magic + 124-byte DDS_HEADER =
+    # 128 bytes minimum. Truncated DDS bodies would otherwise emit a
+    # zero-padded record that dedupes against unrelated zeroed records
+    # from other malformed DDS files via add_dds_file's content-hash
+    # match, corrupting their PATHC entries. Round 8 audit catch (F2.1).
+    if len(data) < 128:
+        raise ValueError(
+            f"DDS file too small ({len(data)} bytes, need >= 128 for "
+            f"the standard header): {dds_path}"
+        )
     record = bytearray(record_size)
     to_copy = min(len(data), record_size)
     record[:to_copy] = data[:to_copy]
