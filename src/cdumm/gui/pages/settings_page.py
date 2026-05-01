@@ -653,17 +653,30 @@ class SettingsPage(SmoothScrollArea):
             )
             return
 
-        # Persist
-        if self._config:
-            self._config.set("game_directory", str(new_path))
-
-        # Update pointer file
+        # Update the pointer file FIRST so a write failure can prevent
+        # us from committing the DB-side change too. Earlier the
+        # pointer write happened after the cfg.set call and silently
+        # swallowed all exceptions, so a read-only AppData / redirected
+        # folder caused DB and pointer to disagree — next launch could
+        # revert to the old path. Round 11 audit catch.
+        pointer_file = Path.home() / "AppData" / "Local" / "cdumm" / "game_dir.txt"
         try:
-            pointer_file = Path.home() / "AppData" / "Local" / "cdumm" / "game_dir.txt"
             pointer_file.parent.mkdir(parents=True, exist_ok=True)
             pointer_file.write_text(str(new_path), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            logger.error(
+                "settings: failed to write game_dir pointer at %s: %s",
+                pointer_file, e)
+            InfoBar.error(
+                title=tr("infobar.error"),
+                content=str(e),
+                duration=8000, position=InfoBarPosition.TOP, parent=self)
+            return
+
+        # Persist (only after pointer write succeeded)
+        if self._config:
+            self._config.set("game_directory", str(new_path))
 
         self._game_dir = new_path
         self._game_dir_card.setContent(str(new_path))
