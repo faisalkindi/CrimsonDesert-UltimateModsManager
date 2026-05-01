@@ -83,6 +83,34 @@ def _build_silent_apply_failure_message(
     )
 
 
+def _compose_merged_mod_name(
+    mod_names: list[str], merge_kind: str,
+) -> str:
+    """Build a user-facing mod_name for a merged delta produced by
+    semantic-merge or byte-merge.
+
+    Used to keep real contributing mod names visible in downstream
+    warnings (size-merge fallback, conflict viewer, etc.) instead of
+    leaking the synthetic merge-kind label. The merge-kind tag still
+    lives on `_merged_metadata` for internal routing.
+
+    Deduplicates and skips empty / "unknown" entries. Caps the inline
+    list at 3 names plus a "+ N more" tail so banner layouts don't
+    blow up on big multi-mod merges.
+    """
+    seen: list[str] = []
+    for n in mod_names:
+        if not n or n == "unknown":
+            continue
+        if n not in seen:
+            seen.append(n)
+    if not seen:
+        return f"({merge_kind} of unidentified mods)"
+    if len(seen) <= 3:
+        return " + ".join(seen)
+    return " + ".join(seen[:3]) + f" + {len(seen) - 3} more"
+
+
 def _rewrite_mount_error_with_mod_names(
     raw_error: str, targets_to_mods: dict[str, list[str]]
 ) -> str:
@@ -2471,11 +2499,19 @@ class ApplyWorker(QObject):
                             if k in first_meta
                         })
 
-                        # Create merged delta dict
+                        # Create merged delta dict. Compose a user-
+                        # facing mod_name from the real contributing
+                        # mod names; the v3.2.7 mod_name propagation
+                        # fix copies this into overlay metadata, so
+                        # downstream warnings (size-merge fallback)
+                        # show real names instead of "semantic_merge"
+                        # placeholders. The internal merge-kind flag
+                        # already lives on `_merged_metadata`.
                         merged_d = dict(first_d)
                         merged_d["_merged_content"] = merged_body
                         merged_d["_merged_metadata"] = merged_meta
-                        merged_d["mod_name"] = "semantic_merge"
+                        merged_d["mod_name"] = _compose_merged_mod_name(
+                            list(mod_bodies.keys()), "semantic merge")
 
                         # Replace conflicting deltas in the output list
                         ep_set = {entry_path}
@@ -2536,7 +2572,8 @@ class ApplyWorker(QObject):
                         merged_d = dict(first_d)
                         merged_d["_merged_content"] = merged_body
                         merged_d["_merged_metadata"] = merged_meta
-                        merged_d["mod_name"] = "byte_merge"
+                        merged_d["mod_name"] = _compose_merged_mod_name(
+                            list(mod_bodies.keys()), "byte merge")
                         ep_set = {entry_path}
                         merged_deltas = [
                             d for d in merged_deltas
