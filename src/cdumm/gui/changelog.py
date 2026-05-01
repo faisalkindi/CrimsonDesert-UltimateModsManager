@@ -13,6 +13,18 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.8",
+        "date": "2026-05-01",
+        "notes": [
+            "<b>Format 3 mods that change a primitive field on iteminfo (item stack count, durability, item flags, etc.) now actually take effect in-game.</b> The Format 3 expansion was emitting per-mod byte offsets relative to the record start, but the apply pipeline anchors offsets at the position AFTER each item's name string. The two coordinate systems differed by 8 + name_length bytes per record, so primitive Format 3 intents were silently writing to the wrong byte position on every record. The verification check then caught the mismatch and skipped the patch, leaving the mod with zero effect. Bug from Faisal's Can It Stack JSON V3 test on 2026-05-01 (1812 of 1827 patches reported \"byte mismatch\"); latent since v3.2.3 when Format 3 primitive support shipped. ZirconX1, Lichtnocht, jscrump1278's earlier \"applies cleanly but doesn't work in-game\" reports likely trace back to this.",
+            "<b>RAR and 7z mod archives that ship Format 3 / OG_ XML / plain XML drop content now import.</b> The shared RAR/7z helper (`_import_from_extracted`) was missing the format detectors that import_from_zip already had, so the same JSON dropped as a ZIP imported fine while the same JSON dropped as a RAR errored with \"no recognized mod format\". Bug from RockNBeard's Standard Gamepad Layout test (Nexus mod 1489) and Lovexvirus007's Can It Stack JSON V3 (Nexus mod 2180), both 2026-05-01.",
+            "<b>RAR and 7z mod archives that mix .asi plugins with PAZ data now install both halves.</b> The ZIP path stages ASI plugins to a persistent dir before format detection so the GUI handler can copy them into bin64/, but the RAR/7z path had no such staging. Mixed RAR/7z mods silently dropped the ASI half. Now the RAR/7z wrappers run the same staging as the ZIP wrapper.",
+            "<b>The \"X mods were dropped during apply\" warning now names real mod names instead of the placeholders \"byte_merge\" or \"semantic_merge\".</b> When two mods conflict on the same entry and CDUMM merges them via the byte-level or semantic-level fallback, the merged delta was being tagged with a synthetic mod_name that then leaked into the size-merge fallback warning at apply time. The v3.2.7 fix that named dropped mods correctly was being undone by this layer. Now the merged delta carries a composed name like \"Mod A + Mod B\" (with a +N more tail for big merges) so the conflict warning stays informative.",
+            "<b>Variant packs (multiple Format 3 JSONs in one archive) dropped as RAR/7z now show the same \"drop on the main window to pick a variant\" message that ZIP imports get.</b> Before, RAR/7z drops with multiple Format 3 JSONs fell through to the generic \"no recognized format\" error.",
+            "<b>iteminfo and skill Format 3 writers now log clear warnings when an intent gets dropped.</b> Earlier: silent debug-level skips for unsupported ops (only `set` is supported), unknown record keys, and unknown field names. Now: warning-level log lines that name the intent, plus a per-change skip summary in the change label so the apply summary shows \"3 intents applied, 5 skipped: 2 unknown key, 3 unknown field\". Also surfaces a warning when zero intents apply at all, instead of silently producing no change.",
+        ],
+    },
+    {
         "version": "3.2.7",
         "date": "2026-04-30",
         "notes": [
