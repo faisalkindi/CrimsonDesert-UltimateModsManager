@@ -2052,23 +2052,28 @@ class ModsPage(QWidget):
 
         if multi:
             # Multi-select: batch enable/disable/uninstall/reimport
-            menu.addAction(Action(FluentIcon.ACCEPT, f"Enable {len(selected_ids)} mods",
+            menu.addAction(Action(FluentIcon.ACCEPT,
+                                  tr("mod_context.enable_n", count=len(selected_ids)),
                                   triggered=lambda: self._ctx_batch_toggle(selected_ids, True)))
-            menu.addAction(Action(FluentIcon.REMOVE, f"Disable {len(selected_ids)} mods",
+            menu.addAction(Action(FluentIcon.REMOVE,
+                                  tr("mod_context.disable_n", count=len(selected_ids)),
                                   triggered=lambda: self._ctx_batch_toggle(selected_ids, False)))
             menu.addSeparator()
             menu.addAction(Action(FluentIcon.SYNC,
-                                  f"Reimport {len(selected_ids)} mods from source",
+                                  tr("mod_context.reimport_n", count=len(selected_ids)),
                                   triggered=lambda: self._ctx_batch_reimport(selected_ids)))
             menu.addSeparator()
-            menu.addAction(Action(FluentIcon.DELETE, f"Uninstall {len(selected_ids)} mods",
+            menu.addAction(Action(FluentIcon.DELETE,
+                                  tr("mod_context.uninstall_n", count=len(selected_ids)),
                                   triggered=lambda: self._ctx_batch_uninstall(selected_ids)))
         else:
             # Single select: full menu
             if mod["enabled"]:
-                menu.addAction(Action(FluentIcon.REMOVE, "Disable", triggered=lambda: self._ctx_toggle(mod_id, False)))
+                menu.addAction(Action(FluentIcon.REMOVE, tr("mod_context.disable"),
+                                      triggered=lambda: self._ctx_toggle(mod_id, False)))
             else:
-                menu.addAction(Action(FluentIcon.ACCEPT, "Enable", triggered=lambda: self._ctx_toggle(mod_id, True)))
+                menu.addAction(Action(FluentIcon.ACCEPT, tr("mod_context.enable"),
+                                      triggered=lambda: self._ctx_toggle(mod_id, True)))
 
         if not multi:
             menu.addSeparator()
@@ -2087,10 +2092,13 @@ class ModsPage(QWidget):
                 else:
                     has_config = bool(mod.get("configurable"))
             if has_config:
-                menu.addAction(Action(FluentIcon.SETTING, "Configure...", triggered=lambda: self._on_config_clicked(mod_id)))
+                menu.addAction(Action(FluentIcon.SETTING,
+                                      tr("mod_context.configure"),
+                                      triggered=lambda: self._on_config_clicked(mod_id)))
 
             # Rename
-            menu.addAction(Action(FluentIcon.EDIT, "Rename", triggered=lambda: self._ctx_rename(mod_id)))
+            menu.addAction(Action(FluentIcon.EDIT, tr("mod_context.rename"),
+                                  triggered=lambda: self._ctx_rename(mod_id)))
 
             # Notes
             menu.addAction(Action(FluentIcon.PENCIL_INK, tr("mods.edit_notes") if mod.get("notes") else tr("mods.add_notes"),
@@ -2103,16 +2111,16 @@ class ModsPage(QWidget):
             # Link to NexusMods
             nexus_id = mod.get("nexus_mod_id")
             if nexus_id:
-                menu.addAction(Action(FluentIcon.LINK, "Open on NexusMods",
+                menu.addAction(Action(FluentIcon.LINK, tr("mod_context.open_nexus"),
                     triggered=lambda: self._ctx_open_nexus(nexus_id)))
-                menu.addAction(Action(FluentIcon.EDIT, "Change NexusMods Link",
+                menu.addAction(Action(FluentIcon.EDIT, tr("mod_context.change_nexus_link"),
                     triggered=lambda: self._ctx_link_nexus(mod_id)))
             else:
-                menu.addAction(Action(FluentIcon.LINK, "Link to NexusMods",
+                menu.addAction(Action(FluentIcon.LINK, tr("mod_context.link_nexus"),
                     triggered=lambda: self._ctx_link_nexus(mod_id)))
 
             # Move to folder submenu
-            move_menu = RoundMenu("Move to Folder", parent=menu)
+            move_menu = RoundMenu(tr("mod_context.move_to_folder"), parent=menu)
             current_gid = mod.get("group_id")
 
             if current_gid is not None:
@@ -2134,17 +2142,19 @@ class ModsPage(QWidget):
                 menu.addMenu(move_menu)
 
             # Update
-            menu.addAction(Action(FluentIcon.UPDATE, "Update (replace)", triggered=lambda: self._ctx_update(mod_id)))
+            menu.addAction(Action(FluentIcon.UPDATE, tr("mod_context.update_replace"),
+                                  triggered=lambda: self._ctx_update(mod_id)))
 
             # Reimport from source (single) — regenerates deltas
             # against current vanilla. Useful after a game update.
-            menu.addAction(Action(FluentIcon.SYNC, "Reimport from source",
+            menu.addAction(Action(FluentIcon.SYNC, tr("mod_context.reimport_source"),
                                   triggered=lambda: self._ctx_batch_reimport([mod_id])))
 
             menu.addSeparator()
 
             # Uninstall
-            menu.addAction(Action(FluentIcon.DELETE, "Uninstall", triggered=lambda: self._ctx_uninstall(mod_id)))
+            menu.addAction(Action(FluentIcon.DELETE, tr("mod_context.uninstall"),
+                                  triggered=lambda: self._ctx_uninstall(mod_id)))
 
         menu.exec(global_pos)
 

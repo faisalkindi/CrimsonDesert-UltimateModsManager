@@ -322,6 +322,26 @@ class AsiManager:
         updated: list[str] = []
         self._bin64.mkdir(parents=True, exist_ok=True)
 
+        # Clean any opposite-state sibling on disk so we don't end up
+        # with both `<stem>.asi` and `<stem>.asi.disabled` after the
+        # update. Mirrors `install()`'s `_resolve_dest_for_asi` cleanup.
+        # Round 8 audit: previously update() only wrote the new file
+        # for the in-memory plugin.enabled state and ignored the
+        # opposite-state sibling that may exist on disk if the user
+        # manually toggled while CDUMM was closed.
+        opposite = (DISABLED_SUFFIX if plugin.enabled else ASI_SUFFIX)
+        opposite_path = self._bin64 / (plugin.name + opposite)
+        if opposite_path.exists():
+            try:
+                opposite_path.unlink()
+                logger.info(
+                    "Removed opposite-state sibling on update: %s",
+                    opposite_path.name)
+            except OSError as e:
+                logger.warning(
+                    "Could not remove opposite-state sibling %s: %s",
+                    opposite_path.name, e)
+
         if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
             dest = self._bin64 / (plugin.name + ASI_SUFFIX)
             if not plugin.enabled:
