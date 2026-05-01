@@ -638,9 +638,9 @@ class PresetPickerDialog(MessageBoxBase):
         """Flip override state and rebuild the preset list."""
         self._override_enabled = self._override_btn.isChecked()
         if self._override_enabled:
-            self._override_btn.setText("Revert to auto-detect")
+            self._override_btn.setText(tr("preset.override_revert"))
         else:
-            self._override_btn.setText("Allow multi-select")
+            self._override_btn.setText(tr("preset.override_allow_multi"))
         self._rebuild_preset_list()
 
 
