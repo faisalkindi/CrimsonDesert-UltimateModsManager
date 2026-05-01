@@ -106,6 +106,11 @@ class Database:
         self._connection = sqlite3.connect(str(self.db_path))
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5 seconds when another connection holds the write lock
+        # before raising "database is locked". Worker subprocesses + GUI
+        # share the same DB; without this, race-y writes raise immediately
+        # (Round 4 audit catch).
+        self._connection.execute("PRAGMA busy_timeout=5000")
         self._connection.executescript(SCHEMA)
         self._migrate()
         # Create indexes that depend on migrated columns (entry_path may not
@@ -116,6 +121,24 @@ class Database:
                 "ON mod_deltas(entry_path)")
         except Exception:
             pass  # column doesn't exist yet on very old DBs
+        # Composite index for the apply hot path's
+        # `WHERE mod_id = ? AND file_path = ?` query. Without this,
+        # SQLite picked one of the two single-column indexes per query.
+        # Round 4 audit catch.
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mod_deltas_mod_file "
+            "ON mod_deltas(mod_id, file_path)")
+        # Cap activity_log growth to the most recent 5000 rows. Rolls
+        # off oldest entries on each startup so the table stays bounded.
+        # Read paths already cap at LIMIT 200/500 so users won't notice.
+        try:
+            self._connection.execute(
+                "DELETE FROM activity_log WHERE id < ("
+                "  SELECT MAX(id) - 5000 FROM activity_log"
+                ")"
+            )
+        except Exception:
+            pass  # table may not exist on fresh DB before SCHEMA ran
         self._connection.commit()
         logger.info("Database schema initialized")
 
