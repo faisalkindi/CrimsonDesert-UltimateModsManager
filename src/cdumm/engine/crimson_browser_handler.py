@@ -131,6 +131,7 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
         return None
 
     # Handle patches_dir: read JSON patches and process via json_patch_handler
+    patches_succeeded = 0
     if has_patches:
         from cdumm.engine.json_patch_handler import convert_json_patch_to_paz
         for patch_file in patches_dir.rglob("*.json"):
@@ -144,14 +145,19 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                 if "patches" in patch_data:
                     result = convert_json_patch_to_paz(patch_data, game_dir, work_dir)
                     if result:
+                        patches_succeeded += 1
                         logger.info("Sharp mod: applied patches from %s", patch_file.name)
             except Exception as e:
                 logger.warning("Sharp mod: failed to apply patch %s: %s",
                                patch_file.name, e)
 
     if not has_files:
-        # Patches-only mod — return work_dir if patches produced output
-        if any(work_dir.iterdir()):
+        # Patches-only mod. Earlier this checked `any(work_dir.iterdir())`
+        # which would treat partial leftovers from a failed
+        # convert_json_patch_to_paz call as success. Track explicit
+        # success counts instead — only return work_dir when at least
+        # one patch actually produced output. Round 10 audit catch.
+        if patches_succeeded > 0:
             return work_dir
         return None
 
