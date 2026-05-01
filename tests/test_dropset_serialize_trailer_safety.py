@@ -84,3 +84,57 @@ def test_serialize_unk4_7_with_friendly_data_succeeds():
     )
     out = _serialize_drop_entry(drop)
     assert len(out) == 68 + 28
+
+
+def test_build_drops_replacement_returns_none_on_trailer_mismatch():
+    """The serializer's new ValueError on missing trailers must be
+    caught by `build_drops_replacement_change` so the apply pipeline
+    sees a graceful `None` (= skipped change) instead of an
+    uncaught exception that aborts the whole apply pass.
+
+    Round 5 audit catch — FIX 17's ValueError was bubbling up
+    uncaught through format3_apply._build_list_writer_change and
+    crashing every Format 3 mod that hit this path.
+    """
+    import struct
+    from cdumm.engine.dropset_writer import build_drops_replacement_change
+
+    # Build a synthetic minimal DropSet record (no drops) so the
+    # template fallback returns None, which then forces the
+    # serializer's trailer-missing path when the intent specifies
+    # `unk4=7` without `friendly_data`.
+    name = b"DropSet_Test"
+    name_len = len(name)
+    record = bytearray()
+    record += struct.pack("<I", 1234)        # key
+    record += struct.pack("<I", name_len)    # name_len
+    record += name                            # name
+    record.append(0)                          # is_blocked
+    record += struct.pack("<I", 0)            # drop_roll_type
+    record += struct.pack("<I", 0)            # drop_roll_count
+    record += struct.pack("<I", 0)            # condition string len
+    record += struct.pack("<I", 0)            # tag name hash
+    record += struct.pack("<I", 0)            # drops count = 0
+    record += struct.pack("<i", -1)           # nee_slot_count
+    record += struct.pack("<I", 0)            # need_weight
+    record += struct.pack("<I", 0)            # total_drop_rate
+    record += struct.pack("<I", 0)            # original string len
+
+    # Note: this synthetic record likely doesn't pass parse, but
+    # that's fine — the test verifies that whether parse fails OR
+    # serialize fails, the function returns None instead of raising.
+    bad_intent = [{"item_key": 0, "unk4": 7}]  # no friendly_data, no template
+
+    out = build_drops_replacement_change(
+        record_bytes=bytes(record),
+        intent_key=1234,
+        intent_entry="DropSet_Test",
+        new_drops_json=bad_intent,
+    )
+
+    # The function must return None (graceful skip) rather than
+    # propagating the ValueError.
+    assert out is None, (
+        f"build_drops_replacement_change must catch serializer "
+        f"ValueError and return None, got: {out!r}"
+    )

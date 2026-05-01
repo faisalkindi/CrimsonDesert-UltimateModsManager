@@ -338,10 +338,21 @@ def build_drops_replacement_change(
     header_len = 4 + 4 + len(name_bytes)  # key u32 + name_len u32 + name
 
     template = parsed.drops[0] if parsed.drops else None
-    parsed.drops = [
-        _drop_dict_to_item_drop(d, template) for d in new_drops_json
-    ]
-    new_record = serialize_dropset_record(parsed)
+    try:
+        parsed.drops = [
+            _drop_dict_to_item_drop(d, template) for d in new_drops_json
+        ]
+        new_record = serialize_dropset_record(parsed)
+    except (ValueError, KeyError, TypeError) as e:
+        # Trailer mismatch (FIX 17 guard), missing required JSON
+        # field, or bad type. Surface as a skipped change with a log
+        # line; the apply pipeline gracefully treats `None` as "no
+        # change emitted" rather than crashing the whole pass.
+        import logging
+        logging.getLogger(__name__).warning(
+            "dropset writer: build_drops_replacement_change failed "
+            "for entry=%r key=%d: %s", intent_entry, intent_key, e)
+        return None
 
     if record_bytes[:header_len] != new_record[:header_len]:
         # Header changed (e.g., name rewritten). The current writer
