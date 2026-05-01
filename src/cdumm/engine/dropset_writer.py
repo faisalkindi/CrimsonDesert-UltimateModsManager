@@ -132,11 +132,35 @@ def _serialize_drop_entry(drop: ItemDrop) -> bytes:
     buf += struct.pack("<Q", max(0, drop.min_amt))
     buf += struct.pack("<H", drop.unk3_flags)
     buf += struct.pack("<I", drop.item_key_dup)
-    if drop.unk4 == 13 and drop.extra_u8 is not None:
+    # Tagged-trailer guards. Earlier the conditions silently passed
+    # (no trailer emitted) when the tagged field was None, which let
+    # FIX 16's `_drop_dict_to_item_drop` produce short records when
+    # the JSON intent specified `unk4=7|10|13` without the matching
+    # trailer field AND the template either didn't exist (empty
+    # parsed.drops) or had a different unk4. Effect: serialized
+    # record was 1 / 4 / 28 bytes short and every subsequent record
+    # in the table shifted, corrupting the entire DropSet body.
+    # Round 4 audit catch.
+    if drop.unk4 == 13:
+        if drop.extra_u8 is None:
+            raise ValueError(
+                f"unk4=13 requires extra_u8 (u8 trailing byte) but "
+                f"none was provided for item_key={drop.item_key}"
+            )
         buf.append(drop.extra_u8 & 0xFF)
-    elif drop.unk4 == 10 and drop.extra_u32 is not None:
+    elif drop.unk4 == 10:
+        if drop.extra_u32 is None:
+            raise ValueError(
+                f"unk4=10 requires extra_u32 (u32 trailing word) but "
+                f"none was provided for item_key={drop.item_key}"
+            )
         buf += struct.pack("<I", drop.extra_u32)
-    elif drop.unk4 == 7 and drop.friendly_data is not None:
+    elif drop.unk4 == 7:
+        if drop.friendly_data is None:
+            raise ValueError(
+                f"unk4=7 requires friendly_data (28-byte trailer) but "
+                f"none was provided for item_key={drop.item_key}"
+            )
         if len(drop.friendly_data) != 28:
             raise ValueError(
                 f"friendly_data must be 28 bytes, got "
