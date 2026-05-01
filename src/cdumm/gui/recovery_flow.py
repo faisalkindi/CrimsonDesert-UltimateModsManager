@@ -61,14 +61,14 @@ DEFAULT_STEP_TIMEOUT_S = 360.0
 
 
 _STEP_LABELS = {
-    # ``awaiting_steam_verify`` is intentionally absent — that phase
-    # is a pre-flight prompt waiting on a user click, not work CDUMM
-    # is doing. Numbering starts at the first chain step the user
-    # cares about (the revert).
-    STEP_FIX_EVERYTHING:       "Step 1/4 — Reverting game files to vanilla",
-    STEP_RESCAN:               "Step 2/4 — Rescanning game files",
-    STEP_REIMPORT:             "Step 3/4 — Reimporting your mods",
-    STEP_APPLY:                "Step 4/4 — Reapplying mods to game files",
+    # `awaiting_steam_verify` is intentionally absent, that phase is
+    # a pre-flight prompt waiting on a user click, not work CDUMM is
+    # doing. Numbering starts at the first chain step the user cares
+    # about (the revert).
+    STEP_FIX_EVERYTHING:       "Step 1/4: Reverting game files to vanilla",
+    STEP_RESCAN:               "Step 2/4: Rescanning game files",
+    STEP_REIMPORT:             "Step 3/4: Reimporting your mods",
+    STEP_APPLY:                "Step 4/4: Reapplying mods to game files",
 }
 
 
@@ -104,9 +104,19 @@ class RecoveryFlow(QObject):
         # background and the user couldn't tell what stage they were
         # in or whether mods were currently applied.
         self._progress_bar: Any = None
+        # Re-entrancy guard: protect against double-trigger when the
+        # recovery banner click and the deferred startup path both
+        # try to fire start() in the same event loop turn. Without
+        # this, two parallel chains race the freeze/unfreeze, double-
+        # connect rescan_requested, and stack two `_on_apply` calls.
+        # Round 10 audit catch.
+        self._started: bool = False
 
     def start(self) -> None:
         """Open the Steam Verify prompt and begin the chain."""
+        if self._started:
+            return
+        self._started = True
         self._freeze_main_window()
         self._emit_step(STEP_AWAITING_STEAM_VERIFY)
 
@@ -262,6 +272,13 @@ class RecoveryFlow(QObject):
         logger.info(
             "RecoveryFlow _on_reimport_finished: %d enabled PAZ mods remain",
             remaining)
+        if remaining < 0:
+            # DB query failed; surface the failure instead of routing
+            # a successful recovery into _enter_all_skipped.
+            self._enter_error(
+                "Could not read mod state after reimport. Check the "
+                "Activity log and try again.")
+            return
         if remaining == 0:
             self._enter_all_skipped()
             return
@@ -474,14 +491,22 @@ class RecoveryFlow(QObject):
         return getattr(self._main_window, "_active_worker", None)
 
     def _count_enabled_paz_mods(self) -> int:
+        # Returns -1 on DB error so callers can distinguish "no mods
+        # enabled" from "couldn't read the DB". Earlier the bare
+        # except returned 0, which the apply branch interpreted as
+        # "nothing to apply" and silently routed valid recoveries
+        # into _enter_all_skipped on a transient DB lock. Round 10
+        # audit catch.
         try:
             row = self._main_window._db.connection.execute(
                 "SELECT COUNT(*) FROM mods "
                 "WHERE enabled = 1 AND mod_type = 'paz'"
             ).fetchone()
             return int(row[0]) if row else 0
-        except Exception:
-            return 0
+        except Exception as e:
+            logger.warning(
+                "_count_enabled_paz_mods: DB query failed: %s", e)
+            return -1
 
     def _disable_skipped(self) -> None:
         from cdumm.engine.recovery_candidates import disable_mods

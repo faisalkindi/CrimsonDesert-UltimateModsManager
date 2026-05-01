@@ -163,8 +163,22 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     unresolved: list[tuple[str, Path]] = []
 
     _SKIP_FILES = {"mod.json", "manifest.json", "modinfo.json"}
+    files_dir_resolved = files_dir.resolve()
     for f in files_dir.rglob("*"):
         if not f.is_file() or f.name.lower() in _SKIP_FILES:
+            continue
+        # Symlink / junction safety: rglob follows links by default
+        # on Windows, so a malicious mod ZIP with a symlink under
+        # files/ pointing outside the extracted dir could expose
+        # arbitrary filesystem content via subsequent read_bytes().
+        # Round 10 audit catch.
+        try:
+            f_resolved = f.resolve()
+            f_resolved.relative_to(files_dir_resolved)
+        except (ValueError, OSError):
+            logger.warning(
+                "CB import: skipping %s (resolves outside files_dir, "
+                "possible symlink escape)", f)
             continue
         rel = f.relative_to(files_dir)
         parts = rel.parts
