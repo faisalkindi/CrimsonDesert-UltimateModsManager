@@ -111,13 +111,14 @@ class RecoveryFlow(QObject):
         self._emit_step(STEP_AWAITING_STEAM_VERIFY)
 
         platform_hint = self._platform_hint()
+        from cdumm.i18n import tr
         box = MessageBox(
-            "Verify your game files",
+            tr("recovery.verify_title"),
             platform_hint,
             self._main_window,
         )
-        box.yesButton.setText("Done, I verified")
-        box.cancelButton.setText("Cancel")
+        box.yesButton.setText(tr("recovery.done_verified"))
+        box.cancelButton.setText(tr("recovery.cancel"))
         # Use getattr so the tool hook doesn't mistake Qt's exec()
         # method name for shell exec.
         _run = getattr(box, "exec")

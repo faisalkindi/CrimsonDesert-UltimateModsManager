@@ -81,7 +81,7 @@ class SetupDialog(MessageBoxBase):
         candidates = find_game_directories()
         if candidates:
             self._path_edit.setText(str(candidates[0]))
-            self._status_label.setText(f"Auto-detected: {candidates[0]}")
+            self._status_label.setText(tr("setup.auto_detected", path=candidates[0]))
             logger.info("Auto-detected game directory: %s", candidates[0])
 
     def _on_browse(self) -> None:

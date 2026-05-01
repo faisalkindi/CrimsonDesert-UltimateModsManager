@@ -3337,13 +3337,11 @@ class CdummWindow(FluentWindow):
                 treat_as_dup = True
                 if match_level == "near":
                     near_box = MessageBox(
-                        "Similar Mod Detected",
-                        f"The mod you're importing looks similar to "
-                        f"'{mname}' which is already installed.\n\n"
-                        f"Is this an update to that mod, or a separate mod?",
+                        tr("import.similar_mod_title"),
+                        tr("import.similar_mod_body", name=mname),
                         self)
-                    near_box.yesButton.setText("Update existing")
-                    near_box.cancelButton.setText("Import as new")
+                    near_box.yesButton.setText(tr("import.update_existing"))
+                    near_box.cancelButton.setText(tr("import.import_as_new"))
                     if not near_box.exec():
                         # 'Import as new' — bypass the dup flow entirely
                         treat_as_dup = False
@@ -5050,13 +5048,8 @@ class CdummWindow(FluentWindow):
         )
         if is_apply_blocked_by_stale_snapshot(self._startup_context):
             InfoBar.error(
-                title="Rescan required",
-                content=(
-                    "Crimson Desert was updated since your last "
-                    "snapshot. Apply is locked until you run Rescan "
-                    "Game Files — otherwise mods land on the wrong "
-                    "bytes and won't work. Use the Rescan panel in "
-                    "the sidebar to unlock Apply."),
+                title=tr("apply.rescan_required_title"),
+                content=tr("apply.rescan_required_body"),
                 duration=-1, position=InfoBarPosition.TOP, parent=self)
             return
 
@@ -5064,7 +5057,7 @@ class CdummWindow(FluentWindow):
             return
 
         logger.info("Apply requested")
-        tip = self._make_state_tooltip("Applying mods...")
+        tip = self._make_state_tooltip(tr("apply.tip_in_progress"))
 
         def on_apply_done(msgs):
             # Check for errors
@@ -5135,15 +5128,14 @@ class CdummWindow(FluentWindow):
             return
 
         box = MessageBox(
-            "Revert to Vanilla",
-            "This will restore all game files to their original state.\n"
-            "All applied mod changes will be removed.\n\nContinue?",
+            tr("revert.dialog_title"),
+            tr("revert.dialog_body"),
             self,
         )
         if not box.exec():
             return
 
-        tip = self._make_state_tooltip("Reverting to vanilla...")
+        tip = self._make_state_tooltip(tr("revert.tip_in_progress"))
 
         def on_revert_msg(msg):
             if msg.get("type") == "warning":
