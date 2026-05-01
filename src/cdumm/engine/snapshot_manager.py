@@ -505,7 +505,10 @@ class SnapshotManager:
         changes: list[tuple[str, str]] = []
         cursor = self._db.connection.execute("SELECT file_path, file_hash FROM snapshots")
         for rel_path, stored_hash in cursor.fetchall():
-            abs_path = game_dir / rel_path.replace("/", "\\")
+            # Path's `/` operator already handles posix-to-native
+            # separator translation; the explicit replace was Windows-
+            # only and would break on a future Linux/Mac port.
+            abs_path = game_dir / rel_path
             if not abs_path.exists():
                 changes.append((rel_path, "deleted"))
             else:
