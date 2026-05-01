@@ -221,11 +221,48 @@ def _drop_dict_to_item_drop(
     NattKh's add_item helper at dropset_editor.py:270 uses the same
     template-fallback pattern.
     """
+    # Tagged-extras (unk4 + its trailing block) MUST fall back to the
+    # template, not default to 0/None. NattKh's exports only include
+    # the user-meaningful fields (item_key, rates, min/max amount); the
+    # tagged trailers (28-byte friendly_data for unk4=7, u32 for
+    # unk4=10, u8 for unk4=13) are part of the binary record layout.
+    # Defaulting them to 0/None on `op=set` strips the trailer, makes
+    # the record the wrong byte length, and shifts every subsequent
+    # record. DropSet_Friendly_Talk mods (Trust Me workalike) gave 0
+    # friendship in-game because of this. kori228's #58 report
+    # 2026-05-01.
+    if "unk4" in d:
+        unk4 = int(d["unk4"])
+    elif template is not None:
+        unk4 = template.unk4
+    else:
+        unk4 = 0
+    if "extra_u8" in d:
+        extra_u8 = d["extra_u8"]
+    elif template is not None and template.unk4 == unk4:
+        extra_u8 = template.extra_u8
+    else:
+        extra_u8 = None
+    if "extra_u32" in d:
+        extra_u32 = d["extra_u32"]
+    elif template is not None and template.unk4 == unk4:
+        extra_u32 = template.extra_u32
+    else:
+        extra_u32 = None
+    if "friendly_data" in d:
+        fd = d["friendly_data"]
+        if isinstance(fd, str):
+            fd = bytes.fromhex(fd)
+        friendly_data = fd
+    elif template is not None and template.unk4 == unk4:
+        friendly_data = template.friendly_data
+    else:
+        friendly_data = None
     return ItemDrop(
         flag=d.get("flag", template.flag if template else 1),
         item_key=int(d["item_key"]),
         unk3=d.get("unk3", template.unk3 if template else 0),
-        unk4=d.get("unk4", 0),  # default 0: no extra tagged data
+        unk4=unk4,
         unk1_flag=(template.unk1_flag if template else b"\x00" * 5),
         unk_cond_flag=d.get(
             "unk_cond_flag",
@@ -240,9 +277,9 @@ def _drop_dict_to_item_drop(
         min_amt=int(d.get("min_amt", 0)),
         unk3_flags=int(d.get("unk3_flags", 0xFFFF)),
         item_key_dup=int(d.get("item_key_dup", d["item_key"])),
-        extra_u8=d.get("extra_u8"),
-        extra_u32=d.get("extra_u32"),
-        friendly_data=None,
+        extra_u8=extra_u8,
+        extra_u32=extra_u32,
+        friendly_data=friendly_data,
     )
 
 
