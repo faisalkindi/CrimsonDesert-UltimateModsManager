@@ -1104,8 +1104,14 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
         # Absolute also failed — re-restore the sig-relative skip
         # records so the user sees the original failure shape, then
         # return the original (zero-success) result.
-        # No state restore needed for the buffer (it was never
-        # successfully written to in either pass).
+        # The buffer claim "never successfully written" was wrong:
+        # the absolute pass can mutate `data` via fallback-offset
+        # and pattern-scan paths even when its overall return is
+        # `applied == 0`, because those write before the final
+        # mismatch elsewhere. Restore the buffer to the pre-apply
+        # snapshot so the caller doesn't write a corrupted overlay.
+        # Round 4 mount-time audit MEDIUM-1.
+        data[:] = _orig_data
 
     return applied, mismatched, relocated
 

@@ -255,8 +255,28 @@ def aggregate_json_mods_into_synthetic_patches(
                 continue
 
             aggregated.setdefault(game_file, []).extend(filtered)
-            if game_file not in signatures and patch.get("signature"):
-                signatures[game_file] = patch["signature"]
+            new_sig = patch.get("signature")
+            if new_sig:
+                if game_file not in signatures:
+                    signatures[game_file] = new_sig
+                elif signatures[game_file] != new_sig:
+                    # Two mods ship different signatures for the same
+                    # target file. The aggregator picks first-wins,
+                    # so the second mod's changes get applied with the
+                    # WRONG anchor. The byte-mismatch + vanilla-remnant
+                    # paths usually catch this, but a silent loss of
+                    # one mod's changes is still possible. Surface the
+                    # conflict so a bug report includes it. Round 4
+                    # mount-time audit MEDIUM-3.
+                    logger.warning(
+                        "Signature conflict on %s: mod %r ships "
+                        "signature %r but earlier mod's signature "
+                        "(%r) is already in use. Second mod's changes "
+                        "will apply against the first mod's anchor; "
+                        "byte mismatches expected if the signatures "
+                        "anchor at different vanilla offsets.",
+                        game_file, mod_name, new_sig,
+                        signatures[game_file])
             targets_this_mod.add(game_file)
 
         per_mod_summary.append({
