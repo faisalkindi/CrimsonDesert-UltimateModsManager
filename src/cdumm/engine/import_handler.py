@@ -1477,38 +1477,51 @@ def _detect_standalone_mod(
         backup_paz = vanilla_backup_dir / dir_name / "0.paz"
 
         if not game_pamt.exists():
-            continue  # no vanilla dir = truly new, handled elsewhere
-
-        mod_pamt_size = mod_pamt.stat().st_size
-        mod_paz_size = mod_paz.stat().st_size
-
-        # Check against vanilla backup first (accurate), then game dir (may be modded)
-        vanilla_pamt_size = backup_pamt.stat().st_size if backup_pamt.exists() else game_pamt.stat().st_size
-        vanilla_paz_size = backup_paz.stat().st_size if backup_paz.exists() else (game_paz.stat().st_size if game_paz.exists() else 0)
-
-        # A standalone mod has completely different content — different PAMT size
-        # indicates entirely different file entries (truly a new directory).
-        # Same PAMT size means same file entries, just modified content —
-        # this is a regular patch even if PAZ size changed (file appending).
-        if mod_pamt_size == vanilla_pamt_size:
-            is_standalone = False
-            logger.info("Modified vanilla: %s (same PAMT size, treating as patch, "
-                         "PAZ %d vs %d)", dir_name, mod_paz_size, vanilla_paz_size)
-        elif int(dir_name) < 36:
-            # Vanilla directories (0000-0035): always treat as patch, even if
-            # PAMT sizes differ (game update may have added/removed entries).
-            # ENTR decomposition handles different PAMTs by matching entries
-            # by path, so it works regardless of PAMT size differences.
-            is_standalone = False
-            logger.info("Modified vanilla: %s (PAMT size differs %d vs %d, but "
-                         "vanilla dir — treating as patch for ENTR decomposition)",
-                         dir_name, mod_pamt_size, vanilla_pamt_size)
-        else:
+            # Truly-new dir: no vanilla counterpart. Two mods both
+            # shipping a brand-new numbered dir would otherwise collide
+            # at the same path on apply (last-wins on the whole
+            # archive). GitHub #59 (DoRoon, 2026-05-01): SwapButcherWith-
+            # Barber + CharacterCreatorFemale both ship 0036/0.paz —
+            # vanilla 0036/ doesn't exist, both record file_path
+            # `0036/0.paz`, second-applied wipes the first. Treat as
+            # standalone so each mod gets a unique remapped dir number
+            # and both apply independently.
             is_standalone = True
-            logger.info("Standalone: %s has different PAMT (mod=%d vs vanilla=%d, "
-                         "PAZ %d vs %d)",
-                         dir_name, mod_pamt_size, vanilla_pamt_size,
-                         mod_paz_size, vanilla_paz_size)
+            logger.info(
+                "Standalone: %s is truly new (no vanilla counterpart) — "
+                "remapping to unique dir so multiple mods can coexist",
+                dir_name)
+        else:
+            mod_pamt_size = mod_pamt.stat().st_size
+            mod_paz_size = mod_paz.stat().st_size
+
+            # Check against vanilla backup first (accurate), then game dir (may be modded)
+            vanilla_pamt_size = backup_pamt.stat().st_size if backup_pamt.exists() else game_pamt.stat().st_size
+            vanilla_paz_size = backup_paz.stat().st_size if backup_paz.exists() else (game_paz.stat().st_size if game_paz.exists() else 0)
+
+            # A standalone mod has completely different content — different PAMT size
+            # indicates entirely different file entries (truly a new directory).
+            # Same PAMT size means same file entries, just modified content —
+            # this is a regular patch even if PAZ size changed (file appending).
+            if mod_pamt_size == vanilla_pamt_size:
+                is_standalone = False
+                logger.info("Modified vanilla: %s (same PAMT size, treating as patch, "
+                             "PAZ %d vs %d)", dir_name, mod_paz_size, vanilla_paz_size)
+            elif int(dir_name) < 36:
+                # Vanilla directories (0000-0035): always treat as patch, even if
+                # PAMT sizes differ (game update may have added/removed entries).
+                # ENTR decomposition handles different PAMTs by matching entries
+                # by path, so it works regardless of PAMT size differences.
+                is_standalone = False
+                logger.info("Modified vanilla: %s (PAMT size differs %d vs %d, but "
+                             "vanilla dir — treating as patch for ENTR decomposition)",
+                             dir_name, mod_pamt_size, vanilla_pamt_size)
+            else:
+                is_standalone = True
+                logger.info("Standalone: %s has different PAMT (mod=%d vs vanilla=%d, "
+                             "PAZ %d vs %d)",
+                             dir_name, mod_pamt_size, vanilla_pamt_size,
+                             mod_paz_size, vanilla_paz_size)
 
         if is_standalone:
             # Each standalone mod gets its own directory number so multiple
