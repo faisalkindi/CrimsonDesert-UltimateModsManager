@@ -2462,115 +2462,112 @@ class ApplyWorker(QObject):
             pass
 
         for idx, (entry_path, conflicting) in enumerate(entries_to_merge.items()):
-            table_name = identify_table_from_path(entry_path)
-            if not table_name:
-                continue  # not a supported format
-
-            try:
-                from cdumm.semantic.engine import SemanticEngine
-                engine = SemanticEngine(self._db)
-
-                # Load each mod's decompressed content
-                mod_bodies: dict[str, bytes] = {}
-                for d in conflicting:
-                    dp = d.get("delta_path")
-                    if not dp:
-                        continue
-                    content, meta = load_entry_delta(Path(dp))
-                    mod_bodies[d.get("mod_name", "unknown")] = content
-
-                if len(mod_bodies) < 2:
+            # Populate mod_bodies BEFORE the table_name check so the byte-
+            # merge tier 2 fallback below works for entries that aren't
+            # known pabgb tables. GitHub #59 (DoRoon, 2026-05-01): two
+            # mods on the same non-pabgb entry (sequencer .paseq, NPC
+            # interaction definition, .paac, etc.) used to hit
+            # `if not table_name: continue` and skip the byte-merge
+            # entirely, last-wins silently dropped one mod's changes.
+            mod_bodies: dict[str, bytes] = {}
+            for d in conflicting:
+                dp = d.get("delta_path")
+                if not dp:
                     continue
-
-                # Semantic merge requires the PABGH header to parse records.
-                # Extract it from the same PAZ directory as a sibling entry.
-                pamt_dir = file_path.split("/")[0]
-                header_entry_path = entry_path.replace(".pabgb", ".pabgh")
-                header_bytes = self._extract_sibling_entry(
-                    pamt_dir, header_entry_path)
-                if not header_bytes:
-                    logger.debug("No PABGH header for %s, skipping semantic merge",
-                                 entry_path)
-                    continue
-
-                # Get vanilla body from backup or game
-                vanilla_content = self._get_vanilla_entry_content(
-                    file_path, entry_path)
-                if not vanilla_content:
-                    continue
-
-                # Heartbeat so the progress bar text changes for huge
-                # tables. analyze_bytes can take many seconds on
-                # 6000+ record tables like iteminfo with multiple
-                # conflicting mods. Without this emit, the bar message
-                # stays stale on the same file/percentage.
                 try:
-                    self.progress_updated.emit(
-                        self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
-                        f"Merging entry {idx + 1}/{total_entries} in "
-                        f"{file_path}: {entry_path} ({len(mod_bodies)} mods)...")
-                except Exception:
-                    pass
+                    content, _meta = load_entry_delta(Path(dp))
+                    mod_bodies[d.get("mod_name", "unknown")] = content
+                except Exception as e:
+                    logger.warning(
+                        "Failed to load delta for merge: %s (%s)", dp, e)
 
-                # Run semantic merge
-                result = engine.analyze_bytes(
-                    table_name, vanilla_content, header_bytes, mod_bodies)
-                if result and not result.has_conflicts:
-                    merged_body = engine.build_merged_body(
-                        table_name, vanilla_content, header_bytes,
-                        result.table_changeset)
-                    if merged_body and merged_body != vanilla_content:
-                        # Replace all conflicting deltas with a single merged one
-                        from cdumm.engine.delta_engine import save_entry_delta
-                        merged_meta = {
-                            "pamt_dir": pamt_dir,
-                            "entry_path": entry_path,
-                            "_semantic_merged": True,
-                        }
-                        # Use first delta's metadata as template
-                        first_d = conflicting[0]
-                        _, first_meta = load_entry_delta(Path(first_d["delta_path"]))
-                        merged_meta.update({
-                            k: first_meta[k] for k in (
-                                "paz_index", "compression_type", "flags",
-                                "vanilla_offset", "vanilla_comp_size",
-                                "vanilla_orig_size", "encrypted")
-                            if k in first_meta
-                        })
+            if len(mod_bodies) < 2:
+                continue
 
-                        # Create merged delta dict. Compose a user-
-                        # facing mod_name from the real contributing
-                        # mod names; the v3.2.7 mod_name propagation
-                        # fix copies this into overlay metadata, so
-                        # downstream warnings (size-merge fallback)
-                        # show real names instead of "semantic_merge"
-                        # placeholders. The internal merge-kind flag
-                        # already lives on `_merged_metadata`.
-                        merged_d = dict(first_d)
-                        merged_d["_merged_content"] = merged_body
-                        merged_d["_merged_metadata"] = merged_meta
-                        merged_d["mod_name"] = _compose_merged_mod_name(
-                            list(mod_bodies.keys()), "semantic merge")
+            pamt_dir = file_path.split("/")[0]
+            table_name = identify_table_from_path(entry_path)
 
-                        # Replace conflicting deltas in the output list
-                        ep_set = {entry_path}
-                        merged_deltas = [
-                            d for d in merged_deltas
-                            if d.get("entry_path") not in ep_set
-                        ]
-                        merged_deltas.append(merged_d)
+            # Tier 1: schema-aware semantic merge, only for known pabgb
+            # tables. Falls through to byte-merge tier 2 (always-on)
+            # below if it can't run or doesn't produce a merged body.
+            if table_name:
+                try:
+                    from cdumm.semantic.engine import SemanticEngine
+                    engine = SemanticEngine(self._db)
 
-                        logger.info("Semantic merge SUCCESS: %s — %s",
+                    header_entry_path = entry_path.replace(".pabgb", ".pabgh")
+                    header_bytes = self._extract_sibling_entry(
+                        pamt_dir, header_entry_path)
+                    vanilla_content = self._get_vanilla_entry_content(
+                        file_path, entry_path)
+
+                    if header_bytes and vanilla_content:
+                        # Heartbeat so the progress bar text changes for huge
+                        # tables. analyze_bytes can take many seconds on
+                        # 6000+ record tables like iteminfo with multiple
+                        # conflicting mods. Without this emit, the bar
+                        # message stays stale on the same file/percentage.
+                        try:
+                            self.progress_updated.emit(
+                                self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
+                                f"Merging entry {idx + 1}/{total_entries} in "
+                                f"{file_path}: {entry_path} ({len(mod_bodies)} mods)...")
+                        except Exception:
+                            pass
+
+                        result = engine.analyze_bytes(
+                            table_name, vanilla_content, header_bytes,
+                            mod_bodies)
+                        if result and not result.has_conflicts:
+                            merged_body = engine.build_merged_body(
+                                table_name, vanilla_content, header_bytes,
+                                result.table_changeset)
+                            if merged_body and merged_body != vanilla_content:
+                                merged_meta = {
+                                    "pamt_dir": pamt_dir,
+                                    "entry_path": entry_path,
+                                    "_semantic_merged": True,
+                                }
+                                first_d = conflicting[0]
+                                _, first_meta = load_entry_delta(
+                                    Path(first_d["delta_path"]))
+                                merged_meta.update({
+                                    k: first_meta[k] for k in (
+                                        "paz_index", "compression_type", "flags",
+                                        "vanilla_offset", "vanilla_comp_size",
+                                        "vanilla_orig_size", "encrypted")
+                                    if k in first_meta
+                                })
+                                merged_d = dict(first_d)
+                                merged_d["_merged_content"] = merged_body
+                                merged_d["_merged_metadata"] = merged_meta
+                                merged_d["mod_name"] = _compose_merged_mod_name(
+                                    list(mod_bodies.keys()), "semantic merge")
+                                ep_set = {entry_path}
+                                merged_deltas = [
+                                    d for d in merged_deltas
+                                    if d.get("entry_path") not in ep_set
+                                ]
+                                merged_deltas.append(merged_d)
+                                logger.info(
+                                    "Semantic merge SUCCESS: %s, %s",
                                     entry_path, result.summary)
-                        continue
+                                continue
 
-                if result and result.has_conflicts:
-                    logger.info("Semantic merge: %d conflict(s) in %s, "
-                                "using last-wins fallback",
+                        if result and result.has_conflicts:
+                            logger.info(
+                                "Semantic merge: %d conflict(s) in %s, "
+                                "trying byte-merge fallback",
                                 len(result.conflicts), entry_path)
-
-            except Exception as e:
-                logger.debug("Semantic merge failed for %s: %s", entry_path, e)
+                    else:
+                        logger.debug(
+                            "Semantic merge skipped for %s: missing %s",
+                            entry_path,
+                            "PABGH header" if not header_bytes
+                            else "vanilla body")
+                except Exception as e:
+                    logger.debug(
+                        "Semantic merge failed for %s: %s", entry_path, e)
 
             # JMM-parity byte-level fallback (MergeCompiledModFiles). Fires
             # when the schema-aware semantic merge couldn't cleanly combine
