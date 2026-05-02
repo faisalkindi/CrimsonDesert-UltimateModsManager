@@ -43,33 +43,46 @@ page, double-click to mount, drag `CDUMM.app` into `/Applications`.
 
 ## Install — from source
 
-For development, or if you want to run an unreleased branch:
+For development, or if you want to run an unreleased branch. Homebrew
+Python on macOS is PEP 668 "externally-managed", so everything below
+runs inside a venv. (The `build-macos.sh` script bails out with a
+helpful message if you forget — don't `--break-system-packages`, that
+way lies a corrupted Homebrew Python.)
 
 ```bash
 # 1. Toolchain (one-time)
 brew install python@3.13 rust sevenzip unar
 
-# 2. Build the native Rust extension
+# 2. Clone + venv
 git clone https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager.git
-cd CrimsonDesert-UltimateModsManager/native
-python3 -m pip install --user maturin
-python3 -m maturin build --release
-python3 -m pip install --user target/wheels/cdumm_native-*.whl
+cd CrimsonDesert-UltimateModsManager
+python3 -m venv .venv
+source .venv/bin/activate
 
-# 3. Install CDUMM itself
-cd ..
-python3 -m pip install --user -e .
+# 3. Install CDUMM (deps come along)
+python3 -m pip install -e .
 
-# 4. Run
+# 4. Build + install the native Rust extension
+python3 -m pip install maturin
+( cd native && python3 -m maturin build --release )
+python3 -m pip install native/target/wheels/cdumm_native-*.whl
+
+# 5. Run
 python3 -m cdumm.main
 ```
 
 To build a `.app` and `.dmg` from source the same way CI does:
 
 ```bash
-./scripts/build-macos.sh           # produces dist/CDUMM.app + dist/CDUMM-<version>-macos-arm64.dmg
+source .venv/bin/activate         # if not already active
+./scripts/build-macos.sh           # → dist/CDUMM.app + dist/CDUMM-<version>-macos-arm64.dmg
 ./scripts/build-macos.sh --no-dmg  # skip the .dmg if you only want the .app
+./scripts/build-macos.sh --no-wheel # skip Rust rebuild (cdumm_native already installed)
 ```
+
+The script auto-installs `maturin`, `pyinstaller`, and CDUMM itself into
+the active venv if any of them are missing, so step 4 above is optional
+when you just want a `.app`.
 
 The first launch shows the welcome wizard. Pick your
 `Crimson Desert.app` (CDUMM walks into it to find the inner

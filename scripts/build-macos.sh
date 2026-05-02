@@ -64,6 +64,69 @@ done
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 
+# ── PEP 668 / venv guard ─────────────────────────────────────────
+# Homebrew Python on macOS marks the system install as "externally
+# managed" (PEP 668); ``pip install`` blows up with a
+# ``error: externally-managed-environment`` unless --break-system-
+# packages or a venv is in use. CI uses actions/setup-python which
+# isn't externally-managed, so it works there. Locally the right
+# answer is a venv; anything else risks corrupting Homebrew's Python.
+in_venv() {
+    "$PYTHON" -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)" 2>/dev/null
+}
+externally_managed() {
+    "$PYTHON" -c "import sys, sysconfig, os; \
+        p = sysconfig.get_path('stdlib'); \
+        sys.exit(0 if os.path.exists(os.path.join(p, 'EXTERNALLY-MANAGED')) else 1)" 2>/dev/null
+}
+
+if ! in_venv && externally_managed; then
+    cat >&2 <<EOF
+$(warn "Refusing to install build deps into externally-managed Python")
+
+This Python ($PYTHON) is marked PEP 668 externally-managed (Homebrew /
+distro Python). Installing maturin / pyinstaller into it would either
+fail outright or corrupt the Homebrew install.
+
+Create + activate a venv first, then re-run:
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+    ./scripts/build-macos.sh
+
+(CI uses actions/setup-python which isn't externally-managed, so the
+GitHub Actions workflow doesn't need this dance.)
+EOF
+    exit 1
+fi
+
+# ── Bootstrap missing build deps ─────────────────────────────────
+# maturin (builds the Rust extension), pyinstaller (builds the .app),
+# and the cdumm package itself (so PyInstaller can resolve hidden
+# imports). All installed into whatever Python environment is active —
+# venv locally, the setup-python install in CI.
+ensure_module() {
+    # ensure_module <pkg-spec> <import-name>
+    # <pkg-spec> is what we'd pass to pip; <import-name> is the
+    # canonical name the module exposes (e.g. PyInstaller).
+    local pkg="$1" import_name="$2"
+    if "$PYTHON" -c "import $import_name" >/dev/null 2>&1; then
+        return 0
+    fi
+    log "Installing missing build dep: $pkg"
+    "$PYTHON" -m pip install --quiet "$pkg"
+}
+
+ensure_module maturin maturin
+ensure_module pyinstaller PyInstaller
+
+# CDUMM itself — editable install means future code edits are picked up
+# without re-installing. Skip if already importable.
+if ! "$PYTHON" -c "import cdumm" >/dev/null 2>&1; then
+    log "Installing CDUMM (editable)"
+    "$PYTHON" -m pip install --quiet -e .
+fi
+
 # ── Resolve version from cdumm/__init__.py ───────────────────────
 VERSION=$("$PYTHON" -c "import sys; sys.path.insert(0, 'src'); from cdumm import __version__; print(__version__)")
 DMG_NAME="CDUMM-${VERSION}-macos-arm64.dmg"
@@ -107,8 +170,20 @@ if [[ "$SKIP_WHEEL" -eq 0 ]]; then
     log "Building cdumm_native (Rust extension)"
     ( cd native && "$PYTHON" -m maturin build --release )
     log "Installing cdumm_native wheel into the build environment"
-    "$PYTHON" -m pip install --force-reinstall \
-        --no-deps native/target/wheels/cdumm_native-*-arm64.whl
+    # The wheel filename is e.g.
+    # ``cdumm_native-0.1.0-cp39-abi3-macosx_11_0_arm64.whl`` —
+    # NOTE: an underscore between the macOS minor version and arm64,
+    # not a hyphen. Resolve the actual file via shell glob and bail
+    # if the glob doesn't match (set -u catches that since the
+    # array would be unset, but be explicit).
+    shopt -s nullglob
+    _wheels=( native/target/wheels/cdumm_native-*.whl )
+    shopt -u nullglob
+    if [[ ${#_wheels[@]} -eq 0 ]]; then
+        echo "maturin build did not produce a cdumm_native wheel" >&2
+        exit 1
+    fi
+    "$PYTHON" -m pip install --force-reinstall --no-deps "${_wheels[0]}"
 else
     log "Skipping cdumm_native rebuild (--no-wheel)"
     if ! "$PYTHON" -c "import cdumm_native" 2>/dev/null; then
