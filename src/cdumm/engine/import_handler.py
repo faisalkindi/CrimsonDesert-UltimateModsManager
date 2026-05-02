@@ -1429,7 +1429,8 @@ def _match_game_files(
 
             for mod_dir, (pazs, pamts) in dirs_with_mods.items():
                 if pazs and pamts:
-                    next_dir = _next_paz_directory(game_dir)
+                    next_dir = _next_paz_directory(
+                        game_dir, db=getattr(snapshot, "_db", None))
                     logger.info("Unnumbered PAZ mod in %s -> assigning %s",
                                 mod_dir.name, next_dir)
                     for f in pazs + pamts:
@@ -1437,7 +1438,8 @@ def _match_game_files(
 
         elif paz_files and not pamt_files:
             # Some mods only ship PAZ without PAMT — still try to import
-            next_dir = _next_paz_directory(game_dir)
+            next_dir = _next_paz_directory(
+                game_dir, db=getattr(snapshot, "_db", None))
             logger.info("PAZ-only mod detected (no PAMT), assigning directory %s", next_dir)
             for f in paz_files:
                 matches.append((f"{next_dir}/{f.name}", f, True))
@@ -1528,7 +1530,8 @@ def _detect_standalone_mod(
             # mods targeting the same directory can coexist.
             rel_parts = d.relative_to(extracted_dir).parts
             old_prefix = "/".join(rel_parts)
-            new_dir = _next_paz_directory(game_dir)
+            new_dir = _next_paz_directory(
+                game_dir, db=getattr(snapshot, "_db", None))
             remap[old_prefix] = new_dir
             logger.info("Standalone mod: remapping %s -> %s", old_prefix, new_dir)
 
@@ -1543,13 +1546,38 @@ def clear_assigned_dirs() -> None:
     _assigned_dirs.clear()
 
 
-def _next_paz_directory(game_dir: Path) -> str:
-    """Find the next available PAZ directory number (0036+)."""
+def _next_paz_directory(game_dir: Path, db=None) -> str:
+    """Find the next available PAZ directory number (0036+).
+
+    Sources of "occupied" dir numbers, in order:
+    1. Filesystem dirs in game_dir (NNNN/ already on disk)
+    2. ``_assigned_dirs`` (current import batch reservations)
+    3. ``db.mod_deltas.file_path`` prefixes when ``db`` is provided
+       — covers mods imported in a previous worker process that
+       haven't been Applied to disk yet. Without this, two
+       cross-process imports both pick the same number and collide
+       on Apply (R4 follow-up to the GitHub #59 fix).
+    """
     existing = set()
     for d in game_dir.iterdir():
         if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
             existing.add(int(d.name))
     existing |= _assigned_dirs
+
+    if db is not None:
+        try:
+            rows = db.connection.execute(
+                "SELECT DISTINCT file_path FROM mod_deltas").fetchall()
+            for (fp,) in rows:
+                if not fp:
+                    continue
+                head = fp.split("/", 1)[0]
+                if head.isdigit() and len(head) == 4:
+                    existing.add(int(head))
+        except Exception as e:
+            logger.debug("DB-aware dir scan failed (%s); "
+                         "falling back to filesystem-only", e)
+
     # Start from 36 (base game uses 0000-0035)
     for n in range(36, 9999):
         if n not in existing:
