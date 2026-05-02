@@ -22,11 +22,11 @@ name: Build macOS release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed to create / update GitHub Releases
+  contents: write # needed to create / update GitHub Releases
 
 jobs:
   build-macos:
@@ -35,17 +35,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           # 3.14 is the macos-26-arm64 image default and matches the
           # local dev environment on Apple Silicon. ``cdumm-native``
           # uses pyo3's abi3-py39 ABI tag so any Python 3.9+ would
           # work, but pinning here keeps CI reproducible if the
           # runner image's default ever changes.
-          python-version: '3.14'
+          python-version: "3.14"
 
       - name: Set up Rust toolchain (arm64)
         uses: dtolnay/rust-toolchain@stable
@@ -59,7 +59,7 @@ jobs:
       # invalidates the cache automatically (avoids ABI mismatches
       # between cached artifacts and the new toolchain).
       - name: Cache cargo + native target
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -69,7 +69,7 @@ jobs:
           restore-keys: cargo-macos26-arm64-
 
       - name: Cache pip wheel cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/Library/Caches/pip
           key: pip-macos26-arm64-py314-${{ hashFiles('pyproject.toml') }}
@@ -94,7 +94,7 @@ jobs:
       # Always uploaded so workflow_dispatch runs (no tag) still
       # produce a downloadable .dmg from the Actions UI.
       - name: Upload .dmg as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CDUMM-macos-arm64
           path: dist/CDUMM-*-macos-arm64.dmg
@@ -104,7 +104,7 @@ jobs:
       # Also upload the raw .app inside a zip so debugging Apple-flag
       # / signature issues doesn't require mounting the DMG.
       - name: Upload .app as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CDUMM-app-macos-arm64
           path: dist/CDUMM.app
@@ -117,7 +117,7 @@ jobs:
       # silently-empty release.
       - name: Attach .dmg to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/CDUMM-*-macos-arm64.dmg
           fail_on_unmatched_files: true
