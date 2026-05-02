@@ -341,8 +341,8 @@ class AsiManager:
     def open_config(self, plugin: AsiPlugin) -> bool:
         """Open plugin's INI file in default text editor. Returns True if opened."""
         if plugin.ini_path and plugin.ini_path.exists():
-            os.startfile(str(plugin.ini_path))
-            return True
+            from cdumm.platform import open_path
+            return open_path(plugin.ini_path)
         return False
 
     def detect_conflicts(self, plugins: list[AsiPlugin]) -> list[AsiConflict]:

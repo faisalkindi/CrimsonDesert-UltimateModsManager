@@ -19,7 +19,11 @@ from qfluentwidgets import (
 )
 
 from cdumm.i18n import tr
-from cdumm.storage.game_finder import find_game_directories, validate_game_directory
+from cdumm.storage.game_finder import (
+    find_game_directories,
+    resolve_game_directory,
+    validate_game_directory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +96,11 @@ class SetupDialog(MessageBoxBase):
     def _on_path_changed(self, text: str) -> None:
         path = Path(text)
         if validate_game_directory(path):
-            self._selected_path = path
+            # On macOS the user normally picks ``Crimson Desert.app``
+            # but the app operates on the inner packages/ directory.
+            # ``resolve_game_directory`` walks in for us; on Windows /
+            # Linux it returns the path unchanged.
+            self._selected_path = resolve_game_directory(path) or path
             self.yesButton.setEnabled(True)
             self._status_label.setText(tr("setup.valid"))
             setCustomStyleSheet(

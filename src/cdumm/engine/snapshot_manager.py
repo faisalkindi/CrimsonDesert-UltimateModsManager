@@ -50,7 +50,6 @@ def verify_live_disk_matches_backups(
 
     Returns ``(is_clean, problem_files)``.
     """
-    import os
     problems: list[str] = []
     if not vanilla_dir.exists():
         return True, []
@@ -454,7 +453,7 @@ class SnapshotManager:
         changes: list[tuple[str, str]] = []
         cursor = self._db.connection.execute("SELECT file_path, file_hash FROM snapshots")
         for rel_path, stored_hash in cursor.fetchall():
-            abs_path = game_dir / rel_path.replace("/", "\\")
+            abs_path = game_dir / rel_path.replace("/", os.sep)
             if not abs_path.exists():
                 changes.append((rel_path, "deleted"))
             else:

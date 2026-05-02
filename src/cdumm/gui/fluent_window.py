@@ -5,6 +5,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from cdumm.platform import (
+    IS_MACOS,
+    IS_WINDOWS,
+    app_data_dir as _resolve_app_data_dir,
+    open_path,
+    subprocess_no_window_kwargs,
+    worker_command,
+)
+
 from PySide6.QtCore import Property, QEasingCurve, QObject, QPropertyAnimation, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QVBoxLayout, QWidget
@@ -93,6 +102,32 @@ def _probe_console_state(tag: str) -> None:
                     tag, pid, hwnd)
     except Exception as e:
         logger.debug("[flash-probe] %s probe failed: %s", tag, e)
+
+
+def _find_app_bundle_above(game_dir: Path) -> Path | None:
+    """Walk up from ``game_dir`` looking for an enclosing ``.app`` bundle.
+
+    On macOS the user's game-directory pointer is usually the
+    ``packages/`` folder inside ``Crimson Desert.app/Contents/Resources``;
+    walking two parents up gets the .app itself. We climb up to four
+    levels because Steam wraps the .app in a couple of extra
+    ``steamapps/common/...`` parents in some configurations and the
+    user might have pointed CDUMM at the .app directly. Returns the
+    first ancestor whose name ends ``.app`` and exists, or ``None`` if
+    none is found.
+
+    No-op cost on Windows because the loop bails immediately when it
+    hits the drive root.
+    """
+    cur = game_dir
+    for _ in range(5):
+        if cur.suffix == ".app" and cur.exists():
+            return cur
+        parent = cur.parent
+        if parent == cur:
+            return None
+        cur = parent
+    return None
 
 
 def _is_standalone_paz_mod(path: Path) -> bool:
@@ -696,7 +731,7 @@ class CdummWindow(FluentWindow):
         # ── Shared state (mirrors old MainWindow exactly) ─────────────
         self._db = db
         self._game_dir = game_dir
-        self._app_data_dir = app_data_dir or Path.home() / "AppData" / "Local" / "cdumm"
+        self._app_data_dir = app_data_dir or _resolve_app_data_dir()
         self._cdmods_dir = game_dir / "CDMods" if game_dir else self._app_data_dir
         self._cdmods_dir.mkdir(parents=True, exist_ok=True)
         self._deltas_dir = self._cdmods_dir / "deltas"
@@ -724,9 +759,7 @@ class CdummWindow(FluentWindow):
         if game_dir:
             staging = game_dir / ".cdumm_staging"
             if staging.exists():
-                lock_file = (
-                    Path.home() / "AppData" / "Local" / "cdumm" / ".running"
-                )
+                lock_file = _resolve_app_data_dir() / ".running"
                 lock_is_stale = True
                 if lock_file.exists():
                     try:
@@ -987,7 +1020,13 @@ class CdummWindow(FluentWindow):
 
         # Top navigation — pages
         self.addSubInterface(self.paz_mods_page, FluentIcon.FOLDER, tr("nav.paz_mods"))
-        self.addSubInterface(self.asi_plugins_page, FluentIcon.EMBED, tr("nav.asi_mods"))
+        # ASI plugins are a Windows-only mod format (winmm.dll proxy
+        # injecting into CrimsonDesert.exe). Hide the entire tab on
+        # macOS / Linux so users don't think a feature is broken when
+        # it's just structurally inapplicable.
+        if not IS_MACOS:
+            self.addSubInterface(
+                self.asi_plugins_page, FluentIcon.EMBED, tr("nav.asi_mods"))
         self.addSubInterface(self.activity_page, FluentIcon.DATE_TIME, tr("nav.activity"))
 
         # Separator before tools
@@ -1338,7 +1377,13 @@ class CdummWindow(FluentWindow):
     # ------------------------------------------------------------------
 
     def _migrate_from_appdata(self) -> None:
-        """One-time migration: move vanilla/deltas from old AppData to CDMods on game drive."""
+        """One-time migration: move vanilla/deltas from old AppData to CDMods on game drive.
+
+        Only runs on Windows — the old per-user-AppData layout never
+        existed on macOS or Linux so there's nothing to migrate.
+        """
+        if not IS_WINDOWS:
+            return
         import shutil
 
         old_appdata = Path.home() / "AppData" / "Local" / "cdmm"
@@ -2669,9 +2714,9 @@ class CdummWindow(FluentWindow):
 
         proc = QProcess(self)
         _quiet_qprocess(proc)
-        exe = sys.executable
-        args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
-                str(self._db.db_path), error]
+        exe, args = worker_command(
+            ["--worker", "diagnose", str(mod_path), str(self._game_dir),
+             str(self._db.db_path), error])
         _buf = [""]
 
         def _on_stdout():
@@ -2737,9 +2782,9 @@ class CdummWindow(FluentWindow):
 
         proc = QProcess(self)
         _quiet_qprocess(proc)
-        exe = sys.executable
-        args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
-                str(self._db.db_path), error]
+        exe, args = worker_command(
+            ["--worker", "diagnose", str(mod_path), str(self._game_dir),
+             str(self._db.db_path), error])
         _buf = [""]
 
         def _on_stdout():
@@ -3063,10 +3108,10 @@ class CdummWindow(FluentWindow):
         _quiet_qprocess(proc)
         self._active_worker = proc
 
-        exe = sys.executable
-        args = ["--worker", "import_batch",
-                tmp.name, str(self._game_dir),
-                str(self._db.db_path), str(self._deltas_dir)]
+        exe, args = worker_command(
+            ["--worker", "import_batch",
+             tmp.name, str(self._game_dir),
+             str(self._db.db_path), str(self._deltas_dir)])
 
         _buf = [""]
         _batch_results = []
@@ -4128,13 +4173,16 @@ class CdummWindow(FluentWindow):
         # top — see comment near the top-level import for why.
         proc._cdumm_ctx = snapshot_and_clear_import_context(self)
 
-        # Build command: the exe calls itself with --worker
-        exe = sys.executable
-        args = ["--worker", "import",
-                str(path), str(self._game_dir),
-                str(self._db.db_path), str(self._deltas_dir)]
+        # Build command: the exe calls itself with --worker (frozen
+        # build) or `python3 -m cdumm.main --worker ...` (run-from-source).
+        _import_args = [
+            "--worker", "import",
+            str(path), str(self._game_dir),
+            str(self._db.db_path), str(self._deltas_dir),
+        ]
         if existing_mod_id is not None:
-            args.append(str(existing_mod_id))
+            _import_args.append(str(existing_mod_id))
+        exe, args = worker_command(_import_args)
 
         # Buffer for partial JSON lines
         _buf = [""]
@@ -4912,42 +4960,39 @@ class CdummWindow(FluentWindow):
         return None
 
     def _check_game_running(self) -> bool:
-        """Check if Crimson Desert is running. Returns True if safe to proceed."""
+        """Check if Crimson Desert is running. Returns True if safe to proceed.
+
+        Cross-platform: scans the live process list via psutil (already
+        a CDUMM dependency). On Windows the binary is
+        ``CrimsonDesert.exe``; on the native macOS build the executable
+        inside the .app bundle is ``CrimsonDesert`` (lives at
+        ``Crimson Desert.app/Contents/MacOS/CrimsonDesert``). Match
+        either name regardless of host platform — psutil reports the
+        leaf basename, no extension matching needed.
+
+        Falls open: any error during the scan returns True so the user
+        can still apply mods. The downside (mod apply during game run)
+        is recoverable; a false-positive block isn't.
+        """
         try:
-            import ctypes
-            import ctypes.wintypes
-
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            kernel32 = ctypes.windll.kernel32
-            psapi = ctypes.windll.psapi
-
-            arr = (ctypes.wintypes.DWORD * 4096)()
-            cb_needed = ctypes.wintypes.DWORD()
-            psapi.EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr), ctypes.byref(cb_needed))
-            num_pids = cb_needed.value // ctypes.sizeof(ctypes.wintypes.DWORD)
-
-            for i in range(num_pids):
-                pid = arr[i]
-                if pid == 0:
-                    continue
-                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                if not handle:
-                    continue
+            import psutil
+        except Exception:
+            return True
+        try:
+            target_names = {"crimsondesert.exe", "crimsondesert"}
+            for proc in psutil.process_iter(attrs=("name",)):
                 try:
-                    buf = ctypes.create_unicode_buffer(260)
-                    size = ctypes.wintypes.DWORD(260)
-                    if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                        if buf.value.lower().endswith("crimsondesert.exe"):
-                            kernel32.CloseHandle(handle)
-                            MessageBox(
-                                "Game Is Running",
-                                "Crimson Desert is currently running.\n\n"
-                                "Please close the game before applying mods.",
-                                self,
-                            ).exec()
-                            return False
-                finally:
-                    kernel32.CloseHandle(handle)
+                    name = (proc.info.get("name") or "").lower()
+                except Exception:
+                    continue
+                if name in target_names:
+                    MessageBox(
+                        "Game Is Running",
+                        "Crimson Desert is currently running.\n\n"
+                        "Please close the game before applying mods.",
+                        self,
+                    ).exec()
+                    return False
         except Exception:
             pass  # If check fails, let the user proceed
         return True
@@ -5297,10 +5342,47 @@ class CdummWindow(FluentWindow):
             QTimer.singleShot(2000, self._run_nexus_update_check)
 
     def _on_launch_game(self) -> None:
-        """Launch the game executable (tries alternate names, minimizes window)."""
+        """Launch the game (cross-platform).
+
+        Windows: prefer the Steam URI (so the overlay attaches), then
+        the Xbox app deep-link, then a direct ``CrimsonDesert.exe``
+        spawn. macOS: ``open`` the ``Crimson Desert.app`` bundle —
+        macOS handles the rest, including Steam overlay attachment if
+        the user launched the .app from Steam's perspective.
+
+        The macOS .app sits two parents above ``packages/`` (which is
+        what ``self._game_dir`` points at when the user installed via
+        Steam macOS): walk up to find the bundle. If we can't find it,
+        fall through and let the user use Steam directly.
+        """
         import subprocess
         if not self._game_dir:
             return
+
+        # ── macOS native branch ─────────────────────────────────────
+        if IS_MACOS:
+            app_bundle = _find_app_bundle_above(self._game_dir)
+            try:
+                if app_bundle is not None:
+                    subprocess.Popen(["open", str(app_bundle)])
+                else:
+                    # Steam URI works on macOS via the Steam client —
+                    # falls back to the App ID lookup below.
+                    from cdumm.engine.game_monitor import get_steam_app_id
+                    app_id = get_steam_app_id(self._game_dir)
+                    subprocess.Popen(["open", f"steam://rungameid/{app_id}"])
+                InfoBar.success(
+                    title=tr("main.game_launched"),
+                    content=tr("main.game_launched_msg"),
+                    duration=3000, position=InfoBarPosition.TOP, parent=self)
+                self.showMinimized()
+            except Exception as e:
+                InfoBar.error(
+                    title=tr("infobar.launch_failed"), content=str(e),
+                    duration=5000, position=InfoBarPosition.TOP, parent=self)
+            return
+
+        # ── Windows branch (original behaviour) ─────────────────────
         exe = None
         for candidate in ["CrimsonDesert.exe", "crimsondesert.exe"]:
             test = self._game_dir / "bin64" / candidate
@@ -5320,14 +5402,12 @@ class CdummWindow(FluentWindow):
                 # and falls back to the verified Crimson Desert AppID (3321460).
                 # Previously this hard-coded the wrong AppID which caused Steam
                 # to show "Game configuration unavailable".
-                import os
                 from cdumm.engine.game_monitor import get_steam_app_id
                 app_id = get_steam_app_id(self._game_dir)
-                os.startfile(f"steam://rungameid/{app_id}")
+                open_path(f"steam://rungameid/{app_id}")
             elif is_xbox_install(self._game_dir):
                 # Xbox Game Pass — launch through the Xbox app
-                import os
-                os.startfile("shell:AppsFolder\\PearlAbyss.CrimsonDesert_8wekyb3d8bbwe!Game")
+                open_path("shell:AppsFolder\\PearlAbyss.CrimsonDesert_8wekyb3d8bbwe!Game")
             else:
                 subprocess.Popen([str(exe)], cwd=str(self._game_dir / "bin64"))
             InfoBar.success(
@@ -5582,8 +5662,12 @@ class CdummWindow(FluentWindow):
         if hasattr(self, '_update_timer'):
             self._update_timer.stop()
 
-        exe = sys.executable
-        args = ["--worker"] + worker_args
+        # ``worker_command`` does the right thing on both frozen and
+        # run-from-source: on the PyInstaller exe ``exe`` is CDUMM
+        # itself; on run-from-source it's the Python interpreter and
+        # ``-m cdumm.main`` is prepended so Python reaches CDUMM's
+        # entry point before seeing ``--worker``.
+        exe, args = worker_command(["--worker", *worker_args])
         _buf = [""]
         _msgs = []
 
@@ -6109,7 +6193,13 @@ class CdummWindow(FluentWindow):
         self._recovery_infobar = bar
 
     def _check_stale_appdata(self) -> None:
-        """Detect stale data in %LocalAppData%/cdumm from old versions."""
+        """Detect stale data in %LocalAppData%/cdumm from old versions.
+
+        Windows-only. The legacy per-user-AppData layout never existed
+        on macOS or Linux, so there's no stale data to surface.
+        """
+        if not IS_WINDOWS:
+            return
         try:
             from cdumm.storage.config import Config
             config = Config(self._db)

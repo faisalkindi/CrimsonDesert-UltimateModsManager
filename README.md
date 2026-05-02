@@ -142,12 +142,15 @@ pyinstaller cdumm.spec --noconfirm
 
 ## Requirements
 
-- Windows 10/11 (or Linux via Wine 11 — see [LINUX.md](LINUX.md))
-- Crimson Desert from Steam, Epic Games Store, or Xbox Game Pass
+- Windows 10/11 (or Linux via Wine 11 — see [LINUX.md](LINUX.md), or
+  macOS — see [MACOS.md](MACOS.md))
+- Crimson Desert from Steam, Epic Games Store, Xbox Game Pass, or
+  the native macOS build
 
-> **No native macOS build.** CDUMM is a Windows executable. Linux users can
-> run it under Wine via the bundled launcher; macOS isn't currently
-> supported.
+> **macOS:** native port (no Wine). Run-from-source today via
+> `pip install -e . && python -m cdumm.main`; signed `.app` bundle is
+> tracked separately. ASI plugins, the Find-Culprit auto-bisect tool,
+> and `nxm://` Mod Manager Download buttons remain Windows-only.
 
 ---
 

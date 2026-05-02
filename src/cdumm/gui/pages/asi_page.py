@@ -1702,8 +1702,8 @@ class AsiPluginsPage(QWidget):
         self.refresh()
 
     def _ctx_open_folder(self, plugin: AsiPlugin) -> None:
-        folder = str(plugin.path.parent)
-        os.startfile(folder)
+        from cdumm.platform import open_path
+        open_path(plugin.path.parent)
 
     def _ctx_uninstall(self, plugin_name: str) -> None:
         from qfluentwidgets import MessageBox
@@ -1750,11 +1750,23 @@ class AsiPluginsPage(QWidget):
         return None
 
     def _install_bundled_loader(self) -> None:
-        """Install or update the bundled ASI loader (winmm.dll) to bin64."""
+        """Install or update the bundled ASI loader (winmm.dll) to bin64.
+
+        ASI plugins are a Windows-only mod format (a proxy DLL injects
+        into ``CrimsonDesert.exe``); on the native macOS build there
+        is no ``CrimsonDesert.exe`` to inject into, so the loader has
+        no effect even if dropped into the bundle. Skip the auto-install
+        on non-Windows so we don't write a stray winmm.dll into the
+        macOS .app bundle. The page itself is hidden from navigation
+        in ``fluent_window`` on macOS, but this method also runs from
+        ``set_managers`` which fires regardless.
+        """
         import hashlib
         import shutil
         import sys
 
+        if sys.platform != "win32":
+            return
         if not self._asi_manager:
             return
 

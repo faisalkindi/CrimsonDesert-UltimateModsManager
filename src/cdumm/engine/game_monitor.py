@@ -5,23 +5,33 @@ and reports whether the game survived a stability window. Pure utility
 module — no GUI, no Qt dependencies.
 
 Ported from CDCrashMonitor v3 (cd_crash_monitor.py).
+
+The crash-monitor flow uses Windows-only crashpad introspection (the
+``.dmp`` files Pearl Abyss writes into ``%LOCALAPPDATA%\\CrashDumps``)
+that has no macOS equivalent, so the high-level :func:`launch_and_test`
+runs on Windows only. The lower-level Steam helpers
+(:func:`get_steam_app_id`) are pure-Python and work everywhere — the
+fluent_window's launch path on macOS calls them directly.
 """
 import atexit
 import ctypes
 import glob
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+_IS_WINDOWS = sys.platform == "win32"
+
 GAME_EXE_NAME = "CrimsonDesert.exe"
 CRASH_DUMP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "CrashDumps")
 FALLBACK_APP_ID = "3321460"
 
-if os.name == "nt":
+if _IS_WINDOWS:
     _psapi = ctypes.WinDLL("psapi", use_last_error=True)
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 else:
@@ -43,7 +53,15 @@ atexit.register(_atexit_restore)
 # ── Process management ────────────────────────────────────────────
 
 def find_game_process() -> int | None:
-    """Find CrimsonDesert.exe PID. Returns PID or None."""
+    """Find CrimsonDesert.exe PID. Returns PID or None.
+
+    Windows-only — uses ``EnumProcesses`` from ``psapi.dll``. On macOS
+    and Linux the bisect / crash-monitor flow doesn't run (it needs
+    the Pearl Abyss crashpad ``.dmp`` infrastructure that only exists
+    on Windows), so return None and let callers short-circuit.
+    """
+    if not _IS_WINDOWS:
+        return None
     arr = (ctypes.c_ulong * 4096)()
     needed = ctypes.c_ulong()
     if not _psapi.EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr), ctypes.byref(needed)):
@@ -69,8 +87,12 @@ def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
     """Wait for process to exit. Returns exit code, or None if still running.
 
     If the process is already gone (can't open handle), returns 0xDEAD
-    as a sentinel to distinguish from "still running" (None).
+    as a sentinel to distinguish from "still running" (None). Windows-
+    only; non-Windows callers should not reach this path because
+    :func:`find_game_process` returns None before this is invoked.
     """
+    if not _IS_WINDOWS:
+        return 0xDEAD
     h = _k32.OpenProcess(0x00100400, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_INFORMATION
     if not h:
         return 0xDEAD  # process already gone
@@ -86,7 +108,9 @@ def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
 
 
 def kill_process(pid: int) -> None:
-    """Terminate a process by PID."""
+    """Terminate a process by PID. Windows-only."""
+    if not _IS_WINDOWS:
+        return
     h = _k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
     if h:
         _k32.TerminateProcess(h, 0)
@@ -167,10 +191,22 @@ def get_steam_app_id(game_dir: Path) -> str:
 
 
 def launch_via_steam(game_dir: Path) -> float:
-    """Launch game through Steam URI. Returns launch timestamp."""
+    """Launch game through Steam URI. Returns launch timestamp.
+
+    Cross-platform: uses ``os.startfile`` on Windows (so the Steam
+    overlay attaches), and ``open <url>`` on macOS / ``xdg-open`` on
+    Linux for the same effect when a Steam client is installed. The
+    higher-level :func:`launch_and_test` flow is still Windows-only
+    because it needs Pearl Abyss' crashpad ``.dmp`` files.
+    """
     app_id = get_steam_app_id(game_dir)
     ts = time.time()
-    os.startfile(f"steam://rungameid/{app_id}")
+    url = f"steam://rungameid/{app_id}"
+    if _IS_WINDOWS:
+        os.startfile(url)
+    else:
+        from cdumm.platform import open_path
+        open_path(url)
     return ts
 
 

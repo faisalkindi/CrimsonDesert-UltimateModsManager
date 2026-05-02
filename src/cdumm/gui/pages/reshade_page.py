@@ -711,12 +711,12 @@ class ReshadePage(SmoothScrollArea):
         dlg.yesButton.setText(tr("reshade.merge_result_open_folder"))
         dlg.cancelButton.setText(tr("reshade.merge_result_close"))
         if _run_modal(dlg):
-            # "Open folder" chosen -> Explorer on the parent directory.
-            import os
-            try:
-                os.startfile(str(output_path.parent))
-            except OSError as e:
-                logger.warning("open merged preset folder failed: %s", e)
+            # "Open folder" chosen → hand the path to the OS file
+            # manager (Explorer / Finder / xdg-open).
+            from cdumm.platform import open_path
+            if not open_path(output_path.parent):
+                logger.warning(
+                    "open merged preset folder failed for %s", output_path.parent)
 
     def _on_revert_clicked(self) -> None:
         if self._game_running:
