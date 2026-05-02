@@ -31,3 +31,6 @@ tests/_test_mods_external/
 # Local investigation scratch
 .tmp_*
 reviewcode_diff.patch
+
+# macOS
+.DS_Store
