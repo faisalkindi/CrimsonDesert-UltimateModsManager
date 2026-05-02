@@ -1056,19 +1056,30 @@ class ApplyWorker(QObject):
 
         If this fingerprint matches the last Apply, the game files are
         already correct and the entire Apply can be skipped.
+
+        GitHub #59 (DoRoon, 2026-05-01): priority, conflict_mode,
+        force_inplace, and mod_config.custom_values all change apply
+        output — they must each be in the hash or drag-reorder /
+        slot-edit / override-toggle gets silently skipped.
         """
         import hashlib
         h = hashlib.sha256()
 
-        # Enabled mods + their delta hashes
         rows = self._db.connection.execute(
             "SELECT m.id, m.enabled, m.json_source, m.disabled_patches, "
+            "       m.priority, m.conflict_mode, m.force_inplace, "
+            "       mc.custom_values, "
             "       GROUP_CONCAT(md.delta_path || ':' || md.file_path, '|') "
-            "FROM mods m LEFT JOIN mod_deltas md ON m.id = md.mod_id "
+            "FROM mods m "
+            "LEFT JOIN mod_deltas md ON m.id = md.mod_id "
+            "LEFT JOIN mod_config mc ON mc.mod_id = m.id "
             "GROUP BY m.id ORDER BY m.id"
         ).fetchall()
         for row in rows:
-            h.update(f"{row[0]}:{row[1]}:{row[2]}:{row[3]}:{row[4]}\n".encode())
+            h.update(
+                f"{row[0]}:{row[1]}:{row[2]}:{row[3]}:"
+                f"{row[4]}:{row[5]}:{row[6]}:{row[7]}:{row[8]}\n".encode()
+            )
 
         return h.hexdigest()[:16]
 
