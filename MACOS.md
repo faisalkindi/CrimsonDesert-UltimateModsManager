@@ -2,17 +2,52 @@
 
 Native macOS support, no Wine. Crimson Desert ships a real macOS build,
 so CDUMM reads and writes mod files directly inside the
-`Crimson Desert.app` bundle on the host filesystem.
+`Crimson Desert.app` bundle on the host filesystem. Apple Silicon
+only — Crimson Desert macOS doesn't run on Intel.
 
-This is "run from source" today — there is no signed `.app` bundle yet.
-The Python entry point boots the same Fluent UI as the Windows
-release on Apple Silicon and Intel Macs.
+## Install — recommended
 
-## Quick start
+Download `CDUMM-<version>-macos-arm64.dmg` from the
+[Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases)
+page, double-click to mount, drag `CDUMM.app` into `/Applications`.
+
+**First launch — two macOS permission steps**:
+
+1. **Gatekeeper**: macOS will refuse to open the app with "Apple
+   cannot check it for malicious software" — the build is ad-hoc
+   signed (no Apple Developer ID). Right-click `CDUMM.app` → Open →
+   Open. The prompt only appears once; subsequent launches are
+   silent. If you prefer to skip the right-click dance entirely:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/CDUMM.app
+   ```
+
+2. **App Management** (macOS Sonoma 14+ / Sequoia 15+ / 26+):
+   modding Crimson Desert means CDUMM has to write inside
+   `Crimson Desert.app`'s bundle. Apps launched from Finder need
+   *App Management* permission to do that, and the first launch
+   will appear to do nothing (CDUMM exits silently because SQLite
+   gets EPERM on its database file).
+   - Open **System Settings → Privacy & Security → App Management**.
+   - Toggle **CDUMM** on. (It only appears in the list after CDUMM
+     has tried to launch at least once.)
+   - Re-open CDUMM. It should now boot all the way to the welcome
+     wizard.
+
+   *Why this happens*: macOS sandboxes Finder-launched apps by
+   default and blocks writes into other `.app` bundles unless the
+   user explicitly grants permission. Run-from-source via
+   `python -m cdumm.main` doesn't trigger this because the terminal
+   is already exempt from App Management TCC.
+
+## Install — from source
+
+For development, or if you want to run an unreleased branch:
 
 ```bash
 # 1. Toolchain (one-time)
-brew install python@3.13 rust
+brew install python@3.13 rust sevenzip unar
 
 # 2. Build the native Rust extension
 git clone https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager.git
@@ -27,6 +62,13 @@ python3 -m pip install --user -e .
 
 # 4. Run
 python3 -m cdumm.main
+```
+
+To build a `.app` and `.dmg` from source the same way CI does:
+
+```bash
+./scripts/build-macos.sh           # produces dist/CDUMM.app + dist/CDUMM-<version>-macos-arm64.dmg
+./scripts/build-macos.sh --no-dmg  # skip the .dmg if you only want the .app
 ```
 
 The first launch shows the welcome wizard. Pick your
@@ -110,6 +152,15 @@ The Rust extension didn't get built or installed. Rerun the
 `cdumm_native` is required — it's the LZ4 + ChaCha20 hot path, the
 pure-Python fallback is intentionally not available.
 
+**The .app exits silently on first launch with no error window**
+You missed the App Management permission step above. Open
+**System Settings → Privacy & Security → App Management** and
+toggle **CDUMM** on, then re-launch. The crash log at
+`~/Library/Application Support/cdumm/crash-pre-qt.log` will show
+`sqlite3.OperationalError: unable to open database file` —
+that's macOS denying CDUMM write access to the game's `.app`
+bundle.
+
 **Old mod source paths point at `Z:\` (Windows VM holdover)**
 If you previously ran CDUMM in a Windows VM with the macOS host
 mounted as `Z:\`, your existing `cdumm.db` has source paths that
@@ -121,9 +172,11 @@ the existing card to relink.
 
 ## What's next
 
-- Packaged `.app` bundle with codesigning + notarisation so the
-  install is one drag-and-drop instead of three pip commands.
-- `nxm://` URL scheme handler via `LSSetDefaultHandlerForURLScheme`
-  (requires the packaged .app first).
-- Universal2 wheel for `cdumm_native` so the same install works on
-  Apple Silicon and Intel without a per-machine `cargo build`.
+- **Notarisation**: would suppress the first-launch Gatekeeper prompt
+  but requires a paid Apple Developer ID. Tracked but no concrete
+  plan; ad-hoc signing is the realistic compromise for a free tool.
+- **`nxm://` URL scheme handler** via
+  `LSSetDefaultHandlerForURLScheme`. Now possible because the .app
+  has a real `CFBundleIdentifier`; the runtime registration code in
+  `cdumm/engine/nxm_handler.py` would grow a macOS branch parallel
+  to the Windows registry path.
