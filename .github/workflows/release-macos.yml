@@ -9,11 +9,16 @@ name: Build macOS release
 #     the .dmg as a workflow artifact (downloadable for 30 days) but
 #     does NOT touch GitHub Releases.
 #
-# Runner: macos-14 = Apple Silicon (M1, ARM64). macos-latest currently
-# resolves to macos-14 too but we pin explicitly so the build stays
-# reproducible if GitHub bumps `latest` to a future Intel-deprecated
-# version with different default toolchain. ARM64-only is the right
+# Runner: macos-26-arm64 = macOS 26 (Tahoe) on Apple Silicon. Pinned
+# to the explicit -arm64 label rather than ``macos-latest`` so the
+# build stays reproducible if GitHub later bumps ``latest`` to a
+# future image with different defaults. ARM64-only is the right
 # arch because Crimson Desert macOS doesn't run on Intel anyway.
+#
+# Switched from macos-14 because actions/runner-images announced
+# macOS 14 Sonoma deprecation starting 2026-07-06; macos-26 also
+# ships Python 3.14.4 + Rust 1.95 + Cargo 1.95 + 7-Zip pre-installed,
+# which matches the local dev toolchain on Apple Silicon.
 on:
   push:
     tags:
@@ -25,22 +30,22 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-26-arm64
     timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.13
+      - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
-          # 3.13 is the current stable line and is what
-          # ``cdumm-native`` is tested against locally. The Rust
-          # extension uses pyo3's abi3-py39 ABI tag so any Python
-          # 3.9+ would work, but we pin 3.13 so the build environment
-          # is reproducible.
-          python-version: '3.13'
+          # 3.14 is the macos-26-arm64 image default and matches the
+          # local dev environment on Apple Silicon. ``cdumm-native``
+          # uses pyo3's abi3-py39 ABI tag so any Python 3.9+ would
+          # work, but pinning here keeps CI reproducible if the
+          # runner image's default ever changes.
+          python-version: '3.14'
 
       - name: Set up Rust toolchain (arm64)
         uses: dtolnay/rust-toolchain@stable
@@ -50,6 +55,9 @@ jobs:
       # Cache Cargo's registry + git index + the native/ build dir.
       # The native crate compiles in ~5s after a warm cache (vs ~45s
       # cold) — most of that is pyo3 + chacha20 dependency builds.
+      # Cache key pinned to the runner label so a runner-image bump
+      # invalidates the cache automatically (avoids ABI mismatches
+      # between cached artifacts and the new toolchain).
       - name: Cache cargo + native target
         uses: actions/cache@v4
         with:
@@ -57,15 +65,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/target
-          key: cargo-macos14-${{ hashFiles('native/Cargo.lock') }}
-          restore-keys: cargo-macos14-
+          key: cargo-macos26-arm64-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: cargo-macos26-arm64-
 
       - name: Cache pip wheel cache
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/pip
-          key: pip-macos14-py313-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-macos14-py313-
+          key: pip-macos26-arm64-py314-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-macos26-arm64-py314-
 
       - name: Install Python build tooling
         run: |
