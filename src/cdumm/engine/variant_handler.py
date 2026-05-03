@@ -543,6 +543,17 @@ def import_multi_variant(
         old_dir = mods_dir / str(mod_id)
         if old_dir.exists():
             shutil.rmtree(old_dir, ignore_errors=True)
+        # Bug from Faisal 2026-05-03 (NPC Trust Gain "Click To Update"
+        # left pill red): the re-import path was rewriting deltas and
+        # the mod_dir but leaving the identity fields stale. Result:
+        # mods.version stayed at the OLD version after a successful
+        # update, so the next Nexus update check kept flagging the mod
+        # as outdated. Mirror the INSERT branch's identity fields here.
+        db.connection.execute(
+            "UPDATE mods SET name = ?, author = ?, version = ?, "
+            "description = ?, game_version_hash = ? WHERE id = ?",
+            (mod_name, author, version, description,
+             game_ver_hash, mod_id))
     else:
         priority = db.connection.execute(
             "SELECT COALESCE(MAX(priority), 0) + 1 FROM mods"
