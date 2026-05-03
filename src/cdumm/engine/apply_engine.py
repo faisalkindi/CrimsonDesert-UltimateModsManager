@@ -2553,8 +2553,10 @@ class ApplyWorker(QObject):
                     content, _meta = load_entry_delta(Path(dp))
                     mod_bodies[d.get("mod_name", "unknown")] = content
                 except Exception as e:
-                    logger.warning(
-                        "Failed to load delta for merge: %s (%s)", dp, e)
+                    # R2: same Bug D class — surface to user instead of
+                    # logger-only silence so corrupt entry deltas don't
+                    # silently skip mods during merge.
+                    self._warn_entr_load_failure(d, e)
 
             if len(mod_bodies) < 2:
                 continue
