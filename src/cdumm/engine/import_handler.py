@@ -1,7 +1,9 @@
+import contextlib
 import logging
 import shutil
 import subprocess
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -27,6 +29,47 @@ def _emit_progress(pct, msg):
     cb = getattr(_progress_local, 'cb', None)
     if cb:
         cb(pct, msg)
+
+
+@contextlib.contextmanager
+def import_staging_dir(game_dir: Path):
+    """Yield a unique extraction-staging directory under
+    game_dir/CDMods/_import_staging/<uuid>/.
+
+    Bug E (Nexus 2026-05-03, unqltango): bare tempfile.TemporaryDirectory()
+    lands the extraction in %TEMP% on C:/, which fails with WinError 112
+    for large mods (Kliff Female Voice, P3rdpc 130MB, etc.) when C:/ is
+    near full but the game drive has space. Anchoring staging under the
+    game install means extraction lives on the same drive that will hold
+    the imported mod's deltas/sources, so disk-space pressure tracks
+    install location.
+
+    Falls back to system temp if the game CDMods dir cannot be created
+    (read-only mount, permission issue) so callers don't fail outright.
+    """
+    base = game_dir / "CDMods" / "_import_staging"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        staging = base / uuid.uuid4().hex
+        staging.mkdir(exist_ok=False)
+    except OSError as e:
+        logger.warning(
+            "import_staging_dir: cannot create %s (%s); falling back "
+            "to system temp. Large mods may hit WinError 112.",
+            base, e)
+        with tempfile.TemporaryDirectory() as fallback:
+            yield fallback
+        return
+
+    try:
+        yield str(staging)
+    finally:
+        try:
+            shutil.rmtree(staging, ignore_errors=True)
+        except Exception as e:
+            logger.debug(
+                "import_staging_dir: cleanup of %s failed: %s",
+                staging, e)
 
 
 def _validate_modified_pamt(modified_bytes: bytes, rel_path: str) -> None:
@@ -1594,7 +1637,7 @@ def import_from_7z(
     mod_name = archive_path.stem
     result = ModImportResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         try:
             import py7zr
@@ -1845,7 +1888,7 @@ def import_from_rar(
         )
         return result
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         try:
             _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -1927,7 +1970,7 @@ def _import_remaining_loose_files(
     logger.info("Mixed-format mod: found %d loose files after PAZ import: %s",
                 len(loose_files), [f.name for f in loose_files])
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         work_dir = Path(tmp)
         files_dir = work_dir / "_loose_files"
         files_dir.mkdir(parents=True, exist_ok=True)
@@ -2260,7 +2303,7 @@ def import_from_zip(
     mod_name = zip_path.stem
     result = ModImportResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         try:
             with zipfile.ZipFile(zip_path) as zf:
@@ -2759,7 +2802,7 @@ def import_from_folder(
     # Check for Crimson Browser format and convert if needed
     manifest = detect_crimson_browser(folder_path)
     if manifest is not None:
-        with tempfile.TemporaryDirectory() as cb_tmp:
+        with import_staging_dir(game_dir) as cb_tmp:
             cb_work = Path(cb_tmp) / "_cb_converted"
             converted = convert_to_paz_mod(manifest, game_dir, cb_work)
             if converted is not None:
@@ -2791,7 +2834,7 @@ def import_from_folder(
     # Check for loose file mod (mod.json + files/ directory)
     lfm = detect_loose_file_mod(folder_path)
     if lfm is not None:
-        with tempfile.TemporaryDirectory() as lfm_tmp:
+        with import_staging_dir(game_dir) as lfm_tmp:
             lfm_work = Path(lfm_tmp) / "_lfm_converted"
             converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
             if converted is not None:
@@ -2938,7 +2981,7 @@ def import_from_folder(
     # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
     tex_info = detect_texture_mod(folder_path)
     if tex_info is not None:
-        with tempfile.TemporaryDirectory() as tex_tmp:
+        with import_staging_dir(game_dir) as tex_tmp:
             tex_work = Path(tex_tmp) / "_tex_converted"
             converted = convert_texture_mod(tex_info, game_dir, tex_work)
             if converted is not None:
@@ -3104,7 +3147,7 @@ def import_from_script(
     mod_name = script_path.stem
     result = ModImportResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as sandbox:
+    with import_staging_dir(game_dir) as sandbox:
         sandbox_path = Path(sandbox)
 
         # Copy game files the script might modify into sandbox
