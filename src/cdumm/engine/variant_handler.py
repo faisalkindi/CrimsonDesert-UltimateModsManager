@@ -589,19 +589,9 @@ def import_multi_variant(
     # Adjacent fix from systematic-debugging review of the version-
     # update bug: the apply fingerprint hashes mods.json_source PATH
     # (not contents) plus mod_deltas (always empty for variant mods).
-    # A re-import that overwrites merged.json content but keeps the
-    # same path produces an identical fingerprint, and the next Apply
-    # fast-paths 'Already up to date' — the new mod content never
-    # lands in game files. Bust the fingerprint here so Apply genuinely
-    # re-runs after every re-import.
-    fp_path = game_dir / "CDMods" / ".apply_fingerprint"
-    try:
-        if fp_path.exists():
-            fp_path.unlink()
-    except OSError as e:
-        logger.debug(
-            "variant re-import: could not remove .apply_fingerprint "
-            "at %s: %s", fp_path, e)
+    # Bust it via the centralized helper so the next Apply re-runs.
+    from cdumm.engine.apply_engine import invalidate_apply_fingerprint
+    invalidate_apply_fingerprint(game_dir)
 
     logger.info("variant mod: created id=%d '%s' with %d variants "
                 "(%d enabled, %d conflict groups)",

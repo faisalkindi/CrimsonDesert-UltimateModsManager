@@ -20,6 +20,26 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 
+def invalidate_apply_fingerprint(game_dir: Path) -> None:
+    """Remove ``CDMods/.apply_fingerprint`` so the next Apply genuinely
+    re-runs the pipeline.
+
+    The fingerprint hashes mods.json_source PATH (not contents) plus
+    mod_deltas. A re-import that overwrites the merged.json content but
+    keeps the same path produces an identical hash, and the next Apply
+    fast-paths 'Already up to date'. Re-import call sites must invoke
+    this after the DB commit. Idempotent (no-op if the file is missing).
+    """
+    fp_path = game_dir / "CDMods" / ".apply_fingerprint"
+    try:
+        if fp_path.exists():
+            fp_path.unlink()
+    except OSError as e:
+        logger.debug(
+            "invalidate_apply_fingerprint: could not remove %s: %s",
+            fp_path, e)
+
+
 def _yield_gil() -> None:
     """Release the GIL momentarily so the GUI thread can process events.
 

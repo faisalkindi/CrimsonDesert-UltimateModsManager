@@ -4413,6 +4413,22 @@ class CdummWindow(FluentWindow):
             except Exception:
                 pass
 
+            # Adjacent to Faisal NPC Trust Gain bug 2026-05-03: the
+            # apply fingerprint hashes mod_deltas paths (not contents)
+            # plus json_source path, so a re-import that overwrites
+            # delta files in place produces the same hash and Apply
+            # fast-paths 'Already up to date'. Bust it after every
+            # successful import so the new mod content actually lands.
+            try:
+                from cdumm.engine.apply_engine import (
+                    invalidate_apply_fingerprint)
+                if self._game_dir is not None:
+                    invalidate_apply_fingerprint(self._game_dir)
+            except Exception as _e:
+                logger.debug(
+                    "post-import: invalidate_apply_fingerprint failed: %s",
+                    _e)
+
             # Post-import: configurable flag + source path
             cfg_src = _ctx.get("configurable_source")
             if cfg_src:
