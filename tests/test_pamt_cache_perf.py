@@ -81,6 +81,66 @@ def test_get_vanilla_entry_content_caches_pamt_parse(tmp_path: Path):
         jph_mod._extract_from_paz = monkey_orig_extract
 
 
+def test_extract_sibling_entry_shares_pamt_cache(tmp_path: Path):
+    """R2: _extract_sibling_entry has the same parse-per-call pattern
+    as #61's _get_vanilla_entry_content. Format 3 mods that touch
+    many .pabgb entries trigger one sibling-header lookup PER entry
+    (in _try_semantic_merge), so without sharing the cache we still
+    re-parse the PAMT N times — just from a different code path.
+    The two methods should share a single _pamt_entries_cache."""
+    from cdumm.engine.apply_engine import ApplyWorker
+    from cdumm.archive.paz_parse import PazEntry
+
+    vanilla_dir = tmp_path / "vanilla"
+    game_dir = tmp_path / "game"
+    pamt_dir = vanilla_dir / "0009"
+    pamt_dir.mkdir(parents=True)
+    (pamt_dir / "0.pamt").write_bytes(b"\x00" * 256)
+
+    worker = ApplyWorker.__new__(ApplyWorker)
+    worker._vanilla_dir = vanilla_dir
+    worker._game_dir = game_dir
+
+    fake_entries = [PazEntry(
+        path="gamedata/iteminfo.pabgh",
+        paz_file=str(pamt_dir / "0.paz"),
+        offset=0, comp_size=10, orig_size=10, flags=0, paz_index=0,
+    )]
+
+    parse_calls = {"count": 0}
+
+    def _fake_parse(pamt_path, paz_dir):
+        parse_calls["count"] += 1
+        return fake_entries
+
+    def _fake_extract(entry, paz_path=None):
+        return b"HEADER_BYTES"
+
+    import cdumm.archive.paz_parse as pp_mod
+    import cdumm.engine.json_patch_handler as jph_mod
+    pp_orig = pp_mod.parse_pamt
+    jph_orig = jph_mod._extract_from_paz
+    pp_mod.parse_pamt = _fake_parse
+    jph_mod._extract_from_paz = _fake_extract
+
+    try:
+        # First call: _get_vanilla_entry_content (populates cache)
+        worker._get_vanilla_entry_content("0009/0.paz", "iteminfo.pabgh")
+        # Then 200 calls to _extract_sibling_entry on SAME pamt_dir
+        for _ in range(200):
+            worker._extract_sibling_entry("0009", "iteminfo.pabgh")
+
+        assert parse_calls["count"] == 1, (
+            f"Expected ONE parse total (shared cache between "
+            f"_get_vanilla_entry_content and _extract_sibling_entry), "
+            f"got {parse_calls['count']}. _extract_sibling_entry must "
+            f"reuse the cache _get_vanilla_entry_content populates."
+        )
+    finally:
+        pp_mod.parse_pamt = pp_orig
+        jph_mod._extract_from_paz = jph_orig
+
+
 def test_pamt_cache_separate_per_pamt_path(tmp_path: Path):
     """Different PAMT files (different pamt_dir) must each parse once,
     not share a single cache slot."""

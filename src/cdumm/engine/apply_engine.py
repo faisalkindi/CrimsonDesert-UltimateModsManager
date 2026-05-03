@@ -2637,24 +2637,45 @@ class ApplyWorker(QObject):
         fallback, the PAMT entry stored as
         "gamedata/iteminfo.pabgh" wouldn't match.
         """
-        try:
-            from cdumm.archive.paz_parse import parse_pamt
-            from cdumm.engine.json_patch_handler import _extract_from_paz
+        from cdumm.archive.paz_parse import parse_pamt
+        from cdumm.engine.json_patch_handler import _extract_from_paz
 
-            entry_basename = entry_path.rsplit("/", 1)[-1]
-            for base in [self._vanilla_dir, self._game_dir]:
-                pamt_path = base / pamt_dir / "0.pamt"
-                if not pamt_path.exists():
+        if not hasattr(self, "_pamt_entries_cache"):
+            self._pamt_entries_cache: dict[str, list] = {}
+
+        entry_basename = entry_path.rsplit("/", 1)[-1]
+        for base in [self._vanilla_dir, self._game_dir]:
+            pamt_path = base / pamt_dir / "0.pamt"
+            if not pamt_path.exists():
+                continue
+            cache_key = str(pamt_path)
+            entries = self._pamt_entries_cache.get(cache_key)
+            if entries is None:
+                try:
+                    entries = parse_pamt(
+                        str(pamt_path), paz_dir=str(base / pamt_dir))
+                except Exception as e:
+                    logger.warning(
+                        "Vanilla PAMT parse failed for %s: %s", pamt_path, e)
                     continue
-                entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                # R2: share cache with _get_vanilla_entry_content so
+                # Format 3 mods that touch many .pabgb entries don't
+                # re-parse the PAMT once per sibling-header lookup
+                # (#61 fix only covered the other call site).
+                self._pamt_entries_cache[cache_key] = entries
+            try:
                 for e in entries:
                     if e.path == entry_path:
                         return _extract_from_paz(e)
                 for e in entries:
                     if e.path.rsplit("/", 1)[-1] == entry_basename:
                         return _extract_from_paz(e)
-        except Exception:
-            pass
+            except Exception as e:
+                # R2: same #62 visibility fix — log the real cause
+                # instead of silently dropping it.
+                logger.warning(
+                    "Sibling extraction failed for %s in %s: %s",
+                    entry_path, pamt_dir, e)
         return None
 
     def _merge_same_target_overlay_entries(
