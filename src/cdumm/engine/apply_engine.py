@@ -2828,18 +2828,39 @@ class ApplyWorker(QObject):
         ("iteminfo.pabgb"). Format 3 mods target by basename, so
         exact-match-only would silently fail to extract vanilla
         bytes for them.
-        """
-        try:
-            from cdumm.archive.paz_parse import parse_pamt
-            from cdumm.engine.json_patch_handler import _extract_from_paz
 
-            pamt_dir = file_path.split("/")[0]
-            entry_basename = entry_path.rsplit("/", 1)[-1]
-            for base in [self._vanilla_dir, self._game_dir]:
-                pamt_path = base / pamt_dir / "0.pamt"
-                if not pamt_path.exists():
+        GitHub #61 (Loe-Aner, 2026-05-02): the overlay dedup phase
+        calls this once per unique entry group. P3rdpc Mod V 3.5
+        with 97k deltas hit it 500+ times for the same pamt_dir,
+        and each call re-parsed the PAMT from disk (~2ms each), so
+        Apply stalled past the 180s watchdog. Cache the parsed
+        entries per-PAMT-path within an apply run.
+        """
+        from cdumm.archive.paz_parse import parse_pamt
+        from cdumm.engine.json_patch_handler import _extract_from_paz
+
+        pamt_dir = file_path.split("/")[0]
+        entry_basename = entry_path.rsplit("/", 1)[-1]
+
+        if not hasattr(self, "_pamt_entries_cache"):
+            self._pamt_entries_cache: dict[str, list] = {}
+
+        for base in [self._vanilla_dir, self._game_dir]:
+            pamt_path = base / pamt_dir / "0.pamt"
+            if not pamt_path.exists():
+                continue
+            cache_key = str(pamt_path)
+            entries = self._pamt_entries_cache.get(cache_key)
+            if entries is None:
+                try:
+                    entries = parse_pamt(
+                        str(pamt_path), paz_dir=str(base / pamt_dir))
+                except Exception as e:
+                    logger.warning(
+                        "Vanilla PAMT parse failed for %s: %s", pamt_path, e)
                     continue
-                entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                self._pamt_entries_cache[cache_key] = entries
+            try:
                 # Prefer exact path match.
                 for e in entries:
                     if e.path == entry_path:
@@ -2851,8 +2872,14 @@ class ApplyWorker(QObject):
                 for e in entries:
                     if e.path.rsplit("/", 1)[-1] == entry_basename:
                         return _extract_from_paz(e)
-        except Exception:
-            pass
+            except Exception as e:
+                # GitHub #62 (UnLuckyLust, 2026-05-02): the prior
+                # bare except Exception:pass swallowed extraction
+                # errors silently and surfaced as a misleading
+                # "file may not exist" warning. Log the real cause.
+                logger.warning(
+                    "Vanilla extraction failed for %s in %s: %s",
+                    entry_path, file_path, e)
         return None
 
     def _merge_json_patch_deltas(
