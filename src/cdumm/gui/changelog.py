@@ -13,6 +13,16 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.8.1",
+        "date": "2026-05-03",
+        "notes": [
+            "<b>Mod re-import via 'Click To Update' actually updates the version stamp now.</b> The variant-mod re-import path was rewriting the merged.json content on disk but never updating <code>mods.version</code>, so the red 'Click To Update' pill stayed red even after a successful download + re-import. Reported by Faisal on NPC Trust Gain v1.04 -> v1.05 update 2026-05-03.",
+            "<b>Re-import now invalidates the apply fingerprint.</b> The apply-skip fast path hashes <code>json_source</code> path (not contents) plus <code>mod_deltas</code>, so a re-import that overwrote the merged.json in place produced an identical hash and the next Apply silently fast-pathed 'Already up to date'. Without this fix, even after the version bump, you'd have to Revert + Apply to actually land the new mod content. Centralized via <code>invalidate_apply_fingerprint(game_dir)</code> called from both the variant in-process re-import path and the regular worker post-import path.",
+            "<b>'Apply failed' errors for missing PAPGT now show the path</b> instead of '(unknown path)'. The PapgtManager raise was using the 1-arg <code>FileNotFoundError(message)</code> form which leaves <code>.filename</code> as None; the apply error handler then fell back to the placeholder. Fixed by switching to the 3-arg <code>FileNotFoundError(errno, msg, path)</code> form. Reported by tbyk101 / GitHub #65 on uninstall.",
+            "<b>Revert to Vanilla no longer fails with 'no backup found' on files that are already vanilla on disk.</b> When the vanilla backup is missing (e.g. large PAZ skipped by the lazy-backup logic, or a newly-vanilla path after a game patch added a new PAZ group), RevertWorker now falls back to the live game file IF its hash matches the snapshot. Same hash-verified-live mechanism the Apply path already used. Reported by Doleun / GitHub #67 after game patch 1.05.01 added group 0042.",
+        ],
+    },
+    {
         "version": "3.2.8",
         "date": "2026-05-03",
         "notes": [
