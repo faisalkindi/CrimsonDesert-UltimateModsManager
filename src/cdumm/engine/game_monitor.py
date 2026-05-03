@@ -31,6 +31,15 @@ GAME_EXE_NAME = "CrimsonDesert.exe"
 CRASH_DUMP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "CrashDumps")
 FALLBACK_APP_ID = "3321460"
 
+# Sentinel returned by :func:`wait_for_exit` when the OpenProcess handle
+# couldn't be acquired — typically because the process exited between
+# :func:`find_game_process` reporting it and the subsequent wait. Keeps
+# the int-or-None return shape (caller distinguishes ``None`` = still
+# running). Distinct from "platform-unsupported" — that case raises
+# NotImplementedError so callers can't silently mistake one for the
+# other (PR #64 review note).
+PROCESS_GONE = 0xDEAD
+
 if _IS_WINDOWS:
     _psapi = ctypes.WinDLL("psapi", use_last_error=True)
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -86,16 +95,22 @@ def find_game_process() -> int | None:
 def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
     """Wait for process to exit. Returns exit code, or None if still running.
 
-    If the process is already gone (can't open handle), returns 0xDEAD
-    as a sentinel to distinguish from "still running" (None). Windows-
-    only; non-Windows callers should not reach this path because
-    :func:`find_game_process` returns None before this is invoked.
+    If the process is already gone (can't open handle), returns
+    :data:`PROCESS_GONE` as a sentinel to distinguish from "still
+    running" (None). Windows-only; non-Windows callers should not
+    reach this path because :func:`find_game_process` returns None
+    before this is invoked. If a non-Windows caller does reach here
+    (programming error elsewhere), raise NotImplementedError rather
+    than silently returning the same sentinel as a real "process gone"
+    — review feedback on PR #64 flagged the conflation as a footgun.
     """
     if not _IS_WINDOWS:
-        return 0xDEAD
+        raise NotImplementedError(
+            "wait_for_exit is Windows-only; find_game_process() returns "
+            "None on macOS / Linux so this should never be called.")
     h = _k32.OpenProcess(0x00100400, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_INFORMATION
     if not h:
-        return 0xDEAD  # process already gone
+        return PROCESS_GONE  # process already gone before we could open a handle
     try:
         r = _k32.WaitForSingleObject(h, timeout_ms)
         if r == 0:  # WAIT_OBJECT_0

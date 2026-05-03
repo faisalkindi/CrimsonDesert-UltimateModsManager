@@ -1,0 +1,52 @@
+name: Windows tests
+
+# Regression net for the cross-platform refactor in PR #64. The
+# os.sep rewrite touched ~25 callsites and the platform abstraction
+# layer is new — without CI here the maintainer would have to spot-
+# check Windows builds by hand on every macOS-related PR. Triggers:
+#
+#   * pull_request — gate every PR before merge.
+#   * push to master — catch any regression that snuck through review.
+#   * workflow_dispatch — manual re-run from the Actions tab.
+#
+# Runner: windows-latest (currently windows-2025). No caching beyond
+# the actions/setup-python wheel cache because the test suite is small
+# (1100+ tests run in <5s on macOS) and the test deps are pure-Python
+# wheels that pip resolves quickly. If the suite ever grows past the
+# point where caching matters, mirror the cache: blocks from
+# release-macos.yml.
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CDUMM + dev deps
+        # Editable install so test imports resolve to the source tree.
+        # The .[dev] extras pull pytest + pytest-qt + pyinstaller so
+        # the qtbot-using tests in test_recovery_flow.py can run.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run pytest
+        # No filtering — full suite. Quiet mode so the log isn't
+        # buried in PASSED lines; -ra shows reasons for any
+        # skip / xfail.
+        run: python -m pytest tests/ -q -ra

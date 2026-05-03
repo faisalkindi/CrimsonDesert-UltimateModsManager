@@ -1021,12 +1021,13 @@ class CdummWindow(FluentWindow):
         # Top navigation — pages
         self.addSubInterface(self.paz_mods_page, FluentIcon.FOLDER, tr("nav.paz_mods"))
         # ASI plugins are a Windows-only mod format (winmm.dll proxy
-        # injecting into CrimsonDesert.exe). Hide the entire tab on
-        # macOS / Linux so users don't think a feature is broken when
-        # it's just structurally inapplicable.
-        if not IS_MACOS:
-            self.addSubInterface(
-                self.asi_plugins_page, FluentIcon.EMBED, tr("nav.asi_mods"))
+        # injecting into CrimsonDesert.exe). The tab stays visible on
+        # macOS / Linux but the page renders a placeholder explaining
+        # why ASI doesn't work on that platform — vanishing UI is more
+        # confusing than a clear "not supported" message (PR #64
+        # review item #3).
+        self.addSubInterface(
+            self.asi_plugins_page, FluentIcon.EMBED, tr("nav.asi_mods"))
         self.addSubInterface(self.activity_page, FluentIcon.DATE_TIME, tr("nav.activity"))
 
         # Separator before tools

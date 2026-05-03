@@ -29,11 +29,14 @@ either way, so callers don't need to care.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
@@ -78,12 +81,19 @@ def open_path(path: str | Path) -> bool:
     """Hand ``path`` (a file, folder, or URL) to the OS default opener.
 
     Replacement for ``os.startfile``, which only exists on Windows.
-    Returns True when the launcher fired without raising; False when no
-    opener was available or the call failed. Errors are swallowed —
-    callers that care about the open-succeeded signal should check the
-    return value and surface their own message, but failure here is
-    almost always "user has weird shell config" and recovering from
-    inside CDUMM isn't possible.
+    Returns True when the launcher fired; False when no opener was
+    available or the call raised.
+
+    Errors are caught and logged at WARNING level (with the failing
+    path + the underlying OSError detail) so callers don't have to
+    wrap each call in their own try/except. The previous version
+    silently swallowed every exception, which lost the diagnostic
+    detail the old ``os.startfile`` raise gave us — review feedback
+    on PR #64 flagged that callers like ``mods_page._ctx_open_source``
+    used to log the OSError message themselves and now show a
+    generic "OS opener unavailable". Logging here at the source
+    means every callsite gets free OSError detail in the user's log
+    file without needing to change.
 
     On macOS and Linux this also handles ``steam://`` / ``nxm://`` URLs
     correctly because both ``open`` and ``xdg-open`` route URL schemes
@@ -106,8 +116,16 @@ def open_path(path: str | Path) -> bool:
                 else:
                     subprocess.Popen([tool, target])
                 return True
+        logger.warning(
+            "open_path: no opener found for %s "
+            "(tried xdg-open, gio); install xdg-utils or gnome-vfs", target)
         return False
-    except Exception:
+    except OSError as e:
+        logger.warning("open_path: failed to open %s: %s", target, e)
+        return False
+    except Exception as e:
+        logger.warning(
+            "open_path: unexpected error opening %s: %s", target, e)
         return False
 
 
