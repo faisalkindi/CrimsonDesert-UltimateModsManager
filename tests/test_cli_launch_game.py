@@ -36,8 +36,10 @@ def test_launch_game_invokes_apply_then_launcher(tmp_path: Path,
             apply_called["count"] += 1
             self.progress_updated = MagicMock()
             self.error_occurred = MagicMock()
+            self.warning = MagicMock()
             self.progress_updated.connect = lambda f: None
             self.error_occurred.connect = lambda f: None
+            self.warning.connect = lambda f: None
 
         def run(self):
             pass  # success — no error_occurred emit
@@ -73,8 +75,10 @@ def test_launch_game_skips_launcher_when_apply_fails(tmp_path: Path,
             self._error_cb = None
             self.progress_updated = MagicMock()
             self.error_occurred = MagicMock()
+            self.warning = MagicMock()
             self.progress_updated.connect = lambda f: None
             self.error_occurred.connect = self._capture_error
+            self.warning.connect = lambda f: None
 
         def _capture_error(self, cb):
             self._error_cb = cb

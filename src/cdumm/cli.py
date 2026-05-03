@@ -220,8 +220,17 @@ def cmd_apply(args):
         errors.append(msg)
         print(f"ERROR: {msg}", file=sys.stderr)
 
+    def on_warning(msg):
+        # Loop R1: ApplyWorker.warning carries soft warnings (size-merge
+        # fallback drops, vanilla extraction failures from #62, etc.).
+        # GUI surfaces them via InfoBar; CLI must print to stderr or
+        # users debugging via headless apply will not see why their mod
+        # silently produced no changes.
+        print(f"WARNING: {msg}", file=sys.stderr)
+
     worker.progress_updated.connect(on_progress)
     worker.error_occurred.connect(on_error)
+    worker.warning.connect(on_warning)
 
     worker.run()
 
@@ -267,8 +276,15 @@ def cmd_launch_game(args):
         errors.append(msg)
         print(f"ERROR: {msg}", file=sys.stderr)
 
+    def on_warning(msg):
+        # Loop R1: surface soft warnings to stderr (same reason as
+        # cmd_apply — handheld users running --launch-game from a
+        # script need to see real warnings, not just success/error).
+        print(f"WARNING: {msg}", file=sys.stderr)
+
     worker.progress_updated.connect(on_progress)
     worker.error_occurred.connect(on_error)
+    worker.warning.connect(on_warning)
 
     worker.run()
 
