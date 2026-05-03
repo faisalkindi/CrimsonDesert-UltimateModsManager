@@ -175,6 +175,10 @@ a = Analysis(
         'cdumm.engine.binary_search',
         'cdumm.engine.nexus_api',
         'cdumm.engine.game_monitor',
+        # GitHub #63: launch-game CLI subcommand. Lazy-imported in
+        # cli.cmd_launch_game so static analysis may miss it; list
+        # defensively the same way the others are.
+        'cdumm.engine.launcher',
         'cdumm.gui.binary_search_dialog',
         'cdumm.gui.patch_toggle_dialog',
         'py7zr',
