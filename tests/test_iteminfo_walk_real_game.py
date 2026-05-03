@@ -450,11 +450,16 @@ def test_format3_intent_on_real_iteminfo_produces_correct_v2_byte_patch():
     #    SENTINEL when re-walked. Catches off-by-one errors that the
     #    walker-only test would miss.
     rel_off = change["rel_offset"]
-    # Find entry 0's actual file offset via the pabgh index
+    # Find entry 0's actual file offset via the pabgh index, then
+    # compute name_end since rel_offset is name-end-relative (matches
+    # the V2 JMM/SWISS Knife convention used by the apply pipeline's
+    # _build_name_offsets_generic).
     from cdumm.semantic.parser import parse_pabgh_index
     _, offsets = parse_pabgh_index(header, "iteminfo")
     entry_off = offsets[2200]
-    abs_off = entry_off + rel_off
+    _name_len = struct.unpack_from("<I", body, entry_off + 4)[0]
+    name_end = entry_off + 8 + _name_len
+    abs_off = name_end + rel_off
 
     new_body = bytearray(body)
     new_body[abs_off:abs_off + 8] = bytes.fromhex(change["patched"])

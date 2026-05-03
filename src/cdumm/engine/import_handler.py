@@ -1,9 +1,11 @@
+import contextlib
 import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -29,6 +31,47 @@ def _emit_progress(pct, msg):
     cb = getattr(_progress_local, 'cb', None)
     if cb:
         cb(pct, msg)
+
+
+@contextlib.contextmanager
+def import_staging_dir(game_dir: Path):
+    """Yield a unique extraction-staging directory under
+    game_dir/CDMods/_import_staging/<uuid>/.
+
+    Bug E (Nexus 2026-05-03, unqltango): bare tempfile.TemporaryDirectory()
+    lands the extraction in %TEMP% on C:/, which fails with WinError 112
+    for large mods (Kliff Female Voice, P3rdpc 130MB, etc.) when C:/ is
+    near full but the game drive has space. Anchoring staging under the
+    game install means extraction lives on the same drive that will hold
+    the imported mod's deltas/sources, so disk-space pressure tracks
+    install location.
+
+    Falls back to system temp if the game CDMods dir cannot be created
+    (read-only mount, permission issue) so callers don't fail outright.
+    """
+    base = game_dir / "CDMods" / "_import_staging"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        staging = base / uuid.uuid4().hex
+        staging.mkdir(exist_ok=False)
+    except OSError as e:
+        logger.warning(
+            "import_staging_dir: cannot create %s (%s); falling back "
+            "to system temp. Large mods may hit WinError 112.",
+            base, e)
+        with tempfile.TemporaryDirectory() as fallback:
+            yield fallback
+        return
+
+    try:
+        yield str(staging)
+    finally:
+        try:
+            shutil.rmtree(staging, ignore_errors=True)
+        except Exception as e:
+            logger.debug(
+                "import_staging_dir: cleanup of %s failed: %s",
+                staging, e)
 
 
 def _validate_modified_pamt(modified_bytes: bytes, rel_path: str) -> None:
@@ -1430,7 +1473,8 @@ def _match_game_files(
 
             for mod_dir, (pazs, pamts) in dirs_with_mods.items():
                 if pazs and pamts:
-                    next_dir = _next_paz_directory(game_dir)
+                    next_dir = _next_paz_directory(
+                        game_dir, db=getattr(snapshot, "_db", None))
                     logger.info("Unnumbered PAZ mod in %s -> assigning %s",
                                 mod_dir.name, next_dir)
                     for f in pazs + pamts:
@@ -1438,7 +1482,8 @@ def _match_game_files(
 
         elif paz_files and not pamt_files:
             # Some mods only ship PAZ without PAMT — still try to import
-            next_dir = _next_paz_directory(game_dir)
+            next_dir = _next_paz_directory(
+                game_dir, db=getattr(snapshot, "_db", None))
             logger.info("PAZ-only mod detected (no PAMT), assigning directory %s", next_dir)
             for f in paz_files:
                 matches.append((f"{next_dir}/{f.name}", f, True))
@@ -1478,45 +1523,59 @@ def _detect_standalone_mod(
         backup_paz = vanilla_backup_dir / dir_name / "0.paz"
 
         if not game_pamt.exists():
-            continue  # no vanilla dir = truly new, handled elsewhere
-
-        mod_pamt_size = mod_pamt.stat().st_size
-        mod_paz_size = mod_paz.stat().st_size
-
-        # Check against vanilla backup first (accurate), then game dir (may be modded)
-        vanilla_pamt_size = backup_pamt.stat().st_size if backup_pamt.exists() else game_pamt.stat().st_size
-        vanilla_paz_size = backup_paz.stat().st_size if backup_paz.exists() else (game_paz.stat().st_size if game_paz.exists() else 0)
-
-        # A standalone mod has completely different content — different PAMT size
-        # indicates entirely different file entries (truly a new directory).
-        # Same PAMT size means same file entries, just modified content —
-        # this is a regular patch even if PAZ size changed (file appending).
-        if mod_pamt_size == vanilla_pamt_size:
-            is_standalone = False
-            logger.info("Modified vanilla: %s (same PAMT size, treating as patch, "
-                         "PAZ %d vs %d)", dir_name, mod_paz_size, vanilla_paz_size)
-        elif int(dir_name) < 36:
-            # Vanilla directories (0000-0035): always treat as patch, even if
-            # PAMT sizes differ (game update may have added/removed entries).
-            # ENTR decomposition handles different PAMTs by matching entries
-            # by path, so it works regardless of PAMT size differences.
-            is_standalone = False
-            logger.info("Modified vanilla: %s (PAMT size differs %d vs %d, but "
-                         "vanilla dir — treating as patch for ENTR decomposition)",
-                         dir_name, mod_pamt_size, vanilla_pamt_size)
-        else:
+            # Truly-new dir: no vanilla counterpart. Two mods both
+            # shipping a brand-new numbered dir would otherwise collide
+            # at the same path on apply (last-wins on the whole
+            # archive). GitHub #59 (DoRoon, 2026-05-01): SwapButcherWith-
+            # Barber + CharacterCreatorFemale both ship 0036/0.paz —
+            # vanilla 0036/ doesn't exist, both record file_path
+            # `0036/0.paz`, second-applied wipes the first. Treat as
+            # standalone so each mod gets a unique remapped dir number
+            # and both apply independently.
             is_standalone = True
-            logger.info("Standalone: %s has different PAMT (mod=%d vs vanilla=%d, "
-                         "PAZ %d vs %d)",
-                         dir_name, mod_pamt_size, vanilla_pamt_size,
-                         mod_paz_size, vanilla_paz_size)
+            logger.info(
+                "Standalone: %s is truly new (no vanilla counterpart) — "
+                "remapping to unique dir so multiple mods can coexist",
+                dir_name)
+        else:
+            mod_pamt_size = mod_pamt.stat().st_size
+            mod_paz_size = mod_paz.stat().st_size
+
+            # Check against vanilla backup first (accurate), then game dir (may be modded)
+            vanilla_pamt_size = backup_pamt.stat().st_size if backup_pamt.exists() else game_pamt.stat().st_size
+            vanilla_paz_size = backup_paz.stat().st_size if backup_paz.exists() else (game_paz.stat().st_size if game_paz.exists() else 0)
+
+            # A standalone mod has completely different content — different PAMT size
+            # indicates entirely different file entries (truly a new directory).
+            # Same PAMT size means same file entries, just modified content —
+            # this is a regular patch even if PAZ size changed (file appending).
+            if mod_pamt_size == vanilla_pamt_size:
+                is_standalone = False
+                logger.info("Modified vanilla: %s (same PAMT size, treating as patch, "
+                             "PAZ %d vs %d)", dir_name, mod_paz_size, vanilla_paz_size)
+            elif int(dir_name) < 36:
+                # Vanilla directories (0000-0035): always treat as patch, even if
+                # PAMT sizes differ (game update may have added/removed entries).
+                # ENTR decomposition handles different PAMTs by matching entries
+                # by path, so it works regardless of PAMT size differences.
+                is_standalone = False
+                logger.info("Modified vanilla: %s (PAMT size differs %d vs %d, but "
+                             "vanilla dir — treating as patch for ENTR decomposition)",
+                             dir_name, mod_pamt_size, vanilla_pamt_size)
+            else:
+                is_standalone = True
+                logger.info("Standalone: %s has different PAMT (mod=%d vs vanilla=%d, "
+                             "PAZ %d vs %d)",
+                             dir_name, mod_pamt_size, vanilla_pamt_size,
+                             mod_paz_size, vanilla_paz_size)
 
         if is_standalone:
             # Each standalone mod gets its own directory number so multiple
             # mods targeting the same directory can coexist.
             rel_parts = d.relative_to(extracted_dir).parts
             old_prefix = "/".join(rel_parts)
-            new_dir = _next_paz_directory(game_dir)
+            new_dir = _next_paz_directory(
+                game_dir, db=getattr(snapshot, "_db", None))
             remap[old_prefix] = new_dir
             logger.info("Standalone mod: remapping %s -> %s", old_prefix, new_dir)
 
@@ -1531,13 +1590,38 @@ def clear_assigned_dirs() -> None:
     _assigned_dirs.clear()
 
 
-def _next_paz_directory(game_dir: Path) -> str:
-    """Find the next available PAZ directory number (0036+)."""
+def _next_paz_directory(game_dir: Path, db=None) -> str:
+    """Find the next available PAZ directory number (0036+).
+
+    Sources of "occupied" dir numbers, in order:
+    1. Filesystem dirs in game_dir (NNNN/ already on disk)
+    2. ``_assigned_dirs`` (current import batch reservations)
+    3. ``db.mod_deltas.file_path`` prefixes when ``db`` is provided
+       — covers mods imported in a previous worker process that
+       haven't been Applied to disk yet. Without this, two
+       cross-process imports both pick the same number and collide
+       on Apply (R4 follow-up to the GitHub #59 fix).
+    """
     existing = set()
     for d in game_dir.iterdir():
         if d.is_dir() and d.name.isdigit() and len(d.name) == 4:
             existing.add(int(d.name))
     existing |= _assigned_dirs
+
+    if db is not None:
+        try:
+            rows = db.connection.execute(
+                "SELECT DISTINCT file_path FROM mod_deltas").fetchall()
+            for (fp,) in rows:
+                if not fp:
+                    continue
+                head = fp.split("/", 1)[0]
+                if head.isdigit() and len(head) == 4:
+                    existing.add(int(head))
+        except Exception as e:
+            logger.debug("DB-aware dir scan failed (%s); "
+                         "falling back to filesystem-only", e)
+
     # Start from 36 (base game uses 0000-0035)
     for n in range(36, 9999):
         if n not in existing:
@@ -1554,7 +1638,7 @@ def import_from_7z(
     mod_name = archive_path.stem
     result = ModImportResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         try:
             import py7zr
@@ -1567,9 +1651,16 @@ def import_from_7z(
         # Unpack any nested archives so format detectors see folders.
         _extract_nested_archives(tmp_path)
 
-        # Delegate to import_from_zip's internal logic (same flow)
-        return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
-                                      mod_name, existing_mod_id)
+        # Stage ASI plugins (mirrors import_from_zip).
+        asi_staged = _stage_asi_files(tmp_path, deltas_dir)
+
+        # Delegate to the shared post-extraction logic
+        result = _import_from_extracted(
+            tmp_path, game_dir, db, snapshot, deltas_dir,
+            mod_name, existing_mod_id)
+        if asi_staged and not result.asi_staged:
+            result.asi_staged = list(asi_staged)
+        return result
 
 
 _NESTED_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
@@ -1894,6 +1985,48 @@ def _extract_rar(archive_path: Path, dest: Path) -> str | None:
     return last_err or "RAR extraction failed"
 
 
+def _stage_asi_files(tmp_path: Path, deltas_dir: Path) -> list[str]:
+    """Move `.asi` plugins (and matching companion `.ini` configs)
+    out of `tmp_path` into a per-import staging subdir under
+    `deltas_dir/_asi_staging/<uuid>/`.
+
+    Used by `import_from_rar` and `import_from_7z` so mixed mods
+    (ASI + PAZ in one archive) get the same handling as ZIP imports.
+    Returns a list of absolute paths to the staged files.
+
+    Only `.ini` files whose stem matches a sibling `.asi` are picked
+    up; game-data `.ini` files inside numbered PAZ dirs are left
+    alone. The persistent location ensures the staged files survive
+    after the caller's tempfile.TemporaryDirectory auto-deletes.
+    """
+    import uuid as _uuid
+    asi_staging = deltas_dir / "_asi_staging" / _uuid.uuid4().hex
+    _all_files = [f for f in tmp_path.rglob("*") if f.is_file()]
+    _asi_stems = {
+        f.stem.lower() for f in _all_files if f.suffix.lower() == ".asi"
+    }
+    staged: list[str] = []
+    for f in _all_files:
+        if "_asi_staging" in f.parts:
+            continue
+        ext = f.suffix.lower()
+        if ext == ".asi":
+            pass
+        elif ext == ".ini" and f.stem.lower() in _asi_stems:
+            pass
+        else:
+            continue
+        try:
+            asi_staging.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.move(str(f), str(asi_staging / f.name))
+            staged.append(str(asi_staging / f.name))
+            logger.info("Staged ASI file for GUI install: %s", f.name)
+        except OSError as e:
+            logger.warning("ASI staging failed for %s: %s", f.name, e)
+    return staged
+
+
 def import_from_rar(
     archive_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
@@ -1928,7 +2061,7 @@ def import_from_rar(
         result.error = "RAR import requires a RAR-capable extractor.\n" + install_hint
         return result
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         err = _extract_rar(archive_path, tmp_path)
         if err is not None:
@@ -1938,8 +2071,17 @@ def import_from_rar(
         # Unpack any nested archives so format detectors see folders.
         _extract_nested_archives(tmp_path)
 
-        return _import_from_extracted(tmp_path, game_dir, db, snapshot, deltas_dir,
-                                      mod_name, existing_mod_id)
+        # Stage ASI plugins to a persistent dir BEFORE format detection
+        # so mixed RAR mods (ASI + PAZ in one archive) get their ASI
+        # half installed by the GUI handler. Mirrors import_from_zip.
+        asi_staged = _stage_asi_files(tmp_path, deltas_dir)
+
+        result = _import_from_extracted(
+            tmp_path, game_dir, db, snapshot, deltas_dir,
+            mod_name, existing_mod_id)
+        if asi_staged and not result.asi_staged:
+            result.asi_staged = list(asi_staged)
+        return result
 
 
 _LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".css", ".html", ".thtml",
@@ -1988,7 +2130,7 @@ def _import_remaining_loose_files(
     logger.info("Mixed-format mod: found %d loose files after PAZ import: %s",
                 len(loose_files), [f.name for f in loose_files])
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         work_dir = Path(tmp)
         files_dir = work_dir / "_loose_files"
         files_dir.mkdir(parents=True, exist_ok=True)
@@ -2124,6 +2266,72 @@ def _import_from_extracted(
             return result
         # Fall through if ENTR import failed
 
+    # OG_ XML full-replacement detection. Mirrors `import_from_zip`'s
+    # block so RAR/7z imports get the same format coverage as ZIP.
+    og_xml = _detect_xml_replacements(tmp_path)
+    if og_xml:
+        og_modinfo = _read_modinfo(tmp_path)
+        og_result = _import_og_xml_as_mod(
+            og_xml, game_dir, db, deltas_dir, mod_name,
+            existing_mod_id=existing_mod_id, modinfo=og_modinfo,
+        )
+        if og_result is not None:
+            return og_result
+
+    # Plain XML drop format (raw .xml files at vanilla basenames).
+    plain_xml = _detect_plain_xml_replacements(tmp_path)
+    if plain_xml:
+        has_paz_dirs = any(
+            d.is_dir() and d.name.isdigit() and len(d.name) == 4
+            for d in tmp_path.rglob("*") if d.is_dir()
+        )
+        has_json_patches = detect_json_patch(tmp_path) is not None
+        if not has_paz_dirs and not has_json_patches:
+            plain_modinfo = _read_modinfo(tmp_path)
+            plain_result = _import_og_xml_as_mod(
+                plain_xml, game_dir, db, deltas_dir, mod_name,
+                existing_mod_id=existing_mod_id, modinfo=plain_modinfo,
+            )
+            if plain_result is not None:
+                return plain_result
+
+    # Format 3 (NattKh field-name) detection. The same JSON dropped as
+    # a ZIP would land in `import_from_zip`'s Format 3 branch; without
+    # this block, RAR/7z imports of the same mod errored with "no
+    # recognized format". Source: Lovexvirus007's Can It Stack JSON V3
+    # 2026-05-01.
+    from cdumm.engine.json_patch_handler import is_natt_format_3
+    f3_jsons = [p for p in tmp_path.rglob("*.json")
+                if is_natt_format_3(p)]
+    if len(f3_jsons) == 1:
+        return import_from_natt_format_3(
+            json_path=f3_jsons[0], game_dir=game_dir, db=db,
+            snapshot=snapshot, deltas_dir=deltas_dir,
+            existing_mod_id=existing_mod_id,
+        )
+    if len(f3_jsons) > 1:
+        # Variant pack messaging mirrored from import_from_zip's flow
+        # so RAR/7z drops of multi-Format-3 archives get the same
+        # "drop on main window to pick" guidance instead of falling
+        # through to the generic "no recognized format" error.
+        f3_pack = _scan_format3_variant_pack(tmp_path)
+        if f3_pack:
+            ids = ", ".join(vid for _, vid in f3_pack)
+            result.error = (
+                f"This archive contains {len(f3_pack)} variants of "
+                f"one Format 3 mod ({ids}). Drop the archive on the "
+                f"main window to pick one variant, or extract the "
+                f"archive and import only the variant JSON you want."
+            )
+            return result
+        names = ", ".join(p.name for p in f3_jsons)
+        result.error = (
+            f"This archive contains {len(f3_jsons)} Format 3 mods "
+            f"({names}). Please import them one at a time so each "
+            f"gets its own row in the mod list."
+        )
+        return result
+
     # Check for DDS texture mod
     tex_info = detect_texture_mod(tmp_path)
     if tex_info is not None:
@@ -2255,7 +2463,7 @@ def import_from_zip(
     mod_name = zip_path.stem
     result = ModImportResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         try:
             with zipfile.ZipFile(zip_path) as zf:
@@ -2754,7 +2962,7 @@ def import_from_folder(
     # Check for Crimson Browser format and convert if needed
     manifest = detect_crimson_browser(folder_path)
     if manifest is not None:
-        with tempfile.TemporaryDirectory() as cb_tmp:
+        with import_staging_dir(game_dir) as cb_tmp:
             cb_work = Path(cb_tmp) / "_cb_converted"
             converted = convert_to_paz_mod(manifest, game_dir, cb_work)
             if converted is not None:
@@ -2786,7 +2994,7 @@ def import_from_folder(
     # Check for loose file mod (mod.json + files/ directory)
     lfm = detect_loose_file_mod(folder_path)
     if lfm is not None:
-        with tempfile.TemporaryDirectory() as lfm_tmp:
+        with import_staging_dir(game_dir) as lfm_tmp:
             lfm_work = Path(lfm_tmp) / "_lfm_converted"
             converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
             if converted is not None:
@@ -2933,7 +3141,7 @@ def import_from_folder(
     # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
     tex_info = detect_texture_mod(folder_path)
     if tex_info is not None:
-        with tempfile.TemporaryDirectory() as tex_tmp:
+        with import_staging_dir(game_dir) as tex_tmp:
             tex_work = Path(tex_tmp) / "_tex_converted"
             converted = convert_texture_mod(tex_info, game_dir, tex_work)
             if converted is not None:
@@ -3099,7 +3307,7 @@ def import_from_script(
     mod_name = script_path.stem
     result = ModImportResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as sandbox:
+    with import_staging_dir(game_dir) as sandbox:
         sandbox_path = Path(sandbox)
 
         # Copy game files the script might modify into sandbox

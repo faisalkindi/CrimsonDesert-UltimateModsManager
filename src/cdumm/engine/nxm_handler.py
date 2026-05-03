@@ -81,6 +81,11 @@ def parse_nxm_url(url: str) -> NxmUrl:
 
     q = parse_qs(parsed.query)
     key = q.get("key", [None])[0]
+    # Sanity-bound key length so a malicious or buggy nxm:// link can't
+    # smuggle gigabytes of payload through the API request URL.
+    # Nexus's keys are short tokens; 256 is generous. Round 11 audit.
+    if key is not None and len(key) > 256:
+        raise NxmUrlError(f"nxm key too long ({len(key)} chars)")
     expires_raw = q.get("expires", [None])[0]
     user_id_raw = q.get("user_id", [None])[0]
     campaign = q.get("campaign", [None])[0]
@@ -93,12 +98,19 @@ def parse_nxm_url(url: str) -> NxmUrl:
         except (TypeError, ValueError):
             return None
 
+    expires = _int_or_none(expires_raw)
+    # Bound `expires` to a reasonable epoch range (32-bit positive int)
+    # so a malicious link can't pass an absurd integer that confuses
+    # Nexus's API or downstream URL parsers.
+    if expires is not None and (expires < 0 or expires > 0xFFFFFFFF):
+        expires = None
+
     return NxmUrl(
         game_domain=game_domain,
         mod_id=mod_id,
         file_id=file_id,
         key=key,
-        expires=_int_or_none(expires_raw),
+        expires=expires,
         user_id=_int_or_none(user_id_raw),
         campaign=campaign,
     )

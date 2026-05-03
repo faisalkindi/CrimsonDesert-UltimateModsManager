@@ -84,6 +84,34 @@ def _build_silent_apply_failure_message(
     )
 
 
+def _compose_merged_mod_name(
+    mod_names: list[str], merge_kind: str,
+) -> str:
+    """Build a user-facing mod_name for a merged delta produced by
+    semantic-merge or byte-merge.
+
+    Used to keep real contributing mod names visible in downstream
+    warnings (size-merge fallback, conflict viewer, etc.) instead of
+    leaking the synthetic merge-kind label. The merge-kind tag still
+    lives on `_merged_metadata` for internal routing.
+
+    Deduplicates and skips empty / "unknown" entries. Caps the inline
+    list at 3 names plus a "+ N more" tail so banner layouts don't
+    blow up on big multi-mod merges.
+    """
+    seen: list[str] = []
+    for n in mod_names:
+        if not n or n == "unknown":
+            continue
+        if n not in seen:
+            seen.append(n)
+    if not seen:
+        return f"({merge_kind} of unidentified mods)"
+    if len(seen) <= 3:
+        return " + ".join(seen)
+    return " + ".join(seen[:3]) + f" + {len(seen) - 3} more"
+
+
 def _rewrite_mount_error_with_mod_names(
     raw_error: str, targets_to_mods: dict[str, list[str]]
 ) -> str:
@@ -213,6 +241,18 @@ def aggregate_json_mods_into_synthetic_patches(
             if not game_file:
                 continue
             all_changes = patch.get("changes", [])
+            # Apply custom values BEFORE the disabled filter so both
+            # operations key by ORIGINAL patch index. Earlier this
+            # ran custom_values on the already-filtered list, which
+            # used enumerate-by-filtered-position keys; if any patch
+            # before an editable was disabled, the editable's stored
+            # value (keyed by original index per FIX 4) silently
+            # missed and the patch fell back to the mod author's
+            # default. Round 4 mount-time audit MEDIUM-2.
+            if custom_vals:
+                from cdumm.engine.json_patch_handler import (
+                    apply_custom_values)
+                all_changes = apply_custom_values(all_changes, custom_vals)
             # Per-mod disabled_patches filter (flat indexed across all
             # of THIS mod's changes, matching how the picker records it).
             filtered = []
@@ -220,16 +260,32 @@ def aggregate_json_mods_into_synthetic_patches(
                 if flat_idx not in disabled:
                     filtered.append(c)
                 flat_idx += 1
-            if custom_vals:
-                from cdumm.engine.json_patch_handler import (
-                    apply_custom_values)
-                filtered = apply_custom_values(filtered, custom_vals)
             if not filtered:
                 continue
 
             aggregated.setdefault(game_file, []).extend(filtered)
-            if game_file not in signatures and patch.get("signature"):
-                signatures[game_file] = patch["signature"]
+            new_sig = patch.get("signature")
+            if new_sig:
+                if game_file not in signatures:
+                    signatures[game_file] = new_sig
+                elif signatures[game_file] != new_sig:
+                    # Two mods ship different signatures for the same
+                    # target file. The aggregator picks first-wins,
+                    # so the second mod's changes get applied with the
+                    # WRONG anchor. The byte-mismatch + vanilla-remnant
+                    # paths usually catch this, but a silent loss of
+                    # one mod's changes is still possible. Surface the
+                    # conflict so a bug report includes it. Round 4
+                    # mount-time audit MEDIUM-3.
+                    logger.warning(
+                        "Signature conflict on %s: mod %r ships "
+                        "signature %r but earlier mod's signature "
+                        "(%r) is already in use. Second mod's changes "
+                        "will apply against the first mod's anchor; "
+                        "byte mismatches expected if the signatures "
+                        "anchor at different vanilla offsets.",
+                        game_file, mod_name, new_sig,
+                        signatures[game_file])
             targets_this_mod.add(game_file)
 
         per_mod_summary.append({
@@ -940,6 +996,15 @@ class ApplyWorker(QObject):
             self._db.initialize()
             self._apply()
             self._db.close()
+        except FileNotFoundError as e:
+            # Bug C (Nexus 2026-05-03, Jyoungy13): bare
+            # [WinError 2] strings have no path. Surface
+            # e.filename so users can see which vanilla file
+            # vanished after a game patch.
+            logger.error("Apply failed: %s", e, exc_info=True)
+            path = getattr(e, "filename", None) or "(unknown path)"
+            self.error_occurred.emit(
+                f"Apply failed: file not found: {path} ({e})")
         except Exception as e:
             logger.error("Apply failed: %s", e, exc_info=True)
             self.error_occurred.emit(f"Apply failed: {e}")
@@ -996,24 +1061,93 @@ class ApplyWorker(QObject):
             to_skip.add(f"{ov['pamt_dir']}/0.pamt")
         return to_skip
 
+    def _warn_entr_load_failure(self, d: dict, exc: Exception) -> None:
+        """Surface a user-visible warning when an entry delta can't be
+        loaded (missing ENTRY_MAGIC, truncated file, decode failure).
+
+        Bug D (Nexus 2026-05-03, Torie1985): Barber Unlocked's
+        customizationcolorpalette.xml.entr lacked the 'ENTR' magic
+        header so load_entry_delta raised ValueError; apply caught
+        the exception, logged to logger only, and silently continued.
+        The user saw zero errors and zero in-game effect.
+
+        The fix: emit to self.warning AND log, so users see an
+        actionable message in the GUI / CLI and know to re-import
+        the mod (typical cause: legacy import format or file system
+        corruption since import).
+        """
+        mod_name = d.get("mod_name") or "(unknown mod)"
+        delta_path = d.get("delta_path", "?")
+        msg = (
+            f"Mod '{mod_name}' has a corrupt entry delta — "
+            f"re-import the mod to regenerate it. "
+            f"Affected file: {delta_path}. Error: {exc}"
+        )
+        logger.warning(
+            "Entry delta load failed for %s (%s): %s",
+            mod_name, delta_path, exc)
+        if hasattr(self, "_soft_warnings"):
+            self._soft_warnings.append(msg)
+        try:
+            self.warning.emit(msg)
+        except Exception:
+            pass
+
+    def _stage_with_pamt_tracking(
+        self, txn, file_path: str, data: bytes,
+        modified_pamts: dict[str, bytes],
+    ) -> None:
+        """Stage a file via the transactional IO and, when the path is
+        a .pamt, also record the bytes in modified_pamts so PapgtManager.
+        rebuild() hashes the staged bytes instead of the stale on-disk
+        copy.
+
+        Bug A (Nexus 2026-05-03): michael2k + timelesscjing reported
+        post-apply verification mismatches on 0009 / 0015 PAMT entries
+        after game patch 1.05.00. Mods that ship complete PAMTs as
+        is_new entries (or as FULL_COPY deltas) were going through
+        stage_file call sites that didn't update modified_pamts. Result:
+        PAPGT entry held the hash of the pre-apply PAMT (whatever was
+        on disk), but commit then replaced it with the mod's bytes —
+        hash mismatch every time.
+
+        All stage_file calls that may target a PAMT MUST go through
+        this helper so the next refactor can't accidentally diverge.
+        """
+        txn.stage_file(file_path, data)
+        if file_path.endswith(".pamt"):
+            dir_name = file_path.split("/")[0]
+            modified_pamts[dir_name] = data
+
     def _compute_apply_fingerprint(self) -> str:
         """Compute a hash of all inputs that affect Apply output.
 
         If this fingerprint matches the last Apply, the game files are
         already correct and the entire Apply can be skipped.
+
+        GitHub #59 (DoRoon, 2026-05-01): priority, conflict_mode,
+        force_inplace, and mod_config.custom_values all change apply
+        output — they must each be in the hash or drag-reorder /
+        slot-edit / override-toggle gets silently skipped.
         """
         import hashlib
         h = hashlib.sha256()
 
-        # Enabled mods + their delta hashes
         rows = self._db.connection.execute(
             "SELECT m.id, m.enabled, m.json_source, m.disabled_patches, "
+            "       m.priority, m.conflict_mode, m.force_inplace, "
+            "       mc.custom_values, "
             "       GROUP_CONCAT(md.delta_path || ':' || md.file_path, '|') "
-            "FROM mods m LEFT JOIN mod_deltas md ON m.id = md.mod_id "
+            "FROM mods m "
+            "LEFT JOIN mod_deltas md ON m.id = md.mod_id "
+            "LEFT JOIN mod_config mc ON mc.mod_id = m.id "
             "GROUP BY m.id ORDER BY m.id"
         ).fetchall()
         for row in rows:
-            h.update(f"{row[0]}:{row[1]}:{row[2]}:{row[3]}:{row[4]}\n".encode())
+            h.update(
+                f"{row[0]}:{row[1]}:{row[2]}:{row[3]}:"
+                f"{row[4]}:{row[5]}:{row[6]}:{row[7]}:{row[8]}\n".encode()
+            )
 
         return h.hexdigest()[:16]
 
@@ -1225,7 +1359,10 @@ class ApplyWorker(QObject):
                     src = Path(new_deltas[-1]["delta_path"])
                     if src.exists():
                         result_bytes = src.read_bytes()
-                        txn.stage_file(file_path, result_bytes)
+                        # Bug A: route through helper so PAMT-shipping
+                        # mods don't desync modified_pamts vs disk.
+                        self._stage_with_pamt_tracking(
+                            txn, file_path, result_bytes, modified_pamts)
                         logger.info("Applying new file: %s from %s",
                                     file_path, new_deltas[-1]["mod_name"])
                     continue
@@ -1242,7 +1379,9 @@ class ApplyWorker(QObject):
                             with open(dp, "rb") as f:
                                 f.seek(4)  # skip FULL magic
                                 result_bytes = f.read()
-                            txn.stage_file(file_path, result_bytes)
+                            # Bug A: PAMT-aware staging
+                            self._stage_with_pamt_tracking(
+                                txn, file_path, result_bytes, modified_pamts)
                             logger.info("Fast-track apply: %s (%.1f MB)",
                                         file_path, len(result_bytes) / 1048576)
                             continue
@@ -1253,7 +1392,9 @@ class ApplyWorker(QObject):
                 if result_bytes is None:
                     continue
 
-                txn.stage_file(file_path, result_bytes)
+                # Bug A: PAMT-aware staging
+                self._stage_with_pamt_tracking(
+                    txn, file_path, result_bytes, modified_pamts)
 
 
             _phase("Phase 1a: Mount-time JSON patching")
@@ -2245,8 +2386,9 @@ class ApplyWorker(QObject):
                         content, metadata = load_entry_delta(Path(d["delta_path"]))
                         metadata["delta_path"] = d["delta_path"]
                     except Exception as e:
-                        logger.warning("Failed to load entry delta %s: %s",
-                                       d["delta_path"], e)
+                        # Bug D: surface the failure to the user
+                        # instead of silent continue.
+                        self._warn_entr_load_failure(d, e)
                         continue
                 else:
                     continue
@@ -2395,107 +2537,114 @@ class ApplyWorker(QObject):
             pass
 
         for idx, (entry_path, conflicting) in enumerate(entries_to_merge.items()):
-            table_name = identify_table_from_path(entry_path)
-            if not table_name:
-                continue  # not a supported format
-
-            try:
-                from cdumm.semantic.engine import SemanticEngine
-                engine = SemanticEngine(self._db)
-
-                # Load each mod's decompressed content
-                mod_bodies: dict[str, bytes] = {}
-                for d in conflicting:
-                    dp = d.get("delta_path")
-                    if not dp:
-                        continue
-                    content, meta = load_entry_delta(Path(dp))
-                    mod_bodies[d.get("mod_name", "unknown")] = content
-
-                if len(mod_bodies) < 2:
+            # Populate mod_bodies BEFORE the table_name check so the byte-
+            # merge tier 2 fallback below works for entries that aren't
+            # known pabgb tables. GitHub #59 (DoRoon, 2026-05-01): two
+            # mods on the same non-pabgb entry (sequencer .paseq, NPC
+            # interaction definition, .paac, etc.) used to hit
+            # `if not table_name: continue` and skip the byte-merge
+            # entirely, last-wins silently dropped one mod's changes.
+            mod_bodies: dict[str, bytes] = {}
+            for d in conflicting:
+                dp = d.get("delta_path")
+                if not dp:
                     continue
-
-                # Semantic merge requires the PABGH header to parse records.
-                # Extract it from the same PAZ directory as a sibling entry.
-                pamt_dir = file_path.split("/")[0]
-                header_entry_path = entry_path.replace(".pabgb", ".pabgh")
-                header_bytes = self._extract_sibling_entry(
-                    pamt_dir, header_entry_path)
-                if not header_bytes:
-                    logger.debug("No PABGH header for %s, skipping semantic merge",
-                                 entry_path)
-                    continue
-
-                # Get vanilla body from backup or game
-                vanilla_content = self._get_vanilla_entry_content(
-                    file_path, entry_path)
-                if not vanilla_content:
-                    continue
-
-                # Heartbeat so the progress bar text changes for huge
-                # tables. analyze_bytes can take many seconds on
-                # 6000+ record tables like iteminfo with multiple
-                # conflicting mods. Without this emit, the bar message
-                # stays stale on the same file/percentage.
                 try:
-                    self.progress_updated.emit(
-                        self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
-                        f"Merging entry {idx + 1}/{total_entries} in "
-                        f"{file_path}: {entry_path} ({len(mod_bodies)} mods)...")
-                except Exception:
-                    pass
+                    content, _meta = load_entry_delta(Path(dp))
+                    mod_bodies[d.get("mod_name", "unknown")] = content
+                except Exception as e:
+                    # R2: same Bug D class — surface to user instead of
+                    # logger-only silence so corrupt entry deltas don't
+                    # silently skip mods during merge.
+                    self._warn_entr_load_failure(d, e)
 
-                # Run semantic merge
-                result = engine.analyze_bytes(
-                    table_name, vanilla_content, header_bytes, mod_bodies)
-                if result and not result.has_conflicts:
-                    merged_body = engine.build_merged_body(
-                        table_name, vanilla_content, header_bytes,
-                        result.table_changeset)
-                    if merged_body and merged_body != vanilla_content:
-                        # Replace all conflicting deltas with a single merged one
-                        from cdumm.engine.delta_engine import save_entry_delta
-                        merged_meta = {
-                            "pamt_dir": pamt_dir,
-                            "entry_path": entry_path,
-                            "_semantic_merged": True,
-                        }
-                        # Use first delta's metadata as template
-                        first_d = conflicting[0]
-                        _, first_meta = load_entry_delta(Path(first_d["delta_path"]))
-                        merged_meta.update({
-                            k: first_meta[k] for k in (
-                                "paz_index", "compression_type", "flags",
-                                "vanilla_offset", "vanilla_comp_size",
-                                "vanilla_orig_size", "encrypted")
-                            if k in first_meta
-                        })
+            if len(mod_bodies) < 2:
+                continue
 
-                        # Create merged delta dict
-                        merged_d = dict(first_d)
-                        merged_d["_merged_content"] = merged_body
-                        merged_d["_merged_metadata"] = merged_meta
-                        merged_d["mod_name"] = "semantic_merge"
+            pamt_dir = file_path.split("/")[0]
+            table_name = identify_table_from_path(entry_path)
 
-                        # Replace conflicting deltas in the output list
-                        ep_set = {entry_path}
-                        merged_deltas = [
-                            d for d in merged_deltas
-                            if d.get("entry_path") not in ep_set
-                        ]
-                        merged_deltas.append(merged_d)
+            # Tier 1: schema-aware semantic merge, only for known pabgb
+            # tables. Falls through to byte-merge tier 2 (always-on)
+            # below if it can't run or doesn't produce a merged body.
+            if table_name:
+                try:
+                    from cdumm.semantic.engine import SemanticEngine
+                    engine = SemanticEngine(self._db)
 
-                        logger.info("Semantic merge SUCCESS: %s — %s",
+                    header_entry_path = entry_path.replace(".pabgb", ".pabgh")
+                    header_bytes = self._extract_sibling_entry(
+                        pamt_dir, header_entry_path)
+                    vanilla_content = self._get_vanilla_entry_content(
+                        file_path, entry_path)
+
+                    if header_bytes and vanilla_content:
+                        # Heartbeat so the progress bar text changes for huge
+                        # tables. analyze_bytes can take many seconds on
+                        # 6000+ record tables like iteminfo with multiple
+                        # conflicting mods. Without this emit, the bar
+                        # message stays stale on the same file/percentage.
+                        try:
+                            self.progress_updated.emit(
+                                self._last_pct_emitted if hasattr(self, "_last_pct_emitted") else 30,
+                                f"Merging entry {idx + 1}/{total_entries} in "
+                                f"{file_path}: {entry_path} ({len(mod_bodies)} mods)...")
+                        except Exception:
+                            pass
+
+                        result = engine.analyze_bytes(
+                            table_name, vanilla_content, header_bytes,
+                            mod_bodies)
+                        if result and not result.has_conflicts:
+                            merged_body = engine.build_merged_body(
+                                table_name, vanilla_content, header_bytes,
+                                result.table_changeset)
+                            if merged_body and merged_body != vanilla_content:
+                                merged_meta = {
+                                    "pamt_dir": pamt_dir,
+                                    "entry_path": entry_path,
+                                    "_semantic_merged": True,
+                                }
+                                first_d = conflicting[0]
+                                _, first_meta = load_entry_delta(
+                                    Path(first_d["delta_path"]))
+                                merged_meta.update({
+                                    k: first_meta[k] for k in (
+                                        "paz_index", "compression_type", "flags",
+                                        "vanilla_offset", "vanilla_comp_size",
+                                        "vanilla_orig_size", "encrypted")
+                                    if k in first_meta
+                                })
+                                merged_d = dict(first_d)
+                                merged_d["_merged_content"] = merged_body
+                                merged_d["_merged_metadata"] = merged_meta
+                                merged_d["mod_name"] = _compose_merged_mod_name(
+                                    list(mod_bodies.keys()), "semantic merge")
+                                ep_set = {entry_path}
+                                merged_deltas = [
+                                    d for d in merged_deltas
+                                    if d.get("entry_path") not in ep_set
+                                ]
+                                merged_deltas.append(merged_d)
+                                logger.info(
+                                    "Semantic merge SUCCESS: %s, %s",
                                     entry_path, result.summary)
-                        continue
+                                continue
 
-                if result and result.has_conflicts:
-                    logger.info("Semantic merge: %d conflict(s) in %s, "
-                                "using last-wins fallback",
+                        if result and result.has_conflicts:
+                            logger.info(
+                                "Semantic merge: %d conflict(s) in %s, "
+                                "trying byte-merge fallback",
                                 len(result.conflicts), entry_path)
-
-            except Exception as e:
-                logger.debug("Semantic merge failed for %s: %s", entry_path, e)
+                    else:
+                        logger.debug(
+                            "Semantic merge skipped for %s: missing %s",
+                            entry_path,
+                            "PABGH header" if not header_bytes
+                            else "vanilla body")
+                except Exception as e:
+                    logger.debug(
+                        "Semantic merge failed for %s: %s", entry_path, e)
 
             # JMM-parity byte-level fallback (MergeCompiledModFiles). Fires
             # when the schema-aware semantic merge couldn't cleanly combine
@@ -2536,7 +2685,8 @@ class ApplyWorker(QObject):
                         merged_d = dict(first_d)
                         merged_d["_merged_content"] = merged_body
                         merged_d["_merged_metadata"] = merged_meta
-                        merged_d["mod_name"] = "byte_merge"
+                        merged_d["mod_name"] = _compose_merged_mod_name(
+                            list(mod_bodies.keys()), "byte merge")
                         ep_set = {entry_path}
                         merged_deltas = [
                             d for d in merged_deltas
@@ -2564,24 +2714,45 @@ class ApplyWorker(QObject):
         fallback, the PAMT entry stored as
         "gamedata/iteminfo.pabgh" wouldn't match.
         """
-        try:
-            from cdumm.archive.paz_parse import parse_pamt
-            from cdumm.engine.json_patch_handler import _extract_from_paz
+        from cdumm.archive.paz_parse import parse_pamt
+        from cdumm.engine.json_patch_handler import _extract_from_paz
 
-            entry_basename = entry_path.rsplit("/", 1)[-1]
-            for base in [self._vanilla_dir, self._game_dir]:
-                pamt_path = base / pamt_dir / "0.pamt"
-                if not pamt_path.exists():
+        if not hasattr(self, "_pamt_entries_cache"):
+            self._pamt_entries_cache: dict[str, list] = {}
+
+        entry_basename = entry_path.rsplit("/", 1)[-1]
+        for base in [self._vanilla_dir, self._game_dir]:
+            pamt_path = base / pamt_dir / "0.pamt"
+            if not pamt_path.exists():
+                continue
+            cache_key = str(pamt_path)
+            entries = self._pamt_entries_cache.get(cache_key)
+            if entries is None:
+                try:
+                    entries = parse_pamt(
+                        str(pamt_path), paz_dir=str(base / pamt_dir))
+                except Exception as e:
+                    logger.warning(
+                        "Vanilla PAMT parse failed for %s: %s", pamt_path, e)
                     continue
-                entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                # R2: share cache with _get_vanilla_entry_content so
+                # Format 3 mods that touch many .pabgb entries don't
+                # re-parse the PAMT once per sibling-header lookup
+                # (#61 fix only covered the other call site).
+                self._pamt_entries_cache[cache_key] = entries
+            try:
                 for e in entries:
                     if e.path == entry_path:
                         return _extract_from_paz(e)
                 for e in entries:
                     if e.path.rsplit("/", 1)[-1] == entry_basename:
                         return _extract_from_paz(e)
-        except Exception:
-            pass
+            except Exception as e:
+                # R2: same #62 visibility fix — log the real cause
+                # instead of silently dropping it.
+                logger.warning(
+                    "Sibling extraction failed for %s in %s: %s",
+                    entry_path, pamt_dir, e)
         return None
 
     def _merge_same_target_overlay_entries(
@@ -2755,18 +2926,39 @@ class ApplyWorker(QObject):
         ("iteminfo.pabgb"). Format 3 mods target by basename, so
         exact-match-only would silently fail to extract vanilla
         bytes for them.
-        """
-        try:
-            from cdumm.archive.paz_parse import parse_pamt
-            from cdumm.engine.json_patch_handler import _extract_from_paz
 
-            pamt_dir = file_path.split("/")[0]
-            entry_basename = entry_path.rsplit("/", 1)[-1]
-            for base in [self._vanilla_dir, self._game_dir]:
-                pamt_path = base / pamt_dir / "0.pamt"
-                if not pamt_path.exists():
+        GitHub #61 (Loe-Aner, 2026-05-02): the overlay dedup phase
+        calls this once per unique entry group. P3rdpc Mod V 3.5
+        with 97k deltas hit it 500+ times for the same pamt_dir,
+        and each call re-parsed the PAMT from disk (~2ms each), so
+        Apply stalled past the 180s watchdog. Cache the parsed
+        entries per-PAMT-path within an apply run.
+        """
+        from cdumm.archive.paz_parse import parse_pamt
+        from cdumm.engine.json_patch_handler import _extract_from_paz
+
+        pamt_dir = file_path.split("/")[0]
+        entry_basename = entry_path.rsplit("/", 1)[-1]
+
+        if not hasattr(self, "_pamt_entries_cache"):
+            self._pamt_entries_cache: dict[str, list] = {}
+
+        for base in [self._vanilla_dir, self._game_dir]:
+            pamt_path = base / pamt_dir / "0.pamt"
+            if not pamt_path.exists():
+                continue
+            cache_key = str(pamt_path)
+            entries = self._pamt_entries_cache.get(cache_key)
+            if entries is None:
+                try:
+                    entries = parse_pamt(
+                        str(pamt_path), paz_dir=str(base / pamt_dir))
+                except Exception as e:
+                    logger.warning(
+                        "Vanilla PAMT parse failed for %s: %s", pamt_path, e)
                     continue
-                entries = parse_pamt(str(pamt_path), paz_dir=str(base / pamt_dir))
+                self._pamt_entries_cache[cache_key] = entries
+            try:
                 # Prefer exact path match.
                 for e in entries:
                     if e.path == entry_path:
@@ -2778,8 +2970,14 @@ class ApplyWorker(QObject):
                 for e in entries:
                     if e.path.rsplit("/", 1)[-1] == entry_basename:
                         return _extract_from_paz(e)
-        except Exception:
-            pass
+            except Exception as e:
+                # GitHub #62 (UnLuckyLust, 2026-05-02): the prior
+                # bare except Exception:pass swallowed extraction
+                # errors silently and surfaced as a misleading
+                # "file may not exist" warning. Log the real cause.
+                logger.warning(
+                    "Vanilla extraction failed for %s in %s: %s",
+                    entry_path, file_path, e)
         return None
 
     def _merge_json_patch_deltas(
@@ -3097,7 +3295,13 @@ class ApplyWorker(QObject):
 
     def _find_entry_at_offset(self, pamt_dir: str, delta: dict,
                               base_dir) -> "PazEntry | None":
-        """Find the PAMT entry whose compressed data occupies a given PAZ offset."""
+        """Find the PAMT entry whose compressed data occupies a given
+        PAZ offset.
+
+        R3: shares the PAMT entries cache with _get_vanilla_entry_content
+        so the JSON-merge fallback loop doesn't re-parse the PAMT once
+        per overlapping group.
+        """
         from cdumm.archive.paz_parse import parse_pamt
 
         try:
@@ -3112,7 +3316,14 @@ class ApplyWorker(QObject):
             if not pamt_path.exists():
                 return None
 
-            entries = parse_pamt(str(pamt_path), str(base_dir / pamt_dir))
+            if not hasattr(self, "_pamt_entries_cache"):
+                self._pamt_entries_cache: dict[str, list] = {}
+            cache_key = str(pamt_path)
+            entries = self._pamt_entries_cache.get(cache_key)
+            if entries is None:
+                entries = parse_pamt(
+                    str(pamt_path), str(base_dir / pamt_dir))
+                self._pamt_entries_cache[cache_key] = entries
             # Find entry whose offset range contains our target
             for e in entries:
                 if e.offset <= target_offset < e.offset + e.comp_size:
@@ -3151,8 +3362,8 @@ class ApplyWorker(QObject):
                 try:
                     content, metadata = load_entry_delta(Path(d["delta_path"]))
                 except Exception as e:
-                    logger.warning("Failed to load entry delta %s: %s",
-                                   d["delta_path"], e)
+                    # Bug D: surface to user
+                    self._warn_entr_load_failure(d, e)
                     continue
             else:
                 continue

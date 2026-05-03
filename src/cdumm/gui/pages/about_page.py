@@ -291,7 +291,7 @@ class AboutPage(SmoothScrollArea):
         """Update the about page to show an available update."""
         from qfluentwidgets import setCustomStyleSheet, HyperlinkButton
 
-        self._update_status.setText(f"Update available: {tag}")
+        self._update_status.setText(tr("about.update_available", tag=tag))
         setCustomStyleSheet(self._update_status,
             "StrongBodyLabel{color:#EBCB8B;}", "StrongBodyLabel{color:#EBCB8B;}")
 

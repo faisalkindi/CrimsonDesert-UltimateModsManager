@@ -97,7 +97,13 @@ class AsiManager:
         if plugin.enabled:
             return
         new_path = plugin.path.with_name(plugin.name + ASI_SUFFIX)
-        plugin.path.rename(new_path)
+        # os.replace is atomic on Windows even when the destination
+        # already exists (e.g., a stale .asi sibling left after a
+        # crash). Path.rename() raises FileExistsError on Windows in
+        # that case and leaves the plugin in an indeterminate state.
+        # Round 8 audit catch.
+        import os as _os
+        _os.replace(str(plugin.path), str(new_path))
         plugin.path = new_path
         plugin.enabled = True
         logger.info("Enabled ASI: %s", plugin.name)
@@ -107,7 +113,8 @@ class AsiManager:
         if not plugin.enabled:
             return
         new_path = plugin.path.with_name(plugin.name + DISABLED_SUFFIX)
-        plugin.path.rename(new_path)
+        import os as _os
+        _os.replace(str(plugin.path), str(new_path))
         plugin.path = new_path
         plugin.enabled = False
         logger.info("Disabled ASI: %s", plugin.name)
@@ -158,45 +165,76 @@ class AsiManager:
                 return self._bin64 / f"{stem}{DISABLED_SUFFIX}"
             return self._bin64 / default_name
 
-        if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
-            dest = _resolve_dest_for_asi(source.stem, source.name)
-            shutil.copy2(source, dest)
-            installed.append(dest.name)
-            owned.append(dest.name)
-            plugin_name = source.stem
-            for f in source.parent.iterdir():
-                if f == source or not f.is_file():
-                    continue
-                if f.suffix.lower() == ".ini":
-                    shutil.copy2(f, self._bin64 / f.name)
-                    installed.append(f.name)
-                    owned.append(f.name)
-                elif f.name.lower() in ASI_LOADER_NAMES:
-                    if not (self._bin64 / f.name).exists():
-                        shutil.copy2(f, self._bin64 / f.name)
+        # Track files we created (not pre-existing loader DLLs) so a
+        # mid-install failure can roll them back. Without this, a
+        # partially-installed mod leaves loose .ini / .dll files in
+        # bin64/ that the legacy uninstall heuristic can't clean up.
+        # Round 8 audit catch.
+        created_paths: list[Path] = []
+        try:
+            if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
+                dest = _resolve_dest_for_asi(source.stem, source.name)
+                shutil.copy2(source, dest)
+                created_paths.append(dest)
+                installed.append(dest.name)
+                owned.append(dest.name)
+                plugin_name = source.stem
+                for f in source.parent.iterdir():
+                    if f == source or not f.is_file():
+                        continue
+                    if f.suffix.lower() == ".ini":
+                        target = self._bin64 / f.name
+                        existed_before = target.exists()
+                        shutil.copy2(f, target)
+                        if not existed_before:
+                            created_paths.append(target)
                         installed.append(f.name)
-                        # NOT owned — shared between mods.
-        elif source.is_dir():
-            for f in source.rglob("*"):
-                if not f.is_file():
-                    continue
-                ext = f.suffix.lower()
-                if ext == ASI_SUFFIX:
-                    dest = _resolve_dest_for_asi(f.stem, f.name)
-                    shutil.copy2(f, dest)
-                    installed.append(dest.name)
-                    owned.append(dest.name)
-                    if plugin_name is None:
-                        plugin_name = f.stem
-                elif ext == ".ini":
-                    shutil.copy2(f, self._bin64 / f.name)
-                    installed.append(f.name)
-                    owned.append(f.name)
-                elif f.name.lower() in ASI_LOADER_NAMES:
-                    if not (self._bin64 / f.name).exists():
-                        shutil.copy2(f, self._bin64 / f.name)
+                        owned.append(f.name)
+                    elif f.name.lower() in ASI_LOADER_NAMES:
+                        if not (self._bin64 / f.name).exists():
+                            shutil.copy2(f, self._bin64 / f.name)
+                            created_paths.append(self._bin64 / f.name)
+                            installed.append(f.name)
+                            # NOT owned — shared between mods.
+            elif source.is_dir():
+                for f in source.rglob("*"):
+                    if not f.is_file():
+                        continue
+                    ext = f.suffix.lower()
+                    if ext == ASI_SUFFIX:
+                        dest = _resolve_dest_for_asi(f.stem, f.name)
+                        shutil.copy2(f, dest)
+                        created_paths.append(dest)
+                        installed.append(dest.name)
+                        owned.append(dest.name)
+                        if plugin_name is None:
+                            plugin_name = f.stem
+                    elif ext == ".ini":
+                        target = self._bin64 / f.name
+                        existed_before = target.exists()
+                        shutil.copy2(f, target)
+                        if not existed_before:
+                            created_paths.append(target)
                         installed.append(f.name)
-                        # NOT owned — shared between mods.
+                        owned.append(f.name)
+                    elif f.name.lower() in ASI_LOADER_NAMES:
+                        if not (self._bin64 / f.name).exists():
+                            shutil.copy2(f, self._bin64 / f.name)
+                            created_paths.append(self._bin64 / f.name)
+                            installed.append(f.name)
+                            # NOT owned — shared between mods.
+        except (OSError, shutil.Error) as e:
+            # Roll back files we created so the user doesn't end up
+            # with orphan .ini / .dll fragments in bin64/.
+            logger.error(
+                "ASI install failed mid-copy (%s); rolling back %d "
+                "created file(s)", e, len(created_paths))
+            for p in created_paths:
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
 
         if plugin_name and owned:
             sidecar = self._bin64 / f"{plugin_name}{SIDECAR_SUFFIX}"
@@ -283,6 +321,26 @@ class AsiManager:
         """
         updated: list[str] = []
         self._bin64.mkdir(parents=True, exist_ok=True)
+
+        # Clean any opposite-state sibling on disk so we don't end up
+        # with both `<stem>.asi` and `<stem>.asi.disabled` after the
+        # update. Mirrors `install()`'s `_resolve_dest_for_asi` cleanup.
+        # Round 8 audit: previously update() only wrote the new file
+        # for the in-memory plugin.enabled state and ignored the
+        # opposite-state sibling that may exist on disk if the user
+        # manually toggled while CDUMM was closed.
+        opposite = (DISABLED_SUFFIX if plugin.enabled else ASI_SUFFIX)
+        opposite_path = self._bin64 / (plugin.name + opposite)
+        if opposite_path.exists():
+            try:
+                opposite_path.unlink()
+                logger.info(
+                    "Removed opposite-state sibling on update: %s",
+                    opposite_path.name)
+            except OSError as e:
+                logger.warning(
+                    "Could not remove opposite-state sibling %s: %s",
+                    opposite_path.name, e)
 
         if source.is_file() and source.suffix.lower() == ASI_SUFFIX:
             dest = self._bin64 / (plugin.name + ASI_SUFFIX)

@@ -674,6 +674,20 @@ def build_overlay(
 
         paz_offset = len(paz_buf)
 
+        # PAZ format encodes file offsets as u32. Once the overlay PAZ
+        # crosses 4 GiB we can't represent the offset and `struct.pack`
+        # raises an opaque error far downstream. Surface this here with
+        # a clear error so the user knows the overlay needs to split.
+        # Round 8 audit catch (F1.1).
+        if paz_offset > 0xFFFFFFFF:
+            raise ValueError(
+                f"Overlay PAZ exceeded 4 GiB at entry {entry_path!r} "
+                f"(current size: {paz_offset:,} bytes). The PAZ format "
+                f"encodes offsets as u32; an overlay this large can't "
+                f"be addressed. Reduce the number of large mods or "
+                f"split the load into multiple apply passes."
+            )
+
         # Check overlay cache: if this entry is unchanged, copy compressed
         # bytes directly from the previous overlay PAZ (skip decompression/recompression)
         delta_hash = metadata.get("delta_hash", "")

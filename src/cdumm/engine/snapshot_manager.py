@@ -26,6 +26,24 @@ PATHC_FILE = "meta/0.pathc"
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks for hashing
 
 
+def _files_equal_streamed(a: Path, b: Path,
+                          chunk_size: int = 1 * 1024 * 1024) -> bool:
+    """Byte-compare two files in fixed-size chunks. Avoids loading
+    multi-GB PAZ archives into memory.
+
+    Caller is expected to have already verified equal file sizes via
+    `stat()` since same-size is a necessary precondition.
+    """
+    with a.open("rb") as fa, b.open("rb") as fb:
+        while True:
+            ca = fa.read(chunk_size)
+            cb = fb.read(chunk_size)
+            if ca != cb:
+                return False
+            if not ca:
+                return True
+
+
 def verify_live_disk_matches_backups(
         game_dir: Path, vanilla_dir: Path,
         max_checked: int = 5) -> tuple[bool, list[str]]:
@@ -67,7 +85,11 @@ def verify_live_disk_matches_backups(
                 if live.stat().st_size != bp.stat().st_size:
                     problems.append(str(rel).replace("\\", "/"))
                     continue
-                if live.read_bytes() != bp.read_bytes():
+                # Stream-compare in 1 MiB chunks instead of reading both
+                # files into memory. Vanilla PAZ archives are commonly
+                # 1-4 GB; the previous `read_bytes()` of both sides
+                # would OOM on 8 GB systems. Round 8 audit catch.
+                if not _files_equal_streamed(live, bp):
                     problems.append(str(rel).replace("\\", "/"))
             except OSError as e:
                 logger.debug(
@@ -327,45 +349,59 @@ class SnapshotWorker(QObject):
         logger.info("Snapshot: %d files, %.1f GB to hash", total, total_gb)
         self.progress_updated.emit(3, f"Found {total} files ({total_gb:.1f} GB). Hashing...")
 
-        # Clear existing snapshot
-        self._thread_db.connection.execute("DELETE FROM snapshots")
+        # Wrap the DELETE + N INSERTs in an explicit transaction so a
+        # mid-loop failure (corrupted PAZ, IO error, OOM during hash)
+        # ROLLBACKs the snapshot table to its prior state instead of
+        # leaving a partial baseline that future Apply calls would
+        # treat as authoritative. Round 8 audit catch.
+        self._thread_db.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._thread_db.connection.execute("DELETE FROM snapshots")
 
-        bytes_hashed = 0
-        last_pct = -1
+            bytes_hashed = 0
+            last_pct = -1
 
-        for i, (abs_path, rel_path) in enumerate(files_to_hash):
-            file_size_bytes = abs_path.stat().st_size
-            file_size_mb = file_size_bytes / (1024 * 1024)
-            logger.debug("Hashing [%d/%d]: %s (%.0f MB)", i + 1, total, rel_path, file_size_mb)
+            for i, (abs_path, rel_path) in enumerate(files_to_hash):
+                file_size_bytes = abs_path.stat().st_size
+                file_size_mb = file_size_bytes / (1024 * 1024)
+                logger.debug("Hashing [%d/%d]: %s (%.0f MB)", i + 1, total, rel_path, file_size_mb)
 
-            def on_chunk(chunk_bytes_read, chunk_total, _rel=rel_path, _i=i,
-                         _base=bytes_hashed, _fmb=file_size_mb):
-                nonlocal last_pct
-                overall = _base + chunk_bytes_read
-                pct = int(overall / total_bytes * 100) if total_bytes > 0 else 0
-                if pct != last_pct:
-                    last_pct = pct
-                    chunk_pct = int(chunk_bytes_read / chunk_total * 100) if chunk_total > 0 else 100
-                    self.progress_updated.emit(
-                        pct,
-                        f"[{_i + 1}/{total}] {_rel} ({_fmb:.0f} MB) — {chunk_pct}%"
-                    )
+                def on_chunk(chunk_bytes_read, chunk_total, _rel=rel_path, _i=i,
+                             _base=bytes_hashed, _fmb=file_size_mb):
+                    nonlocal last_pct
+                    overall = _base + chunk_bytes_read
+                    pct = int(overall / total_bytes * 100) if total_bytes > 0 else 0
+                    if pct != last_pct:
+                        last_pct = pct
+                        chunk_pct = int(chunk_bytes_read / chunk_total * 100) if chunk_total > 0 else 100
+                        self.progress_updated.emit(
+                            pct,
+                            f"[{_i + 1}/{total}] {_rel} ({_fmb:.0f} MB) — {chunk_pct}%"
+                        )
 
-            file_hash, file_size = hash_file(abs_path, progress_callback=on_chunk)
-            bytes_hashed += file_size
+                file_hash, file_size = hash_file(abs_path, progress_callback=on_chunk)
+                bytes_hashed += file_size
 
-            self._thread_db.connection.execute(
-                "INSERT OR REPLACE INTO snapshots (file_path, file_hash, file_size) "
-                "VALUES (?, ?, ?)",
-                (rel_path, file_hash, file_size),
-            )
+                self._thread_db.connection.execute(
+                    "INSERT OR REPLACE INTO snapshots (file_path, file_hash, file_size) "
+                    "VALUES (?, ?, ?)",
+                    (rel_path, file_hash, file_size),
+                )
 
-            pct = int(bytes_hashed / total_bytes * 100) if total_bytes > 0 else 0
-            self.progress_updated.emit(pct, f"[{i + 1}/{total}] {rel_path} — done")
-            logger.debug("Hashed: %s -> %s", rel_path, file_hash[:16])
-            time.sleep(0)  # yield GIL so GUI stays responsive
+                pct = int(bytes_hashed / total_bytes * 100) if total_bytes > 0 else 0
+                self.progress_updated.emit(pct, f"[{i + 1}/{total}] {rel_path} — done")
+                logger.debug("Hashed: %s -> %s", rel_path, file_hash[:16])
+                time.sleep(0)  # yield GIL so GUI stays responsive
 
-        self._thread_db.connection.commit()
+            self._thread_db.connection.commit()
+        except Exception:
+            # Rollback the open transaction so the snapshot table
+            # falls back to its prior state (no partial baseline).
+            try:
+                self._thread_db.connection.rollback()
+            except Exception:
+                pass
+            raise
         logger.info("Snapshot complete: %d files hashed", total)
         self.finished.emit(total)
 
@@ -411,8 +447,23 @@ class SnapshotWorker(QObject):
                 rel = str(backup.relative_to(vanilla_dir)).replace("\\", "/")
                 game_file = self._game_dir / rel.replace("/", os.sep)
                 if game_file.exists():
+                    # First quick reject: size mismatch.
                     if game_file.stat().st_size != backup.stat().st_size:
                         stale_backups.append(backup)
+                        continue
+                    # Same size doesn't prove same content — many delta
+                    # patches preserve byte length. A modded PAZ that
+                    # happens to match vanilla size silently survived
+                    # the stale-backup sweep, then got promoted as the
+                    # vanilla baseline on the next snapshot. Verify
+                    # content with a streamed byte-compare. Round 8
+                    # audit catch.
+                    try:
+                        if not _files_equal_streamed(game_file, backup):
+                            stale_backups.append(backup)
+                    except OSError as _e:
+                        logger.debug(
+                            "stale-backup compare skip %s (%s)", rel, _e)
             if stale_backups:
                 # Backups are from an old game version — delete them
                 for b in stale_backups:
@@ -453,7 +504,10 @@ class SnapshotManager:
         changes: list[tuple[str, str]] = []
         cursor = self._db.connection.execute("SELECT file_path, file_hash FROM snapshots")
         for rel_path, stored_hash in cursor.fetchall():
-            abs_path = game_dir / rel_path.replace("/", os.sep)
+            # Path's `/` operator already handles posix-to-native
+            # separator translation; the explicit replace was Windows-
+            # only and would break on a future Linux/Mac port.
+            abs_path = game_dir / rel_path
             if not abs_path.exists():
                 changes.append((rel_path, "deleted"))
             else:

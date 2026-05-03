@@ -77,8 +77,21 @@ def lz4_decompress(data: bytes, original_size: int) -> bytes:
     return lz4.block.decompress(data, uncompressed_size=original_size)
 
 
+_LZ4_MAX_INPUT_SIZE = 0x7E000000  # 2,113,929,216 bytes (~2.0 GiB)
+
+
 def lz4_compress(data: bytes) -> bytes:
     """LZ4 block compression (no frame header, matching game format)."""
+    # LZ4 block format limits a single compressed buffer to
+    # LZ4_MAX_INPUT_SIZE bytes. Beyond that the underlying lz4 lib
+    # raises an opaque error far downstream. Surface a clear failure
+    # so the user knows which entry can't be packed (Round 8 audit).
+    if len(data) > _LZ4_MAX_INPUT_SIZE:
+        raise ValueError(
+            f"LZ4 input size {len(data):,} bytes exceeds the format "
+            f"limit ({_LZ4_MAX_INPUT_SIZE:,} bytes ~= 2.0 GiB). "
+            f"Single PAZ entries this large can't be compressed."
+        )
     if _HAS_NATIVE:
         return _native.lz4_compress(data)
     import lz4.block

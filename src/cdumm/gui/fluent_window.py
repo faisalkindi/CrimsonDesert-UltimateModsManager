@@ -3163,7 +3163,16 @@ class CdummWindow(FluentWindow):
                     pass  # handled in _on_finished
 
         def _on_finished(exit_code, exit_status):
-            tip.setContent(f"Completed! {len(_batch_results)}/{total} imported")
+            from PySide6.QtCore import QProcess as _QProcess
+            crashed = exit_status == _QProcess.CrashExit
+            if crashed:
+                tip.setContent(
+                    f"Batch import worker crashed (exit code {exit_code})"
+                )
+            else:
+                tip.setContent(
+                    f"Completed! {len(_batch_results)}/{total} imported"
+                )
             tip.setState(True)
             proc.deleteLater()
             self._active_worker = None
@@ -3373,13 +3382,11 @@ class CdummWindow(FluentWindow):
                 treat_as_dup = True
                 if match_level == "near":
                     near_box = MessageBox(
-                        "Similar Mod Detected",
-                        f"The mod you're importing looks similar to "
-                        f"'{mname}' which is already installed.\n\n"
-                        f"Is this an update to that mod, or a separate mod?",
+                        tr("import.similar_mod_title"),
+                        tr("import.similar_mod_body", name=mname),
                         self)
-                    near_box.yesButton.setText("Update existing")
-                    near_box.cancelButton.setText("Import as new")
+                    near_box.yesButton.setText(tr("import.update_existing"))
+                    near_box.cancelButton.setText(tr("import.import_as_new"))
                     if not near_box.exec():
                         # 'Import as new' — bypass the dup flow entirely
                         treat_as_dup = False
@@ -4234,6 +4241,24 @@ class CdummWindow(FluentWindow):
             self._active_worker = None
             self._active_progress = None
 
+            # If the worker subprocess crashed (segfault / unhandled
+            # native exception) without emitting a JSON `done`/`error`
+            # line, the previous code silently flowed into the success
+            # branch and showed "Import succeeded". Catch CrashExit
+            # explicitly so the user sees the real failure mode.
+            # Round 4 GUI/worker audit catch.
+            from PySide6.QtCore import QProcess as _QProcess
+            if exit_status == _QProcess.CrashExit:
+                if not getattr(self, '_import_result_error', None):
+                    self._import_result_error = (
+                        f"Import worker crashed (exit code {exit_code}). "
+                        f"This usually means a native extension hit a "
+                        f"segfault or the worker was killed externally. "
+                        f"Try the import again; if it persists, attach "
+                        f"the bug report and the cdumm_worker.log file "
+                        f"to a new GitHub issue."
+                    )
+
             err = getattr(self, '_import_result_error', None)
             name = getattr(self, '_import_result_name', path.stem)
 
@@ -4578,9 +4603,57 @@ class CdummWindow(FluentWindow):
         proc.readyReadStandardOutput.connect(_on_stdout)
         proc.readyReadStandardError.connect(_on_stderr)
         proc.finished.connect(_on_finished)
+
+        # Stall watchdog mirrored from _run_qprocess. Without this the
+        # import can hang forever (silent 7z deadlock, infinite-loop in
+        # an inner archive scan, etc.) and the user sees a frozen
+        # progress tip with no way out. Round 4 GUI/worker audit catch.
+        # Threshold is more lenient than apply (5 min vs 3 min) because
+        # large multi-variant archives can legitimately take a while
+        # to extract + parse.
+        import time as _time
+        from PySide6.QtCore import QTimer as _QTimer
+        IMPORT_STALL_THRESHOLD_S = 300
+        _wd_state = {"last_activity": _time.time(), "killed": False}
+        _wd_orig_on_stdout = _on_stdout
+
+        def _on_stdout_with_wd():
+            _wd_state["last_activity"] = _time.time()
+            _wd_orig_on_stdout()
+        try:
+            proc.readyReadStandardOutput.disconnect(_on_stdout)
+        except (RuntimeError, TypeError):
+            pass
+        proc.readyReadStandardOutput.connect(_on_stdout_with_wd)
+
+        watchdog = _QTimer(self)
+        watchdog.setInterval(5000)
+
+        def _on_wd_tick():
+            if _wd_state["killed"]:
+                return
+            elapsed = _time.time() - _wd_state["last_activity"]
+            if elapsed > IMPORT_STALL_THRESHOLD_S and proc.state() != 0:
+                _wd_state["killed"] = True
+                watchdog.stop()
+                logger.error(
+                    "Import watchdog: no progress for %ss, killing PID %s",
+                    int(elapsed), proc.processId())
+                proc.kill()
+                self._import_result_error = (
+                    f"Import stalled for over {IMPORT_STALL_THRESHOLD_S}s "
+                    f"with no progress and was stopped. Drop the mod "
+                    f"again, or open it in 7-Zip first to verify the "
+                    f"archive isn't corrupt."
+                )
+        watchdog.timeout.connect(_on_wd_tick)
+        # Stop watchdog when proc finishes
+        proc.finished.connect(lambda *_: watchdog.stop())
+
         _probe_console_state("before proc.start(exe, args)")
         proc.start(exe, args)
         _probe_console_state("after proc.start(exe, args)")
+        watchdog.start()
         logger.info("Import QProcess started: PID %s exe=%s args=%s",
                      proc.processId(), exe, args)
 
@@ -5020,13 +5093,8 @@ class CdummWindow(FluentWindow):
         )
         if is_apply_blocked_by_stale_snapshot(self._startup_context):
             InfoBar.error(
-                title="Rescan required",
-                content=(
-                    "Crimson Desert was updated since your last "
-                    "snapshot. Apply is locked until you run Rescan "
-                    "Game Files — otherwise mods land on the wrong "
-                    "bytes and won't work. Use the Rescan panel in "
-                    "the sidebar to unlock Apply."),
+                title=tr("apply.rescan_required_title"),
+                content=tr("apply.rescan_required_body"),
                 duration=-1, position=InfoBarPosition.TOP, parent=self)
             return
 
@@ -5034,7 +5102,7 @@ class CdummWindow(FluentWindow):
             return
 
         logger.info("Apply requested")
-        tip = self._make_state_tooltip("Applying mods...")
+        tip = self._make_state_tooltip(tr("apply.tip_in_progress"))
 
         def on_apply_done(msgs):
             # Check for errors
@@ -5105,15 +5173,14 @@ class CdummWindow(FluentWindow):
             return
 
         box = MessageBox(
-            "Revert to Vanilla",
-            "This will restore all game files to their original state.\n"
-            "All applied mod changes will be removed.\n\nContinue?",
+            tr("revert.dialog_title"),
+            tr("revert.dialog_body"),
             self,
         )
         if not box.exec():
             return
 
-        tip = self._make_state_tooltip("Reverting to vanilla...")
+        tip = self._make_state_tooltip(tr("revert.tip_in_progress"))
 
         def on_revert_msg(msg):
             if msg.get("type") == "warning":
@@ -5757,6 +5824,24 @@ class CdummWindow(FluentWindow):
                         threshold_s=APPLY_STALL_THRESHOLD_S)})
                 on_done(_msgs)
                 return
+            # Detect native worker crash (segfault / unhandled C
+            # exception). When the worker dies without emitting any
+            # `done`/`error` JSON, _msgs may be empty and downstream
+            # handlers would silently report success. Synthesize an
+            # error entry so on_done sees the failure. Round 4
+            # GUI/worker audit catch.
+            from PySide6.QtCore import QProcess as _QProcess
+            if exit_status == _QProcess.CrashExit:
+                _msgs.append({
+                    "type": "error",
+                    "msg": (
+                        f"{worker_args[0].capitalize()} worker crashed "
+                        f"(exit code {exit_code}). Likely a native "
+                        f"extension hit a segfault. Try again; if it "
+                        f"persists, attach the bug report and "
+                        f"cdumm_worker.log to a new GitHub issue."
+                    )
+                })
             # Guard against the case where the user closed the main
             # window while apply was still running. By the time this
             # finished-handler fires, Qt may have already deleted the
@@ -6612,6 +6697,21 @@ class CdummWindow(FluentWindow):
 
     def closeEvent(self, event) -> None:
         """Clean shutdown -- stop timers, quit threads, close DB, remove lock."""
+        # Kill any active worker QProcess so it doesn't outlive the GUI
+        # and continue writing to the DB. Earlier closeEvent only
+        # stopped QThreads, leaving QProcess children running until
+        # they finished naturally — orphan processes could collide
+        # with the next instance's worker. Round 4 GUI/worker audit.
+        active_worker = getattr(self, "_active_worker", None)
+        if active_worker is not None:
+            try:
+                from PySide6.QtCore import QProcess as _QProcess
+                if isinstance(active_worker, _QProcess):
+                    if active_worker.state() != _QProcess.NotRunning:
+                        active_worker.kill()
+                        active_worker.waitForFinished(3000)
+            except (RuntimeError, Exception) as _e:
+                logger.debug("Active worker kill failed: %s", _e)
         # Stop the SystemThemeListener FIRST — it's a background thread
         # that can hold references during Qt teardown if left running.
         listener = getattr(self, "_theme_listener", None)

@@ -262,11 +262,24 @@ def detect_json_patches_all(path: Path) -> list[dict]:
             if (isinstance(data, dict)
                     and "patches" in data
                     and isinstance(data["patches"], list)
-                    and len(data["patches"]) > 0
-                    and "game_file" in data["patches"][0]
-                    and "changes" in data["patches"][0]):
-                data["_json_path"] = candidate
-                valid.append(data)
+                    and len(data["patches"]) > 0):
+                # Validate at least one patch entry has the required
+                # shape, not just patches[0]. Earlier the check was
+                # `patches[0] in dict and "game_file" in patches[0]`,
+                # which raised TypeError when patches[0] was None or
+                # a non-dict (caught by the outer except, dropping
+                # the whole file). Now a malformed first entry no
+                # longer hides valid sibling entries. Round 10 audit.
+                any_valid = False
+                for p in data["patches"]:
+                    if (isinstance(p, dict)
+                            and "game_file" in p
+                            and "changes" in p):
+                        any_valid = True
+                        break
+                if any_valid:
+                    data["_json_path"] = candidate
+                    valid.append(data)
         except Exception:
             continue
 
@@ -1104,8 +1117,14 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
         # Absolute also failed — re-restore the sig-relative skip
         # records so the user sees the original failure shape, then
         # return the original (zero-success) result.
-        # No state restore needed for the buffer (it was never
-        # successfully written to in either pass).
+        # The buffer claim "never successfully written" was wrong:
+        # the absolute pass can mutate `data` via fallback-offset
+        # and pattern-scan paths even when its overall return is
+        # `applied == 0`, because those write before the final
+        # mismatch elsewhere. Restore the buffer to the pre-apply
+        # snapshot so the caller doesn't write a corrupted overlay.
+        # Round 4 mount-time audit MEDIUM-1.
+        data[:] = _orig_data
 
     return applied, mismatched, relocated
 

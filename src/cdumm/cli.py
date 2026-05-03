@@ -226,8 +226,17 @@ def cmd_apply(args):
         errors.append(msg)
         print(f"ERROR: {msg}", file=sys.stderr)
 
+    def on_warning(msg):
+        # Loop R1: ApplyWorker.warning carries soft warnings (size-merge
+        # fallback drops, vanilla extraction failures from #62, etc.).
+        # GUI surfaces them via InfoBar; CLI must print to stderr or
+        # users debugging via headless apply will not see why their mod
+        # silently produced no changes.
+        print(f"WARNING: {msg}", file=sys.stderr)
+
     worker.progress_updated.connect(on_progress)
     worker.error_occurred.connect(on_error)
+    worker.warning.connect(on_warning)
 
     worker.run()
 
@@ -236,6 +245,70 @@ def cmd_apply(args):
     else:
         print("Apply complete.", file=sys.stderr)
         sys.exit(0)
+
+
+def cmd_launch_game(args):
+    """GitHub #63: apply enabled mods, then launch the game.
+
+    Fail-fast: if apply emits any error, exit non-zero WITHOUT
+    launching the game. Users on handheld devices (Steam Deck, ROG
+    Ally) register CDUMM as a non-Steam launcher and press Play
+    once; launching into a broken state would be worse than
+    surfacing the apply error.
+    """
+    game_dir = _resolve_game_dir(args.game_dir)
+    if not game_dir:
+        print("Error: cannot find game directory. Use --game-dir.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    db_path = game_dir / "CDMods" / "cdumm.db"
+    if not db_path.exists():
+        print(f"Error: database not found at {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    vanilla_dir = game_dir / "CDMods" / "vanilla"
+
+    from cdumm.engine.apply_engine import ApplyWorker
+
+    worker = ApplyWorker(game_dir, vanilla_dir, db_path, force_outdated=False)
+
+    errors = []
+
+    def on_progress(pct, msg):
+        print(f"[{pct:3d}%] {msg}", file=sys.stderr)
+
+    def on_error(msg):
+        errors.append(msg)
+        print(f"ERROR: {msg}", file=sys.stderr)
+
+    def on_warning(msg):
+        # Loop R1: surface soft warnings to stderr (same reason as
+        # cmd_apply — handheld users running --launch-game from a
+        # script need to see real warnings, not just success/error).
+        print(f"WARNING: {msg}", file=sys.stderr)
+
+    worker.progress_updated.connect(on_progress)
+    worker.error_occurred.connect(on_error)
+    worker.warning.connect(on_warning)
+
+    worker.run()
+
+    if errors:
+        print("Apply failed; not launching game.", file=sys.stderr)
+        sys.exit(1)
+
+    print("Apply complete; launching game...", file=sys.stderr)
+    try:
+        from cdumm.engine import launcher
+        launcher.launch_game(game_dir)
+    except FileNotFoundError as e:
+        print(f"Launch failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Launch failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
 
 
 def cmd_bisect(args):
@@ -443,6 +516,12 @@ def main():
     p_apply = sub.add_parser("apply", help="Apply current mod state to game files")
     p_apply.add_argument("--game-dir", default=None, help="Game directory override")
 
+    # launch-game (GitHub #63: handheld one-shot)
+    p_launch = sub.add_parser(
+        "launch-game",
+        help="Apply enabled mods then launch Crimson Desert (fail-fast on apply error)")
+    p_launch.add_argument("--game-dir", default=None, help="Game directory override")
+
     # cleanup-duplicates
     p_dedup = sub.add_parser(
         "cleanup-duplicates",
@@ -467,6 +546,8 @@ def main():
         cmd_set_enabled(args)
     elif args.command == "apply":
         cmd_apply(args)
+    elif args.command == "launch-game":
+        cmd_launch_game(args)
     elif args.command == "bisect":
         cmd_bisect(args)
     elif args.command == "cleanup-duplicates":

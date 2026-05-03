@@ -132,11 +132,35 @@ def _serialize_drop_entry(drop: ItemDrop) -> bytes:
     buf += struct.pack("<Q", max(0, drop.min_amt))
     buf += struct.pack("<H", drop.unk3_flags)
     buf += struct.pack("<I", drop.item_key_dup)
-    if drop.unk4 == 13 and drop.extra_u8 is not None:
+    # Tagged-trailer guards. Earlier the conditions silently passed
+    # (no trailer emitted) when the tagged field was None, which let
+    # FIX 16's `_drop_dict_to_item_drop` produce short records when
+    # the JSON intent specified `unk4=7|10|13` without the matching
+    # trailer field AND the template either didn't exist (empty
+    # parsed.drops) or had a different unk4. Effect: serialized
+    # record was 1 / 4 / 28 bytes short and every subsequent record
+    # in the table shifted, corrupting the entire DropSet body.
+    # Round 4 audit catch.
+    if drop.unk4 == 13:
+        if drop.extra_u8 is None:
+            raise ValueError(
+                f"unk4=13 requires extra_u8 (u8 trailing byte) but "
+                f"none was provided for item_key={drop.item_key}"
+            )
         buf.append(drop.extra_u8 & 0xFF)
-    elif drop.unk4 == 10 and drop.extra_u32 is not None:
+    elif drop.unk4 == 10:
+        if drop.extra_u32 is None:
+            raise ValueError(
+                f"unk4=10 requires extra_u32 (u32 trailing word) but "
+                f"none was provided for item_key={drop.item_key}"
+            )
         buf += struct.pack("<I", drop.extra_u32)
-    elif drop.unk4 == 7 and drop.friendly_data is not None:
+    elif drop.unk4 == 7:
+        if drop.friendly_data is None:
+            raise ValueError(
+                f"unk4=7 requires friendly_data (28-byte trailer) but "
+                f"none was provided for item_key={drop.item_key}"
+            )
         if len(drop.friendly_data) != 28:
             raise ValueError(
                 f"friendly_data must be 28 bytes, got "
@@ -221,11 +245,48 @@ def _drop_dict_to_item_drop(
     NattKh's add_item helper at dropset_editor.py:270 uses the same
     template-fallback pattern.
     """
+    # Tagged-extras (unk4 + its trailing block) MUST fall back to the
+    # template, not default to 0/None. NattKh's exports only include
+    # the user-meaningful fields (item_key, rates, min/max amount); the
+    # tagged trailers (28-byte friendly_data for unk4=7, u32 for
+    # unk4=10, u8 for unk4=13) are part of the binary record layout.
+    # Defaulting them to 0/None on `op=set` strips the trailer, makes
+    # the record the wrong byte length, and shifts every subsequent
+    # record. DropSet_Friendly_Talk mods (Trust Me workalike) gave 0
+    # friendship in-game because of this. kori228's #58 report
+    # 2026-05-01.
+    if "unk4" in d:
+        unk4 = int(d["unk4"])
+    elif template is not None:
+        unk4 = template.unk4
+    else:
+        unk4 = 0
+    if "extra_u8" in d:
+        extra_u8 = d["extra_u8"]
+    elif template is not None and template.unk4 == unk4:
+        extra_u8 = template.extra_u8
+    else:
+        extra_u8 = None
+    if "extra_u32" in d:
+        extra_u32 = d["extra_u32"]
+    elif template is not None and template.unk4 == unk4:
+        extra_u32 = template.extra_u32
+    else:
+        extra_u32 = None
+    if "friendly_data" in d:
+        fd = d["friendly_data"]
+        if isinstance(fd, str):
+            fd = bytes.fromhex(fd)
+        friendly_data = fd
+    elif template is not None and template.unk4 == unk4:
+        friendly_data = template.friendly_data
+    else:
+        friendly_data = None
     return ItemDrop(
         flag=d.get("flag", template.flag if template else 1),
         item_key=int(d["item_key"]),
         unk3=d.get("unk3", template.unk3 if template else 0),
-        unk4=d.get("unk4", 0),  # default 0: no extra tagged data
+        unk4=unk4,
         unk1_flag=(template.unk1_flag if template else b"\x00" * 5),
         unk_cond_flag=d.get(
             "unk_cond_flag",
@@ -240,9 +301,9 @@ def _drop_dict_to_item_drop(
         min_amt=int(d.get("min_amt", 0)),
         unk3_flags=int(d.get("unk3_flags", 0xFFFF)),
         item_key_dup=int(d.get("item_key_dup", d["item_key"])),
-        extra_u8=d.get("extra_u8"),
-        extra_u32=d.get("extra_u32"),
-        friendly_data=None,
+        extra_u8=extra_u8,
+        extra_u32=extra_u32,
+        friendly_data=friendly_data,
     )
 
 
@@ -277,10 +338,21 @@ def build_drops_replacement_change(
     header_len = 4 + 4 + len(name_bytes)  # key u32 + name_len u32 + name
 
     template = parsed.drops[0] if parsed.drops else None
-    parsed.drops = [
-        _drop_dict_to_item_drop(d, template) for d in new_drops_json
-    ]
-    new_record = serialize_dropset_record(parsed)
+    try:
+        parsed.drops = [
+            _drop_dict_to_item_drop(d, template) for d in new_drops_json
+        ]
+        new_record = serialize_dropset_record(parsed)
+    except (ValueError, KeyError, TypeError) as e:
+        # Trailer mismatch (FIX 17 guard), missing required JSON
+        # field, or bad type. Surface as a skipped change with a log
+        # line; the apply pipeline gracefully treats `None` as "no
+        # change emitted" rather than crashing the whole pass.
+        import logging
+        logging.getLogger(__name__).warning(
+            "dropset writer: build_drops_replacement_change failed "
+            "for entry=%r key=%d: %s", intent_entry, intent_key, e)
+        return None
 
     if record_bytes[:header_len] != new_record[:header_len]:
         # Header changed (e.g., name rewritten). The current writer

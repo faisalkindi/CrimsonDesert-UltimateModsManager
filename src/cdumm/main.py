@@ -535,13 +535,21 @@ def main() -> int:
     splash.showMessage("  Loading game schemas...", 0x0081)
     app.processEvents()
 
+    # Bug B (Nexus 2026-05-03): users report startup hangs with the
+    # exe alive in Task Manager. Without log breadcrumbs we cannot
+    # tell which step blocked. Log INFO before each heavy step so the
+    # user's cdumm.log shows exactly where startup stopped.
+    logger.info("Startup: loading game schemas")
     # Load semantic schemas eagerly so they're available for all operations
     try:
         from cdumm.semantic.parser import init_schemas
         schema_count = init_schemas()
         logger.info("Semantic schemas: %d tables loaded", schema_count)
     except Exception as e:
-        logger.debug("Semantic schemas unavailable: %s", e)
+        # Was logger.debug — bumped to warning so silent schema-load
+        # failures surface in default logs (Rank 1 hypothesis for the
+        # Pr0nt / gabagoolboi47 launch crash).
+        logger.warning("Semantic schemas unavailable: %s", e)
 
     splash.showMessage("  Checking game state...", 0x0081)
     app.processEvents()
@@ -564,6 +572,10 @@ def main() -> int:
         from cdumm.engine.version_detector import (
             backfill_stored_fingerprints, detect_game_version,
         )
+        # Bug B breadcrumb: AV scanning the game .exe can block this
+        # call for tens of seconds; log so we can tell from logs that
+        # we got here.
+        logger.info("Startup: backfilling fingerprints")
         backfill_stored_fingerprints(db, game_path)
 
         # Check game version fingerprint (fast — just reads a config value)
@@ -575,9 +587,14 @@ def main() -> int:
     splash.showMessage("  Building UI...", 0x0081)
     app.processEvents()
 
+    # Bug B breadcrumb: CdummWindow constructor is heavy (loads icons,
+    # initializes pages, scans mods). Hangs here would otherwise show
+    # only "Building UI..." in the splash with no log evidence.
+    logger.info("Startup: building main window")
     from cdumm.gui.fluent_window import CdummWindow
     window = CdummWindow(db=db, game_dir=game_path, app_data_dir=APP_DATA_DIR,
                          startup_context=startup_context)
+    logger.info("Startup: main window constructed; showing")
     window.show()
     splash.finish(window)
 
@@ -617,7 +634,7 @@ if __name__ == "__main__":
             from cdumm.worker_process import worker_main
             worker_main(sys.argv[2:])
         # CLI mode: if first arg is a known subcommand, skip GUI entirely
-        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect", "cleanup-duplicates"}:
+        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect", "cleanup-duplicates", "launch-game"}:
             from cdumm.cli import main as cli_main
             cli_main()
         # nxm:// URL handler — Windows fires this when the user clicks

@@ -131,6 +131,7 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
         return None
 
     # Handle patches_dir: read JSON patches and process via json_patch_handler
+    patches_succeeded = 0
     if has_patches:
         from cdumm.engine.json_patch_handler import convert_json_patch_to_paz
         for patch_file in patches_dir.rglob("*.json"):
@@ -144,14 +145,19 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
                 if "patches" in patch_data:
                     result = convert_json_patch_to_paz(patch_data, game_dir, work_dir)
                     if result:
+                        patches_succeeded += 1
                         logger.info("Sharp mod: applied patches from %s", patch_file.name)
             except Exception as e:
                 logger.warning("Sharp mod: failed to apply patch %s: %s",
                                patch_file.name, e)
 
     if not has_files:
-        # Patches-only mod — return work_dir if patches produced output
-        if any(work_dir.iterdir()):
+        # Patches-only mod. Earlier this checked `any(work_dir.iterdir())`
+        # which would treat partial leftovers from a failed
+        # convert_json_patch_to_paz call as success. Track explicit
+        # success counts instead — only return work_dir when at least
+        # one patch actually produced output. Round 10 audit catch.
+        if patches_succeeded > 0:
             return work_dir
         return None
 
@@ -163,8 +169,22 @@ def convert_to_paz_mod(manifest: dict, game_dir: Path, work_dir: Path) -> Path |
     unresolved: list[tuple[str, Path]] = []
 
     _SKIP_FILES = {"mod.json", "manifest.json", "modinfo.json"}
+    files_dir_resolved = files_dir.resolve()
     for f in files_dir.rglob("*"):
         if not f.is_file() or f.name.lower() in _SKIP_FILES:
+            continue
+        # Symlink / junction safety: rglob follows links by default
+        # on Windows, so a malicious mod ZIP with a symlink under
+        # files/ pointing outside the extracted dir could expose
+        # arbitrary filesystem content via subsequent read_bytes().
+        # Round 10 audit catch.
+        try:
+            f_resolved = f.resolve()
+            f_resolved.relative_to(files_dir_resolved)
+        except (ValueError, OSError):
+            logger.warning(
+                "CB import: skipping %s (resolves outside files_dir, "
+                "possible symlink escape)", f)
             continue
         rel = f.relative_to(files_dir)
         parts = rel.parts

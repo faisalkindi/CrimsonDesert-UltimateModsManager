@@ -176,3 +176,115 @@ def test_revert_no_backups(tmp_path: Path) -> None:
     assert len(errors) == 1
     assert "No vanilla" in errors[0]
     db.close()
+
+
+def _seed_two_enabled_mods(db: Database) -> None:
+    db.connection.execute(
+        "INSERT INTO mods (id, name, mod_type, enabled, priority) "
+        "VALUES (1, 'ModA', 'paz', 1, 1)"
+    )
+    db.connection.execute(
+        "INSERT INTO mods (id, name, mod_type, enabled, priority) "
+        "VALUES (2, 'ModB', 'paz', 1, 2)"
+    )
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end) "
+        "VALUES (1, 'gamedata/x.pabgb', 'a.delta', 0, 10)"
+    )
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, byte_start, byte_end) "
+        "VALUES (2, 'gamedata/x.pabgb', 'b.delta', 0, 10)"
+    )
+    db.connection.execute(
+        "INSERT INTO mod_config (mod_id, custom_values) VALUES (1, '{\"k\":1}')"
+    )
+    db.connection.commit()
+
+
+def test_apply_fingerprint_changes_on_priority_swap(tmp_path: Path) -> None:
+    """GitHub #59: swapping priority between two enabled mods must change
+    the apply fingerprint so the next Apply re-runs instead of fast-pathing
+    'Already up to date'."""
+    game_dir, vanilla_dir, db = _setup_apply_test(tmp_path)
+    _seed_two_enabled_mods(db)
+
+    worker = ApplyWorker(game_dir, vanilla_dir, db.db_path)
+    worker._db = db  # _compute_apply_fingerprint expects _db (set in run())
+    fp_before = worker._compute_apply_fingerprint()
+
+    # Swap priorities (drag-reorder simulation)
+    db.connection.execute("UPDATE mods SET priority = 2 WHERE id = 1")
+    db.connection.execute("UPDATE mods SET priority = 1 WHERE id = 2")
+    db.connection.commit()
+
+    fp_after = worker._compute_apply_fingerprint()
+    assert fp_before != fp_after, (
+        "Apply fingerprint must include priority — otherwise reorder is "
+        "silently skipped by the 'already up to date' fast-path."
+    )
+    db.close()
+
+
+def test_apply_fingerprint_changes_on_custom_values_edit(tmp_path: Path) -> None:
+    """Editing a custom value (e.g. inventory expand slots) must change the
+    fingerprint — aggregator at apply_engine.py:254 reads custom_values."""
+    game_dir, vanilla_dir, db = _setup_apply_test(tmp_path)
+    _seed_two_enabled_mods(db)
+
+    worker = ApplyWorker(game_dir, vanilla_dir, db.db_path)
+    worker._db = db  # _compute_apply_fingerprint expects _db (set in run())
+    fp_before = worker._compute_apply_fingerprint()
+
+    db.connection.execute(
+        "UPDATE mod_config SET custom_values = '{\"k\":99}' WHERE mod_id = 1"
+    )
+    db.connection.commit()
+
+    fp_after = worker._compute_apply_fingerprint()
+    assert fp_before != fp_after, (
+        "Apply fingerprint must include mod_config.custom_values."
+    )
+    db.close()
+
+
+def test_apply_fingerprint_changes_on_conflict_mode_flip(tmp_path: Path) -> None:
+    """conflict_mode='override' is checked at apply_engine.py:3777 — flipping
+    it changes apply order, so it must change the fingerprint."""
+    game_dir, vanilla_dir, db = _setup_apply_test(tmp_path)
+    _seed_two_enabled_mods(db)
+
+    worker = ApplyWorker(game_dir, vanilla_dir, db.db_path)
+    worker._db = db  # _compute_apply_fingerprint expects _db (set in run())
+    fp_before = worker._compute_apply_fingerprint()
+
+    db.connection.execute(
+        "UPDATE mods SET conflict_mode = 'override' WHERE id = 1"
+    )
+    db.connection.commit()
+
+    fp_after = worker._compute_apply_fingerprint()
+    assert fp_before != fp_after, (
+        "Apply fingerprint must include conflict_mode."
+    )
+    db.close()
+
+
+def test_apply_fingerprint_changes_on_force_inplace_flip(tmp_path: Path) -> None:
+    """force_inplace toggles the overlay-vs-inplace path at apply_engine.py:2287."""
+    game_dir, vanilla_dir, db = _setup_apply_test(tmp_path)
+    _seed_two_enabled_mods(db)
+
+    worker = ApplyWorker(game_dir, vanilla_dir, db.db_path)
+    worker._db = db  # _compute_apply_fingerprint expects _db (set in run())
+    fp_before = worker._compute_apply_fingerprint()
+
+    db.connection.execute(
+        "UPDATE mods SET force_inplace = 1 WHERE id = 1"
+    )
+    db.connection.commit()
+
+    fp_after = worker._compute_apply_fingerprint()
+    assert fp_before != fp_after, (
+        "Apply fingerprint must include force_inplace."
+    )
+    db.close()

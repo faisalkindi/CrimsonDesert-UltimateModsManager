@@ -37,7 +37,11 @@ def test_mod(
     mod_name = mod_path.stem
     result = ModTestResult(mod_name)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # R2 follow-up to Bug E: route staging under game_dir/CDMods so
+    # large mods being analyzed don't fill C:/ when %TEMP% is on a
+    # different drive than the game install.
+    from cdumm.engine.import_handler import import_staging_dir
+    with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         deltas_dir = tmp_path / "deltas"
 

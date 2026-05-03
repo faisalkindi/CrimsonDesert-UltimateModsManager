@@ -437,7 +437,29 @@ def _intents_to_v2_changes(
             continue
 
         original_bytes = bytes(vanilla_body[abs_off:abs_off + size])
-        rel_offset = abs_off - entry_off
+        # rel_offset must be in the same coordinate system as the apply
+        # pipeline's `_build_name_offsets_generic`, which anchors entry
+        # names at `name_end` (= entry_off + eid_size + 4 + name_len).
+        # Earlier this emitted `abs_off - entry_off` (record-start
+        # relative), causing the apply to land `8 + name_len` bytes
+        # past the target field on every primitive Format 3 intent.
+        # Bug from Faisal's Can It Stack JSON V3 test 2026-05-01: 1812
+        # of 1827 max_stack_count patches mismatched because they were
+        # reading bytes from adjacent string fields. Latent since
+        # v3.2.3 when Format 3 primitive support shipped — the
+        # ZirconX1 / Lichtnocht "applies cleanly but doesn't work
+        # in-game" reports trace here.
+        if no_entry_header:
+            # No name field, so the apply pipeline can't use name_end.
+            # Keep entry_off as the anchor (matches the no_entry_header
+            # case in _payload_offset).
+            rel_offset = abs_off - entry_off
+        else:
+            eid_size = 2 if key_size == 2 else 4
+            _name_len = struct.unpack_from(
+                "<I", vanilla_body, entry_off + eid_size)[0]
+            name_end = entry_off + eid_size + 4 + _name_len
+            rel_offset = abs_off - name_end
 
         out.append({
             "entry": entry_name or intent.entry,

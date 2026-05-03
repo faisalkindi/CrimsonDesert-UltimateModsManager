@@ -163,6 +163,9 @@ def get_rate_limit_snapshot() -> dict[str, str]:
     return dict(_last_rate_limit)
 
 
+_rate_limited_until: float = 0.0
+
+
 def _api_request(endpoint: str, api_key: str) -> dict | list:
     """Make an authenticated request to the NexusMods API.
 
@@ -173,8 +176,22 @@ def _api_request(endpoint: str, api_key: str) -> dict | list:
 
     Raises :class:`NexusPremiumRequired` on HTTP 403 from endpoints that
     gate behind a premium membership (currently only download_link).
+    Raises :class:`NexusRateLimited` immediately (without making a
+    network call) when a previous response set a 429 cooldown that
+    hasn't elapsed yet, to avoid burning further quota by hammering
+    the API while it's already rejecting us.
     """
+    global _rate_limited_until
     import ssl
+    import time as _time
+    if _rate_limited_until > _time.time():
+        # Skip the network call and surface the in-flight cooldown.
+        # Round 11 audit: previously every retry immediately fired
+        # another N requests when the rate limit was already known
+        # to be exceeded.
+        raise NexusRateLimited(
+            "Nexus rate limit cooldown still active",
+            reset_at=int(_rate_limited_until))
     url = f"{BASE_URL}{endpoint}"
     headers = {
         "apikey": api_key,
@@ -222,6 +239,14 @@ def _api_request(endpoint: str, api_key: str) -> dict | list:
                 reset_at = 0
             logger.warning("nexus rate limit hit (429), reset_at=%d",
                            reset_at)
+            # Set the in-process cooldown so subsequent calls fail
+            # fast without hitting the network. Round 11 audit catch.
+            # `global` was declared at the top of _api_request.
+            if reset_at > 0:
+                _rate_limited_until = float(reset_at)
+            else:
+                # No header, back off conservatively for 5 minutes.
+                _rate_limited_until = _time.time() + 300
             raise NexusRateLimited(
                 "Nexus rate limit exceeded", reset_at=reset_at)
         if e.code in (403, 404, 410) and "download_link" in endpoint:

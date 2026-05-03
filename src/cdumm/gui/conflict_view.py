@@ -224,7 +224,7 @@ class ConflictView(QWidget):
         body_color = QColor("#E8E8E8") if isDarkTheme() else QColor("#1F1F1F")
 
         if not conflicts:
-            empty = QStandardItem("No conflicts detected")
+            empty = QStandardItem(tr("conflicts.empty_title"))
             empty.setForeground(QColor("#4CAF50"))
             self._model.appendRow([empty, QStandardItem(""), QStandardItem("")])
             return
@@ -285,7 +285,8 @@ class ConflictView(QWidget):
                 pair_item.appendRow([file_item, file_level, file_detail])
 
             if len(pair_conflicts) > MAX_CHILDREN:
-                more = QStandardItem(f"... and {len(pair_conflicts) - MAX_CHILDREN} more")
+                more = QStandardItem(tr("conflicts.and_n_more",
+                                        count=len(pair_conflicts) - MAX_CHILDREN))
                 more.setForeground(body_color)
                 pair_item.appendRow([more, QStandardItem(""), QStandardItem("")])
 
@@ -326,11 +327,11 @@ class ConflictView(QWidget):
 
         menu = QMenu(self)
         if mod_a_name:
-            action_a = QAction(f"Set \"{mod_a_name}\" as winner", self)
+            action_a = QAction(tr("conflicts.set_as_winner", name=mod_a_name), self)
             action_a.triggered.connect(lambda: self.winner_changed.emit(mod_a_id))
             menu.addAction(action_a)
         if mod_b_name:
-            action_b = QAction(f"Set \"{mod_b_name}\" as winner", self)
+            action_b = QAction(tr("conflicts.set_as_winner", name=mod_b_name), self)
             action_b.triggered.connect(lambda: self.winner_changed.emit(mod_b_id))
             menu.addAction(action_b)
 
