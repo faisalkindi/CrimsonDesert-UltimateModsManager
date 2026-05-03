@@ -187,6 +187,7 @@ a = Analysis(
         'cdumm.engine.binary_search',
         'cdumm.engine.nexus_api',
         'cdumm.engine.game_monitor',
+        'cdumm.engine.launcher',
         'cdumm.gui.binary_search_dialog',
         'cdumm.gui.patch_toggle_dialog',
         'py7zr',
