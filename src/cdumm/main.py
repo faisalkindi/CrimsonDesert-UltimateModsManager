@@ -502,13 +502,21 @@ def main() -> int:
     splash.showMessage("  Loading game schemas...", 0x0081)
     app.processEvents()
 
+    # Bug B (Nexus 2026-05-03): users report startup hangs with the
+    # exe alive in Task Manager. Without log breadcrumbs we cannot
+    # tell which step blocked. Log INFO before each heavy step so the
+    # user's cdumm.log shows exactly where startup stopped.
+    logger.info("Startup: loading game schemas")
     # Load semantic schemas eagerly so they're available for all operations
     try:
         from cdumm.semantic.parser import init_schemas
         schema_count = init_schemas()
         logger.info("Semantic schemas: %d tables loaded", schema_count)
     except Exception as e:
-        logger.debug("Semantic schemas unavailable: %s", e)
+        # Was logger.debug — bumped to warning so silent schema-load
+        # failures surface in default logs (Rank 1 hypothesis for the
+        # Pr0nt / gabagoolboi47 launch crash).
+        logger.warning("Semantic schemas unavailable: %s", e)
 
     splash.showMessage("  Checking game state...", 0x0081)
     app.processEvents()
@@ -531,6 +539,10 @@ def main() -> int:
         from cdumm.engine.version_detector import (
             backfill_stored_fingerprints, detect_game_version,
         )
+        # Bug B breadcrumb: AV scanning the game .exe can block this
+        # call for tens of seconds; log so we can tell from logs that
+        # we got here.
+        logger.info("Startup: backfilling fingerprints")
         backfill_stored_fingerprints(db, game_path)
 
         # Check game version fingerprint (fast — just reads a config value)
