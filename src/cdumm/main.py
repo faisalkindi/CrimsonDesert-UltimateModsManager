@@ -554,9 +554,14 @@ def main() -> int:
     splash.showMessage("  Building UI...", 0x0081)
     app.processEvents()
 
+    # Bug B breadcrumb: CdummWindow constructor is heavy (loads icons,
+    # initializes pages, scans mods). Hangs here would otherwise show
+    # only "Building UI..." in the splash with no log evidence.
+    logger.info("Startup: building main window")
     from cdumm.gui.fluent_window import CdummWindow
     window = CdummWindow(db=db, game_dir=game_path, app_data_dir=APP_DATA_DIR,
                          startup_context=startup_context)
+    logger.info("Startup: main window constructed; showing")
     window.show()
     splash.finish(window)
 
