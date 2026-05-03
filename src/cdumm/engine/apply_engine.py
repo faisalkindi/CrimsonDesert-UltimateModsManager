@@ -1060,6 +1060,38 @@ class ApplyWorker(QObject):
             to_skip.add(f"{ov['pamt_dir']}/0.pamt")
         return to_skip
 
+    def _warn_entr_load_failure(self, d: dict, exc: Exception) -> None:
+        """Surface a user-visible warning when an entry delta can't be
+        loaded (missing ENTRY_MAGIC, truncated file, decode failure).
+
+        Bug D (Nexus 2026-05-03, Torie1985): Barber Unlocked's
+        customizationcolorpalette.xml.entr lacked the 'ENTR' magic
+        header so load_entry_delta raised ValueError; apply caught
+        the exception, logged to logger only, and silently continued.
+        The user saw zero errors and zero in-game effect.
+
+        The fix: emit to self.warning AND log, so users see an
+        actionable message in the GUI / CLI and know to re-import
+        the mod (typical cause: legacy import format or file system
+        corruption since import).
+        """
+        mod_name = d.get("mod_name") or "(unknown mod)"
+        delta_path = d.get("delta_path", "?")
+        msg = (
+            f"Mod '{mod_name}' has a corrupt entry delta — "
+            f"re-import the mod to regenerate it. "
+            f"Affected file: {delta_path}. Error: {exc}"
+        )
+        logger.warning(
+            "Entry delta load failed for %s (%s): %s",
+            mod_name, delta_path, exc)
+        if hasattr(self, "_soft_warnings"):
+            self._soft_warnings.append(msg)
+        try:
+            self.warning.emit(msg)
+        except Exception:
+            pass
+
     def _stage_with_pamt_tracking(
         self, txn, file_path: str, data: bytes,
         modified_pamts: dict[str, bytes],
@@ -2354,8 +2386,9 @@ class ApplyWorker(QObject):
                         content, metadata = load_entry_delta(Path(d["delta_path"]))
                         metadata["delta_path"] = d["delta_path"]
                     except Exception as e:
-                        logger.warning("Failed to load entry delta %s: %s",
-                                       d["delta_path"], e)
+                        # Bug D: surface the failure to the user
+                        # instead of silent continue.
+                        self._warn_entr_load_failure(d, e)
                         continue
                 else:
                     continue
@@ -3327,8 +3360,8 @@ class ApplyWorker(QObject):
                 try:
                     content, metadata = load_entry_delta(Path(d["delta_path"]))
                 except Exception as e:
-                    logger.warning("Failed to load entry delta %s: %s",
-                                   d["delta_path"], e)
+                    # Bug D: surface to user
+                    self._warn_entr_load_failure(d, e)
                     continue
             else:
                 continue
