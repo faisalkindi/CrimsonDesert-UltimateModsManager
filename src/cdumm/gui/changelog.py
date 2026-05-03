@@ -13,13 +13,6 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
-        "version": "3.2.8.2",
-        "date": "2026-05-03",
-        "notes": [
-            "<b>Apply / uninstall errors that previously failed with a confusing <code>[WinError 2] '&lt;path&gt;' -&gt; '&lt;path&gt;'</code> (same path on both sides) now produce a clear actionable error.</b> The transactional file IO layer rejects absolute paths up-front instead of letting them collapse staged and target paths to the same string inside Python's shutil.move. The caller stack frames are also logged so the next bug report tells us exactly which call site is constructing absolute paths. Reported by tbyk101 / GitHub #65 on uninstall flow.",
-        ],
-    },
-    {
         "version": "3.2.8.1",
         "date": "2026-05-03",
         "notes": [
