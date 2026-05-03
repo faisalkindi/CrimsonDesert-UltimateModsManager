@@ -1051,6 +1051,32 @@ class ApplyWorker(QObject):
             to_skip.add(f"{ov['pamt_dir']}/0.pamt")
         return to_skip
 
+    def _stage_with_pamt_tracking(
+        self, txn, file_path: str, data: bytes,
+        modified_pamts: dict[str, bytes],
+    ) -> None:
+        """Stage a file via the transactional IO and, when the path is
+        a .pamt, also record the bytes in modified_pamts so PapgtManager.
+        rebuild() hashes the staged bytes instead of the stale on-disk
+        copy.
+
+        Bug A (Nexus 2026-05-03): michael2k + timelesscjing reported
+        post-apply verification mismatches on 0009 / 0015 PAMT entries
+        after game patch 1.05.00. Mods that ship complete PAMTs as
+        is_new entries (or as FULL_COPY deltas) were going through
+        stage_file call sites that didn't update modified_pamts. Result:
+        PAPGT entry held the hash of the pre-apply PAMT (whatever was
+        on disk), but commit then replaced it with the mod's bytes —
+        hash mismatch every time.
+
+        All stage_file calls that may target a PAMT MUST go through
+        this helper so the next refactor can't accidentally diverge.
+        """
+        txn.stage_file(file_path, data)
+        if file_path.endswith(".pamt"):
+            dir_name = file_path.split("/")[0]
+            modified_pamts[dir_name] = data
+
     def _compute_apply_fingerprint(self) -> str:
         """Compute a hash of all inputs that affect Apply output.
 
@@ -1291,7 +1317,10 @@ class ApplyWorker(QObject):
                     src = Path(new_deltas[-1]["delta_path"])
                     if src.exists():
                         result_bytes = src.read_bytes()
-                        txn.stage_file(file_path, result_bytes)
+                        # Bug A: route through helper so PAMT-shipping
+                        # mods don't desync modified_pamts vs disk.
+                        self._stage_with_pamt_tracking(
+                            txn, file_path, result_bytes, modified_pamts)
                         logger.info("Applying new file: %s from %s",
                                     file_path, new_deltas[-1]["mod_name"])
                     continue
@@ -1308,7 +1337,9 @@ class ApplyWorker(QObject):
                             with open(dp, "rb") as f:
                                 f.seek(4)  # skip FULL magic
                                 result_bytes = f.read()
-                            txn.stage_file(file_path, result_bytes)
+                            # Bug A: PAMT-aware staging
+                            self._stage_with_pamt_tracking(
+                                txn, file_path, result_bytes, modified_pamts)
                             logger.info("Fast-track apply: %s (%.1f MB)",
                                         file_path, len(result_bytes) / 1048576)
                             continue
@@ -1319,7 +1350,9 @@ class ApplyWorker(QObject):
                 if result_bytes is None:
                     continue
 
-                txn.stage_file(file_path, result_bytes)
+                # Bug A: PAMT-aware staging
+                self._stage_with_pamt_tracking(
+                    txn, file_path, result_bytes, modified_pamts)
 
 
             _phase("Phase 1a: Mount-time JSON patching")
