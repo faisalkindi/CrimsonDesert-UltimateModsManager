@@ -13,7 +13,10 @@ Validation now accepts either:
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from cdumm.storage.game_finder import (
     _looks_like_game_root,
@@ -86,6 +89,13 @@ def test_xbox_install_without_paz_or_exe_is_invalid(tmp_path):
     assert validate_game_directory(game) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="On macOS, validate_game_directory accepts any path with the "
+           "PAZ structural layout (0008/0.paz + meta/0.papgt) so users "
+           "can point CDUMM at the inner Contents/Resources/packages of "
+           "an opaque .app bundle. The Windows-only 'must be xboxgames-"
+           "marked' constraint doesn't apply.")
 def test_non_xbox_path_without_exe_is_invalid_even_with_paz(tmp_path):
     # Generic path (no XboxGames / WindowsApps marker) without the exe
     # must NOT be accepted — could be a partial manual copy.

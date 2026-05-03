@@ -164,6 +164,11 @@ def test_find_7z_returns_none_when_registry_path_missing_exe(tmp_path):
         "be returned — the caller would just fail with 'file not found'.")
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows-only test path. macOS / Linux _find_7z searches "
+           "_FIND_7Z_UNIX_PATHS first (Homebrew sevenzip / system bsdtar) "
+           "regardless of mocked _FIND_7Z_DEFAULT_PATHS.")
 def test_find_7z_default_paths_still_work(tmp_path):
     """Regression: when 7-Zip IS at the default path, return it
     without touching the registry."""
@@ -178,6 +183,10 @@ def test_find_7z_default_paths_still_work(tmp_path):
     assert found == str(seven_z)
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows-only test path. macOS / Linux _find_7z searches "
+           "_FIND_7Z_UNIX_PATHS first regardless of the mocked which().")
 def test_find_7z_falls_back_to_which_when_all_else_fails(tmp_path):
     """If registry is empty AND default paths missing, fall back to
     shutil.which (PATH search)."""
