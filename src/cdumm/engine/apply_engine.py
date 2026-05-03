@@ -995,6 +995,15 @@ class ApplyWorker(QObject):
             self._db.initialize()
             self._apply()
             self._db.close()
+        except FileNotFoundError as e:
+            # Bug C (Nexus 2026-05-03, Jyoungy13): bare
+            # [WinError 2] strings have no path. Surface
+            # e.filename so users can see which vanilla file
+            # vanished after a game patch.
+            logger.error("Apply failed: %s", e, exc_info=True)
+            path = getattr(e, "filename", None) or "(unknown path)"
+            self.error_occurred.emit(
+                f"Apply failed: file not found: {path} ({e})")
         except Exception as e:
             logger.error("Apply failed: %s", e, exc_info=True)
             self.error_occurred.emit(f"Apply failed: {e}")
