@@ -3218,7 +3218,13 @@ class ApplyWorker(QObject):
 
     def _find_entry_at_offset(self, pamt_dir: str, delta: dict,
                               base_dir) -> "PazEntry | None":
-        """Find the PAMT entry whose compressed data occupies a given PAZ offset."""
+        """Find the PAMT entry whose compressed data occupies a given
+        PAZ offset.
+
+        R3: shares the PAMT entries cache with _get_vanilla_entry_content
+        so the JSON-merge fallback loop doesn't re-parse the PAMT once
+        per overlapping group.
+        """
         from cdumm.archive.paz_parse import parse_pamt
 
         try:
@@ -3233,7 +3239,14 @@ class ApplyWorker(QObject):
             if not pamt_path.exists():
                 return None
 
-            entries = parse_pamt(str(pamt_path), str(base_dir / pamt_dir))
+            if not hasattr(self, "_pamt_entries_cache"):
+                self._pamt_entries_cache: dict[str, list] = {}
+            cache_key = str(pamt_path)
+            entries = self._pamt_entries_cache.get(cache_key)
+            if entries is None:
+                entries = parse_pamt(
+                    str(pamt_path), str(base_dir / pamt_dir))
+                self._pamt_entries_cache[cache_key] = entries
             # Find entry whose offset range contains our target
             for e in entries:
                 if e.offset <= target_offset < e.offset + e.comp_size:

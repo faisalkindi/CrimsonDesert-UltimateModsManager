@@ -141,6 +141,71 @@ def test_extract_sibling_entry_shares_pamt_cache(tmp_path: Path):
         jph_mod._extract_from_paz = jph_orig
 
 
+def test_find_entry_at_offset_uses_pamt_cache(tmp_path: Path):
+    """R3: _find_entry_at_offset is called once per fallback-merge
+    group inside the JSON merge fallback loop. With many overlapping
+    mods on the same dir, this is another N-call hot path that
+    re-parses the PAMT per call. Same shared cache should serve."""
+    from cdumm.engine.apply_engine import ApplyWorker
+    from cdumm.archive.paz_parse import PazEntry
+    from cdumm.storage.database import Database
+
+    vanilla_dir = tmp_path / "vanilla"
+    game_dir = tmp_path / "game"
+    pamt_dir_path = vanilla_dir / "0009"
+    pamt_dir_path.mkdir(parents=True)
+    (pamt_dir_path / "0.pamt").write_bytes(b"\x00" * 256)
+
+    worker = ApplyWorker.__new__(ApplyWorker)
+    worker._vanilla_dir = vanilla_dir
+    worker._game_dir = game_dir
+
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    # Seed mod_deltas so byte_start row exists for the test delta_path
+    db.connection.execute(
+        "INSERT INTO mods (id, name, mod_type, enabled) "
+        "VALUES (1, 'TestMod', 'paz', 1)"
+    )
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+        "byte_start, byte_end, is_new) "
+        "VALUES (1, '0009/0.paz', 'd1', 100, 200, 0)"
+    )
+    db.connection.commit()
+    worker._db = db
+
+    parse_calls = {"count": 0}
+    fake_entries = [PazEntry(
+        path="gamedata/x.pabgb",
+        paz_file=str(pamt_dir_path / "0.paz"),
+        offset=50, comp_size=200, orig_size=200, flags=0, paz_index=0,
+    )]
+
+    def _fake_parse(pamt_path, paz_dir):
+        parse_calls["count"] += 1
+        return fake_entries
+
+    import cdumm.archive.paz_parse as pp_mod
+    pp_orig = pp_mod.parse_pamt
+    pp_mod.parse_pamt = _fake_parse
+
+    try:
+        # Pre-warm cache via _get_vanilla_entry_content
+        worker._get_vanilla_entry_content("0009/0.paz", "gamedata/x.pabgb")
+        # Now 100 _find_entry_at_offset calls for the same dir
+        for _ in range(100):
+            worker._find_entry_at_offset("0009", {"delta_path": "d1"}, vanilla_dir)
+
+        assert parse_calls["count"] == 1, (
+            f"Expected 1 parse total (shared cache covers "
+            f"_find_entry_at_offset), got {parse_calls['count']}."
+        )
+    finally:
+        pp_mod.parse_pamt = pp_orig
+        db.close()
+
+
 def test_pamt_cache_separate_per_pamt_path(tmp_path: Path):
     """Different PAMT files (different pamt_dir) must each parse once,
     not share a single cache slot."""
