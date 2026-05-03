@@ -21,6 +21,26 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 
+def invalidate_apply_fingerprint(game_dir: Path) -> None:
+    """Remove ``CDMods/.apply_fingerprint`` so the next Apply genuinely
+    re-runs the pipeline.
+
+    The fingerprint hashes mods.json_source PATH (not contents) plus
+    mod_deltas. A re-import that overwrites the merged.json content but
+    keeps the same path produces an identical hash, and the next Apply
+    fast-paths 'Already up to date'. Re-import call sites must invoke
+    this after the DB commit. Idempotent (no-op if the file is missing).
+    """
+    fp_path = game_dir / "CDMods" / ".apply_fingerprint"
+    try:
+        if fp_path.exists():
+            fp_path.unlink()
+    except OSError as e:
+        logger.debug(
+            "invalidate_apply_fingerprint: could not remove %s: %s",
+            fp_path, e)
+
+
 def _yield_gil() -> None:
     """Release the GIL momentarily so the GUI thread can process events.
 
@@ -4179,7 +4199,16 @@ class RevertWorker(QObject):
             txn.cleanup_staging()
 
     def _get_vanilla_bytes(self, file_path: str) -> bytes | None:
-        """Get vanilla version from full backup or range backup."""
+        """Get vanilla version from full backup or range backup.
+
+        GitHub #67 (Doleun, 2026-05-03): when the vanilla backup is
+        missing (e.g. large PAZ file skipped by _refresh_vanilla_backups,
+        or a newly-vanilla path after a game patch), fall back to the
+        live game file IF its hash matches the snapshot. That means the
+        file is already vanilla on disk — restoring is a no-op for the
+        bytes but the path returns successfully so revert doesn't error
+        with 'no backup found'.
+        """
         full_path = self._vanilla_dir / file_path.replace("/", os.sep)
         if full_path.exists():
             return full_path.read_bytes()
@@ -4193,5 +4222,19 @@ class RevertWorker(QObject):
             buf = bytearray(game_path.read_bytes())
             _apply_ranges_to_buf(buf, range_entries)
             return bytes(buf)
+
+        # Snapshot-hash fallback: if the live file matches the snapshot,
+        # it IS vanilla. Return its bytes so revert treats this path
+        # as already-clean instead of failing.
+        try:
+            from cdumm.engine.snapshot_manager import hash_matches
+            row = self._db.connection.execute(
+                "SELECT file_hash FROM snapshots WHERE file_path = ?",
+                (file_path,)).fetchone()
+            if row and row[0] and hash_matches(game_path, row[0]):
+                return game_path.read_bytes()
+        except Exception as e:
+            logger.debug(
+                "snapshot-hash fallback failed for %s: %s", file_path, e)
 
         return None

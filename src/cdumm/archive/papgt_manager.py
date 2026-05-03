@@ -100,7 +100,14 @@ class PapgtManager:
         else:
             base_path = self._vanilla_papgt if self._vanilla_papgt and self._vanilla_papgt.exists() else self._papgt_path
             if not base_path.exists():
-                raise FileNotFoundError(f"PAPGT not found: {base_path}")
+                # GitHub #65 (tbyk101, 2026-05-03): use the 3-arg form
+                # so e.filename is populated. Bare
+                # `raise FileNotFoundError(message)` leaves .filename
+                # as None, and the top-level apply error then renders
+                # '(unknown path)' instead of the actual missing
+                # PAPGT path.
+                raise FileNotFoundError(
+                    2, "PAPGT not found", str(base_path))
             papgt = bytearray(base_path.read_bytes())
 
         if len(papgt) < 12:
