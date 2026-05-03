@@ -584,7 +584,7 @@ if __name__ == "__main__":
             from cdumm.worker_process import worker_main
             worker_main(sys.argv[2:])
         # CLI mode: if first arg is a known subcommand, skip GUI entirely
-        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect", "cleanup-duplicates"}:
+        elif len(sys.argv) > 1 and sys.argv[1] in {"list-mods", "set-enabled", "apply", "bisect", "cleanup-duplicates", "launch-game"}:
             from cdumm.cli import main as cli_main
             cli_main()
         # nxm:// URL handler — Windows fires this when the user clicks
