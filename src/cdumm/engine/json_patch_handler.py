@@ -672,6 +672,76 @@ def _intersects_written_ranges(pos: int, length: int,
     return False
 
 
+def filter_changes_by_tainted_mods(
+    changes: list[dict],
+    vanilla: bytes,
+    signature: str | None = None,
+    name_offsets: dict[str, int] | None = None,
+    skipped_out: list | None = None,
+) -> list[dict]:
+    """All-or-nothing-per-mod gate (Faisal 2026-05-04).
+
+    Group ``changes`` by ``_source_mod_id``. For each tagged mod,
+    apply that mod's changes to a scratch copy of ``vanilla`` via
+    ``_apply_byte_patches`` , if any change registers a skip, mark
+    the whole mod as tainted.
+
+    Return a new changes list with every tainted mod's changes
+    removed. For each removed change, append a synthetic skip entry
+    to ``skipped_out`` so the per-mod skip count + tooltip reflect
+    the full set of dropped changes (not just the trigger mismatch).
+
+    Untagged changes (no ``_source_mod_id``) , chiefly the Format 3
+    whole-table merged dispatch , pass through untouched. Per-change
+    skip policy still runs against them in the actual apply pass.
+    """
+    by_mod: dict[int, list[dict]] = {}
+    for c in changes:
+        mid = c.get("_source_mod_id")
+        if mid is None:
+            continue
+        by_mod.setdefault(int(mid), []).append(c)
+
+    tainted: set[int] = set()
+    for mid, mod_changes in by_mod.items():
+        scratch = bytearray(vanilla)
+        test_skipped: list[dict] = []
+        try:
+            _apply_byte_patches(
+                scratch, mod_changes, signature=signature,
+                vanilla_data=vanilla, name_offsets=name_offsets,
+                skipped_out=test_skipped)
+        except Exception:
+            tainted.add(mid)
+            continue
+        if test_skipped:
+            tainted.add(mid)
+
+    if not tainted:
+        return list(changes)
+
+    clean: list[dict] = []
+    for c in changes:
+        mid = c.get("_source_mod_id")
+        if mid is not None and int(mid) in tainted:
+            if skipped_out is not None:
+                skipped_out.append({
+                    "label": c.get("label", "")
+                              or c.get("entry", ""),
+                    "expected": c.get("original", ""),
+                    "actual": "",
+                    "offset": -1,
+                    "reason": (
+                        "mod skipped: another patch in this mod "
+                        "did not match"),
+                    "_source_mod_id": int(mid),
+                    "_target_file": c.get("_target_file", ""),
+                })
+        else:
+            clean.append(c)
+    return clean
+
+
 def _apply_byte_patches(data: bytearray, changes: list[dict],
                         signature: str | None = None,
                         vanilla_data: bytes | None = None,
@@ -2254,10 +2324,24 @@ def process_json_patches_for_overlay(
                     logger.warning("mount-time: v2 index build failed for %s: %s",
                                    pabgh_file, e_pabgh)
 
+        # All-or-nothing per mod (Faisal 2026-05-04): if any of a
+        # mod's changes mismatch vanilla, drop EVERY change from that
+        # mod for this Apply. Coordinated multi-patch mods (max value
+        # + drain rate + regen rate) leave the game in a worse state
+        # when partially applied than when fully skipped.
+        signature = patch.get("signature")
+        changes = filter_changes_by_tainted_mods(
+            changes, bytes(plaintext), signature=signature,
+            name_offsets=name_offsets, skipped_out=skipped_out)
+        if not changes:
+            # Every contributing mod was tainted , nothing left to
+            # apply for this target. The synthetic skip entries are
+            # already in skipped_out.
+            continue
+
         # Apply byte patches with pattern scan against vanilla. Also capture
         # inserts so we can shift a companion .pabgh (JMM parity).
         modified = bytearray(plaintext)
-        signature = patch.get("signature")
         inserts_out: list[tuple[int, int]] = []
         applied, mismatched, relocated = _apply_byte_patches(
             modified, changes, signature=signature, vanilla_data=vanilla_ref,

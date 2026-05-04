@@ -406,6 +406,12 @@ class ModCard(CardWidget):
         self._status_badge.setMinimumWidth(105)
         self._status_badge.setMaximumWidth(105)
         self._status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Hide the green/orange Active pill when this mod is in the
+        # skipped state. The yellow SKIPPED badge above already
+        # communicates the correct surface and showing both gives the
+        # user contradictory signals (Faisal feedback 2026-05-04).
+        if last_apply_skipped_count and last_apply_skipped_count > 0:
+            self._status_badge.hide()
         root.addWidget(self._status_badge)
         root.addSpacing(4)
 
