@@ -90,6 +90,73 @@ on a SINGLE intent should let us reverse the offset.
   field decoded should add a branch returning
   ``(offset, width, dtype)``.
 
+## Additional findings (Session 2)
+
+### Engine schema for BuffInfo has 13 fields total
+
+Pulled from ``schemas/pabgb_complete_schema.json``. In declaration
+order:
+
+| # | Field | type | size |
+|---|-------|------|------|
+| 1 | _stringKey | (cstring) | variable |
+| 2 | _key | direct_u32 | 4 |
+| 3 | _buffDataList | direct_u32 | 4 (count only , items live elsewhere) |
+| 4 | _isBlocked | direct_15B | 15 |
+| 5 | _maxLevel | direct_u32 | 4 |
+| 6 | _minLevel | direct_u32 | 4 |
+| 7 | _buffLevelCalculateType | direct_15B | 15 |
+| 8 | _sequencerFileName | (cstring) | variable |
+| 9 | _uiComponentName | reader_4B | 4 |
+| 10 | _uiTemplateName | reader_4B | 4 |
+| 11 | _isUseSkillInfoPatternDescription | direct_15B | 15 |
+| 12 | _elementalStatusInfo | reader_4B | 4 |
+| 13 | _useCountingByGlobalTimer | direct_15B | 15 |
+
+Crucially: **the schema does NOT define BuffData (the list element
+type)**. _buffDataList is just a count u32; the actual list items
+live somewhere outside what the engine schema describes. NattKh's
+own ``pabgb_field_parsers.py:parse_buff_record`` (line 144) is a
+HEURISTIC SCANNER, not a structured parser , it just grep-scans
+the entry bytes for known stat hashes and rates.
+
+That's why even NattKh's published tools don't ship a buffinfo
+editor: nobody public has the BuffData binary layout decoded.
+
+### Sentinel 0x73e1c5ea is sub-structural, not item-bounding
+
+Hypothesis tested: ``73 e1 c5 ea`` (= u32 0xEAC5E173) appearing
+N times in an entry where ``_buffDataList`` count = N.
+Result: 0/280 matches across the table , the sentinel appears
+per-sub-field, not per-item. E.g. BuffLevel_Drunken has count=1
+but 47 sentinels in 5222 bytes (~111 bytes between sentinels).
+
+Probably a per-stat-effect marker that appears many times inside
+each buff_data item's body. Not useful for finding item boundaries.
+
+### Why progress stops here without an oracle
+
+The `byN` raw-byte naming in Adfaz's mod paths
+(``data.base.by58``, ``by69``, ``by132``) is the giveaway: even
+Adfaz didn't decode the structure, they exposed bytes by raw
+position. Their tool computes offsets from somewhere , probably
+runtime introspection of a parsed buff_data, but we don't have
+their parser.
+
+To make verified progress on Phase 3+, we need ONE of:
+
+1. **Adfaz's parser source** , one Nexus DM. Cheapest path.
+2. **Adfaz's tool itself** as oracle: feed it a known input, observe
+   which bytes change in the output, infer offsets.
+3. **A weeks-long byte-walking RE project** using vanilla
+   ``buffinfo.pabgb`` only, treating Adfaz's ``new`` values as
+   weak oracles (they specify the value to write but not the offset
+   to write at).
+
+Shipping speculative offsets would corrupt user game files.
+Stopping at Phase 2 is the right move until an oracle becomes
+available.
+
 ## How to resume
 
 ```bash
