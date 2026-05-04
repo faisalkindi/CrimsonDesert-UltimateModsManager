@@ -1,7 +1,9 @@
 import logging
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
@@ -32,11 +34,37 @@ class SetupDialog(MessageBoxBase):
     """First-run dialog for selecting the Crimson Desert game directory."""
 
     def __init__(self, parent=None) -> None:
-        # MessageBoxBase requires a parent; create a temporary invisible
-        # widget when called from main.py before any window exists.
-        self._temp_parent = None
+        # MaskDialogBase (the qfluentwidgets parent of MessageBoxBase)
+        # calls ``self.setGeometry(0, 0, parent.width(), parent.height())``
+        # in __init__. When SetupDialog is constructed before any
+        # real window exists (the main.py recovery flow when a saved
+        # game_dir doesn't validate on relaunch), the previous
+        # "invisible QWidget temp parent" gave width=0/height=0 on
+        # macOS — the dialog rendered with zero geometry and macOS's
+        # window server refused to raise it. CptUndies (Nexus
+        # 2026-05-04, mod 2253) reported the symptom as a silent
+        # hang: process alive, modal exec waiting, no GUI visible.
+        #
+        # Fix: build the temp parent as a transparent, frameless,
+        # on-top widget sized to the primary screen, and SHOW it
+        # before super().__init__ so MaskDialogBase reads real
+        # width/height. The translucent mask layer that
+        # MaskDialogBase paints over the parent already covers this
+        # widget, so the user only sees the dialog itself — the
+        # transparent backing is invisible.
+        self._temp_parent: QWidget | None = None
         if parent is None:
+            screen = QApplication.primaryScreen().availableGeometry()
             self._temp_parent = QWidget()
+            self._temp_parent.setAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground)
+            self._temp_parent.setWindowFlags(
+                Qt.WindowType.Tool
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+            self._temp_parent.setGeometry(screen)
+            self._temp_parent.show()
             parent = self._temp_parent
         super().__init__(parent)
 
@@ -124,3 +152,19 @@ class SetupDialog(MessageBoxBase):
     @property
     def game_directory(self) -> Path | None:
         return self._selected_path
+
+    def done(self, result: int) -> None:  # noqa: D401 — Qt slot
+        """Tear down the temp parent on close (accept OR reject).
+
+        Qt's ``QDialog`` calls ``done()`` for both ``accept()`` and
+        ``reject()``, so a single override covers cleanup regardless
+        of how the user dismissed the dialog. Without this, the
+        screen-sized transparent temp parent would linger as an
+        invisible top-level widget after the modal returned and
+        keep the Qt event loop holding refs.
+        """
+        super().done(result)
+        if self._temp_parent is not None:
+            self._temp_parent.hide()
+            self._temp_parent.deleteLater()
+            self._temp_parent = None
