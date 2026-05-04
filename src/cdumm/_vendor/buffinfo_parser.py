@@ -75,20 +75,35 @@ from dataclasses import dataclass
 class BuffinfoEntryHeader:
     """Decoded prefix of a single buffinfo.pabgb entry.
 
-    ``end_offset`` is the byte offset (relative to the entry start)
-    where the prefix ends and the variable-length body begins. A
-    future pass will extend this dataclass with field-by-field
-    offsets for the body.
+    Verified field-by-field across all 280 entries of CD v1.05
+    vanilla buffinfo.pabgb. ``body_start`` is the byte offset where
+    the variable-length buff_data_list items begin.
     """
     entry_key: int
     name: str
-    end_offset: int  # bytes consumed by the prefix (= 8 + slen)
+    is_blocked: int  # 1 byte at body+0; always 0 in v1.05 vanilla
+    is_blocked_offset: int  # byte offset within entry
+    buff_data_count: int  # u32 at body+1..+4
+    buff_data_count_offset: int  # byte offset within entry
+    body_start: int  # offset where buff_data items begin (= prefix_end + 5)
+    prefix_end: int  # byte offset just past the name string (= 8 + slen)
 
 
 def parse_entry_prefix(entry_bytes: bytes) -> BuffinfoEntryHeader:
     """Decode the fixed prefix of a buffinfo entry.
 
-    Raises ``ValueError`` on truncation or implausible string length.
+    Verified layout (Phase 2):
+      [0..3]            entry_key (u32)
+      [4..7]            slen (u32)
+      [8..7+slen]       name (utf-8)
+      [prefix_end]      _isBlocked (1 byte; always 0 in v1.05 vanilla)
+      [prefix_end+1..]  _buffDataList count (u32)
+      [body_start..]    _buffDataList items (variable-length, NOT
+                        decoded yet)
+
+    Raises ``ValueError`` on truncation or implausible counts. The
+    count sanity ceiling (10000) is set well above the observed
+    maximum (200) but low enough to catch pointer-misread bugs.
     """
     if len(entry_bytes) < 8:
         raise ValueError(
@@ -102,10 +117,31 @@ def parse_entry_prefix(entry_bytes: bytes) -> BuffinfoEntryHeader:
             f"(entry size {len(entry_bytes)}B)"
         )
     name = entry_bytes[8:8 + slen].decode("utf-8", errors="replace")
+    prefix_end = 8 + slen
+
+    if prefix_end + 5 > len(entry_bytes):
+        raise ValueError(
+            f"buffinfo entry truncated at body header: need 5 bytes "
+            f"after name, got {len(entry_bytes) - prefix_end}"
+        )
+    is_blocked = entry_bytes[prefix_end]
+    buff_data_count = struct.unpack_from(
+        "<I", entry_bytes, prefix_end + 1)[0]
+    if buff_data_count > 10_000:
+        raise ValueError(
+            f"buffinfo entry has implausible buff_data_list count "
+            f"{buff_data_count} for entry {name!r}"
+        )
+
     return BuffinfoEntryHeader(
         entry_key=entry_key,
         name=name,
-        end_offset=8 + slen,
+        is_blocked=is_blocked,
+        is_blocked_offset=prefix_end,
+        buff_data_count=buff_data_count,
+        buff_data_count_offset=prefix_end + 1,
+        body_start=prefix_end + 5,
+        prefix_end=prefix_end,
     )
 
 
