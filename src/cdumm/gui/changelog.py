@@ -13,6 +13,19 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.9",
+        "date": "2026-05-04",
+        "notes": [
+            "<b>New yellow SKIPPED badge on the mod card.</b> When the most recent Apply could not land all of a mod's patches because the bytes on disk did not match what the mod expected (usually a game patch shifted the file), the card shows a yellow pill with the count and a tooltip listing every dropped patch with its game file and reason. Right-click the mod and pick 'Reimport from source' to regenerate patches against the new game bytes; the badge clears the moment the reimport row commits, before you even rerun Apply.",
+            "<b>All-or-nothing per mod on Apply.</b> Earlier builds applied whatever patches matched and silently dropped the rest, leaving multi-patch mods (max stamina at offset A plus drain rate at offset B plus regen rate at offset C) in a half-baked state worse than fully off. CDUMM now drops every patch from any mod with even one byte mismatch, so a mod is either fully in-game or fully out, never partially applied.",
+            "<b>Active status pill hides when a mod is in the SKIPPED state.</b> Showing green Active alongside yellow SKIPPED gave contradictory signals. SKIPPED now owns the status surface so it is unambiguous that the mod is not effectively active.",
+            "<b>Post-Apply Verification 'PAMT hash mismatch' for groups 0009 and 0015 after a game update is fixed.</b> The PAPGT rebuild trusted hash values cached in its base for any PAMT file at or above 2 MB, so when a Crimson Desert patch rewrote those big PAMTs the rebuilt PAPGT shipped the old hashes and verification correctly flagged the inconsistency. CDUMM now always rehashes from live disk regardless of size. Reported by michael2k and timelesscjing on Nexus 2026-05-03 after game patch 1.05.",
+            "<b>Reimport from source clears the SKIPPED badge immediately</b> instead of carrying stale entries from before the reimport. The badge tooltip directs users at exactly that action, so the badge persisting after the reimport made the whole flow look broken.",
+            "<b>Format 3 mods now contribute to the SKIPPED badge.</b> The Format 3 expansion path emitted changes without source-mod attribution, so partial-apply failures on Format 3 mods produced no badge at all. Both per-mod and whole-table dispatches now tag changes with the originating mod and target file so the badge fires and the tooltip names the asset.",
+            "<b>Tooltip on the SKIPPED badge now names the entry and the game file together.</b> Multi-target mods (one mod patching items.pabgb and skill.pabgb) used to render skip lines named only by entry label, no way to tell which asset each line referred to.",
+        ],
+    },
+    {
         "version": "3.2.8.2",
         "date": "2026-05-03",
         "notes": [
