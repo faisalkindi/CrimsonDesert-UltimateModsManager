@@ -8,6 +8,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from cdumm.platform import IS_WINDOWS
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
@@ -65,7 +67,7 @@ def _short_python_version() -> str:
 
 def _is_admin_windows() -> str:
     """Return 'yes' / 'no' / 'unknown' for Windows administrator privilege."""
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return "n/a"
     try:
         import ctypes
@@ -257,7 +259,7 @@ def _read_compat_flags(exe_path: Path) -> list[str]:
     from both hives, or an empty list when not running on Windows or when
     no flags are set.
     """
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return []
     try:
         import winreg

@@ -168,7 +168,7 @@ def _find_epic_games() -> list[Path]:
     # Find manifest directory from registry or default paths
     manifest_dirs: list[Path] = []
 
-    if sys.platform == "win32":
+    if IS_WINDOWS:
         try:
             import winreg
             with winreg.OpenKey(

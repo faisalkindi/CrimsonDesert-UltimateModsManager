@@ -129,7 +129,7 @@ def try_acquire_gui_lock(app_data: Path) -> tuple[bool, str]:
             stale = False  # treat read failure as conservative
 
     try:
-        if sys.platform == "win32":
+        if IS_WINDOWS:
             import msvcrt
             _lock_fh = open(lock_path, "w", encoding="utf-8")
             try:

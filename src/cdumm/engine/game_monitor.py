@@ -25,7 +25,11 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-_IS_WINDOWS = sys.platform == "win32"
+# Aliased to ``_IS_WINDOWS`` (module-private convention) so existing
+# in-file usages keep working without per-callsite churn. Routes through
+# the central platform abstraction in cdumm.platform so a future
+# refactor only has to update one place.
+from cdumm.platform import IS_WINDOWS as _IS_WINDOWS
 
 GAME_EXE_NAME = "CrimsonDesert.exe"
 CRASH_DUMP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "CrashDumps")

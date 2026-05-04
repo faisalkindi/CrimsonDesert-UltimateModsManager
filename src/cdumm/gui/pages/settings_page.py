@@ -299,8 +299,8 @@ class SettingsPage(SmoothScrollArea):
         # under ``~/.local/share/applications`` plus ``xdg-mime
         # default``. Until those are in place, hide the row entirely
         # on non-Windows so users don't tap a button that does nothing.
-        import sys as _sys_for_nxm_card
-        if _sys_for_nxm_card.platform == "win32":
+        from cdumm.platform import IS_WINDOWS
+        if IS_WINDOWS:
             nxm_row = QWidget()
             nxm_layout = QHBoxLayout(nxm_row)
             nxm_layout.setContentsMargins(6, 4, 6, 4)
@@ -730,8 +730,8 @@ class SettingsPage(SmoothScrollArea):
         is hidden by ``set_managers`` on those platforms; this
         early-return is belt-and-braces for any direct caller.
         """
-        import sys
-        if sys.platform != "win32":
+        from cdumm.platform import IS_WINDOWS
+        if not IS_WINDOWS:
             self._set_nexus_status(
                 "nxm:// handler registration is Windows-only.",
                 InfoLevel.INFOAMTION)

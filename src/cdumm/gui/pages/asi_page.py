@@ -44,7 +44,7 @@ from qfluentwidgets import (
 
 from cdumm.asi.asi_manager import AsiManager, AsiPlugin
 from cdumm.i18n import tr
-from cdumm.platform import IS_MACOS
+from cdumm.platform import IS_MACOS, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -1849,15 +1849,16 @@ class AsiPluginsPage(QWidget):
         is no ``CrimsonDesert.exe`` to inject into, so the loader has
         no effect even if dropped into the bundle. Skip the auto-install
         on non-Windows so we don't write a stray winmm.dll into the
-        macOS .app bundle. The page itself is hidden from navigation
-        in ``fluent_window`` on macOS, but this method also runs from
-        ``set_managers`` which fires regardless.
+        macOS .app bundle. The page renders a "Windows-only" placeholder
+        on macOS rather than the normal card list (see
+        ``_build_macos_placeholder_view``); this method's defensive
+        early-return is belt-and-braces in case the placeholder branch
+        ever calls back through to the real install path.
         """
         import hashlib
         import shutil
-        import sys
 
-        if sys.platform != "win32":
+        if not IS_WINDOWS:
             return
         if not self._asi_manager:
             return

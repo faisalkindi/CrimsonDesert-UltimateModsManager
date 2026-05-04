@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 from cdumm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
+from cdumm.platform import IS_LINUX, IS_MACOS, IS_WINDOWS
 from cdumm.engine.snapshot_manager import SnapshotManager
 from cdumm.storage.database import Database
 
@@ -1816,7 +1817,7 @@ def _find_7z_in_registry() -> str | None:
     raises ``ModuleNotFoundError`` there, which the bare ``except
     ImportError`` below catches.
     """
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return None
     try:
         import winreg
@@ -1866,7 +1867,7 @@ def _find_7z() -> str | None:
     nothing usable was found. ``import_from_rar`` surfaces a clear
     install-instruction error message in the latter case.
     """
-    if sys.platform == "win32":
+    if IS_WINDOWS:
         for candidate in _FIND_7Z_DEFAULT_PATHS:
             if Path(candidate).exists():
                 return candidate
@@ -2043,13 +2044,13 @@ def import_from_rar(
         or Path("/usr/bin/bsdtar").exists()
     )
     if not have_extractor:
-        if sys.platform == "darwin":
+        if IS_MACOS:
             install_hint = (
                 "Install via Homebrew (`brew install sevenzip` or "
                 "`brew install unar`) — bsdtar is normally pre-installed "
                 "but seems missing on this system. Or extract the .rar "
                 "manually and drop the folder.")
-        elif sys.platform.startswith("linux"):
+        elif IS_LINUX:
             install_hint = (
                 "Install your distro's 7-Zip package (apt install p7zip-full, "
                 "dnf install p7zip-plugins, pacman -S p7zip) or `unar` / "

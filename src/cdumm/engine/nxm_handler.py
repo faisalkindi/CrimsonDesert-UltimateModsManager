@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from cdumm.platform import IS_WINDOWS
+
 logger = logging.getLogger(__name__)
 
 EXPECTED_GAME_DOMAIN = "crimsondesert"
@@ -141,7 +143,7 @@ def register_windows_handler(force: bool = False) -> bool:
     scheme, this leaves the existing registration in place and returns
     False so the caller can prompt the user.
     """
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return False
     exe = _exe_path()
     if exe is None:
@@ -184,7 +186,7 @@ def unregister_windows_handler() -> bool:
     strip Vortex/MO2 out from under the user. If the current
     registration doesn't point at our own exe, refuse.
     """
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return False
     try:
         import winreg
@@ -224,7 +226,7 @@ def unregister_windows_handler() -> bool:
 def is_handler_registered() -> bool:
     """True when the nxm:// handler under HKCU points at the current
     CDUMM executable."""
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return False
     try:
         import winreg

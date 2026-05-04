@@ -67,7 +67,7 @@ def _quiet_qprocess(proc) -> None:
     OR the flag in. No-op on non-Windows platforms — that codepath is
     never reached on Linux/macOS QProcess.
     """
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return
     try:
         import subprocess as _sp
@@ -92,7 +92,7 @@ def _probe_console_state(tag: str) -> None:
     zero handle around the moment of the flash, the OS is allocating
     a console and we need CREATE_NO_WINDOW on the child.
     """
-    if sys.platform != "win32":
+    if not IS_WINDOWS:
         return
     try:
         import ctypes
@@ -6295,20 +6295,49 @@ class CdummWindow(FluentWindow):
         self._recovery_infobar = bar
 
     def _check_stale_appdata(self) -> None:
-        """Detect stale data in %LocalAppData%/cdumm from old versions.
+        """Detect stale data in the legacy %LocalAppData%/cdumm layout.
 
         Windows-only. The legacy per-user-AppData layout never existed
         on macOS or Linux, so there's no stale data to surface.
+
+        Path is resolved through ``cdumm.platform.app_data_dir()``
+        rather than a hardcoded ``Path.home() / "AppData" / "Local" /
+        "cdumm"`` so the scan stays correct under redirected
+        ``LOCALAPPDATA`` (Windows enterprise / one-drive setups). Two
+        refuse-when-equal guards protect against ever offering to
+        delete the live state directory:
+          1. The resolved path equals ``self._app_data_dir``, the
+             active state dir for this run.
+          2. The resolved path contains the currently-open SQLite DB
+             (``self._db.db_path``).
+        Either short-circuit sets ``stale_appdata_checked`` so the
+        scan is permanently a no-op on this install. PR #64 review
+        item HIGH 1.
         """
         if not IS_WINDOWS:
             return
         try:
             from cdumm.storage.config import Config
+            from cdumm.platform import app_data_dir
             config = Config(self._db)
             if config.get("stale_appdata_checked"):
                 return
 
-            appdata_dir = Path.home() / "AppData" / "Local" / "cdumm"
+            appdata_dir = app_data_dir()
+            # Guard 1: the resolved appdata dir IS the live state dir.
+            if appdata_dir == self._app_data_dir:
+                config.set("stale_appdata_checked", "1")
+                return
+            # Guard 2: the resolved dir contains the currently-open
+            # database. Defensive in case _app_data_dir was customized
+            # but the DB still happens to live in the legacy path.
+            try:
+                if self._db and Path(self._db.db_path).parent == appdata_dir:
+                    config.set("stale_appdata_checked", "1")
+                    return
+            except Exception:
+                pass
+
             if not appdata_dir.exists():
                 config.set("stale_appdata_checked", "1")
                 return
