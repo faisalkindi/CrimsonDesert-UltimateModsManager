@@ -341,10 +341,15 @@ app = BUNDLE(
         'CFBundleShortVersionString': VERSION,
         'CFBundleExecutable': 'CDUMM',
         'CFBundleIconFile': 'cdumm.icns',
-        # Matches the macosx_11_0_arm64 wheel tag we ship for cdumm_native.
-        # macOS 11 (Big Sur, 2020) is also the first version that supports
-        # Apple Silicon, so this lines up with the ARM64-only constraint.
-        'LSMinimumSystemVersion': '11.0',
+        # macOS 15 (Sequoia) is what Crimson Desert itself requires —
+        # advertising any lower in our Info.plist would be a lie and
+        # also wouldn't help, since the game can't run on older macOS.
+        # Matches the Nexus page's "macOS 15 Sequoia or later" line.
+        # The build script (scripts/build-macos.sh) post-processes
+        # every bundled Mach-O with vtool to enforce this — without
+        # that, setup-python on macos-26-arm64 ships a Python with
+        # minos=26 which dyld refuses to load on Sequoia.
+        'LSMinimumSystemVersion': '15.0',
         # Retina rendering — without this, Qt apps look fuzzy on HiDPI.
         'NSHighResolutionCapable': True,
         'LSApplicationCategoryType': 'public.app-category.utilities',

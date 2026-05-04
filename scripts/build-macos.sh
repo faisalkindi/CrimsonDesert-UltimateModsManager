@@ -199,6 +199,41 @@ if [[ ! -d dist/CDUMM.app ]]; then
     exit 1
 fi
 
+# ── 3b. Rewrite minos on bundled Mach-O binaries to 15.0 ─────────
+# Discovered via the goodygoosey crash report on Nexus (CDUMM 3.2.8.2,
+# macOS 15 Sequoia + M4 Max): 61 of 123 Mach-O files inside the .app
+# carried ``minos 26.0`` because both Homebrew Python (locally) and
+# actions/setup-python (CI on macos-26-arm64) ship a Python compiled
+# with ``MACOSX_DEPLOYMENT_TARGET=26.0``. PyInstaller bundles those
+# binaries verbatim, so the .app's effective floor was macOS 26 even
+# though Info.plist advertised macOS 11.0 — every user on Sequoia or
+# earlier hit a silent dyld failure mid-startup.
+#
+# Workaround: ``vtool -set-build-version`` rewrites
+# ``LC_BUILD_VERSION`` in-place. macOS 15 (Sequoia) is the real
+# minimum because that's what Crimson Desert itself requires, so
+# clamping ``minos`` to 15.0 is honest. Python's stdlib doesn't use
+# any macOS-26-specific APIs, so the rewrite is safe.
+#
+# vtool emits a "code signature will be invalid" warning for each
+# rewrite; the codesign step that follows re-signs the whole bundle
+# so the final .app's signature is intact. ``2>/dev/null`` suppresses
+# the warning spam (one line per rewritten file).
+log "Rewriting minos to 15.0 on bundled Mach-O binaries"
+_rewrite_count=0
+while IFS= read -r -d '' f; do
+    _minos=$(otool -l "$f" 2>/dev/null | awk '/minos/ {print $2; exit}')
+    [[ -z "$_minos" ]] && continue
+    _major=${_minos%%.*}
+    if (( _major > 15 )); then
+        if vtool -set-build-version macos 15.0 26.0 -replace -output "$f" "$f" 2>/dev/null; then
+            _rewrite_count=$((_rewrite_count + 1))
+        fi
+    fi
+done < <(find dist/CDUMM.app -type f \( -name "*.so" -o -name "*.dylib" \
+        -o -name "Python" -o -name "CDUMM" \) -print0)
+log "Rewrote ${_rewrite_count} binaries"
+
 # ── 4. Ad-hoc codesign ───────────────────────────────────────────
 # ``codesign --sign -`` is the ad-hoc identity (no certificate). This
 # is enough to keep macOS happy for the user's own builds and lets the
