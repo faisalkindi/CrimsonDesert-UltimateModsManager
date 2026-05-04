@@ -292,24 +292,36 @@ class SettingsPage(SmoothScrollArea):
         # Populate label/button state for the current key.
         self._refresh_sso_button()
 
-        nxm_row = QWidget()
-        nxm_layout = QHBoxLayout(nxm_row)
-        nxm_layout.setContentsMargins(6, 4, 6, 4)
-        nxm_layout.setSpacing(8)
-        nxm_label = BodyLabel(
-            "Handle nxm:// links — when you click 'Mod Manager "
-            "Download' on a Nexus mod page, the file is sent to CDUMM "
-            "automatically (premium users download directly; free "
-            "users still route through the website's button).")
-        nxm_label.setWordWrap(True)
-        nxm_layout.addWidget(nxm_label, 1)
-        self._nxm_toggle_btn = PushButton("Register")
-        self._nxm_toggle_btn.setMinimumWidth(160)
-        self._nxm_toggle_btn.clicked.connect(self._on_nxm_toggle)
-        nxm_layout.addWidget(self._nxm_toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._layout.addWidget(nxm_row)
-        # Populate the initial state of the button
-        self._refresh_nxm_button()
+        # nxm:// scheme registration is OS-specific and CDUMM only
+        # implements the Windows registry path today. macOS would need
+        # ``LSSetDefaultHandlerForURLScheme`` + a packaged .app
+        # (see MACOS.md); Linux would need an ``nxm.desktop`` install
+        # under ``~/.local/share/applications`` plus ``xdg-mime
+        # default``. Until those are in place, hide the row entirely
+        # on non-Windows so users don't tap a button that does nothing.
+        from cdumm.platform import IS_WINDOWS
+        if IS_WINDOWS:
+            nxm_row = QWidget()
+            nxm_layout = QHBoxLayout(nxm_row)
+            nxm_layout.setContentsMargins(6, 4, 6, 4)
+            nxm_layout.setSpacing(8)
+            nxm_label = BodyLabel(
+                "Handle nxm:// links — when you click 'Mod Manager "
+                "Download' on a Nexus mod page, the file is sent to CDUMM "
+                "automatically (premium users download directly; free "
+                "users still route through the website's button).")
+            nxm_label.setWordWrap(True)
+            nxm_layout.addWidget(nxm_label, 1)
+            self._nxm_toggle_btn = PushButton("Register")
+            self._nxm_toggle_btn.setMinimumWidth(160)
+            self._nxm_toggle_btn.clicked.connect(self._on_nxm_toggle)
+            nxm_layout.addWidget(
+                self._nxm_toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._layout.addWidget(nxm_row)
+            # Populate the initial state of the button
+            self._refresh_nxm_button()
+        else:
+            self._nxm_toggle_btn = None  # for the refresh helper below
 
         # ── Advanced toggle row (last) ─────────────────────────────
         # Hyperlink-style toggle that reveals/hides the manual API
@@ -659,7 +671,8 @@ class SettingsPage(SmoothScrollArea):
         # swallowed all exceptions, so a read-only AppData / redirected
         # folder caused DB and pointer to disagree — next launch could
         # revert to the old path. Round 11 audit catch.
-        pointer_file = Path.home() / "AppData" / "Local" / "cdumm" / "game_dir.txt"
+        from cdumm.platform import app_data_dir
+        pointer_file = app_data_dir() / "game_dir.txt"
         try:
             pointer_file.parent.mkdir(parents=True, exist_ok=True)
             pointer_file.write_text(str(new_path), encoding="utf-8")
@@ -694,6 +707,8 @@ class SettingsPage(SmoothScrollArea):
 
     def _refresh_nxm_button(self) -> None:
         """Sync nxm:// register/unregister button label with current state."""
+        if self._nxm_toggle_btn is None:
+            return  # row hidden on macOS / Linux
         from cdumm.engine.nxm_handler import is_handler_registered
         if is_handler_registered():
             self._nxm_toggle_btn.setText("Unregister")
@@ -709,7 +724,18 @@ class SettingsPage(SmoothScrollArea):
         they can decide whether to take over. Codex P1 — previous code
         auto-retried with ``force=True`` in the same click, defeating
         the explicit-opt-in contract documented in ``nxm_handler.py``.
+
+        macOS / Linux: nxm:// scheme registration is per-OS and
+        ``register_windows_handler`` is a no-op there. The button
+        is hidden by ``set_managers`` on those platforms; this
+        early-return is belt-and-braces for any direct caller.
         """
+        from cdumm.platform import IS_WINDOWS
+        if not IS_WINDOWS:
+            self._set_nexus_status(
+                "nxm:// handler registration is Windows-only.",
+                InfoLevel.INFOAMTION)
+            return
         from cdumm.engine.nxm_handler import (
             is_handler_registered, register_windows_handler,
             unregister_windows_handler, _read_command_string,

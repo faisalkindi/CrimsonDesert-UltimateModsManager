@@ -1,0 +1,130 @@
+name: Build macOS release
+
+# Triggers:
+#   * push of a tag matching v*  — matches the existing release scheme
+#     (chore(release): vX.Y.Z is followed by `git tag vX.Y.Z`). The
+#     workflow then attaches the .dmg to the GitHub Release for that
+#     tag automatically.
+#   * workflow_dispatch — manual run from the Actions tab. Produces
+#     the .dmg as a workflow artifact (downloadable for 30 days) but
+#     does NOT touch GitHub Releases.
+#
+# Runner: macos-26-arm64 = macOS 26 (Tahoe) on Apple Silicon. Pinned
+# to the explicit -arm64 label rather than ``macos-latest`` so the
+# build stays reproducible if GitHub later bumps ``latest`` to a
+# future image with different defaults. ARM64-only is the right
+# arch because Crimson Desert macOS doesn't run on Intel anyway.
+#
+# Switched from macos-14 because actions/runner-images announced
+# macOS 14 Sonoma deprecation starting 2026-07-06; macos-26 also
+# ships Python 3.14.4 + Rust 1.95 + Cargo 1.95 + 7-Zip pre-installed,
+# which matches the local dev toolchain on Apple Silicon.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create / update GitHub Releases
+
+jobs:
+  build-macos:
+    runs-on: macos-26-arm64
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          # 3.14 is the macos-26-arm64 image default and matches the
+          # local dev environment on Apple Silicon. ``cdumm-native``
+          # uses pyo3's abi3-py39 ABI tag so any Python 3.9+ would
+          # work, but pinning here keeps CI reproducible if the
+          # runner image's default ever changes.
+          python-version: "3.14"
+
+      - name: Set up Rust toolchain (arm64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      # Cache Cargo's registry + git index + the native/ build dir.
+      # The native crate compiles in ~5s after a warm cache (vs ~45s
+      # cold) — most of that is pyo3 + chacha20 dependency builds.
+      # Cache key pinned to the runner label so a runner-image bump
+      # invalidates the cache automatically (avoids ABI mismatches
+      # between cached artifacts and the new toolchain).
+      - name: Cache cargo + native target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: cargo-macos26-arm64-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: cargo-macos26-arm64-
+
+      - name: Cache pip wheel cache
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/pip
+          key: pip-macos26-arm64-py314-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-macos26-arm64-py314-
+
+      - name: Install Python build tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          # maturin builds the Rust extension; pyinstaller builds the .app.
+          python3 -m pip install maturin pyinstaller
+          # Project deps (PySide6, qfluentwidgets, etc.). Editable install
+          # is fine — PyInstaller resolves the package via importlib.find_spec.
+          python3 -m pip install -e .
+
+      - name: Build .app and .dmg
+        # The script handles: icns generation, maturin build + wheel
+        # install, PyInstaller, ad-hoc codesign, and DMG packaging.
+        # Same script devs run locally — keeps CI / local parity.
+        run: ./scripts/build-macos.sh
+
+      # ----- Artifact upload ----------------------------------------
+      # Always uploaded so workflow_dispatch runs (no tag) still
+      # produce a downloadable .dmg from the Actions UI.
+      - name: Upload .dmg as workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CDUMM-macos-arm64
+          path: dist/CDUMM-*-macos-arm64.dmg
+          retention-days: 30
+          if-no-files-found: error
+
+      # Also upload the raw .app inside a zip so debugging Apple-flag
+      # / signature issues doesn't require mounting the DMG.
+      - name: Upload .app as workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CDUMM-app-macos-arm64
+          path: dist/CDUMM.app
+          retention-days: 7
+          if-no-files-found: error
+
+      # ----- Release attachment (tag-triggered runs only) ----------
+      # Uses the official softprops action. fail_on_unmatched_files
+      # turns "no DMG built" into a workflow failure rather than a
+      # silently-empty release.
+      - name: Attach .dmg to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/CDUMM-*-macos-arm64.dmg
+          fail_on_unmatched_files: true
+          # Don't auto-create the release body — the maintainer's
+          # manual release notes (matching the RELEASE_NOTES_*.md
+          # files in the repo) are richer than anything we'd
+          # auto-generate.
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

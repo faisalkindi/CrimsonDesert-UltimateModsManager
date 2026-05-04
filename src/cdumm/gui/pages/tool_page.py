@@ -659,8 +659,9 @@ class VerifyStatePage(ToolPageBase):
         from cdumm.gui.fluent_window import _quiet_qprocess
         _quiet_qprocess(proc)
         self._verify_proc = proc
-        exe = sys.executable
-        args = ["--worker", "verify", str(self._game_dir), str(self._db.db_path)]
+        from cdumm.platform import worker_command
+        exe, args = worker_command(
+            ["--worker", "verify", str(self._game_dir), str(self._db.db_path)])
         _buf = [""]
 
         def _on_stdout():
@@ -860,8 +861,9 @@ class CheckModsPage(ToolPageBase):
         from cdumm.gui.fluent_window import _quiet_qprocess
         _quiet_qprocess(proc)
         self._check_proc = proc
-        exe = sys.executable
-        args = ["--worker", "check_mods", str(self._game_dir), str(self._db.db_path)]
+        from cdumm.platform import worker_command
+        exe, args = worker_command(
+            ["--worker", "check_mods", str(self._game_dir), str(self._db.db_path)])
         _buf = [""]
 
         def _on_stdout():
@@ -1497,8 +1499,10 @@ class InspectModPage(ToolPageBase):
         from cdumm.gui.fluent_window import _quiet_qprocess
         _quiet_qprocess(proc)
         self._inspect_proc = proc
-        exe = sys.executable
-        args = ["--worker", "inspect", path, str(self._game_dir), str(self._db.db_path)]
+        from cdumm.platform import worker_command
+        exe, args = worker_command(
+            ["--worker", "inspect", path, str(self._game_dir),
+             str(self._db.db_path)])
         _buf = [""]
 
         def _on_stdout():
@@ -1928,10 +1932,11 @@ class FixEverythingPage(ToolPageBase):
         from cdumm.gui.fluent_window import _quiet_qprocess
         _quiet_qprocess(proc)
         self._fix_proc = proc
-        exe = sys.executable
+        from cdumm.platform import worker_command
         steam_flag = "1" if self._steam_verified else "0"
-        args = ["--worker", "fix", str(self._game_dir), str(self._vanilla_dir),
-                str(self._db.db_path), steam_flag]
+        exe, args = worker_command(
+            ["--worker", "fix", str(self._game_dir), str(self._vanilla_dir),
+             str(self._db.db_path), steam_flag])
         _buf = [""]
 
         def _on_stdout():

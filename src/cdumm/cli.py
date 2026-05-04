@@ -12,12 +12,18 @@ import logging
 import sys
 from pathlib import Path
 
-APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
+from cdumm.platform import IS_WINDOWS, app_data_dir
+
+APP_DATA_DIR = app_data_dir()
 
 
 def _attach_console():
-    """Attach to parent console for windowed exe (console=False in PyInstaller)."""
-    if sys.platform == "win32":
+    """Attach to parent console for windowed exe (console=False in PyInstaller).
+
+    Windows-only: the macOS / Linux builds run from a real terminal so
+    stdout/stderr are already wired correctly.
+    """
+    if IS_WINDOWS:
         import ctypes
         kernel32 = ctypes.windll.kernel32
         if kernel32.AttachConsole(-1):  # ATTACH_PARENT_PROCESS

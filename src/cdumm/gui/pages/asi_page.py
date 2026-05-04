@@ -30,6 +30,7 @@ from qfluentwidgets import (
     CheckBox,
     FluentIcon,
     IconWidget,
+    PrimaryPushButton,
     PushButton,
     RoundMenu,
     SearchLineEdit,
@@ -43,6 +44,7 @@ from qfluentwidgets import (
 
 from cdumm.asi.asi_manager import AsiManager, AsiPlugin
 from cdumm.i18n import tr
+from cdumm.platform import IS_MACOS, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -770,6 +772,15 @@ class AsiPluginsPage(QWidget):
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
+        # macOS doesn't support ASI plugins (Win32-only winmm.dll proxy
+        # against CrimsonDesert.exe — no Windows exe in the macOS .app
+        # build). Render a placeholder card explaining the gap rather
+        # than the normal scan + card list. Hiding the tab entirely
+        # confused users with downloaded ASI mods (PR #64 review #3).
+        if IS_MACOS:
+            self._build_macos_placeholder_view(main)
+            return
+
         # Summary bar (pinned top)
         self._summary_bar = _AsiSummaryBar(self)
         self._summary_bar.refresh_clicked.connect(self.refresh)
@@ -851,11 +862,76 @@ class AsiPluginsPage(QWidget):
         main.addLayout(body, 1)
 
     # ------------------------------------------------------------------
+    # macOS placeholder
+    # ------------------------------------------------------------------
+
+    def _build_macos_placeholder_view(self, main: QVBoxLayout) -> None:
+        """Render a Windows-only-feature explanation in place of the
+        normal ASI card list when running on macOS.
+
+        Mirrors the structure of ``ReshadePage._build_not_installed_view``
+        for visual consistency: a single CardWidget with a strong-weight
+        title, word-wrapped body paragraph, and a primary action button
+        that opens the macOS docs in the user's browser. Avoids
+        instantiating any of the engine-side ASI machinery
+        (``_summary_bar``, ``_asi_manager``, scan timers) so the page
+        is cheap and never tries to scan a non-existent ``bin64/``.
+        """
+        import webbrowser
+
+        outer = QVBoxLayout()
+        outer.setContentsMargins(32, 32, 32, 32)
+        outer.setSpacing(12)
+        outer.addStretch()
+
+        card = CardWidget(self)
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(32, 24, 32, 24)
+        card_lay.setSpacing(12)
+
+        title = StrongBodyLabel(tr("asi.macos_unavailable_title"), card)
+        tf = title.font()
+        tf.setPixelSize(18)
+        title.setFont(tf)
+        card_lay.addWidget(title)
+        card_lay.addSpacing(4)
+
+        body_text = BodyLabel(tr("asi.macos_unavailable_body"), card)
+        body_text.setWordWrap(True)
+        card_lay.addWidget(body_text)
+
+        reassure = BodyLabel(tr("asi.macos_unavailable_reassure"), card)
+        reassure.setWordWrap(True)
+        card_lay.addWidget(reassure)
+
+        card_lay.addSpacing(8)
+        link_btn = PrimaryPushButton(
+            FluentIcon.LINK, tr("asi.macos_unavailable_link"), card)
+        link_btn.clicked.connect(lambda: webbrowser.open(
+            "https://github.com/faisalkindi/CrimsonDesert-"
+            "UltimateModsManager/blob/master/MACOS.md"))
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(link_btn)
+        btn_row.addStretch()
+        card_lay.addLayout(btn_row)
+
+        outer.addWidget(card)
+        outer.addStretch()
+        main.addLayout(outer, 1)
+
+    # ------------------------------------------------------------------
     # Engine wiring
     # ------------------------------------------------------------------
 
     def set_managers(self, game_dir: Path | None = None, db=None, **kwargs) -> None:
-        """Receive engine references from CdummWindow."""
+        """Receive engine references from CdummWindow.
+
+        On macOS the page renders a "Windows-only" placeholder and
+        never touches the engine, so we early-return without wiring
+        AsiManager or kicking off a refresh.
+        """
+        if IS_MACOS:
+            return
         self._game_dir = game_dir
         if db is not None:
             self._db = db
@@ -1112,7 +1188,18 @@ class AsiPluginsPage(QWidget):
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Rescan ASI plugins and rebuild the card list with folder groups."""
+        """Rescan ASI plugins and rebuild the card list with folder groups.
+
+        No-op on macOS where ``_build_ui`` rendered the platform-not-
+        supported placeholder instead of the normal scroll/card UI —
+        none of the widgets refresh() touches (``_scroll_layout``,
+        ``_summary_bar`` etc.) exist on the placeholder page.
+        ``fluent_window`` calls refresh() unconditionally during
+        startup; without this guard the AttributeError gets caught at
+        the call site but logs a noisy DEBUG line.
+        """
+        if IS_MACOS:
+            return
         from cdumm.gui.components.mod_card import FolderGroup
 
         # Clear existing cards
@@ -1252,7 +1339,12 @@ class AsiPluginsPage(QWidget):
 
         Args:
             updates: {nexus_mod_id: ModUpdateStatus}
+
+        No-op on macOS — the placeholder page has no version pills to
+        update and ``_db`` is never wired up by ``set_managers``.
         """
+        if IS_MACOS:
+            return
         self._nexus_updates = updates
         if not self._db:
             return
@@ -1702,8 +1794,8 @@ class AsiPluginsPage(QWidget):
         self.refresh()
 
     def _ctx_open_folder(self, plugin: AsiPlugin) -> None:
-        folder = str(plugin.path.parent)
-        os.startfile(folder)
+        from cdumm.platform import open_path
+        open_path(plugin.path.parent)
 
     def _ctx_uninstall(self, plugin_name: str) -> None:
         from qfluentwidgets import MessageBox
@@ -1750,11 +1842,24 @@ class AsiPluginsPage(QWidget):
         return None
 
     def _install_bundled_loader(self) -> None:
-        """Install or update the bundled ASI loader (winmm.dll) to bin64."""
+        """Install or update the bundled ASI loader (winmm.dll) to bin64.
+
+        ASI plugins are a Windows-only mod format (a proxy DLL injects
+        into ``CrimsonDesert.exe``); on the native macOS build there
+        is no ``CrimsonDesert.exe`` to inject into, so the loader has
+        no effect even if dropped into the bundle. Skip the auto-install
+        on non-Windows so we don't write a stray winmm.dll into the
+        macOS .app bundle. The page renders a "Windows-only" placeholder
+        on macOS rather than the normal card list (see
+        ``_build_macos_placeholder_view``); this method's defensive
+        early-return is belt-and-braces in case the placeholder branch
+        ever calls back through to the real install path.
+        """
         import hashlib
         import shutil
-        import sys
 
+        if not IS_WINDOWS:
+            return
         if not self._asi_manager:
             return
 

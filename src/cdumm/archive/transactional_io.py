@@ -5,6 +5,7 @@ the previous valid state is preserved. On crash, .pre-apply files serve as
 recovery markers.
 """
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -49,7 +50,7 @@ class TransactionalIO:
                 f"{rel_path!r}. Pass the path relative to game_dir "
                 f"(e.g. '0012/4.paz')."
             )
-        staged_path = self._staging_dir / rel_path.replace("/", "\\")
+        staged_path = self._staging_dir / rel_path.replace("/", os.sep)
         staged_path.parent.mkdir(parents=True, exist_ok=True)
         staged_path.write_bytes(data)
         if rel_path not in self._staged_files:
@@ -67,7 +68,7 @@ class TransactionalIO:
         of stage_file + commit entirely. Only the size+byte comparison
         cost is paid.
         """
-        target = self._game_dir / rel_path.replace("/", "\\")
+        target = self._game_dir / rel_path.replace("/", os.sep)
         if target.exists():
             try:
                 if target.stat().st_size == len(data):
@@ -94,7 +95,7 @@ class TransactionalIO:
         try:
             # Phase 1: rename originals to .pre-apply
             for rel_path in self._staged_files:
-                original = self._game_dir / rel_path.replace("/", "\\")
+                original = self._game_dir / rel_path.replace("/", os.sep)
                 backup = original.with_suffix(original.suffix + PRE_APPLY_SUFFIX)
 
                 if original.exists():
@@ -104,8 +105,8 @@ class TransactionalIO:
 
             # Phase 2: move staged files to game directory
             for rel_path in self._staged_files:
-                staged = self._staging_dir / rel_path.replace("/", "\\")
-                target = self._game_dir / rel_path.replace("/", "\\")
+                staged = self._staging_dir / rel_path.replace("/", os.sep)
+                target = self._game_dir / rel_path.replace("/", os.sep)
                 # Defense in depth (GitHub #65 followup): if some caller
                 # bypasses stage_file's guard and injects an absolute
                 # path into _staged_files, Path / abspath returns
@@ -133,7 +134,7 @@ class TransactionalIO:
 
         # Phase 3: cleanup .pre-apply files
         for rel_path in renamed:
-            original = self._game_dir / rel_path.replace("/", "\\")
+            original = self._game_dir / rel_path.replace("/", os.sep)
             backup = original.with_suffix(original.suffix + PRE_APPLY_SUFFIX)
             if backup.exists():
                 backup.unlink()
@@ -143,7 +144,7 @@ class TransactionalIO:
     def _rollback(self, renamed: list[str]) -> None:
         """Restore .pre-apply files back to originals."""
         for rel_path in renamed:
-            original = self._game_dir / rel_path.replace("/", "\\")
+            original = self._game_dir / rel_path.replace("/", os.sep)
             backup = original.with_suffix(original.suffix + PRE_APPLY_SUFFIX)
 
             # Remove any partially-committed staged file

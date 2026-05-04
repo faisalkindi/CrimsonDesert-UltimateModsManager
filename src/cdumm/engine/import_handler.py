@@ -1,13 +1,16 @@
 import contextlib
 import logging
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 import zipfile
 from pathlib import Path
 
 from cdumm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
+from cdumm.platform import IS_LINUX, IS_MACOS, IS_WINDOWS
 from cdumm.engine.snapshot_manager import SnapshotManager
 from cdumm.storage.database import Database
 
@@ -828,7 +831,6 @@ def _try_paz_entry_import(
     from cdumm.archive.paz_crypto import lz4_decompress, decrypt
     from cdumm.engine.delta_engine import save_entry_delta
     from cdumm.engine.json_patch_handler import _extract_from_paz
-    import os
     import sys as _sys
 
     _entr_start = time.perf_counter()
@@ -1446,7 +1448,7 @@ def _match_game_files(
 
             # Check if it looks like a game file by pattern
             if _GAME_FILE_RE.match(candidate):
-                game_file = game_dir / candidate.replace("/", "\\")
+                game_file = game_dir / candidate.replace("/", os.sep)
                 is_new = not game_file.exists()
                 matches.append((candidate, f, is_new))
                 matched = True
@@ -1767,6 +1769,33 @@ _FIND_7Z_DEFAULT_PATHS: list[str] = [
     r"C:\Program Files (x86)\7-Zip\7z.exe",
 ]
 
+# macOS / Linux 7-Zip install conventions. The modern Homebrew formula
+# is ``sevenzip`` (binary name ``7zz``); the legacy ``p7zip`` formula
+# (binary ``7z``) is deprecated but still around on older systems.
+# Homebrew's ``/opt/homebrew/opt/<formula>/bin`` symlink is created
+# whether or not the user has run ``brew link`` — checking it directly
+# means CDUMM finds 7-Zip even when ``which 7zz`` returns nothing.
+_FIND_7Z_UNIX_PATHS: list[str] = [
+    # Apple Silicon Homebrew (modern sevenzip formula)
+    "/opt/homebrew/opt/sevenzip/bin/7zz",
+    "/opt/homebrew/bin/7zz",
+    "/opt/homebrew/bin/7z",
+    # Intel macOS Homebrew + most Linux distros
+    "/usr/local/opt/sevenzip/bin/7zz",
+    "/usr/local/bin/7zz",
+    "/usr/local/bin/7z",
+    # System-package-manager paths (apt / dnf / pacman / Linuxbrew)
+    "/usr/bin/7zz",
+    "/usr/bin/7z",
+    "/home/linuxbrew/.linuxbrew/bin/7zz",
+]
+
+# Binary names to try via ``shutil.which`` in PATH order. ``7zz`` first
+# so modern Homebrew wins when both are installed; ``7za`` covers the
+# old Linux ``p7zip-full-rar`` packaging where the RAR-capable binary
+# is renamed.
+_FIND_7Z_CANDIDATE_NAMES: tuple[str, ...] = ("7zz", "7z", "7za")
+
 # Documented registry locations the official 7-Zip installer writes:
 #   HKLM\SOFTWARE\7-Zip\Path                 (admin / system install)
 #   HKCU\Software\7-Zip\Path                 (user install)
@@ -1784,8 +1813,12 @@ def _find_7z_in_registry() -> str | None:
 
     Returns the absolute path to `7z.exe` if any documented key
     points at a directory containing the executable, else None.
-    Silently returns None on non-Windows platforms.
+    Silently returns None on non-Windows platforms — ``import winreg``
+    raises ``ModuleNotFoundError`` there, which the bare ``except
+    ImportError`` below catches.
     """
+    if not IS_WINDOWS:
+        return None
     try:
         import winreg
     except ImportError:
@@ -1812,22 +1845,145 @@ def _find_7z_in_registry() -> str | None:
 
 
 def _find_7z() -> str | None:
-    """Locate the 7-Zip executable on Windows.
+    """Locate the 7-Zip executable. Cross-platform.
 
-    Search order:
+    Windows search order:
       1. Default install paths (Program Files / Program Files (x86))
       2. Windows registry — covers Scoop, custom installs, NanaZip,
          and any case where 7-Zip isn't on PATH (the installer does
          not add itself to PATH by default).
       3. PATH lookup via shutil.which.
+
+    macOS / Linux search order:
+      1. Hard-coded Homebrew + system-package paths (``/opt/homebrew/...``,
+         ``/usr/local/bin/...``, ``/usr/bin/...``). The Homebrew
+         ``sevenzip`` formula sometimes doesn't get linked into
+         ``/opt/homebrew/bin``, so we check the ``opt`` cellar path
+         too — that one is always created.
+      2. PATH lookup via shutil.which, trying ``7zz`` (modern
+         Homebrew), ``7z`` (legacy p7zip), then ``7za``.
+
+    Returns the absolute path to the 7-Zip executable, or None when
+    nothing usable was found. ``import_from_rar`` surfaces a clear
+    install-instruction error message in the latter case.
     """
-    for candidate in _FIND_7Z_DEFAULT_PATHS:
+    if IS_WINDOWS:
+        for candidate in _FIND_7Z_DEFAULT_PATHS:
+            if Path(candidate).exists():
+                return candidate
+        from_registry = _find_7z_in_registry()
+        if from_registry:
+            return from_registry
+        for name in _FIND_7Z_CANDIDATE_NAMES:
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
+
+    # POSIX (macOS / Linux): cellar / opt paths first, then PATH.
+    for candidate in _FIND_7Z_UNIX_PATHS:
         if Path(candidate).exists():
             return candidate
-    from_registry = _find_7z_in_registry()
-    if from_registry:
-        return from_registry
-    return shutil.which("7z")
+    for name in _FIND_7Z_CANDIDATE_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _extract_rar(archive_path: Path, dest: Path) -> str | None:
+    """Extract a RAR archive into ``dest``. Returns None on success,
+    error string on failure.
+
+    Tries every RAR extractor that's plausibly installed, in order of
+    preference, and falls through on failure. The order accounts for
+    real-world RAR support gaps:
+
+    - **7z / 7zz** (Windows 7-Zip, modern Homebrew sevenzip): works
+      for classic RAR4 and basic RAR5 archives. Critical caveat:
+      open-source 7zz on macOS / Linux does NOT include RARLAB's
+      proprietary RAR5 codec, so newer RAR5 archives that use the v6
+      compression methods (``Method = v6:128K:m5`` and similar)
+      partially extract — directory structure created, file contents
+      report ``Unsupported Method`` errors and exit code 2. The
+      Windows 7-Zip ships ``Codecs/Rar.dll`` from RARLAB and handles
+      everything; that's why this same RAR works in the Windows VM
+      but not under Homebrew sevenzip on macOS.
+
+    - **unar** (The Unarchiver, BSD-licensed, ``brew install unar``
+      / ``apt install unar``): handles RAR5 v6 archives that 7zz
+      can't, including the ``character_underwear`` mod that exposed
+      this gap. The CLI uses different flags from 7-Zip.
+
+    - **bsdtar** (libarchive, ships with macOS by default at
+      ``/usr/bin/bsdtar``, optional on Linux): handles RAR5 via
+      libarchive 3.7+. Extracts cleanly when neither 7z nor unar are
+      installed — important because it means CDUMM works on a fresh
+      macOS install with no extra Homebrew packages.
+
+    Each attempt extracts into a fresh subdirectory so partial output
+    from a failed attempt doesn't contaminate the next one.
+    """
+    from cdumm.platform import subprocess_no_window_kwargs
+    sub_kwargs = subprocess_no_window_kwargs()
+
+    attempts: list[tuple[str, list[str]]] = []
+    seven_z = _find_7z()
+    if seven_z:
+        attempts.append(
+            (seven_z,
+             [seven_z, "x", str(archive_path), f"-o{dest}", "-y"]))
+    unar = shutil.which("unar") or (
+        "/opt/homebrew/bin/unar" if Path("/opt/homebrew/bin/unar").exists()
+        else None)
+    if unar:
+        attempts.append(
+            ("unar",
+             [unar, "-quiet", "-force-overwrite",
+              "-output-directory", str(dest), str(archive_path)]))
+    bsdtar = shutil.which("bsdtar") or (
+        "/usr/bin/bsdtar" if Path("/usr/bin/bsdtar").exists() else None)
+    if bsdtar:
+        attempts.append(
+            ("bsdtar",
+             [bsdtar, "-xf", str(archive_path), "-C", str(dest)]))
+
+    if not attempts:
+        return None  # caller surfaces the "no extractor installed" message
+
+    last_err: str = ""
+    for tool_name, cmd in attempts:
+        # Reset the destination between tries so a partial extraction
+        # from a previous tool doesn't get treated as a successful
+        # extract by the format-detection downstream.
+        try:
+            for child in dest.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    try:
+                        child.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, timeout=120, **sub_kwargs)
+        except Exception as e:
+            last_err = f"{tool_name}: {e}"
+            continue
+
+        if proc.returncode == 0 and any(dest.iterdir()):
+            return None
+
+        stderr_msg = proc.stderr.decode(errors="replace").strip()
+        last_err = (
+            f"{tool_name} exit={proc.returncode}"
+            + (f": {stderr_msg.splitlines()[-1]}" if stderr_msg else ""))
+
+    return last_err or "RAR extraction failed"
 
 
 def _stage_asi_files(tmp_path: Path, deltas_dir: Path) -> list[str]:
@@ -1876,36 +2032,41 @@ def import_from_rar(
     archive_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
 ) -> ModImportResult:
-    """Import a mod from a RAR archive by extracting via 7-Zip."""
+    """Import a mod from a RAR archive by extracting via 7-Zip / unar / bsdtar."""
     mod_name = archive_path.stem
     result = ModImportResult(mod_name)
 
-    seven_z = _find_7z()
-    if not seven_z:
-        result.error = (
-            "RAR import requires 7-Zip.\n"
-            "Install from https://7-zip.org or extract manually and drop the folder."
-        )
+    have_extractor = (
+        _find_7z() is not None
+        or shutil.which("unar") is not None
+        or Path("/opt/homebrew/bin/unar").exists()
+        or shutil.which("bsdtar") is not None
+        or Path("/usr/bin/bsdtar").exists()
+    )
+    if not have_extractor:
+        if IS_MACOS:
+            install_hint = (
+                "Install via Homebrew (`brew install sevenzip` or "
+                "`brew install unar`) — bsdtar is normally pre-installed "
+                "but seems missing on this system. Or extract the .rar "
+                "manually and drop the folder.")
+        elif IS_LINUX:
+            install_hint = (
+                "Install your distro's 7-Zip package (apt install p7zip-full, "
+                "dnf install p7zip-plugins, pacman -S p7zip) or `unar` / "
+                "`bsdtar`. Or extract the .rar manually and drop the folder.")
+        else:
+            install_hint = (
+                "Install from https://7-zip.org or extract manually and drop "
+                "the folder.")
+        result.error = "RAR import requires a RAR-capable extractor.\n" + install_hint
         return result
 
     with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
-        try:
-            _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            proc = subprocess.run(
-                [seven_z, "x", str(archive_path), f"-o{tmp_path}", "-y"],
-                capture_output=True, timeout=120,
-                creationflags=_no_window,
-            )
-            if proc.returncode != 0:
-                stderr_msg = proc.stderr.decode(errors="replace").strip()
-                result.error = (
-                    f"7-Zip extraction failed (code {proc.returncode})"
-                    + (f"\n{stderr_msg}" if stderr_msg else "")
-                )
-                return result
-        except Exception as e:
-            result.error = f"Failed to extract RAR: {e}"
+        err = _extract_rar(archive_path, tmp_path)
+        if err is not None:
+            result.error = f"Failed to extract RAR: {err}"
             return result
 
         # Unpack any nested archives so format detectors see folders.
@@ -3248,7 +3409,7 @@ def import_from_bsdiff(
     encoded_path = stem.replace("_", "/")
     for file_path, file_size in candidates:
         if file_path == encoded_path:
-            game_file = game_dir / file_path.replace("/", "\\")
+            game_file = game_dir / file_path.replace("/", os.sep)
             if game_file.exists():
                 try:
                     source = game_file.read_bytes()
@@ -3268,7 +3429,7 @@ def import_from_bsdiff(
             if file_size is not None and abs(file_size - new_size) > file_size * 0.5:
                 continue
 
-            game_file = game_dir / file_path.replace("/", "\\")
+            game_file = game_dir / file_path.replace("/", os.sep)
             if not game_file.exists():
                 continue
 
@@ -3291,11 +3452,11 @@ def import_from_bsdiff(
 
     # Generate our own delta (vanilla → patched) so it goes through the
     # standard apply pipeline with proper byte-range tracking
-    vanilla_file = game_dir / "CDMods" / "vanilla" / target_path.replace("/", "\\")
+    vanilla_file = game_dir / "CDMods" / "vanilla" / target_path.replace("/", os.sep)
     if vanilla_file.exists():
         vanilla_bytes = vanilla_file.read_bytes()
     else:
-        vanilla_bytes = (game_dir / target_path.replace("/", "\\")).read_bytes()
+        vanilla_bytes = (game_dir / target_path.replace("/", os.sep)).read_bytes()
 
     our_delta = generate_delta(vanilla_bytes, patched_bytes)
     byte_ranges = get_changed_byte_ranges(vanilla_bytes, patched_bytes)
@@ -3669,7 +3830,6 @@ def _store_json_patches(db: Database, result, patch_data: dict, game_dir: Path) 
             continue
 
         # The PAZ file path in mod_deltas
-        import os
         pamt_dir = os.path.basename(os.path.dirname(entry.paz_file))
         paz_file_path = f"{pamt_dir}/{entry.paz_index}.paz"
 
@@ -3935,8 +4095,8 @@ def _process_extracted_files(
 
             # Use vanilla backup if available (accurate base for delta),
             # fall back to current game file
-            vanilla_backup = game_dir / "CDMods" / "vanilla" / rel_path.replace("/", "\\")
-            vanilla_path = game_dir / rel_path.replace("/", "\\")
+            vanilla_backup = game_dir / "CDMods" / "vanilla" / rel_path.replace("/", os.sep)
+            vanilla_path = game_dir / rel_path.replace("/", os.sep)
             vanilla_source = vanilla_backup if vanilla_backup.exists() else vanilla_path
             if not vanilla_source.exists():
                 logger.warning("Vanilla file not found for %s, skipping", rel_path)
@@ -4334,7 +4494,7 @@ def import_script_live(
         if not f.is_file():
             continue
         rel = f.relative_to(vanilla_dir).as_posix()
-        game_file = game_dir / rel.replace("/", "\\")
+        game_file = game_dir / rel.replace("/", os.sep)
         if game_file.exists():
             h, _ = _hash_file(game_file)
             pre_hashes[rel] = h
@@ -4358,7 +4518,7 @@ def import_script_live(
     logger.info("Scanning for changes after script...")
     changed_files: list[str] = []
     for rel_path, old_hash in pre_hashes.items():
-        abs_path = game_dir / rel_path.replace("/", "\\")
+        abs_path = game_dir / rel_path.replace("/", os.sep)
         if not abs_path.exists():
             continue
         new_hash, _ = _hash_file(abs_path)
@@ -4381,8 +4541,8 @@ def import_script_live(
     mod_id = cursor.lastrowid
 
     for rel_path in changed_files:
-        vanilla_path = vanilla_dir / rel_path.replace("/", "\\")
-        current_path = game_dir / rel_path.replace("/", "\\")
+        vanilla_path = vanilla_dir / rel_path.replace("/", os.sep)
+        current_path = game_dir / rel_path.replace("/", os.sep)
 
         if not vanilla_path.exists():
             logger.warning("No vanilla backup for %s, skipping", rel_path)
@@ -4479,8 +4639,8 @@ def _ensure_vanilla_backup(game_dir: Path, vanilla_dir: Path, rel_path: str) -> 
     Always a real copy — hard links are unsafe because script mods can
     modify the game file directly, which would corrupt a hard-linked backup.
     """
-    src = game_dir / rel_path.replace("/", "\\")
-    dst = vanilla_dir / rel_path.replace("/", "\\")
+    src = game_dir / rel_path.replace("/", os.sep)
+    dst = vanilla_dir / rel_path.replace("/", os.sep)
     if not dst.exists() and src.exists():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -4516,9 +4676,9 @@ def import_from_game_scan(
     mod_id = cursor.lastrowid
 
     for rel_path, _ in modified:
-        vanilla_path = game_dir / rel_path.replace("/", "\\")
+        vanilla_path = game_dir / rel_path.replace("/", os.sep)
         # We need the vanilla version — check the vanilla backup dir first
-        vanilla_backup = deltas_dir.parent / "vanilla" / rel_path.replace("/", "\\")
+        vanilla_backup = deltas_dir.parent / "vanilla" / rel_path.replace("/", os.sep)
 
         if vanilla_backup.exists():
             vanilla_bytes = vanilla_backup.read_bytes()

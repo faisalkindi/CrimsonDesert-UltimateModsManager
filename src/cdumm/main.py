@@ -7,7 +7,9 @@ import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
+from cdumm.platform import IS_WINDOWS, app_data_dir
+
+APP_DATA_DIR = app_data_dir()
 
 # Enable faulthandler to dump C-level stack trace on segfault.
 # Defensive: if AppData is read-only / permissions fail (domolinixd1000
@@ -127,7 +129,7 @@ def try_acquire_gui_lock(app_data: Path) -> tuple[bool, str]:
             stale = False  # treat read failure as conservative
 
     try:
-        if sys.platform == "win32":
+        if IS_WINDOWS:
             import msvcrt
             _lock_fh = open(lock_path, "w", encoding="utf-8")
             try:
@@ -270,13 +272,17 @@ def main() -> int:
         # silently with a logged error.
         if reason == "another_running":
             logger.info("Another CDUMM instance is already running, exiting")
-            if sys.platform == "win32":
+            if IS_WINDOWS:
                 import ctypes
                 from cdumm import __version__
                 hwnd = ctypes.windll.user32.FindWindowW(None, f"CDUMM v{__version__}")
                 if hwnd:
                     ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                 ctypes.windll.user32.SetForegroundWindow(hwnd)
+            # On macOS / Linux there's no equivalent quick-front API
+            # without an Apple Events / X11 helper — the second
+            # instance just exits silently and leaves the user to
+            # Cmd+Tab to the running window themselves.
         else:
             logger.error(
                 "Could not acquire GUI lock (reason=%s). The "
@@ -291,11 +297,17 @@ def main() -> int:
     from cdumm.i18n import load as load_i18n
     load_i18n("en")
 
-    # Set AppUserModelID so Windows taskbar shows our icon, not Python's
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("kindiboy.cdumm.modmanager.3")
-    except Exception:
-        pass
+    # Set AppUserModelID so Windows taskbar shows our icon, not Python's.
+    # No-op on macOS / Linux — the AUMID concept doesn't exist outside
+    # the Windows shell. macOS uses CFBundleIdentifier from Info.plist
+    # (set when we build the .app); Linux uses .desktop StartupWMClass.
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "kindiboy.cdumm.modmanager.3")
+        except Exception:
+            pass
 
     # Reduce GIL switch interval from 5ms to 0.5ms so the GUI thread
     # gets more frequent time slices during worker Python execution.
@@ -382,11 +394,16 @@ def main() -> int:
     old_cdmm_db = Path.home() / "AppData" / "Local" / "cdmm" / "cdumm.db"
 
     # Try to find game_dir: wizard result first, then pointer file, then old DBs, then auto-detect
-    from cdumm.storage.game_finder import find_game_directories, validate_game_directory
+    from cdumm.storage.game_finder import (
+        find_game_directories, resolve_game_directory, validate_game_directory,
+    )
     game_dir = None
 
     # Method 0: Use wizard result (first launch)
     if _wizard_game_dir and validate_game_directory(Path(_wizard_game_dir)):
+        # The wizard already canonicalises macOS .app paths to the
+        # inner ``packages/`` directory before storing, so this is a
+        # straight assignment.
         game_dir = _wizard_game_dir
         logger.info("Game directory from wizard: %s", game_dir)
 
@@ -395,8 +412,24 @@ def main() -> int:
         try:
             saved = _game_dir_file.read_text(encoding="utf-8").strip()
             if saved and validate_game_directory(Path(saved)):
-                game_dir = saved
-                logger.info("Game directory from pointer: %s", game_dir)
+                # On macOS users running CDUMM in a Windows VM in the
+                # past stored the .app path itself; the rest of CDUMM
+                # operates on the inner ``packages/`` directory. Walk
+                # in via ``resolve_game_directory`` and silently upgrade
+                # the pointer file when the canonical path differs so
+                # the migration runs once, not every launch.
+                resolved = str(resolve_game_directory(Path(saved)) or saved)
+                game_dir = resolved
+                if resolved != saved:
+                    logger.info(
+                        "Game directory from pointer (upgraded): %s -> %s",
+                        saved, resolved)
+                    try:
+                        _game_dir_file.write_text(resolved, encoding="utf-8")
+                    except Exception:
+                        pass
+                else:
+                    logger.info("Game directory from pointer: %s", game_dir)
             elif saved:
                 logger.info("Pointer path no longer valid: %s", saved)
         except Exception:

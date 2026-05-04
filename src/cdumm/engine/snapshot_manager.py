@@ -68,7 +68,6 @@ def verify_live_disk_matches_backups(
 
     Returns ``(is_clean, problem_files)``.
     """
-    import os
     problems: list[str] = []
     if not vanilla_dir.exists():
         return True, []

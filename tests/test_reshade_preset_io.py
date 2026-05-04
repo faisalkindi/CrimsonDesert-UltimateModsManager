@@ -8,9 +8,12 @@
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from cdumm.engine.reshade_preset import (
     is_game_running,
@@ -49,6 +52,11 @@ def test_resolve_relative_with_subdir(tmp_path: Path) -> None:
     assert result == base / "folder" / "inner.ini"
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Asserts a Windows drive-letter path (C:/) round-trips through "
+           "resolve_preset_path; on POSIX the C: prefix is treated as a "
+           "relative segment under bin64/.")
 def test_resolve_strips_double_quotes(tmp_path: Path) -> None:
     """Defensive: if ReShade (or a user hand-edit) quoted the path,
     strip the quotes rather than treat them as part of the filename."""
@@ -57,6 +65,9 @@ def test_resolve_strips_double_quotes(tmp_path: Path) -> None:
     assert str(result).replace("\\", "/") == "C:/external/my preset.ini"
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Same Windows drive-letter assumption as the double-quotes test.")
 def test_resolve_strips_single_quotes(tmp_path: Path) -> None:
     result = resolve_preset_path(None, tmp_path / "bin64",
                                  "'D:/presets/foo.ini'")
@@ -305,6 +316,11 @@ def test_same_preset_exact_match(tmp_path: Path) -> None:
     assert same_preset(p, p) is True
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Tests Windows-specific case-insensitive path comparison via "
+           "os.path.normcase. On POSIX, normcase is a no-op so 'Preset.INI' "
+           "and 'preset.ini' compare unequal as expected.")
 def test_same_preset_case_insensitive_on_windows() -> None:
     # We don't actually need the files to exist for same_preset — it uses
     # normcase + normpath.
@@ -313,6 +329,11 @@ def test_same_preset_case_insensitive_on_windows() -> None:
     assert same_preset(a, b) is True
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Backslash-vs-forward-slash equivalence is Windows-specific; "
+           "POSIX treats `C:\\Foo\\x.ini` as a single filename containing "
+           "literal backslashes.")
 def test_same_preset_handles_mixed_separators() -> None:
     a = Path("C:/Foo/x.ini")
     b = Path("C:\\Foo\\x.ini")

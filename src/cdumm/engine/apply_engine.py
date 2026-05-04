@@ -13,6 +13,7 @@ sparse deltas. Only the specific byte ranges that mods modify are backed up.
 Bsdiff deltas use full file backups (but those files are always small).
 """
 import logging
+import os
 import struct
 import time
 from pathlib import Path
@@ -809,7 +810,7 @@ def _save_range_backup(game_dir: Path, vanilla_dir: Path,
     not-yet-backed-up positions from the current game file (which must
     still be vanilla at those positions, since backups run before apply).
     """
-    game_file = game_dir / file_path.replace("/", "\\")
+    game_file = game_dir / file_path.replace("/", os.sep)
     if not game_file.exists():
         return
 
@@ -1261,7 +1262,7 @@ class ApplyWorker(QObject):
             delta_infos = file_deltas.get(file_path, [])
             if all(d.get("is_new") for d in delta_infos) and delta_infos:
                 continue
-            full_path = self._vanilla_dir / file_path.replace("/", "\\")
+            full_path = self._vanilla_dir / file_path.replace("/", os.sep)
             range_path = self._vanilla_dir / (file_path.replace("/", "_") + RANGE_BACKUP_EXT)
             if not full_path.exists() and not range_path.exists():
                 needs_backup = True
@@ -1284,9 +1285,9 @@ class ApplyWorker(QObject):
         # Ensure PAMT backups for directories with entry-level deltas
         for pamt_dir in entry_pamt_dirs:
             pamt_path = f"{pamt_dir}/0.pamt"
-            full_path = self._vanilla_dir / pamt_path.replace("/", "\\")
+            full_path = self._vanilla_dir / pamt_path.replace("/", os.sep)
             if not full_path.exists():
-                game_pamt = self._game_dir / pamt_path.replace("/", "\\")
+                game_pamt = self._game_dir / pamt_path.replace("/", os.sep)
                 if game_pamt.exists():
                     full_path.parent.mkdir(parents=True, exist_ok=True)
                     _backup_copy(game_pamt, full_path)
@@ -1944,7 +1945,7 @@ class ApplyWorker(QObject):
                 _yield_gil()
 
                 if file_path in new_files_to_delete:
-                    game_path = self._game_dir / file_path.replace("/", "\\")
+                    game_path = self._game_dir / file_path.replace("/", os.sep)
                     if game_path.exists():
                         game_path.unlink()
                         logger.info("Deleted new file from disabled mod: %s", file_path)
@@ -1956,7 +1957,7 @@ class ApplyWorker(QObject):
                             logger.info("Removed empty mod directory: %s", parent.name)
                     continue
 
-                game_path = self._game_dir / file_path.replace("/", "\\")
+                game_path = self._game_dir / file_path.replace("/", os.sep)
                 if game_path.exists():
                     try:
                         snap_row = self._db.connection.execute(
@@ -1992,7 +1993,6 @@ class ApplyWorker(QObject):
             # from the snapshot but aren't managed by an enabled mod.
             if not file_deltas:  # only when reverting everything
                 try:
-                    import os
                     from cdumm.engine.snapshot_manager import hash_file, hash_matches
                     snap_cursor = self._db.connection.execute(
                         "SELECT file_path, file_hash, file_size FROM snapshots")
@@ -2198,9 +2198,9 @@ class ApplyWorker(QObject):
             implicit_backups.add("meta/0.pathc")
 
         for imp_path in implicit_backups:
-            backup_path = self._vanilla_dir / imp_path.replace("/", "\\")
+            backup_path = self._vanilla_dir / imp_path.replace("/", os.sep)
             if not backup_path.exists():
-                game_path = self._game_dir / imp_path.replace("/", "\\")
+                game_path = self._game_dir / imp_path.replace("/", os.sep)
                 if game_path.exists() and self._verify_is_vanilla(
                         game_path, imp_path, snap_hashes):
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2240,8 +2240,8 @@ class ApplyWorker(QObject):
             needs_full = has_bsdiff or file_path.endswith(".pamt")
 
             if needs_full:
-                full_path = self._vanilla_dir / file_path.replace("/", "\\")
-                game_path = self._game_dir / file_path.replace("/", "\\")
+                full_path = self._vanilla_dir / file_path.replace("/", os.sep)
+                game_path = self._game_dir / file_path.replace("/", os.sep)
                 if full_path.exists():
                     # Validate existing backup against snapshot
                     snap = snap_hashes.get(file_path)
@@ -2430,11 +2430,11 @@ class ApplyWorker(QObject):
             return None  # Don't modify the original PAZ
 
         # Get vanilla content
-        full_vanilla = self._vanilla_dir / file_path.replace("/", "\\")
+        full_vanilla = self._vanilla_dir / file_path.replace("/", os.sep)
         if full_vanilla.exists():
             current = full_vanilla.read_bytes()
         else:
-            game_path = self._game_dir / file_path.replace("/", "\\")
+            game_path = self._game_dir / file_path.replace("/", os.sep)
             if not game_path.exists():
                 logger.warning("Game file not found: %s", file_path)
                 return None
@@ -3444,7 +3444,7 @@ class ApplyWorker(QObject):
         """
         vanilla = self._get_vanilla_bytes(pamt_path)
         if vanilla is None:
-            game_path = self._game_dir / pamt_path.replace("/", "\\")
+            game_path = self._game_dir / pamt_path.replace("/", os.sep)
             if game_path.exists():
                 vanilla = game_path.read_bytes()
             else:
@@ -3483,12 +3483,12 @@ class ApplyWorker(QObject):
         (from other mods or manual edits), those leak into the result.
         """
         # Try full backup first
-        full_path = self._vanilla_dir / file_path.replace("/", "\\")
+        full_path = self._vanilla_dir / file_path.replace("/", os.sep)
         if full_path.exists():
             return full_path.read_bytes()
 
         # Try range backup — reconstruct vanilla from game file + ranges
-        game_path = self._game_dir / file_path.replace("/", "\\")
+        game_path = self._game_dir / file_path.replace("/", os.sep)
         if not game_path.exists():
             return None
 
@@ -3525,8 +3525,6 @@ class ApplyWorker(QObject):
         2. Vanilla backup exists but no enabled mod manages the file
            (catches same-size modifications like PAMT byte patches)
         """
-        import os
-
         try:
             cursor = self._db.connection.execute(
                 "SELECT file_path, file_hash, file_size FROM snapshots")
@@ -4058,7 +4056,7 @@ class RevertWorker(QObject):
 
                 if file_path in new_files:
                     # New file — delete it (didn't exist in vanilla)
-                    game_path = self._game_dir / file_path.replace("/", "\\")
+                    game_path = self._game_dir / file_path.replace("/", os.sep)
                     if game_path.exists():
                         game_path.unlink()
                         logger.info("Deleted mod-added file: %s", file_path)
@@ -4088,7 +4086,7 @@ class RevertWorker(QObject):
             for implicit_file in ["meta/0.pathc"]:
                 vanilla_bytes = self._get_vanilla_bytes(implicit_file)
                 if vanilla_bytes:
-                    game_path = self._game_dir / implicit_file.replace("/", "\\")
+                    game_path = self._game_dir / implicit_file.replace("/", os.sep)
                     if game_path.exists():
                         current = game_path.read_bytes()
                         if current != vanilla_bytes:
@@ -4211,11 +4209,11 @@ class RevertWorker(QObject):
         bytes but the path returns successfully so revert doesn't error
         with 'no backup found'.
         """
-        full_path = self._vanilla_dir / file_path.replace("/", "\\")
+        full_path = self._vanilla_dir / file_path.replace("/", os.sep)
         if full_path.exists():
             return full_path.read_bytes()
 
-        game_path = self._game_dir / file_path.replace("/", "\\")
+        game_path = self._game_dir / file_path.replace("/", os.sep)
         if not game_path.exists():
             return None
 

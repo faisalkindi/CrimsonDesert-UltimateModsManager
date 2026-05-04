@@ -31,3 +31,9 @@ tests/_test_mods_external/
 # Local investigation scratch
 .tmp_*
 reviewcode_diff.patch
+
+# macOS
+.DS_Store
+# macOS build artifacts. cdumm.icns is regenerated from
+# assets/cdumm-logo.png by scripts/build-macos.sh on every build.
+cdumm.icns
