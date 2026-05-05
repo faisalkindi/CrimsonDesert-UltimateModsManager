@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# A copy of the MPL-2.0 license text is bundled alongside this file
+# as `skillinfo_parser_LICENSE_MPL2`.
 """
 skillinfo_parser.py  --  100% roundtrip parser for Crimson Desert skill.pabgb/pabgh.
 

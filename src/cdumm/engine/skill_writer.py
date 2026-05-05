@@ -1,7 +1,9 @@
 """Skill Format 3 list-of-dict field writer.
 
 Uses the vendored skill parser at
-`src/cdumm/_vendor/skillinfo_parser.py`.
+`src/cdumm/_vendor/skillinfo_parser.py`. That parser file is
+distributed under MPL-2.0 (see
+`src/cdumm/_vendor/skillinfo_parser_LICENSE_MPL2`).
 
 Whole-table approach (mirrors iteminfo_writer): the parser is
 already verified byte-roundtrip on vanilla 1.0.0.4 skill.pabgb,
