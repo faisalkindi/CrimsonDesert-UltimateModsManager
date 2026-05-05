@@ -329,6 +329,12 @@ def is_xbox_install(game_dir: Path) -> bool:
         return True
     if "8wekyb3d8bbwe" in path_lower:
         return True
-    if "/content/packages" in path_lower:
+    # Anchored match: /content/packages must be a complete path
+    # segment, not a prefix of /content/packagesource or
+    # /content/packages_old. Either followed by another path
+    # separator or at end-of-string.
+    if "/content/packages/" in path_lower:
+        return True
+    if path_lower.endswith("/content/packages"):
         return True
     return False

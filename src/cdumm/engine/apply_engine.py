@@ -4381,44 +4381,67 @@ class RevertWorker(QObject):
                 _yield_gil()
                 for fname in ["0.pamt", "0.paz"]:
                     rel = f"{d.name}/{fname}"
-                    vanilla_bytes = self._get_vanilla_bytes(rel)
+                    # Per-file try/except so a single read failure
+                    # (locked file, antivirus interference, transient
+                    # I/O error) doesn't abort the entire revert and
+                    # leave the user stuck. Log + continue.
+                    try:
+                        vanilla_bytes = self._get_vanilla_bytes(rel)
+                    except OSError as e:
+                        logger.warning(
+                            "Revert verify: skipped %s due to read "
+                            "error: %s", rel, e)
+                        continue
                     if vanilla_bytes:
                         fpath = d / fname
                         if fpath.exists():
-                            actual_size = fpath.stat().st_size
-                            if actual_size == len(vanilla_bytes):
-                                # Same size — check content. For large
-                                # files, stream-hash live and compare
-                                # to in-memory hash of vanilla_bytes.
-                                # Avoids loading 200MB at once for
-                                # 100MB PAZ files.
-                                if actual_size > 5 * 1024 * 1024:
-                                    import hashlib
-                                    h = hashlib.sha256()
-                                    with open(fpath, "rb") as f:
-                                        while True:
-                                            chunk = f.read(1024 * 1024)
-                                            if not chunk:
-                                                break
-                                            h.update(chunk)
-                                    live_h = h.digest()
-                                    van_h = hashlib.sha256(
-                                        vanilla_bytes).digest()
-                                    if live_h != van_h:
-                                        txn.stage_file(rel, vanilla_bytes)
-                                        logger.info(
-                                            "Restored %s (content diff)", rel)
-                                        reverted += 1
-                                else:
-                                    if fpath.read_bytes() != vanilla_bytes:
-                                        txn.stage_file(rel, vanilla_bytes)
-                                        logger.info(
-                                            "Restored %s (content diff)", rel)
-                                        reverted += 1
-                            elif actual_size != len(vanilla_bytes):
-                                txn.stage_file(rel, vanilla_bytes)
-                                logger.info("Restored %s (size diff)", rel)
-                                reverted += 1
+                            try:
+                                actual_size = fpath.stat().st_size
+                                if actual_size == len(vanilla_bytes):
+                                    # Same size — check content. For
+                                    # large files, stream-hash live
+                                    # and compare to in-memory hash of
+                                    # vanilla_bytes. Avoids loading
+                                    # 200MB at once for 100MB PAZ.
+                                    if actual_size > 5 * 1024 * 1024:
+                                        import hashlib
+                                        h = hashlib.sha256()
+                                        with open(fpath, "rb") as f:
+                                            while True:
+                                                chunk = f.read(1024 * 1024)
+                                                if not chunk:
+                                                    break
+                                                h.update(chunk)
+                                        live_h = h.digest()
+                                        van_h = hashlib.sha256(
+                                            vanilla_bytes).digest()
+                                        if live_h != van_h:
+                                            txn.stage_file(rel, vanilla_bytes)
+                                            logger.info(
+                                                "Restored %s (content diff)",
+                                                rel)
+                                            reverted += 1
+                                    else:
+                                        if fpath.read_bytes() != vanilla_bytes:
+                                            txn.stage_file(rel, vanilla_bytes)
+                                            logger.info(
+                                                "Restored %s (content diff)",
+                                                rel)
+                                            reverted += 1
+                                elif actual_size != len(vanilla_bytes):
+                                    txn.stage_file(rel, vanilla_bytes)
+                                    logger.info(
+                                        "Restored %s (size diff)", rel)
+                                    reverted += 1
+                            except OSError as e:
+                                # File locked / antivirus / transient
+                                # I/O. Log + continue to next file
+                                # rather than aborting the whole
+                                # revert.
+                                logger.warning(
+                                    "Revert verify: read failure on "
+                                    "%s, skipping: %s", rel, e)
+                                continue
 
             # Clean up orphan mod directories (0036+) that are empty or
             # only existed because of standalone mods
