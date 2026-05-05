@@ -480,22 +480,25 @@ def _make_format3_vanilla_extractor(
                 # Lazy backup so the next Format 3 apply finds the
                 # backup directly. Mirrors the behavior in
                 # ``resolve_vanilla_source`` for the v2 path.
-                # GitHub #68.
-                try:
-                    backup_paz = vanilla_dir / paz_rel
-                    if not backup_paz.exists():
-                        backup_paz.parent.mkdir(
-                            parents=True, exist_ok=True)
-                        _backup_copy(paz_path, backup_paz)
-                        sibling_pamt = paz_path.with_suffix(".pamt")
-                        if sibling_pamt.exists():
-                            backup_pamt = backup_paz.with_suffix(".pamt")
-                            if not backup_pamt.exists():
-                                _backup_copy(sibling_pamt, backup_pamt)
-                except Exception as e:
-                    logger.debug(
-                        "Lazy vanilla backup failed for %s: %s",
-                        paz_rel, e)
+                # GitHub #68. Skip when paz_rel is just a bare
+                # filename (relative_to fallback) — would write the
+                # backup to the wrong location otherwise.
+                if "/" in paz_rel:
+                    try:
+                        backup_paz = vanilla_dir / paz_rel
+                        if not backup_paz.exists():
+                            backup_paz.parent.mkdir(
+                                parents=True, exist_ok=True)
+                            _backup_copy(paz_path, backup_paz)
+                            sibling_pamt = paz_path.with_suffix(".pamt")
+                            if sibling_pamt.exists():
+                                backup_pamt = backup_paz.with_suffix(".pamt")
+                                if not backup_pamt.exists():
+                                    _backup_copy(sibling_pamt, backup_pamt)
+                    except Exception as e:
+                        logger.debug(
+                            "Lazy vanilla backup failed for %s: %s",
+                            paz_rel, e)
             pamt_dir = _derive_pamt_dir(chosen_entry.paz_file)
             if not pamt_dir:
                 return None
@@ -872,22 +875,28 @@ def resolve_vanilla_source(
     # action doesn't actually create the missing backup (it only
     # backs up archives critical for currently-enabled JSON mods).
     # GitHub #68 (mit999sif).
-    try:
-        backup_paz = vanilla_dir / paz_rel
-        if not backup_paz.exists():
-            backup_paz.parent.mkdir(parents=True, exist_ok=True)
-            _backup_copy(paz_path, backup_paz)
-            sibling_pamt = paz_path.with_suffix(".pamt")
-            if sibling_pamt.exists():
-                backup_pamt = backup_paz.with_suffix(".pamt")
-                if not backup_pamt.exists():
-                    _backup_copy(sibling_pamt, backup_pamt)
-    except Exception as e:
-        # Backup failure is non-fatal \u2014 the apply itself can still
-        # proceed with the verified-live bytes, the warning just
-        # fires again next apply.
-        logger.debug(
-            "Lazy vanilla backup failed for %s: %s", paz_rel, e)
+    # Only attempt lazy backup when paz_rel is a real relative path
+    # (contains a directory component). When relative_to(game_dir)
+    # fell back to ``paz_path.name`` we'd otherwise write the backup
+    # to the wrong location (vanilla_dir/0.paz instead of
+    # vanilla_dir/0008/0.paz).
+    if "/" in paz_rel:
+        try:
+            backup_paz = vanilla_dir / paz_rel
+            if not backup_paz.exists():
+                backup_paz.parent.mkdir(parents=True, exist_ok=True)
+                _backup_copy(paz_path, backup_paz)
+                sibling_pamt = paz_path.with_suffix(".pamt")
+                if sibling_pamt.exists():
+                    backup_pamt = backup_paz.with_suffix(".pamt")
+                    if not backup_pamt.exists():
+                        _backup_copy(sibling_pamt, backup_pamt)
+        except Exception as e:
+            # Backup failure is non-fatal \u2014 the apply itself can still
+            # proceed with the verified-live bytes, the warning just
+            # fires again next apply.
+            logger.debug(
+                "Lazy vanilla backup failed for %s: %s", paz_rel, e)
 
     if warn_callback is not None:
         warn_callback(paz_rel)
