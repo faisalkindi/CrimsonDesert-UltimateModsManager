@@ -726,6 +726,25 @@ def _import_og_xml_as_mod(
             # Nexus bug Torie1985 / cremlins / Robhood19 (Barber
             # Unlocked: 'corrupt entry delta' on v3.2.8.x).
             pamt_dir = Path(entry.paz_file).parent.name
+            # Encryption flag must reflect the original entry's
+            # encryption state so apply re-encrypts on pack-back.
+            # Hardcoding False would skip encryption and the game
+            # would fail to decrypt the entry at runtime. Same
+            # decompress-check fallback the regular PAZ import path
+            # uses.
+            encrypted = bool(getattr(entry, "encrypted", False))
+            if (not encrypted
+                    and getattr(entry, "compressed", False)
+                    and getattr(entry, "compression_type", 0) == 2):
+                try:
+                    with open(entry.paz_file, "rb") as _f:
+                        _f.seek(entry.offset)
+                        _raw = _f.read(entry.comp_size)
+                    from cdumm.archive.paz_parse import lz4_decompress
+                    lz4_decompress(
+                        _raw, getattr(entry, "orig_size", len(xml_bytes)))
+                except Exception:
+                    encrypted = True
             metadata = {
                 "pamt_dir": pamt_dir,
                 "entry_path": entry.path,
@@ -735,7 +754,7 @@ def _import_og_xml_as_mod(
                 "vanilla_offset": entry.offset,
                 "vanilla_comp_size": entry.comp_size,
                 "vanilla_orig_size": getattr(entry, "orig_size", len(xml_bytes)),
-                "encrypted": False,
+                "encrypted": encrypted,
             }
             if existing_mod_id is not None and final_delta_path.exists():
                 staging_path = final_delta_path.with_suffix(".entr.new")
