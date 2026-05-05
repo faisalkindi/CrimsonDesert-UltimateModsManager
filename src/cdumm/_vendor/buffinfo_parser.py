@@ -65,6 +65,45 @@ _POST_ITEMS_PRE_CSTRING_BYTES = 8
 # 4 bytes prefix integer + 1 byte absent indicator.
 _ITEM_HEADER_BYTES = 5
 
+# Offsets within the BuffDataBase (the common payload prefix that
+# follows the item header when absent_flag == 0). All offsets are
+# relative to the start of the payload (i.e. position + 5 from the
+# start of the item).
+_DBASE_TAG = 0
+_DBASE_ID = 1
+_DBASE_NAME_ID = 5
+_DBASE_FLAGS_A = 9
+_DBASE_FLAGS_B = 10
+_DBASE_QWORD_A = 11
+_DBASE_QWORD_B = 19
+_DBASE_QWORD_C = 27
+_DBASE_ASSET_PATH_LEN = 35  # u32 length, then UTF-8 bytes
+# Fields whose positions depend on the asset_path cstring length get
+# computed at parse time. The constants below are the *offsets within
+# the post-cstring region*, i.e. relative to (asset_path_end_offset).
+_AFTER_CSTRING_CATEGORY = 0
+_AFTER_CSTRING_BY58 = 4
+_AFTER_CSTRING_LOOKUP_A_60 = 5
+_AFTER_CSTRING_LOOKUP_B_62 = 9
+_AFTER_CSTRING_LOOKUP_C_64 = 13
+_AFTER_CSTRING_LOOKUP_D_66 = 17
+_AFTER_CSTRING_BY68 = 21
+_AFTER_CSTRING_BY69 = 22
+_AFTER_CSTRING_LOOKUP_88 = 23
+_AFTER_CSTRING_LOOKUP_90 = 27
+_AFTER_CSTRING_FIRST_ARRAY_LEN = 31
+# After the first u32-array (length-prefixed): 5 u32 fields then a
+# second u32-array, then a 1-byte and a final u32.
+_AFTER_FIRST_ARRAY_U32_AT128 = 0
+_AFTER_FIRST_ARRAY_U32_AT72 = 4
+_AFTER_FIRST_ARRAY_U32_AT76 = 8
+_AFTER_FIRST_ARRAY_U32_AT80 = 12
+_AFTER_FIRST_ARRAY_U32_AT84 = 16
+_AFTER_FIRST_ARRAY_SECOND_ARRAY_LEN = 20
+_AFTER_SECOND_ARRAY_BY132 = 0
+_AFTER_SECOND_ARRAY_U32_AT136 = 1
+_DBASE_FIXED_TAIL_BYTES = 5  # by132 + u32_at136
+
 
 @dataclass(frozen=True)
 class BuffItemHeader:
@@ -88,6 +127,318 @@ class BuffItemHeader:
     absent_flag: int
     absent_flag_offset: int
     payload_offset: int
+
+
+@dataclass(frozen=True)
+class BuffPayloadCommon:
+    """Decoded common-prefix region of one buff_data item's payload.
+
+    This is the structure that every present (``absent_flag == 0``)
+    item starts with, before the variant-specific tail. It contains
+    28 fields , a mix of fixed-width primitives plus three
+    variable-length sub-records (one UTF-8 cstring and two
+    length-prefixed u32 arrays).
+
+    Each ``_offset`` field is a byte position within the entry that
+    CDUMM's intent expander targets for byte patches. The field
+    names match the public mod-schema identifiers used in intent
+    paths like ``buff_data_list[0].data.base.flags_a``.
+
+    ``end_offset`` is the byte position immediately after this
+    common prefix , i.e. where the variant-specific tail begins.
+    """
+    tag: int
+    tag_offset: int
+    id: int
+    id_offset: int
+    name_id: int
+    name_id_offset: int
+    flags_a: int
+    flags_a_offset: int
+    flags_b: int
+    flags_b_offset: int
+    qword_a: int
+    qword_a_offset: int
+    qword_b: int
+    qword_b_offset: int
+    qword_c: int
+    qword_c_offset: int
+    asset_path: str
+    asset_path_offset: int  # offset of the length u32
+    category: int
+    category_offset: int
+    by58: int
+    by58_offset: int
+    lookup_a_60: int
+    lookup_a_60_offset: int
+    lookup_b_62: int
+    lookup_b_62_offset: int
+    lookup_c_64: int
+    lookup_c_64_offset: int
+    lookup_d_66: int
+    lookup_d_66_offset: int
+    by68: int
+    by68_offset: int
+    by69: int
+    by69_offset: int
+    lookup_88: int
+    lookup_88_offset: int
+    lookup_90: int
+    lookup_90_offset: int
+    first_array: tuple[int, ...]
+    first_array_offset: int  # offset of the length u32
+    u32_at128: int
+    u32_at128_offset: int
+    u32_at72: int
+    u32_at72_offset: int
+    u32_at76: int
+    u32_at76_offset: int
+    u32_at80: int
+    u32_at80_offset: int
+    u32_at84: int
+    u32_at84_offset: int
+    second_array: tuple[int, ...]
+    second_array_offset: int
+    by132: int
+    by132_offset: int
+    u32_at136: int
+    u32_at136_offset: int
+    end_offset: int
+
+
+def _read_u32_array(
+    entry_bytes: bytes, position: int,
+) -> tuple[tuple[int, ...], int]:
+    """Read a length-prefixed u32 array at ``position``. Returns
+    ``(elements, bytes_consumed_total)`` where bytes_consumed_total
+    includes the 4-byte length prefix and ``4 * count`` element bytes.
+    """
+    if position + 4 > len(entry_bytes):
+        raise ValueError(
+            f"u32 array length prefix out of range at {position}")
+    count = struct.unpack_from("<I", entry_bytes, position)[0]
+    if count > 1_000_000:
+        raise ValueError(
+            f"implausible u32 array length {count} at {position}")
+    body_pos = position + 4
+    body_end = body_pos + 4 * count
+    if body_end > len(entry_bytes):
+        raise ValueError(
+            f"u32 array of {count} elements overflows entry at "
+            f"{position}")
+    elements = struct.unpack_from(
+        f"<{count}I", entry_bytes, body_pos) if count else ()
+    return tuple(elements), 4 + 4 * count
+
+
+def parse_payload_common(
+    entry_bytes: bytes, position: int,
+) -> BuffPayloadCommon:
+    """Decode the BuffPayloadCommon region starting at ``position``.
+
+    ``position`` is the byte offset within ``entry_bytes`` where the
+    payload begins (i.e. just past the item header's 5 bytes when
+    absent_flag is 0). Raises ``ValueError`` on any out-of-range
+    read.
+    """
+    if position < 0 or position >= len(entry_bytes):
+        raise ValueError(
+            f"payload position {position} out of range for entry "
+            f"of size {len(entry_bytes)}")
+
+    # Fixed-width prefix (35 bytes) up to the asset_path cstring.
+    end_of_fixed = position + _DBASE_ASSET_PATH_LEN
+    if end_of_fixed + 4 > len(entry_bytes):
+        raise ValueError(
+            "buff item payload truncated within fixed prefix")
+    tag = entry_bytes[position + _DBASE_TAG]
+    id_val = struct.unpack_from(
+        "<I", entry_bytes, position + _DBASE_ID)[0]
+    name_id = struct.unpack_from(
+        "<I", entry_bytes, position + _DBASE_NAME_ID)[0]
+    flags_a = entry_bytes[position + _DBASE_FLAGS_A]
+    flags_b = entry_bytes[position + _DBASE_FLAGS_B]
+    qword_a = struct.unpack_from(
+        "<Q", entry_bytes, position + _DBASE_QWORD_A)[0]
+    qword_b = struct.unpack_from(
+        "<Q", entry_bytes, position + _DBASE_QWORD_B)[0]
+    qword_c = struct.unpack_from(
+        "<Q", entry_bytes, position + _DBASE_QWORD_C)[0]
+
+    # asset_path cstring at position + 35.
+    cstring_len_pos = position + _DBASE_ASSET_PATH_LEN
+    asset_path_len = struct.unpack_from(
+        "<I", entry_bytes, cstring_len_pos)[0]
+    if asset_path_len > 1_000_000:
+        raise ValueError(
+            f"implausible asset_path length {asset_path_len}")
+    asset_path_data_pos = cstring_len_pos + 4
+    asset_path_end = asset_path_data_pos + asset_path_len
+    if asset_path_end > len(entry_bytes):
+        raise ValueError("asset_path overflows entry")
+    asset_path = entry_bytes[
+        asset_path_data_pos:asset_path_end].decode(
+            "utf-8", errors="replace")
+
+    # Post-cstring fixed region (31 bytes up to the first array).
+    after_cs = asset_path_end
+    needed = after_cs + _AFTER_CSTRING_FIRST_ARRAY_LEN + 4
+    if needed > len(entry_bytes):
+        raise ValueError(
+            "buff item payload truncated in post-cstring region")
+    category = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_CATEGORY)[0]
+    by58 = entry_bytes[after_cs + _AFTER_CSTRING_BY58]
+    lookup_a_60 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_LOOKUP_A_60)[0]
+    lookup_b_62 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_LOOKUP_B_62)[0]
+    lookup_c_64 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_LOOKUP_C_64)[0]
+    lookup_d_66 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_LOOKUP_D_66)[0]
+    by68 = entry_bytes[after_cs + _AFTER_CSTRING_BY68]
+    by69 = entry_bytes[after_cs + _AFTER_CSTRING_BY69]
+    lookup_88 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_LOOKUP_88)[0]
+    lookup_90 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_cs + _AFTER_CSTRING_LOOKUP_90)[0]
+
+    # First u32 array.
+    first_array_pos = after_cs + _AFTER_CSTRING_FIRST_ARRAY_LEN
+    first_array, first_array_size = _read_u32_array(
+        entry_bytes, first_array_pos)
+    after_first_array = first_array_pos + first_array_size
+
+    # Five u32 fields between the two arrays.
+    needed = after_first_array + _AFTER_FIRST_ARRAY_SECOND_ARRAY_LEN + 4
+    if needed > len(entry_bytes):
+        raise ValueError(
+            "buff item payload truncated between arrays")
+    u32_at128 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_first_array + _AFTER_FIRST_ARRAY_U32_AT128)[0]
+    u32_at72 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_first_array + _AFTER_FIRST_ARRAY_U32_AT72)[0]
+    u32_at76 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_first_array + _AFTER_FIRST_ARRAY_U32_AT76)[0]
+    u32_at80 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_first_array + _AFTER_FIRST_ARRAY_U32_AT80)[0]
+    u32_at84 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_first_array + _AFTER_FIRST_ARRAY_U32_AT84)[0]
+
+    # Second u32 array.
+    second_array_pos = (
+        after_first_array + _AFTER_FIRST_ARRAY_SECOND_ARRAY_LEN)
+    second_array, second_array_size = _read_u32_array(
+        entry_bytes, second_array_pos)
+    after_second_array = second_array_pos + second_array_size
+
+    # Final fixed tail: by132 (1) + u32_at136 (4).
+    if after_second_array + _DBASE_FIXED_TAIL_BYTES > len(entry_bytes):
+        raise ValueError(
+            "buff item payload truncated in final tail")
+    by132 = entry_bytes[
+        after_second_array + _AFTER_SECOND_ARRAY_BY132]
+    u32_at136 = struct.unpack_from(
+        "<I", entry_bytes,
+        after_second_array + _AFTER_SECOND_ARRAY_U32_AT136)[0]
+    end_offset = after_second_array + _DBASE_FIXED_TAIL_BYTES
+
+    return BuffPayloadCommon(
+        tag=tag, tag_offset=position + _DBASE_TAG,
+        id=id_val, id_offset=position + _DBASE_ID,
+        name_id=name_id, name_id_offset=position + _DBASE_NAME_ID,
+        flags_a=flags_a, flags_a_offset=position + _DBASE_FLAGS_A,
+        flags_b=flags_b, flags_b_offset=position + _DBASE_FLAGS_B,
+        qword_a=qword_a, qword_a_offset=position + _DBASE_QWORD_A,
+        qword_b=qword_b, qword_b_offset=position + _DBASE_QWORD_B,
+        qword_c=qword_c, qword_c_offset=position + _DBASE_QWORD_C,
+        asset_path=asset_path,
+        asset_path_offset=cstring_len_pos,
+        category=category,
+        category_offset=after_cs + _AFTER_CSTRING_CATEGORY,
+        by58=by58,
+        by58_offset=after_cs + _AFTER_CSTRING_BY58,
+        lookup_a_60=lookup_a_60,
+        lookup_a_60_offset=after_cs + _AFTER_CSTRING_LOOKUP_A_60,
+        lookup_b_62=lookup_b_62,
+        lookup_b_62_offset=after_cs + _AFTER_CSTRING_LOOKUP_B_62,
+        lookup_c_64=lookup_c_64,
+        lookup_c_64_offset=after_cs + _AFTER_CSTRING_LOOKUP_C_64,
+        lookup_d_66=lookup_d_66,
+        lookup_d_66_offset=after_cs + _AFTER_CSTRING_LOOKUP_D_66,
+        by68=by68, by68_offset=after_cs + _AFTER_CSTRING_BY68,
+        by69=by69, by69_offset=after_cs + _AFTER_CSTRING_BY69,
+        lookup_88=lookup_88,
+        lookup_88_offset=after_cs + _AFTER_CSTRING_LOOKUP_88,
+        lookup_90=lookup_90,
+        lookup_90_offset=after_cs + _AFTER_CSTRING_LOOKUP_90,
+        first_array=first_array,
+        first_array_offset=first_array_pos,
+        u32_at128=u32_at128,
+        u32_at128_offset=after_first_array + _AFTER_FIRST_ARRAY_U32_AT128,
+        u32_at72=u32_at72,
+        u32_at72_offset=after_first_array + _AFTER_FIRST_ARRAY_U32_AT72,
+        u32_at76=u32_at76,
+        u32_at76_offset=after_first_array + _AFTER_FIRST_ARRAY_U32_AT76,
+        u32_at80=u32_at80,
+        u32_at80_offset=after_first_array + _AFTER_FIRST_ARRAY_U32_AT80,
+        u32_at84=u32_at84,
+        u32_at84_offset=after_first_array + _AFTER_FIRST_ARRAY_U32_AT84,
+        second_array=second_array,
+        second_array_offset=second_array_pos,
+        by132=by132,
+        by132_offset=after_second_array + _AFTER_SECOND_ARRAY_BY132,
+        u32_at136=u32_at136,
+        u32_at136_offset=after_second_array + _AFTER_SECOND_ARRAY_U32_AT136,
+        end_offset=end_offset,
+    )
+
+
+# Mapping from the public mod-schema field name (the leaf in
+# ``buff_data_list[N].data.base.X``) to the (offset_attr, width,
+# dtype) triple on BuffPayloadCommon. Variable-length array fields
+# aren't directly addressable by intent paths so they're not listed.
+_PAYLOAD_COMMON_FIELDS: dict[str, tuple[str, int, str]] = {
+    "tag": ("tag_offset", 1, "u8"),
+    "id": ("id_offset", 4, "u32"),
+    "name_id": ("name_id_offset", 4, "u32"),
+    "flags_a": ("flags_a_offset", 1, "u8"),
+    "flags_b": ("flags_b_offset", 1, "u8"),
+    "qword_a": ("qword_a_offset", 8, "u64"),
+    "qword_b": ("qword_b_offset", 8, "u64"),
+    "qword_c": ("qword_c_offset", 8, "u64"),
+    "asset_path": ("asset_path_offset", 0, "cstring"),
+    "category": ("category_offset", 4, "u32"),
+    "by58": ("by58_offset", 1, "u8"),
+    "lookup_a_60": ("lookup_a_60_offset", 4, "u32"),
+    "lookup_b_62": ("lookup_b_62_offset", 4, "u32"),
+    "lookup_c_64": ("lookup_c_64_offset", 4, "u32"),
+    "lookup_d_66": ("lookup_d_66_offset", 4, "u32"),
+    "by68": ("by68_offset", 1, "u8"),
+    "by69": ("by69_offset", 1, "u8"),
+    "lookup_88": ("lookup_88_offset", 4, "u32"),
+    "lookup_90": ("lookup_90_offset", 4, "u32"),
+    "u32_at128": ("u32_at128_offset", 4, "u32"),
+    "u32_at72": ("u32_at72_offset", 4, "u32"),
+    "u32_at76": ("u32_at76_offset", 4, "u32"),
+    "u32_at80": ("u32_at80_offset", 4, "u32"),
+    "u32_at84": ("u32_at84_offset", 4, "u32"),
+    "by132": ("by132_offset", 1, "u8"),
+    "u32_at136": ("u32_at136_offset", 4, "u32"),
+}
 
 
 def parse_item_header(
@@ -447,15 +798,24 @@ def locate_buff_field(
             return None
         if n != 0:
             return None
-        if tail in (".absent_flag", ".leading_lookup"):
-            entry = parse_entry(entry_bytes)
-            header = parse_item_header(
-                entry_bytes, entry.buff_data_list_offset)
-            if tail == ".absent_flag":
-                return header.absent_flag_offset, 1, "u8"
-            # ``leading_lookup`` is the public schema name for the
-            # 4-byte prefix integer at the start of each item.
+        entry = parse_entry(entry_bytes)
+        header = parse_item_header(
+            entry_bytes, entry.buff_data_list_offset)
+        if tail == ".absent_flag":
+            return header.absent_flag_offset, 1, "u8"
+        if tail == ".leading_lookup":
             return header.prefix_id_offset, 4, "u32"
+        if tail.startswith(".data.base."):
+            if header.absent_flag != 0:
+                return None  # absent items have no payload to address
+            leaf = tail[len(".data.base."):]
+            spec = _PAYLOAD_COMMON_FIELDS.get(leaf)
+            if spec is None:
+                return None
+            offset_attr, width, dtype = spec
+            payload = parse_payload_common(
+                entry_bytes, header.payload_offset)
+            return getattr(payload, offset_attr), width, dtype
         return None
 
     return None

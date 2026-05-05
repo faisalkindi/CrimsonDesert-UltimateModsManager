@@ -107,9 +107,11 @@ def test_locate_buff_field_returns_none_for_unresolved_paths():
     return None , this protects callers from accidentally writing
     to the wrong byte while incremental work proceeds."""
     raw = _build_entry_with_prefix(1, "X", b"\x00" * 100)
-    # Nested data.base paths require the BuffDataBase decoder.
-    assert locate_buff_field(
-        raw, "buff_data_list[0].data.base.flags_a") is None
     # Items at index > 0 require the variant size table.
     assert locate_buff_field(
         raw, "buff_data_list[2].absent_flag") is None
+    # Variant-tail paths (data.variant.*) need the variant decoder.
+    assert locate_buff_field(
+        raw, "buff_data_list[0].data.variant.type") is None
+    assert locate_buff_field(
+        raw, "buff_data_list[0].data.variant.body.f00") is None
