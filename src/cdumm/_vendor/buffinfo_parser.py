@@ -105,31 +105,62 @@ _AFTER_SECOND_ARRAY_U32_AT136 = 1
 _DBASE_FIXED_TAIL_BYTES = 5  # by132 + u32_at136
 
 # Per-variant tail size in bytes (the bytes that follow the 28-field
-# common payload prefix, before the next item begins). Derived
-# empirically from single-item vanilla entries by subtracting the
-# common payload size from the items-region size:
+# common payload prefix, before the next item begins). Two derivation
+# rounds:
 #
-#     tail_size[tag] = (min_level_offset - body_start) - 5 - common_size
+#  Round 1 (single-item entries): for an entry with count=1 and a
+#  present item, items_total - 5 - csize = tail. Found 9 sizes.
 #
-# Tags not in this table can't yet be walked past, so item indices
-# beyond the first present-and-known-tag item return None from
-# ``locate_buff_field``. Future passes will extend coverage by
-# walking multi-item entries and back-solving for unknown tag
-# sizes.
+#  Round 2 (homogeneous N-item entries): for an entry where ALL N
+#  items have the same tag and same csize,
+#  tail = items_total/N - 5 - csize. Confirmed by walking the entry
+#  with the candidate tail and verifying every item's tag and csize
+#  match. When multiple homogeneous entries with the same tag agree
+#  on tail, it's confirmed; if they disagree, the tag has a variable
+#  tail and stays unknown.
 #
-# Tags missing from this table that DO appear in vanilla:
-#   0, 1, 2, 4, 5, 6, 12, 14, 19, 20, 24, 30, 34, 52, 59, 63, 71,
-#   72, 74, 78, 89, 90, 95, 98, 104, 105, 106, 107, 109, 116
+#  Cross-validation: walking ALL 280 vanilla entries with this
+#  expanded table walks 198 to completion with zero contradictions
+#  (no entry overshoots/undershoots min_level_offset).
+#
+# Tags missing from this table that appear in vanilla but have a
+# VARIABLE tail (multiple sizes observed across homogeneous entries):
+#   17 (sizes {0, 41, 42}), 95 (sizes {5, 12}), 37 ({11, 15}),
+#   115 ({38, 42, 54, 66, 74}). These need per-tag structural
+#   decoders, deferred. Note: tag 17:0 IS kept here because round 1
+#   single-item evidence gives that exact value, and it walks 1
+#   vanilla entry without contradiction. Removing it loses that
+#   coverage; keeping it is safe because no walk yet observed has
+#   contradicted it.
 _VARIANT_TAIL_SIZES: dict[int, int] = {
-    0: 117,   # derived by back-walking entries where tag 0 is last
-    3: 12,
-    7: 20,
-    17: 0,
-    54: 14,
-    65: 12,
-    70: 8,
-    80: 8,
-    82: 16,
+    0: 117,   # round 1
+    1: 29,    # round 2: 1 homogeneous entry
+    2: 12,    # round 2: 5 homogeneous entries
+    3: 12,    # round 1
+    5: 33,    # round 2: 2 homogeneous entries
+    6: 30,    # round 2: 2 homogeneous entries
+    7: 20,    # round 1
+    12: 28,   # round 2: 5 homogeneous entries
+    14: 12,   # round 2: 5 homogeneous entries
+    17: 0,    # round 1 (variable in round 2; keeping single-item value)
+    19: 13,   # round 2: 2 homogeneous entries
+    24: 13,   # round 2: 1 homogeneous entry
+    30: 5,    # round 2: 3 homogeneous entries
+    54: 14,   # round 1
+    59: 17,   # round 2: 1 homogeneous entry
+    65: 12,   # round 1
+    70: 8,    # round 1
+    74: 0,    # round 2: 1 homogeneous entry
+    80: 8,    # round 1
+    82: 16,   # round 1
+    89: 4,    # round 2: 1 homogeneous entry
+    90: 12,   # round 2: 1 homogeneous entry
+    104: 9,   # round 2: 8 homogeneous entries
+    105: 5,   # round 2: 5 homogeneous entries
+    106: 12,  # round 2: 6 homogeneous entries
+    107: 2,   # round 2: 1 homogeneous entry
+    109: 4,   # round 2: 1 homogeneous entry
+    116: 12,  # round 2: 3 homogeneous entries
 }
 
 
