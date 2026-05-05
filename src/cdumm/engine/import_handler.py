@@ -706,6 +706,7 @@ def _import_og_xml_as_mod(
     # failure rolls back the DB but leaves overwritten `.entr` files —
     # the restored old DB rows then reference filenames whose contents
     # are from the failed new import (silent corruption).
+    from cdumm.engine.delta_engine import save_entry_delta
     pending_renames: list[tuple[Path, Path]] = []  # (final, .new)
     try:
         for og, entry in resolved:
@@ -719,12 +720,29 @@ def _import_og_xml_as_mod(
             # each other (their targets differ, so safe_names differ).
             safe_name = og["target_name"].replace("/", "_") + ".entr"
             final_delta_path = mod_delta_dir / safe_name
+            # Build the metadata block ENTRY_MAGIC framing requires.
+            # Without it, load_entry_delta fails with "Not an entry
+            # delta" at apply-time and the mod silently no-ops.
+            # Nexus bug Torie1985 / cremlins / Robhood19 (Barber
+            # Unlocked: 'corrupt entry delta' on v3.2.8.x).
+            pamt_dir = Path(entry.paz_file).parent.name
+            metadata = {
+                "pamt_dir": pamt_dir,
+                "entry_path": entry.path,
+                "paz_index": getattr(entry, "paz_index", 0),
+                "compression_type": getattr(entry, "compression_type", 0),
+                "flags": getattr(entry, "flags", 0),
+                "vanilla_offset": entry.offset,
+                "vanilla_comp_size": entry.comp_size,
+                "vanilla_orig_size": getattr(entry, "orig_size", len(xml_bytes)),
+                "encrypted": False,
+            }
             if existing_mod_id is not None and final_delta_path.exists():
                 staging_path = final_delta_path.with_suffix(".entr.new")
-                staging_path.write_bytes(xml_bytes)
+                save_entry_delta(xml_bytes, metadata, staging_path)
                 pending_renames.append((final_delta_path, staging_path))
             else:
-                final_delta_path.write_bytes(xml_bytes)
+                save_entry_delta(xml_bytes, metadata, final_delta_path)
 
             db.connection.execute(
                 "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
