@@ -106,6 +106,37 @@ def invalidate_apply_fingerprint(game_dir: Path) -> None:
             fp_path, e)
 
 
+# Set of file extensions where partial-byte-edits across mods can be
+# safely merged. Anything else falls back to last-wins to avoid
+# corrupting self-contained binary blobs (textures, audio, images,
+# compressed data) that would crash the game when byte-merged.
+# Nexus regression report (mrkillerhomer, 2026-05-03 v3.2.7→v3.2.8):
+# the byte-merge fallback enabled in commit 57cfa29 for non-pabgb
+# entries fired on overlapping DDS textures and produced a corrupt
+# Frankenstein file that froze the game on the loading screen.
+_BYTE_MERGEABLE_EXTS = frozenset({
+    # PABGB tables and their headers
+    "pabgb", "pabgh",
+    # Pearl Abyss XML / sequencer formats
+    "pac_xml", "pamb_xml", "paseq", "paac", "xml",
+    # UI text formats
+    "css", "html",
+})
+
+
+def _entry_supports_byte_merge(entry_path: str) -> bool:
+    """Return True iff ``entry_path``'s extension is one where a
+    multi-mod byte-merge is meaningful. Self-contained binary blobs
+    (textures, audio) and unknown extensions return False so the
+    apply pipeline falls through to last-wins for them.
+    """
+    name = entry_path.rsplit("/", 1)[-1].lower()
+    if "." not in name:
+        return False
+    ext = name.rsplit(".", 1)[-1]
+    return ext in _BYTE_MERGEABLE_EXTS
+
+
 def _yield_gil() -> None:
     """Release the GIL momentarily so the GUI thread can process events.
 
@@ -2774,6 +2805,18 @@ class ApplyWorker(QObject):
             pass
 
         for idx, (entry_path, conflicting) in enumerate(entries_to_merge.items()):
+            # Skip byte-merge entirely for self-contained binary blobs
+            # (textures, audio, images, unknown formats). Merging a
+            # DDS texture from two mods produces a corrupt Frankenstein
+            # file the GPU chokes on. Last-wins is the right fallback
+            # for these formats. Nexus regression mrkillerhomer
+            # 2026-05-03 (texture mods 920/2233/2126 broke on v3.2.8).
+            if not _entry_supports_byte_merge(entry_path):
+                logger.debug(
+                    "skipping merge for %s (extension not in byte-"
+                    "merge whitelist; falling through to last-wins)",
+                    entry_path)
+                continue
             # Populate mod_bodies BEFORE the table_name check so the byte-
             # merge tier 2 fallback below works for entries that aren't
             # known pabgb tables. GitHub #59 (DoRoon, 2026-05-01): two
