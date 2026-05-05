@@ -1042,6 +1042,9 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             patched_hex = change.get("patched")
             if not patched_hex:
                 logger.warning("Change at offset %d has no 'patched' field, skipping", offset)
+                _record_skip(
+                    change, offset, None,
+                    "missing or empty 'patched' field")
                 continue
             try:
                 patched_bytes = bytes.fromhex(patched_hex)

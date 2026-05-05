@@ -35,6 +35,24 @@ def test_out_of_range_offset_records_skip_entry():
         or "out of range" in (entry.get("reason") or "").lower()
 
 
+def test_missing_patched_field_records_skip_entry():
+    """Sister bug to out-of-range: a change with no 'patched' field
+    was logging-only without recording a skip. Same family of silent
+    failure."""
+    from cdumm.engine.json_patch_handler import _apply_byte_patches
+
+    data = bytearray(b"\x00" * 16)
+    changes = [
+        {"label": "no-patched", "offset": 0, "original": "00"},
+        # 'patched' missing
+    ]
+    skipped: list[dict] = []
+    _apply_byte_patches(
+        data, changes, signature=None, skipped_out=skipped)
+    assert len(skipped) == 1
+    assert "patched" in (skipped[0].get("reason") or "").lower()
+
+
 def test_out_of_range_taints_mod_via_filter():
     """End-to-end: a mod with a single out-of-range change must be
     fully tainted by filter_changes_by_tainted_mods, not silently
