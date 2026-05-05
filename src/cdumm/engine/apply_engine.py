@@ -438,7 +438,6 @@ def _make_format3_vanilla_extractor(
         try:
             backup_entry = _find_pamt_entry(target, vanilla_dir)
             chosen_entry = None
-            using_live = False
             if backup_entry is not None and Path(
                     backup_entry.paz_file).exists():
                 chosen_entry = backup_entry
@@ -476,7 +475,6 @@ def _make_format3_vanilla_extractor(
                         target, paz_rel)
                     return None
                 chosen_entry = live_entry
-                using_live = True
                 # Lazy backup so the next Format 3 apply finds the
                 # backup directly. Mirrors the behavior in
                 # ``resolve_vanilla_source`` for the v2 path.
