@@ -66,6 +66,25 @@ def test_emit_swallows_oserror_epipe(monkeypatch):
     _emit({"type": "progress", "value": 50})
 
 
+def test_emit_swallows_typeerror_on_non_serializable(monkeypatch, capsys):
+    """If a caller accidentally passes a non-serializable value
+    (Path, set, custom object), _emit must not raise. The worker
+    error-reporting boundary needs ALL exceptions swallowed, not
+    just OSError. Same crash-resilience class as the original
+    Nexus zellmann21b bug."""
+    from pathlib import Path
+    from cdumm.worker_process import _emit
+
+    class _GoodStdout:
+        def write(self, s): return len(s)
+        def flush(self): pass
+
+    monkeypatch.setattr(sys, "stdout", _GoodStdout())
+
+    # A Path is not JSON-serializable. _emit must not raise.
+    _emit({"type": "progress", "path": Path("/tmp/foo")})
+
+
 def test_emit_normal_path_still_writes(monkeypatch):
     """Sanity: the resilient _emit must still write to stdout when
     stdout is healthy. Don't accidentally suppress all writes."""

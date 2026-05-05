@@ -34,13 +34,23 @@ def _emit(obj: dict) -> None:
     its error stream.
     """
     try:
-        sys.stdout.write(json.dumps(obj) + "\n")
+        line = json.dumps(obj)
+    except (TypeError, ValueError):
+        # Non-serializable value (Path, set, custom object). Fall
+        # back to repr so we still emit SOMETHING the parent can
+        # log, instead of letting the worker crash with TypeError.
+        try:
+            line = json.dumps({"type": "error",
+                               "msg": f"unserializable: {obj!r}"})
+        except Exception:
+            line = '{"type":"error","msg":"unserializable payload"}'
+    try:
+        sys.stdout.write(line + "\n")
         sys.stdout.flush()
     except OSError:
         try:
             sys.stderr.write(
-                "worker._emit fallback (stdout broken): "
-                f"{json.dumps(obj)}\n")
+                f"worker._emit fallback (stdout broken): {line}\n")
             sys.stderr.flush()
         except OSError:
             # Both pipes broken. Nothing more we can do without
