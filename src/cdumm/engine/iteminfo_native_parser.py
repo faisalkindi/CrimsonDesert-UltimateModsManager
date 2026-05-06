@@ -600,9 +600,23 @@ def _read_PrefabData(r: _Reader) -> dict:
     equip_slot_list = r.carray(_Reader.u32)
     is_craft_material = r.u8()
     tribe_count = r.u32()
-    tribe_gender_list = [
-        _read_PrefabDataTribe(r, i, tribe_count) for i in range(tribe_count)
-    ]
+    tribe_gender_list: list[dict] = []
+    snap_before_tribes = r.pos
+    try:
+        for i in range(tribe_count):
+            tribe_gender_list.append(_read_PrefabDataTribe(r, i, tribe_count))
+    except Exception:
+        # Family C (264 records, tcnt=11) and other multi-tribe shapes
+        # whose layout isn't fully RE'd. Forward-walk to the next field's
+        # GVP scale needle and consume the entire tribe block opaquely.
+        r.pos = snap_before_tribes
+        opaque = _shapeA2_forward_walk(r)
+        if opaque is None:
+            # Re-raise the original error by retrying parse
+            for i in range(tribe_count):
+                tribe_gender_list.append(_read_PrefabDataTribe(r, i, tribe_count))
+        else:
+            tribe_gender_list = [opaque]
     return {
         "tag_name_hash": tag_name_hash,
         "prefab_names": prefab_names,
