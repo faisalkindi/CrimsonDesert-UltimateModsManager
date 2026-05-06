@@ -204,8 +204,8 @@ def _walk_table(table: str, target: str):
 
 
 def test_vehicleinfo_can_call_in_safe_zone_reachable_for_every_entry():
-    """Vehicleinfo override must reach `_canCallInSafeZone` (the field
-    NattKh's parser was built to target) for every entry."""
+    """Vehicleinfo override must reach `_canCallInSafeZone` (the
+    field the upstream parser was built to target) for every entry."""
     total, target_reached, walked_full, bails = _walk_table(
         "vehicleinfo", "_canCallInSafeZone")
     assert target_reached == total, (
@@ -257,7 +257,7 @@ def test_value_correctness_spot_checks_across_path_b_tables():
         return ("field_not_found_in_schema", target_field)
 
     # Ground-truth values: matched against crimson-rs roundtrip tests
-    # (Pyeonjeon_Arrow) and NattKh's documented vehicleinfo values
+    # (Pyeonjeon_Arrow) and upstream-documented vehicleinfo values
     # (Horse, BearWarMachine, Dragon).
     checks = [
         ("iteminfo", "_maxStackCount", 2200, 100, "<Q",
@@ -265,13 +265,13 @@ def test_value_correctness_spot_checks_across_path_b_tables():
         ("iteminfo", "_isBlocked", 2200, 0, "<B",
          "Pyeonjeon_Arrow not blocked"),
         ("vehicleinfo", "_canCallInSafeZone", 16960, 1, "<B",
-         "NattKh: Horse only entry with this flag set"),
+         "Horse: only entry with this flag set"),
         ("vehicleinfo", "_mountCallType", 16960, 1, "<B",
-         "NattKh: Horse is rideable (=1)"),
+         "Horse is rideable (=1)"),
         ("vehicleinfo", "_mountCallType", 16984, 2, "<B",
-         "NattKh: Dragon is flying (=2)"),
+         "Dragon is flying (=2)"),
         ("vehicleinfo", "_mountCallType", 16998, 0, "<B",
-         "NattKh: BearWarMachine is siege (=0)"),
+         "BearWarMachine is siege (=0)"),
     ]
     skipped_any = False
     for tbl, field, key, expected, fmt, desc in checks:
@@ -295,8 +295,9 @@ def test_vehicleinfo_horse_canCallInSafeZone_reads_as_one():
     pointing at the WRONG bytes — there are 2 unknown bytes between
     `_vehicleCharKey` and `_mountCallType` that the schema missed.
 
-    Empirical truth (NattKh: "_canCallInSafeZone — only Horse=1 in
-    vanilla"). Verifies schema correctly identifies Horse's flag value.
+    Empirical truth (upstream notes: "_canCallInSafeZone — only
+    Horse=1 in vanilla"). Verifies schema correctly identifies
+    Horse's flag value.
     """
     import struct
     paths = _find_vanilla_pair("vehicleinfo")
@@ -330,8 +331,8 @@ def test_vehicleinfo_horse_canCallInSafeZone_reads_as_one():
         off += consumed
 
     assert can_call_value == 1, (
-        f"Horse._canCallInSafeZone read as {can_call_value} but "
-        f"NattKh's documented vanilla value is 1. The vehicleinfo "
+        f"Horse._canCallInSafeZone read as {can_call_value} but the "
+        f"documented vanilla value is 1. The vehicleinfo "
         f"schema is reading the wrong byte position — likely missing "
         f"~2 bytes between _vehicleCharKey and _mountCallType.")
 
@@ -340,8 +341,8 @@ def test_fieldinfo_can_call_vehicle_reachable_for_every_entry():
     """Fieldinfo override walks fields 1-19 for every entry. Target
     `_canCallVehicle` (field 20 in IDA order, index 18 in payload) is
     the deepest field reachable before the undecoded `_complexData`
-    block. NattKh's `_alwaysCallVehicle_dev` is past that block and
-    requires further RE work — explicitly out of Path B's scope."""
+    block. The upstream `_alwaysCallVehicle_dev` is past that block
+    and requires further RE work — explicitly out of Path B's scope."""
     total, target_reached, walked_full, bails = _walk_table(
         "fieldinfo", "_canCallVehicle")
     assert target_reached == total, (
@@ -352,8 +353,8 @@ def test_fieldinfo_can_call_vehicle_reachable_for_every_entry():
 def test_stageinfo_complete_count_reachable_for_majority():
     """Stageinfo override reaches `_completeCount` for 93.5% of entries
     (verified empirically 2026-04-27: 47186/50463). The remaining 6.5%
-    hit `_sequencerDesc` optional-object variant NattKh's parser also
-    can't decode. Asserts a hard floor of 93% so a regression dropping
+    hit `_sequencerDesc` optional-object variant the upstream parser
+    also can't decode. Asserts a hard floor of 93% so a regression dropping
     to 92% would flag — Requirements review caught the original 90%
     floor as too loose to detect realistic regressions."""
     total, target_reached, walked_full, bails = _walk_table(
@@ -366,10 +367,11 @@ def test_stageinfo_complete_count_reachable_for_majority():
 
 
 def test_regioninfo_is_town_reachable_for_every_entry():
-    """RegionInfo override walks all 24 fields with no entry header (NattKh
-    confirms RegionInfo lacks the standard entry header — _key and
-    _stringKey are regular schema fields). Verifies the
-    ``_no_entry_header: true`` flag plumbed through ``_payload_offset``."""
+    """RegionInfo override walks all 24 fields with no entry header
+    (RegionInfo lacks the standard entry header — _key and
+    _stringKey are regular schema fields, confirmed against the
+    upstream parser). Verifies the ``_no_entry_header: true`` flag
+    plumbed through ``_payload_offset``."""
     total, target_reached, walked_full, bails = _walk_table(
         "regioninfo", "_isTown")
     assert target_reached == total, (
@@ -381,11 +383,12 @@ def test_regioninfo_is_town_reachable_for_every_entry():
 
 
 def test_characterinfo_call_mercenary_spawn_duration_reachable():
-    """CharacterInfo mount/vehicle subset (14 fields) — covers the fields
-    NattKh's characterinfo_mount_parser.py exposes for ride-duration and
-    cooldown mods. The full CharacterInfo entry has many more fields
-    (complex arrays/stats in the tail) that NattKh's mount parser
-    deliberately skips; reaching them requires further RE."""
+    """CharacterInfo mount/vehicle subset (14 fields) — covers the
+    fields the upstream characterinfo_mount_parser.py exposes for
+    ride-duration and cooldown mods. The full CharacterInfo entry
+    has many more fields (complex arrays/stats in the tail) that
+    the upstream mount parser deliberately skips; reaching them
+    requires further RE."""
     total, target_reached, walked_full, bails = _walk_table(
         "characterinfo", "_callMercenarySpawnDuration")
     assert target_reached == total, (

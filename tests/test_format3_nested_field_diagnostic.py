@@ -1,8 +1,8 @@
 """Format 3 nested-field intents get a clear "not yet supported"
 message instead of the generic "no field_schema entry" wall.
 
-Bug from UnLuckyLust on GitHub #55, 2026-04-28: NattKh's
-CrimsonGameMods v3 exports targeting `iteminfo.pabgb` with fields
+Bug from UnLuckyLust on GitHub #55, 2026-04-28: Field-JSON v3
+exports targeting `iteminfo.pabgb` with fields
 like `enchant_data_list` (a list of dicts) and dotted paths like
 `docking_child_data.attach_parent_socket_name` get rejected with:
 

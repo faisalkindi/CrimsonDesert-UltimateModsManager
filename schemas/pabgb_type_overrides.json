@@ -1,8 +1,9 @@
 {
   "_meta": {
-    "purpose": "Type-descriptor overrides for fields NattKh's pabgb_complete_schema.json leaves as stream=?/type=?. Ported from Potter420/crimson-rs (MIT) src/item_info/item.rs. Resolves the 22 unknown-stream fields in ItemInfo so the parser can walk past them to reach _cooltime and the 70+ fields after it.",
-    "source": "https://github.com/potter420/crimson-rs/blob/main/src/item_info/item.rs",
-    "license": "MIT — credit Potter420 (corin) per crimson-rs LICENSE",
+    "purpose": "Type-descriptor overrides for fields the upstream pabgb_complete_schema.json leaves as stream=?/type=?. Item_info type definitions ported from Potter420/crimson-rs (MIT) src/item_info/item.rs. StageInfo / FieldInfo / RegionInfo / CharacterInfo subset entries ported from NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS (MPL-2.0 at time of port; license text bundled at src/cdumm/_vendor/crimson_rs/LICENSE_MPL2; copyright 2026 RicePaddySoftware). Resolves the 22 unknown-stream fields in ItemInfo so the parser can walk past them to reach _cooltime and the 70+ fields after it.",
+    "source_potter420": "https://github.com/potter420/crimson-rs/blob/main/src/item_info/item.rs",
+    "source_nattkh": "https://github.com/NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS",
+    "license": "Mixed: MIT (Potter420 portions, credited per crimson-rs LICENSE) and MPL-2.0 (NattKh portions, copyright 2026 RicePaddySoftware, license text bundled with CDUMM).",
     "format": "Each table key may also have a special `_ordered_fields` array listing the deserialization order. When present, the loader REPLACES NattKh's field array with this order (NattKh's array is sorted by memory address, NOT serialization order). Field-level overrides set type descriptors. Verified empirically against vanilla iteminfo.pabgb 2026-04-27.",
     "added_2026_04_27": "Path B coverage: ItemInfo (113 fields), VehicleInfo (19), FieldInfo (19 of 26 — _complexData blocks the rest), StageInfo (81 of 82), RegionInfo (24), CharacterInfo (14-field mount subset). 6 tables, ~270 fields total."
   },

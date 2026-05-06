@@ -362,7 +362,7 @@ def detect_format(path: Path) -> str:
     if suffix == ".json":
         if detect_json_patch(path) is not None:
             return "json_patch"
-        # NattKh's Format 3 (field-names + intents) lives in a .json
+        # Format 3 (field-names + intents) lives in a .json
         # but doesn't have a patches[] array, so the standard detector
         # rejects it. We return a dedicated format string so the
         # dispatch can emit a "coming in v3.3" message instead of the
@@ -709,6 +709,7 @@ def _import_og_xml_as_mod(
     # failure rolls back the DB but leaves overwritten `.entr` files —
     # the restored old DB rows then reference filenames whose contents
     # are from the failed new import (silent corruption).
+    from cdumm.engine.delta_engine import save_entry_delta
     pending_renames: list[tuple[Path, Path]] = []  # (final, .new)
     try:
         for og, entry in resolved:
@@ -722,12 +723,48 @@ def _import_og_xml_as_mod(
             # each other (their targets differ, so safe_names differ).
             safe_name = og["target_name"].replace("/", "_") + ".entr"
             final_delta_path = mod_delta_dir / safe_name
+            # Build the metadata block ENTRY_MAGIC framing requires.
+            # Without it, load_entry_delta fails with "Not an entry
+            # delta" at apply-time and the mod silently no-ops.
+            # Nexus bug Torie1985 / cremlins / Robhood19 (Barber
+            # Unlocked: 'corrupt entry delta' on v3.2.8.x).
+            pamt_dir = Path(entry.paz_file).parent.name
+            # Encryption flag must reflect the original entry's
+            # encryption state so apply re-encrypts on pack-back.
+            # Hardcoding False would skip encryption and the game
+            # would fail to decrypt the entry at runtime. Same
+            # decompress-check fallback the regular PAZ import path
+            # uses.
+            encrypted = bool(getattr(entry, "encrypted", False))
+            if (not encrypted
+                    and getattr(entry, "compressed", False)
+                    and getattr(entry, "compression_type", 0) == 2):
+                try:
+                    with open(entry.paz_file, "rb") as _f:
+                        _f.seek(entry.offset)
+                        _raw = _f.read(entry.comp_size)
+                    from cdumm.archive.paz_parse import lz4_decompress
+                    lz4_decompress(
+                        _raw, getattr(entry, "orig_size", len(xml_bytes)))
+                except Exception:
+                    encrypted = True
+            metadata = {
+                "pamt_dir": pamt_dir,
+                "entry_path": entry.path,
+                "paz_index": getattr(entry, "paz_index", 0),
+                "compression_type": getattr(entry, "compression_type", 0),
+                "flags": getattr(entry, "flags", 0),
+                "vanilla_offset": entry.offset,
+                "vanilla_comp_size": entry.comp_size,
+                "vanilla_orig_size": getattr(entry, "orig_size", len(xml_bytes)),
+                "encrypted": encrypted,
+            }
             if existing_mod_id is not None and final_delta_path.exists():
                 staging_path = final_delta_path.with_suffix(".entr.new")
-                staging_path.write_bytes(xml_bytes)
+                save_entry_delta(xml_bytes, metadata, staging_path)
                 pending_renames.append((final_delta_path, staging_path))
             else:
-                final_delta_path.write_bytes(xml_bytes)
+                save_entry_delta(xml_bytes, metadata, final_delta_path)
 
             db.connection.execute(
                 "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
@@ -2296,7 +2333,7 @@ def _import_from_extracted(
             if plain_result is not None:
                 return plain_result
 
-    # Format 3 (NattKh field-name) detection. The same JSON dropped as
+    # Format 3 (field-name) detection. The same JSON dropped as
     # a ZIP would land in `import_from_zip`'s Format 3 branch; without
     # this block, RAR/7z imports of the same mod errored with "no
     # recognized format". Source: Lovexvirus007's Can It Stack JSON V3
@@ -2670,7 +2707,7 @@ def import_from_zip(
                     _store_json_patches(db, result, jp_data, game_dir)
                 return result
 
-        # NattKh's Format 3 mods (field-names + intents) ship as a
+        # Format 3 mods (field-names + intents) ship as a
         # single .json. detect_json_patch above checks for a
         # 'patches' array — Format 3 doesn't have one, so it falls
         # through here. Catch it before the rest of the detectors so
@@ -2684,7 +2721,8 @@ def import_from_zip(
         if len(f3_jsons) == 1:
             return import_from_natt_format_3(
                 json_path=f3_jsons[0], game_dir=game_dir, db=db,
-                snapshot=snapshot, deltas_dir=deltas_dir)
+                snapshot=snapshot, deltas_dir=deltas_dir,
+                existing_mod_id=existing_mod_id)
         if len(f3_jsons) > 1:
             # Variant pack (CrimsonWings: 10pct/25pct/50pct/75pct/
             # infinite of one mod) is detected via stem prefix +
@@ -3107,7 +3145,7 @@ def import_from_folder(
         if primary_result is not None:
             return primary_result
 
-    # Format 3 (NattKh field-names) detection — same fix as
+    # Format 3 (field-names) detection — same fix as
     # import_from_zip. detect_json_patches_all only matches files
     # with a 'patches' array; Format 3 uses 'intents' and falls
     # through. Catch it here before texture/PAZ scans so the user
@@ -3118,7 +3156,8 @@ def import_from_folder(
     if len(f3_jsons) == 1:
         return import_from_natt_format_3(
             json_path=f3_jsons[0], game_dir=game_dir, db=db,
-            snapshot=snapshot, deltas_dir=deltas_dir)
+            snapshot=snapshot, deltas_dir=deltas_dir,
+            existing_mod_id=existing_mod_id)
     if len(f3_jsons) > 1:
         result = ModImportResult(mod_name)
         f3_pack = _scan_format3_variant_pack(folder_path)
@@ -3501,7 +3540,7 @@ def import_from_natt_format_3(
     json_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
 ) -> ModImportResult:
-    """Importer for NattKh's Format 3 (field-names + intents).
+    """Importer for Format 3 (field-names + intents).
 
     Parses the file, validates each intent against the PABGB schema
     + community-curated field_schema, and surfaces a precise summary
@@ -3519,11 +3558,17 @@ def import_from_natt_format_3(
     """
     name = json_path.stem
     title = name
+    data: dict = {}
     try:
         from cdumm.engine.format3_handler import (
-            parse_format3_mod, validate_intents,
+            parse_format3_mod_targets, validate_intents,
         )
-        target, intents = parse_format3_mod(json_path)
+        # Multi-target dialect (newer .field.json export, Faisal
+        # 2026-05-04 ZIP review): one mod can declare several
+        # .pabgb targets in a single file. parse_format3_mod_targets
+        # returns one (target, intents) pair per declared target;
+        # singular-shape files yield a 1-pair list.
+        target_pairs = parse_format3_mod_targets(json_path)
         try:
             import json as _json
             with open(json_path, "r", encoding="utf-8") as f:
@@ -3542,54 +3587,119 @@ def import_from_natt_format_3(
         result.error = f"Failed to parse Format 3 mod: {e}"
         return result
 
-    validation = validate_intents(target, intents)
+    # Validate every (target, intents) pair. The mod is importable
+    # if AT LEAST ONE pair has supported intents , the others get
+    # surfaced in the per-target skip summary, same shape the apply
+    # pipeline emits.
+    validations = [
+        (t, intents, validate_intents(t, intents))
+        for t, intents in target_pairs
+    ]
+    total_supported = sum(len(v.supported) for _, _, v in validations)
+    total_skipped = sum(len(v.skipped) for _, _, v in validations)
+    total_intents = sum(len(intents) for _, intents, _ in validations)
+    targets_summary = ", ".join(t for t, _, _ in validations)
+
     result = ModImportResult(title)
 
-    # No supported intents → surface the skip reasons, no DB row.
-    # Creating a row would put the mod in CDUMM's list as 'imported'
-    # but Apply would do nothing — worse UX than not importing.
-    if not validation.supported:
+    # No supported intents across ANY target → surface the skip
+    # reasons, no DB row. Creating a row would put the mod in
+    # CDUMM's list as 'imported' but Apply would do nothing.
+    if total_supported == 0:
+        per_target_summaries = "\n\n".join(
+            f"=== {t} ===\n{v.summary()}"
+            for t, _, v in validations
+        )
         result.error = (
-            f"NattKh Format 3 mod targeting {target}: none of the "
-            f"{len(intents)} intent(s) can be applied yet.\n\n"
-            f"{validation.summary()}\n\n"
-            f"Workaround: drop NattKh's offset-based JSON variant "
-            f"if they ship one. That format works in CDUMM today."
+            f"Format 3 mod targeting {targets_summary}: none of the "
+            f"{total_intents} intent(s) can be applied yet.\n\n"
+            f"{per_target_summaries}\n\n"
+            f"Workaround: use the offset-based JSON variant of this "
+            f"mod if one exists. That format works in CDUMM today."
         )
         return result
 
-    # Some or all intents are applicable → persist the mod so the
-    # apply pipeline can process it. Mirrors import_json_fast
-    # (json_patch_handler.py) but for the Format 3 file shape.
+    # At least one target has supported intents → persist the mod row
+    # using the FIRST target as the primary anchor. Additional targets
+    # get their own mod_deltas rows below so conflict detection sees
+    # every file the mod touches.
+    primary_target = target_pairs[0][0]
     persist_outcome = _persist_format3_mod(
-        json_path=json_path, target=target, mod_name=title,
+        json_path=json_path, target=primary_target, mod_name=title,
         modinfo=(data.get("modinfo") or {}),
         game_dir=game_dir, db=db, existing_mod_id=existing_mod_id,
     )
     if persist_outcome is None:
         # Persistence failed — couldn't resolve target file in PAMTs
         result.error = (
-            f"NattKh Format 3 mod targeting {target}: "
-            f"validated {len(validation.supported)} applicable "
-            f"intent(s), but the target file '{target}' couldn't be "
-            f"located in your game's PAZ archives. Make sure the "
-            f"target name matches a real game data file."
+            f"Format 3 mod targeting {primary_target}: "
+            f"validated {total_supported} applicable intent(s), but "
+            f"the target file '{primary_target}' couldn't be located "
+            f"in your game's PAZ archives. Make sure the target name "
+            f"matches a real game data file."
         )
         return result
 
-    result.mod_id = persist_outcome["mod_id"]
-    result.changed_files = persist_outcome["changed_files"]
+    mod_id = persist_outcome["mod_id"]
+    changed_files = list(persist_outcome["changed_files"])
 
-    if validation.skipped:
+    # Add mod_deltas rows for the remaining targets (multi-target
+    # mods only). Mirrors _persist_format3_mod's PAMT lookup path.
+    if len(target_pairs) > 1:
+        from cdumm.engine.json_patch_handler import (
+            _derive_pamt_dir, _find_pamt_entry,
+        )
+        vanilla_dir = game_dir / "CDMods" / "vanilla"
+        if not vanilla_dir.exists():
+            vanilla_dir = game_dir
+        for extra_target, _ in target_pairs[1:]:
+            entry = _find_pamt_entry(extra_target, vanilla_dir)
+            if entry is None:
+                entry = _find_pamt_entry(extra_target, game_dir)
+            if entry is None:
+                # Target file genuinely missing from PAMT index.
+                # Skip the mod_deltas row but keep going , the apply
+                # pipeline re-parses json_source and will emit its
+                # own warning per missing target.
+                continue
+            pamt_dir = _derive_pamt_dir(entry.paz_file)
+            if not pamt_dir:
+                continue
+            paz_filename = Path(entry.paz_file).name
+            paz_file_path = f"{pamt_dir}/{paz_filename}"
+            db.connection.execute(
+                "INSERT INTO mod_deltas (mod_id, file_path, "
+                "delta_path, byte_start, byte_end, entry_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (mod_id, paz_file_path, "",
+                 entry.offset, entry.offset + entry.comp_size,
+                 extra_target),
+            )
+            changed_files.append({
+                "file_path": paz_file_path,
+                "delta_path": "",
+                "byte_start": entry.offset,
+                "byte_end": entry.offset + entry.comp_size,
+            })
+        db.connection.commit()
+
+    result.mod_id = mod_id
+    result.changed_files = changed_files
+
+    if total_skipped:
+        per_target_summaries = "\n\n".join(
+            f"=== {t} ===\n{v.summary()}"
+            for t, _, v in validations
+        )
         result.info = (
-            f"Format 3 mod imported: {len(validation.supported)} "
-            f"intent(s) ready to apply, {len(validation.skipped)} "
-            f"can't yet:\n\n{validation.summary()}"
+            f"Format 3 mod imported: {total_supported} intent(s) "
+            f"ready to apply, {total_skipped} can't yet:\n\n"
+            f"{per_target_summaries}"
         )
     else:
         result.info = (
-            f"Format 3 mod imported: all {len(intents)} intent(s) "
-            f"on {target} ready to apply."
+            f"Format 3 mod imported: all {total_intents} intent(s) "
+            f"on {targets_summary} ready to apply."
         )
     return result
 

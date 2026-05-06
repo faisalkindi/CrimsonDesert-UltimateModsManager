@@ -185,7 +185,7 @@ def detect_json_patch(path: Path) -> dict | None:
 
 
 def is_natt_format_3(path: Path) -> bool:
-    """Return True if ``path`` is a NattKh-style Format 3 JSON mod.
+    """Return True if ``path`` is a field-names Format 3 JSON mod.
 
     Format 3 is a high-level semantic mod format that uses field
     names + entry keys instead of byte offsets. CDUMM doesn't fully
@@ -672,6 +672,117 @@ def _intersects_written_ranges(pos: int, length: int,
     return False
 
 
+def filter_changes_by_tainted_mods(
+    changes: list[dict],
+    vanilla: bytes,
+    signature: str | None = None,
+    name_offsets: dict[str, int] | None = None,
+    skipped_out: list | None = None,
+) -> list[dict]:
+    """All-or-nothing-per-mod gate (Faisal 2026-05-04).
+
+    Group ``changes`` by ``_source_mod_id``. For each tagged mod,
+    apply that mod's changes to a scratch copy of ``vanilla`` via
+    ``_apply_byte_patches`` , if any change registers a skip, mark
+    the whole mod as tainted.
+
+    Return a new changes list with every tainted mod's changes
+    removed. For each removed change, append a synthetic skip entry
+    to ``skipped_out`` so the per-mod skip count + tooltip reflect
+    the full set of dropped changes (not just the trigger mismatch).
+
+    Untagged changes (no ``_source_mod_id``) , chiefly the Format 3
+    whole-table merged dispatch , pass through untouched. Per-change
+    skip policy still runs against them in the actual apply pass.
+    """
+    by_mod: dict[int, list[dict]] = {}
+    for c in changes:
+        mid = c.get("_source_mod_id")
+        if mid is None:
+            continue
+        by_mod.setdefault(int(mid), []).append(c)
+
+    # Map each source change dict (by id) to a stable token so the
+    # dry-run's real skip entries can be paired back with their
+    # originating change. id() is stable for the lifetime of this
+    # function call, which is all we need.
+    change_to_token: dict[int, str] = {}
+    for mid, mod_changes in by_mod.items():
+        for i, c in enumerate(mod_changes):
+            change_to_token[id(c)] = f"{mid}:{i}"
+
+    # Per-mod dry-run. Tokenized copies carry _dry_run_token so the
+    # _record_skip helper inside _apply_byte_patches can stamp it on
+    # each real mismatch entry. Originals are NOT mutated.
+    tainted_real_skips: dict[int, list[dict]] = {}
+    for mid, mod_changes in by_mod.items():
+        scratch = bytearray(vanilla)
+        test_skipped: list[dict] = []
+        tokenized = []
+        for c in mod_changes:
+            tc = dict(c)
+            tc["_dry_run_token"] = change_to_token[id(c)]
+            tokenized.append(tc)
+        try:
+            _apply_byte_patches(
+                scratch, tokenized, signature=signature,
+                vanilla_data=vanilla, name_offsets=name_offsets,
+                skipped_out=test_skipped)
+        except Exception:
+            tainted_real_skips[mid] = []
+            continue
+        if test_skipped:
+            tainted_real_skips[mid] = test_skipped
+
+    if not tainted_real_skips:
+        return list(changes)
+
+    # Index real skip entries by their dry-run token so the second
+    # pass can look up "did this specific change actually mismatch?"
+    # in O(1).
+    real_by_token: dict[str, dict] = {}
+    for entries in tainted_real_skips.values():
+        for e in entries:
+            tok = e.get("_dry_run_token")
+            if tok:
+                real_by_token[tok] = e
+
+    clean: list[dict] = []
+    for c in changes:
+        mid = c.get("_source_mod_id")
+        if mid is not None and int(mid) in tainted_real_skips:
+            if skipped_out is not None:
+                tok = change_to_token.get(id(c))
+                real = real_by_token.get(tok) if tok else None
+                if real is not None:
+                    # Trigger entry: keep the real offset/actual/
+                    # expected/reason from the dry-run. Strip the
+                    # internal token before it escapes.
+                    out = {k: v for k, v in real.items()
+                           if k != "_dry_run_token"}
+                    skipped_out.append(out)
+                else:
+                    # Drag-along: this change matched vanilla but
+                    # gets dropped because a sibling in the same mod
+                    # did not. Synthetic entry keeps the badge count
+                    # honest.
+                    skipped_out.append({
+                        "label": c.get("label", "")
+                                  or c.get("entry", ""),
+                        "expected": c.get("original", ""),
+                        "actual": "",
+                        "offset": -1,
+                        "reason": (
+                            "mod skipped: another patch in this mod "
+                            "did not match"),
+                        "_source_mod_id": int(mid),
+                        "_target_file": c.get("_target_file", ""),
+                    })
+        else:
+            clean.append(c)
+    return clean
+
+
 def _apply_byte_patches(data: bytearray, changes: list[dict],
                         signature: str | None = None,
                         vanilla_data: bytes | None = None,
@@ -731,6 +842,27 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             "offset": offset_val if offset_val is not None else -1,
             "reason": reason,
         }
+        # Propagate the originating mod's id when the aggregator tagged
+        # the change. Lets the apply pipeline attribute partial-skip
+        # results back to a specific mod card for the post-apply badge.
+        if "_source_mod_id" in change:
+            entry["_source_mod_id"] = change["_source_mod_id"]
+        # Same trick for the target game file so persist_skip_summary's
+        # tooltip 'file' column can name the asset that failed (e.g.
+        # iteminfo.pabgb) instead of leaving it blank.
+        if "_target_file" in change:
+            entry["_target_file"] = change["_target_file"]
+        # Internal: propagate the all-or-nothing dry-run token so the
+        # caller can match real mismatch entries back to their source
+        # change. The token gets stripped before the entry escapes
+        # filter_changes_by_tainted_mods. See H1 fix.
+        if "_dry_run_token" in change:
+            entry["_dry_run_token"] = change["_dry_run_token"]
+        # Whole-table Format 3 changes use _source_mod_ids (plural,
+        # list of ints) because one merged change represents many
+        # mods. persist_skip_summary fans out per id. H3 fix.
+        if "_source_mod_ids" in change:
+            entry["_source_mod_ids"] = list(change["_source_mod_ids"])
         skipped_out.append(entry)
     mismatched = 0
     relocated = 0
@@ -910,6 +1042,9 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             patched_hex = change.get("patched")
             if not patched_hex:
                 logger.warning("Change at offset %d has no 'patched' field, skipping", offset)
+                _record_skip(
+                    change, offset, None,
+                    "missing or empty 'patched' field")
                 continue
             try:
                 patched_bytes = bytes.fromhex(patched_hex)
@@ -925,6 +1060,12 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
             if offset + len(patched_bytes) > len(data):
                 logger.warning("Patch at offset %d exceeds file size %d, skipping",
                                offset, len(data))
+                # Record so the all-or-nothing filter taints the mod
+                # and the user sees the skip in the post-apply toast.
+                # /systematic-debugging finding 2026-05-05.
+                _record_skip(
+                    change, offset, None,
+                    f"offset {offset} exceeds file size {len(data)}")
                 continue
 
             if "original" in change:
@@ -2035,7 +2176,9 @@ def import_json_fast(
         db.connection.execute("DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
         # Clear disabled_patches on reimport — indices may not match new version
         db.connection.execute(
-            "UPDATE mods SET json_source = ?, game_version_hash = ?, disabled_patches = NULL WHERE id = ?",
+            "UPDATE mods SET json_source = ?, game_version_hash = ?, "
+            "disabled_patches = NULL, last_apply_skipped_count = 0, "
+            "last_apply_skip_summary = NULL WHERE id = ?",
             (str(json_dest), game_ver_hash, mod_id))
     else:
         cursor = db.connection.execute(
@@ -2242,10 +2385,24 @@ def process_json_patches_for_overlay(
                     logger.warning("mount-time: v2 index build failed for %s: %s",
                                    pabgh_file, e_pabgh)
 
+        # All-or-nothing per mod (Faisal 2026-05-04): if any of a
+        # mod's changes mismatch vanilla, drop EVERY change from that
+        # mod for this Apply. Coordinated multi-patch mods (max value
+        # + drain rate + regen rate) leave the game in a worse state
+        # when partially applied than when fully skipped.
+        signature = patch.get("signature")
+        changes = filter_changes_by_tainted_mods(
+            changes, bytes(plaintext), signature=signature,
+            name_offsets=name_offsets, skipped_out=skipped_out)
+        if not changes:
+            # Every contributing mod was tainted , nothing left to
+            # apply for this target. The synthetic skip entries are
+            # already in skipped_out.
+            continue
+
         # Apply byte patches with pattern scan against vanilla. Also capture
         # inserts so we can shift a companion .pabgh (JMM parity).
         modified = bytearray(plaintext)
-        signature = patch.get("signature")
         inserts_out: list[tuple[int, int]] = []
         applied, mismatched, relocated = _apply_byte_patches(
             modified, changes, signature=signature, vanilla_data=vanilla_ref,

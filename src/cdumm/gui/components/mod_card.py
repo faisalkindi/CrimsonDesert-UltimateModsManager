@@ -230,6 +230,8 @@ class ModCard(CardWidget):
         enabled: bool = True,
         target_language: str | None = None,
         conflict_mode: str = "normal",
+        last_apply_skipped_count: int = 0,
+        last_apply_skip_summary: str | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -357,11 +359,77 @@ class ModCard(CardWidget):
             root.addWidget(new_badge)
             root.addSpacing(6)
 
+        # Skipped badge — yellow warning shown when the most recent
+        # Apply produced byte-mismatch skips for any of this mod's
+        # patches. Tooltip surfaces the per-patch detail so users can
+        # right-click → Reimport from source without leaving the card.
+        if last_apply_skipped_count and last_apply_skipped_count > 0:
+            count = int(last_apply_skipped_count)
+            # Spell out 'patch'/'patches' so the (N) carries meaning.
+            # Pre-fix the label was '⚠ SKIPPED (2)' and Faisal asked
+            # "what is this (2)?" on 2026-05-04 , M3 fix.
+            unit = tr("mod_card.skipped_unit_singular") if count == 1 \
+                else tr("mod_card.skipped_unit_plural")
+            skipped_badge = QLabel(
+                f"⚠ {tr('mod_card.skipped')} ({count} {unit})")
+            skipped_badge.setObjectName("skippedBadge")
+            skipped_badge.setFixedHeight(26)
+            skipped_badge.setMinimumWidth(95)
+            skipped_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _skip_colors = (
+                {"bg": "#3E2A10", "text": "#FBBF24", "border": "#92400E"}
+                if isDarkTheme()
+                else {"bg": "#FEF3C7", "text": "#92400E", "border": "#FCD34D"}
+            )
+            skipped_badge.setStyleSheet(_pill_qss(_skip_colors))
+            # Default arrow cursor: the badge is informational. The
+            # tooltip exposes the full skip detail; there's no click
+            # target. WhatsThisCursor (Faisal feedback 2026-05-04) was
+            # promising interactivity that doesn't exist , H4 fix.
+            skipped_badge.setCursor(Qt.CursorShape.ArrowCursor)
+            tip_lines = [tr("tooltip.skipped_header", count=count)]
+            try:
+                import json as _json
+                entries = _json.loads(last_apply_skip_summary or "[]")
+                for e in entries[:8]:
+                    lab = e.get("label") or ""
+                    fil = e.get("file") or ""
+                    reason = e.get("reason") or ""
+                    if lab and fil:
+                        head = f"{lab} ({fil})"
+                    else:
+                        head = lab or fil or "?"
+                    tip_lines.append(
+                        f"• {head} , {reason}" if reason else f"• {head}")
+                if len(entries) > 8:
+                    tip_lines.append(f"… +{len(entries) - 8} more")
+            except Exception as _e:
+                # Bad JSON shouldn't crash the card render, but it
+                # SHOULD show up in logs , otherwise corrupt skip
+                # summaries are invisible to anyone debugging a
+                # 'badge shows but tooltip is empty' report. L1 fix.
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "Failed to parse last_apply_skip_summary for "
+                    "mod %s: %s (raw=%r)",
+                    mod_id, _e, last_apply_skip_summary)
+            tip_lines.append("")
+            tip_lines.append(tr("tooltip.skipped_hint"))
+            skipped_badge.setToolTip("\n".join(tip_lines))
+            root.addWidget(skipped_badge)
+            root.addSpacing(6)
+
         # Col 3: Status badge — game state (fixed width)
         self._status_badge = StatusBadge(status)
         self._status_badge.setMinimumWidth(105)
         self._status_badge.setMaximumWidth(105)
         self._status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Hide the green/orange Active pill when this mod is in the
+        # skipped state. The yellow SKIPPED badge above already
+        # communicates the correct surface and showing both gives the
+        # user contradictory signals (Faisal feedback 2026-05-04).
+        if last_apply_skipped_count and last_apply_skipped_count > 0:
+            self._status_badge.hide()
         root.addWidget(self._status_badge)
         root.addSpacing(4)
 

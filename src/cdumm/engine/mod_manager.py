@@ -22,7 +22,8 @@ class ModManager:
             "SELECT id, name, mod_type, enabled, priority, import_date, "
             "game_version_hash, source_path, author, version, description, configurable, "
             "force_inplace, notes, group_id, drop_name, conflict_mode, target_language, "
-            "nexus_mod_id, nexus_file_id, json_source, variants "
+            "nexus_mod_id, nexus_file_id, json_source, variants, "
+            "last_apply_skipped_count, last_apply_skip_summary "
             "FROM mods"
         )
         if mod_type:
@@ -47,6 +48,8 @@ class ModManager:
                 "nexus_file_id": row[19] if len(row) > 19 else None,
                 "json_source": row[20] if len(row) > 20 else None,
                 "variants": row[21] if len(row) > 21 else None,
+                "last_apply_skipped_count": row[22] if len(row) > 22 else 0,
+                "last_apply_skip_summary": row[23] if len(row) > 23 else None,
             }
             for row in cursor.fetchall()
         ]

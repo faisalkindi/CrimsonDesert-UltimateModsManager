@@ -551,7 +551,9 @@ def import_multi_variant(
         # as outdated. Mirror the INSERT branch's identity fields here.
         db.connection.execute(
             "UPDATE mods SET name = ?, author = ?, version = ?, "
-            "description = ?, game_version_hash = ? WHERE id = ?",
+            "description = ?, game_version_hash = ?, "
+            "last_apply_skipped_count = 0, "
+            "last_apply_skip_summary = NULL WHERE id = ?",
             (mod_name, author, version, description,
              game_ver_hash, mod_id))
     else:

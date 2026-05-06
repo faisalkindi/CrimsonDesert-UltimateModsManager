@@ -197,9 +197,14 @@ class ConfigPanel(QWidget):
 
     # Bug from nknwn issue #48 (2026-04-26): config option labels
     # like 'Insect_Collect_Cooldown' truncated at ~16 chars in the
-    # 400px panel. Bumped to 520 to fit typical option names without
-    # ellipsis.
-    _PANEL_WIDTH = 520
+    # 400px panel. Bumped to 520 then to 640 because option labels
+    # in non-Latin scripts (Korean, Japanese, Simplified Chinese)
+    # render visually wider per-character than English at the same
+    # font size, AND because the CC - Female Armor Expansion mod
+    # ships option names with the full file path — both cases hit
+    # the ellipsis at 520px even though wordWrap=True is set on the
+    # label. Nexus reports: Malowded + AsteiosSaber 2026-05-05.
+    _PANEL_WIDTH = 640
     _ANIM_DURATION = 250
 
     def __init__(self, parent=None) -> None:

@@ -15,14 +15,16 @@
 
 ---
 
-## New in v3.2.4
+## New in v3.2.9
 
-- **Field-name JSON mods finally apply (v3.2.3).** The new format that says "change `cooltime` to 0" instead of "change byte 1632 to `00 00 00 00`" now applies for six game tables: items, mounts, terrain, stages, regions, and mount character data. Previously imports worked but apply produced no changes; now they actually take effect in-game.
-- **One broken mod can't kill your whole loadout (v3.2.3).** A single mod with a corrupt change used to abort the entire Apply. Now CDUMM skips just the broken change, names which mod and entry was wrong, and applies everything else cleanly.
-- **BC7 texture mods no longer show as rainbow noise (v3.2.4).** Single-mip BC7 textures (UI elements, HUD bars, icons) had a 20-byte header layout mismatch that scrambled pixel decoding. Fixed.
-- **Multi-version mod packs now show a picker (v3.2.3).** Mods like CrimsonWings ship five strength levels in one zip; drop the zip, pick a level, done.
-- **NexusMods built-in (v3.2).** Sign in once, CDUMM watches every mod you've installed and lights up a red badge when an update lands. Click "Mod Manager Download" on a Nexus page and the file goes straight in.
-- **One-click Game Update Recovery (v3.2).** Steam patches Crimson Desert, your mods break? CDUMM catches it on launch and a single button runs the whole repair: verify, refresh every mod against the new game files, reapply.
+- **Buff mods now apply.** Field-name `.field.json` mods that target `buffinfo.pabgb` (NoCooldownForALLItems, Double Resource Buff, etc.) used to import cleanly and then quietly do nothing in game. CDUMM now decodes the actual on-disk layout instead of relying on a structurally wrong schema, and a 4185-intent test mod goes from 0% applying to 100%. If you installed any buffinfo `.field.json` mod on an older build, run Settings > Fix Everything before re-applying because the old code was silently corrupting unrelated bytes.
+- **SKIPPED badge surfaces partial-apply state (v3.2.9 series).** When a game patch drifts a mod's bytes off, the card shows a yellow pill with the dropped patch count and a tooltip naming each affected file. Right-click > Reimport from source clears it. Active and SKIPPED never both show; one mod is either fully active or fully off.
+- **Click-to-update no longer creates duplicate cards on Format 3 mods.** Two import paths were dropping the existing-mod-id when forwarding to the Format 3 importer, so updates inserted a fresh row instead of replacing the original.
+- **Three texture mods touching the same file no longer hang the loading screen.** v3.2.8 byte-level merging was firing on DDS textures and producing corrupt files the GPU rejected. Texture / audio / image mods now fall back to last-wins like before.
+- **Barber Unlocked and similar OG_ XML mods apply.** The OG_ XML import was writing delta files without the right header, apply hit "corrupt entry delta" and silently no-opped. Re-importing rewrote the same broken file.
+- **"Vanilla backup missing" warning no longer loops forever after Fix Everything.** The self-heal path now creates the backup the first time it succeeds, so subsequent applies skip the warn entirely.
+- **Revert to Vanilla no longer freezes around 90% on installs with many archives.** Per-dir progress, faster hash-stream comparison for large files, single locked file logs and continues instead of aborting the whole revert.
+- **Xbox installs at custom paths now launch correctly.** Detection also checks for the Microsoft publisher hash and the canonical Content/packages layout token, so installs moved off the default `C:\XboxGames\` path use the right launch URI.
 
 ---
 
@@ -46,7 +48,7 @@ Your original game files are **never modified**. Mods are applied through an ove
 | `.zip` / `.7z` / `.rar` | Archives — auto-extracted, including nested zips for multi-language packs |
 | Folders | Loose directories with PAZ/PAMT files or Crimson Browser mods |
 | `.json` (byte-patch) | Offset-based JSON mods (`offset`, `original`, `patched`) |
-| `.field.json` (field-name) | Field-name JSON mods — six tables covered (items, mounts, terrain, stages, regions, mount character) |
+| `.field.json` (field-name) | Field-name JSON mods — items, mounts, terrain, stages, regions, mount character, buffs, drop sets, and skills. Supports both singular `target` and multi-target `targets: [...]` shapes. |
 | `.dds` | DDS texture mods with full PATHC index registration (BC1/BC3/BC4/BC5/BC7) |
 | `OG_*.xml` | XML full replacement mods |
 | `.asi` | ASI plugins — auto-detected, installed to `bin64/` with clean uninstall tracking |
@@ -187,7 +189,9 @@ JSON patches also support `editable_value` metadata for inline value editing in 
 
 ### Field-name JSON mods (Format 3)
 
-CDUMM supports the new field-name JSON format for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), and mount character data (`characterinfo.pabgb`). Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
+CDUMM supports the field-name JSON format (`.field.json`) for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), mount character data (`characterinfo.pabgb`), buffs (`buffinfo.pabgb`), drop sets (`dropsetinfo.pabgb`), and skills (`skill.pabgb`). Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
+
+Both file shapes work: the original singular `{"format": 3, "target": "iteminfo.pabgb", "intents": [...]}` and the newer multi-target `{"format": 3, "targets": [{"file": "...", "intents": [...]}, ...]}` form. The `op` key is optional and defaults to `"set"`.
 
 ---
 

@@ -305,6 +305,27 @@ class Database:
             )
             logger.info("Migrated: added notes column to mods")
 
+        # Per-mod skip tracking (skipped-mod-badge plumbing).
+        # last_apply_skipped_count: how many JSON patches from this
+        # mod were skipped on the most recent Apply (byte mismatch /
+        # stale signature / etc). Reset to 0 on a clean reapply.
+        # last_apply_skip_summary: JSON list of
+        #   {"file": str, "label": str, "reason": str}
+        # used as the badge tooltip so users see exactly what failed.
+        if "last_apply_skipped_count" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN "
+                "last_apply_skipped_count INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info(
+                "Migrated: added last_apply_skipped_count column to mods")
+        if "last_apply_skip_summary" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN last_apply_skip_summary TEXT"
+            )
+            logger.info(
+                "Migrated: added last_apply_skip_summary column to mods")
+
         # Create semantic_resolutions table for conflict resolution persistence
         if not self.table_exists("semantic_resolutions"):
             self._connection.execute("""

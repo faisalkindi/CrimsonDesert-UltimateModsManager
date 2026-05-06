@@ -41,7 +41,26 @@ def test_folder_variant_dialog_not_all_black(qtbot, tmp_path: Path):
     dlg.show()
     qtbot.waitExposed(dlg)
     dlg.adjustSize()
-    qtbot.wait(50)   # settle paint
+
+    # Wait until the dialog has actually painted non-black pixels,
+    # rather than a fixed sleep. Under full-suite CPU load the
+    # 50ms heuristic was insufficient and grab() could return a
+    # solid-black pixmap before paint completed.
+    def _paint_settled() -> bool:
+        pm = dlg.grab()
+        if pm.isNull():
+            return False
+        sample = pm.toImage()
+        if sample.isNull():
+            return False
+        sw, sh = sample.width(), sample.height()
+        if sw <= 0 or sh <= 0:
+            return False
+        center = sample.pixel(sw // 2, sh // 2)
+        return ((center >> 16) & 0xFF, (center >> 8) & 0xFF,
+                center & 0xFF) != (0, 0, 0)
+
+    qtbot.waitUntil(_paint_settled, timeout=2000)
 
     pixmap = dlg.grab()
     img = pixmap.toImage()
@@ -60,7 +79,6 @@ def test_folder_variant_dialog_not_all_black(qtbot, tmp_path: Path):
     non_black_samples = 0
     for x, y in sample_points:
         pixel = img.pixel(x, y)
-        # Qt QImage.pixel returns ARGB as uint32.
         r = (pixel >> 16) & 0xFF
         g = (pixel >> 8) & 0xFF
         b = pixel & 0xFF

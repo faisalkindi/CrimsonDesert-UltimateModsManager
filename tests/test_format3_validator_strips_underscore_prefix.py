@@ -1,11 +1,12 @@
-"""Format 3 validator must accept NattKh-naming field intents.
+"""Format 3 validator must accept field-name intents that strip
+the underscore prefix.
 
 Bug from Faisal 2026-04-27: NoCooldownForALLItems Format 3 mod has
 201 intents using field names ``cooltime``, ``unk_post_cooltime_a``,
-``unk_post_cooltime_b`` (NattKh strips the leading underscore from
-the CDUMM-internal Pearl Abyss field names). CDUMM's loaded schema
-uses underscore-prefixed names (``_cooltime``) because that's what
-NattKh's IDA-MCP schema dumper produces.
+``unk_post_cooltime_b`` (the field-names dialect strips the leading
+underscore from the CDUMM-internal Pearl Abyss field names). CDUMM's
+loaded schema uses underscore-prefixed names (``_cooltime``) because
+that's what the IDA-MCP schema dumper produces.
 
 The apply path at ``format3_apply.py:324`` already handles this with
 a fallback lookup (``field_specs.get(intent.field) or
@@ -48,8 +49,8 @@ class _FakeSchema:
 
 
 def test_walker_reachable_accepts_unprefixed_name_for_prefixed_schema_field():
-    """Schema has `_cooltime` (NattKh schema-dumper naming);
-    intent uses `cooltime` (NattKh mod naming). Reachable check
+    """Schema has `_cooltime` (schema-dumper naming);
+    intent uses `cooltime` (mod naming). Reachable check
     must succeed via prefix fallback."""
     schema = _FakeSchema(fields=[
         _FakeSpec(name="_isBlocked", stream_size=1, type_descriptor="u8"),
@@ -105,5 +106,5 @@ def test_validator_accepts_three_unk_post_cooltime_intents():
     ]
     result = validate_intents("iteminfo.pabgb", intents)
     assert len(result.supported) == 3, (
-        f"All 3 NattKh-named intents must validate. "
+        f"All 3 unprefixed-named intents must validate. "
         f"Skipped: {[(i.field, r) for i, r in result.skipped]}")

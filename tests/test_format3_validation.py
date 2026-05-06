@@ -1,6 +1,6 @@
 """Format 3 — parse + validate.
 
-NattKh's "field-names" JSON format (#41, #208 in CDUMM tracker).
+The "field-names" JSON format (#41, #208 in CDUMM tracker).
 The file has::
 
     {"format": 3, "target": "dropsetinfo.pabgb",

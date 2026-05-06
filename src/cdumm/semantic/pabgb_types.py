@@ -1,10 +1,28 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Portions of the table-walking logic and the StageInfo / FieldInfo /
+# RegionInfo / CharacterInfo helper definitions in this file are
+# ported from:
+#   NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS (MPL-2.0 at time
+#   of port)
+#   https://github.com/NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS
+#   CrimsonGameMods/{stageinfo,fieldinfo,regioninfo,characterinfo_mount}_parser.py
+# Other portions (item_info type definitions) are ported from:
+#   Potter420/crimson-rs (MIT)
+#   https://github.com/potter420/crimson-rs
+# Copyright (c) 2026 RicePaddySoftware (MPL-2.0 portions)
+# License text for the MPL-2.0 portions is bundled at
+# src/cdumm/_vendor/crimson_rs/LICENSE_MPL2.
 """PABGB binary type walker — consumes bytes for any PABGB field type.
 
 Extends the schema-driven parser to handle the variable-length and
-nested types that NattKh's `pabgb_complete_schema.json` leaves as
-`stream=?`/`type=?`. Built by porting type definitions from Potter420's
-`crimson-rs/src/item_info/structs.rs` and `item.rs` (MIT licensed,
-credited in CRIMSON_DESERT_MODDING_BIBLE.md section 22).
+nested types that the upstream `pabgb_complete_schema.json` leaves
+as `stream=?`/`type=?`. Built by porting type definitions from
+Potter420's `crimson-rs/src/item_info/structs.rs` and `item.rs`
+(MIT licensed, credited in CRIMSON_DESERT_MODDING_BIBLE.md section
+22).
 
 The key entry point is :func:`consume_bytes`, which returns the number
 of bytes a typed field occupies starting at a given offset, or None
@@ -27,7 +45,7 @@ on the wire. `LocStringInfoKey` is also a u32 key. `InventoryKey` is u16.
 
 Schema entries that use these new types are in
 ``schemas/pabgb_type_overrides.json``, which the schema loader merges
-with NattKh's base schema at load time.
+with the base schema at load time.
 """
 from __future__ import annotations
 
@@ -248,11 +266,11 @@ SUBSTRUCT_DEFS: dict[str, list[tuple[str, str]]] = {
         ("socket_valid_count", "u8"),
         ("use_socket", "u8"),
     ],
-    # ── StageInfo helpers (ported from NattKh stageinfo_parser.py) ────────────
+    # ── StageInfo helpers (ported from upstream stageinfo_parser.py) ─────────
     # Each one mirrors a sub_*_NNNN reader. Variable-length fields whose
-    # encoding NattKh couldn't fully decode (e.g. SequencerDesc with the
-    # optional-object variant) are tagged below — the walker returns None
-    # for entries that hit those, matching NattKh's own behavior.
+    # encoding the upstream parser couldn't fully decode (e.g. SequencerDesc
+    # with the optional-object variant) are tagged below — the walker returns
+    # None for entries that hit those, matching the upstream's own behavior.
     "StageInfo_CloseFilterEntry": [  # sub_141065180 element: 15B fixed
         ("data", "[u8;15]"),
     ],
@@ -304,8 +322,8 @@ SUBSTRUCT_DEFS: dict[str, list[tuple[str, str]]] = {
         ("flags", "[u8;8]"),
         ("enum_a", "u16"),
         # Optional object — when flag is 1, the inner format is unknown
-        # (NattKh's parser returns -1). The tagged variant below lets the
-        # walker fail cleanly for entries that have flag=1.
+        # (upstream parser returns -1). The tagged variant below lets
+        # the walker fail cleanly for entries that have flag=1.
         ("optional_obj", "StageInfo_SequencerDescOptObj"),
         ("name_c", "CString"),
         ("name_d", "CString"),
@@ -319,13 +337,13 @@ SUBSTRUCT_DEFS: dict[str, list[tuple[str, str]]] = {
         ("u32_arr_c", "CArray<u32>"),
         ("u32_arr_d", "CArray<u32>"),
     ],
-    # ── FieldInfo helpers (ported from NattKh fieldinfo_parser.py) ──────────
-    # _complexData (sub_141A7CA00) is the one field NattKh couldn't decode
-    # field-by-field; her parser punts and reads the target from end-of-entry.
-    # Until the encoding is reversed, the walker can't reliably reach
-    # FieldInfo's last 4 fields. Override only walks up to (but not past)
-    # _complexData.
-    # ── RegionInfo helpers (ported from NattKh regioninfo_parser.py) ────────
+    # ── FieldInfo helpers (ported from upstream fieldinfo_parser.py) ────────
+    # _complexData (sub_141A7CA00) is the one field the upstream parser
+    # couldn't decode field-by-field; it punts and reads the target from
+    # end-of-entry. Until the encoding is reversed, the walker can't
+    # reliably reach FieldInfo's last 4 fields. Override only walks up
+    # to (but not past) _complexData.
+    # ── RegionInfo helpers (ported from upstream regioninfo_parser.py) ──────
     "RegionInfo_KnowledgeEntry": [  # sub_141064C20 element: u32 + u32
         ("key", "u32"),
         ("val", "u32"),
@@ -386,16 +404,17 @@ TAGGED_VARIANT_DEFS: dict[str, dict] = {
         },
     },
     # StageInfo SequencerDesc optional object (sub_141066ED0 inner part):
-    # u8 flag — if 0, just the flag (no payload, total 1B). If 1, NattKh's
-    # parser bails (sub_141BF4F70 is a virtual reader she didn't decode).
-    # Modeled here so entries with flag=1 fail cleanly via an unknown
-    # discriminator value, matching NattKh's behavior.
+    # u8 flag — if 0, just the flag (no payload, total 1B). If 1, the
+    # upstream parser bails (sub_141BF4F70 is a virtual reader it
+    # doesn't decode). Modeled here so entries with flag=1 fail
+    # cleanly via an unknown discriminator value, matching the
+    # upstream behavior.
     "StageInfo_SequencerDescOptObj": {
         "discriminator": "u8",
         "variants": {
             0: "",          # absent — fast path most stages take
             # 1 deliberately omitted: forces None on entries with the
-            # complex variant, same as NattKh punting.
+            # complex variant, same as the upstream punting.
         },
     },
 }

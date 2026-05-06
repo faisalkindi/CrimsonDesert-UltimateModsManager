@@ -98,10 +98,17 @@ def stamp_enabled_mods_as_current(db, game_dir: Path) -> bool:
         current = detect_game_version(game_dir)
         if not current:
             return False
+        # Exclude mods with active skips (last_apply_skipped_count > 0).
+        # Their most recent Apply produced byte-mismatch failures, so
+        # they're NOT known-good on the current game version. Stamping
+        # them would clear the only persistent signal users have for
+        # the partial-skip state. Skipped-mod badge work, chunk 2B.
         cursor = db.connection.execute(
             "UPDATE mods SET game_version_hash = ? WHERE enabled = 1 "
             "AND game_version_hash IS NOT NULL "
-            "AND game_version_hash != ?", (current, current))
+            "AND game_version_hash != ? "
+            "AND COALESCE(last_apply_skipped_count, 0) = 0",
+            (current, current))
         db.connection.commit()
         changed = cursor.rowcount
         if changed:

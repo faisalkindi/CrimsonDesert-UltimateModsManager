@@ -1,6 +1,6 @@
 # Format 3 field_schema — mod author guide
 
-CDUMM ships the engine that applies NattKh-style Format 3 mods. The schema
+CDUMM ships the engine that applies field-names Format 3 mods. The schema
 that maps friendly field names (like `attack`, `price`, `drops`) to byte
 positions inside game data files lives **here** — community-authored,
 shipped alongside CDUMM.
@@ -86,11 +86,10 @@ In order:
 
 ## How to find TIDs
 
-NattKh's `CrimsonDesertModdingTools` repo (github.com/NattKh) ships
-parsers and schemas for the major game data tables. The TID values can
-be derived from those parsers, or from a memory dump of the game's
-field-reader functions. CDUMM doesn't ship a TID extraction tool —
-that's NattKh's specialty.
+External `CrimsonDesertModdingTools` projects ship parsers and schemas
+for the major game data tables. The TID values can be derived from
+those parsers, or from a memory dump of the game's field-reader
+functions. CDUMM doesn't ship a TID extraction tool.
 
 If you author a useful schema, please share it back via a CDUMM GitHub
 issue so other users can benefit.

@@ -1,4 +1,4 @@
-"""Skill list-of-dict field writer (uses vendored NattKh
+"""Skill list-of-dict field writer (uses vendored
 skillinfo_parser).
 
 Bug from timuela on GitHub #41 (focus_aerial_roll skill mod):

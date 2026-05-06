@@ -2,7 +2,7 @@
 equip_passive_skill_list, etc.) using the vendored crimson_rs Rust
 parser/serializer.
 
-Bug from UnLuckyLust on GitHub #55: NattKh-exported Format 3 mods
+Bug from UnLuckyLust on GitHub #55: field-names Format 3 mods
 targeting iteminfo.pabgb with `enchant_data_list` etc. were
 skipped. crimson_rs (MPL-2.0, vendored at src/cdumm/_vendor/) does
 byte-perfect parse + serialize on the full iteminfo table, so we

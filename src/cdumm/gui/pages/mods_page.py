@@ -792,6 +792,8 @@ class ModsPage(QWidget):
                 enabled=bool(mod["enabled"]),
                 target_language=mod.get("target_language"),
                 conflict_mode=mod.get("conflict_mode", "normal"),
+                last_apply_skipped_count=mod.get("last_apply_skipped_count") or 0,
+                last_apply_skip_summary=mod.get("last_apply_skip_summary"),
                 parent=self._scroll_content,
             )
             card.set_note_text(mod.get("notes") or "")
@@ -923,6 +925,8 @@ class ModsPage(QWidget):
             enabled=bool(mod["enabled"]),
             target_language=mod.get("target_language"),
             conflict_mode=mod.get("conflict_mode", "normal"),
+            last_apply_skipped_count=mod.get("last_apply_skipped_count") or 0,
+            last_apply_skip_summary=mod.get("last_apply_skip_summary"),
             parent=self._scroll_content,
         )
         card.set_note_text(mod.get("notes") or "")

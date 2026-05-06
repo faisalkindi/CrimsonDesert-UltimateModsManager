@@ -7,9 +7,8 @@ intents in-memory, and serialize the result back to bytes.
 Whole-table approach: the iteminfo binary is 5+ MB with 6300+
 records and inter-record offset/index dependencies. Per-record
 serialize would require crimson_rs to expose record boundaries,
-which it doesn't. Whole-table parse + apply + serialize is what
-NattKh's own tools use, and crimson_rs does it in ~0.3 seconds
-on the full vanilla file.
+which it doesn't. Whole-table parse + apply + serialize processes
+the full vanilla file in ~0.3 seconds.
 
 Bug from UnLuckyLust on GitHub #55: enchant_data_list and other
 list-of-dict fields on iteminfo were skipped at validation time
@@ -57,10 +56,11 @@ def _resolve_field_name(intent_field: str, item: dict) -> Optional[str]:
     """Map a Format 3 intent field name to a key in crimson_rs's
     ItemInfo dict, or None if no match.
 
-    NattKh's exports use snake_case-without-underscore-prefix
-    (`enchant_data_list`, `is_blocked`); crimson_rs's TypedDict
-    matches that convention. Other tools may emit schema-style
-    underscore-prefixed camelCase (`_isBlocked`); we bridge both.
+    Field-names dialect exports use snake_case-without-underscore-
+    prefix (`enchant_data_list`, `is_blocked`); crimson_rs's
+    TypedDict matches that convention. Other tools may emit
+    schema-style underscore-prefixed camelCase (`_isBlocked`); we
+    bridge both.
     """
     if intent_field in item:
         return intent_field
@@ -126,9 +126,10 @@ def build_iteminfo_intent_change(
                 intent.op, intent.key, intent.field)
             continue
         item = by_key[intent.key]
-        # Resolve field name: try direct (snake_case-no-prefix from
-        # NattKh tools) first, then underscore-stripped + snake-case
-        # of camelCase for schema-style names like `_isBlocked`.
+        # Resolve field name: try direct (snake_case-no-prefix as the
+        # field-names dialect emits) first, then underscore-stripped +
+        # snake-case of camelCase for schema-style names like
+        # `_isBlocked`.
         target_field = _resolve_field_name(intent.field, item)
         if target_field is None:
             skipped_field += 1

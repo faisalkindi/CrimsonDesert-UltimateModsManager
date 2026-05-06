@@ -482,8 +482,35 @@ def is_epic_install(game_dir: Path) -> bool:
 
 
 def is_xbox_install(game_dir: Path) -> bool:
-    """Check if the game directory is an Xbox Game Pass installation."""
-    path_lower = str(game_dir).lower()
-    return ("xboxgames" in path_lower
+    """Check if the game directory is an Xbox Game Pass installation.
+
+    Detection signals (any one is sufficient):
+      * Path contains a known Xbox/Microsoft-Store install root token
+        (``xboxgames``, ``windowsapps``, ``modifiablewindowsapps``).
+      * Path contains the Microsoft publisher hash ``8wekyb3d8bbwe``
+        (the universal Xbox/MS-Store package family suffix). Catches
+        installs at custom paths like
+        ``F:\\Games\\Crimson Desert\\Content\\<pkg>_8wekyb3d8bbwe\\`` —
+        GitHub #74 (JofeMofe, 2026-05-05).
+      * Path contains the canonical Xbox layout token
+        ``\\Content\\packages\\`` which a default Xbox install always
+        ships with (the game's PAZ data lives there). Catches custom
+        install paths whose parent dirs were renamed to mask the
+        Xbox-store origin.
+    """
+    path_lower = str(game_dir).lower().replace("\\", "/")
+    if ("xboxgames" in path_lower
             or "windowsapps" in path_lower
-            or "modifiablewindowsapps" in path_lower)
+            or "modifiablewindowsapps" in path_lower):
+        return True
+    if "8wekyb3d8bbwe" in path_lower:
+        return True
+    # Anchored match: /content/packages must be a complete path
+    # segment, not a prefix of /content/packagesource or
+    # /content/packages_old. Either followed by another path
+    # separator or at end-of-string.
+    if "/content/packages/" in path_lower:
+        return True
+    if path_lower.endswith("/content/packages"):
+        return True
+    return False

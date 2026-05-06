@@ -1,0 +1,27 @@
+Third-party content shipped in this directory
+==============================================
+
+pabgb_complete_schema.json
+--------------------------
+Source:    NattKh / CrimsonDesertModdingTools / pabgb_complete_schema.json
+URL:       https://github.com/NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS
+License:   MPL-2.0 at time of inclusion in CDUMM
+Copyright: Copyright (c) 2026 RicePaddySoftware
+
+This file is included in CDUMM under the terms of the Mozilla Public
+License, v. 2.0. A copy of the MPL-2.0 license text is bundled at
+src/cdumm/_vendor/crimson_rs/LICENSE_MPL2.
+
+If you obtained CDUMM in source or binary form, you can obtain a copy
+of the MPL at https://mozilla.org/MPL/2.0/.
+
+Modifications: this file is included as-is. Any CDUMM-specific
+additions or overrides live in pabgb_type_overrides.json (which has
+its own license metadata in its _meta block).
+
+
+pabgb_type_overrides.json
+-------------------------
+Source:    Authored by CDUMM, with field-level type definitions
+           ported from Potter420/crimson-rs (MIT).
+License:   See the _meta block inside the file.

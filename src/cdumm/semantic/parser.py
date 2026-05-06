@@ -67,7 +67,7 @@ class FieldSpec:
     ``"CArray<OccupiedEquipSlotData>"``, ``"COptional<DockingChildData>"``).
     Set when ``schemas/pabgb_type_overrides.json`` provides an entry for this
     field. Lets the format3 walker consume variable-length fields that the
-    base NattKh schema marks as ``stream=?``. None = no override; use
+    base schema marks as ``stream=?``. None = no override; use
     legacy field_type/stream_size logic."""
 
 
@@ -87,9 +87,10 @@ class TableSchema:
     entry offset — there is no CDUMM-style entry header (entry_id +
     name_len + name) to skip. The schema's first field is at byte 0
     of the entry. Set via ``_no_entry_header: true`` in the override
-    file. Empirically required for RegionInfo (NattKh: 'There is NO
-    per-entry name header in RegionInfo PABGB. The _key and _stringKey
-    are regular fields read by the table reader')."""
+    file. Empirically required for RegionInfo (the upstream parser
+    notes: 'There is NO per-entry name header in RegionInfo PABGB.
+    The _key and _stringKey are regular fields read by the table
+    reader')."""
 
     @property
     def fixed_record_size(self) -> int | None:
@@ -145,8 +146,9 @@ def _load_schemas() -> dict[str, TableSchema]:
         _loaded_schemas = {}
         return _loaded_schemas
 
-    # Load type-descriptor overrides (Path B — fills NattKh's stream=? gaps
-    # using crimson-rs-derived types). Same lookup order as the base schema.
+    # Load type-descriptor overrides (Path B — fills the base schema's
+    # stream=? gaps using crimson-rs-derived types). Same lookup order
+    # as the base schema.
     overrides = _load_type_overrides(schema_path.parent)
 
     schemas: dict[str, TableSchema] = {}
@@ -154,17 +156,18 @@ def _load_schemas() -> dict[str, TableSchema]:
         table_overrides = overrides.get(table_name, {})
         no_null_skip = bool(table_overrides.get("_no_null_skip", False))
         no_entry_header = bool(table_overrides.get("_no_entry_header", False))
-        # `_ordered_fields` REPLACES NattKh's array order. NattKh sorts
-        # by memory address; the actual on-disk deserialization order
-        # often differs (verified empirically against vanilla ItemInfo
-        # 2026-04-27). When provided, build the schema from this list,
-        # picking each field's metadata from NattKh's array (or from
-        # the override entry).
+        # `_ordered_fields` REPLACES the upstream schema's array order.
+        # The upstream schema sorts by memory address; the actual
+        # on-disk deserialization order often differs (verified
+        # empirically against vanilla ItemInfo 2026-04-27). When
+        # provided, build the schema from this list, picking each
+        # field's metadata from the upstream array (or from the
+        # override entry).
         ordered = table_overrides.get("_ordered_fields")
         if ordered is not None:
             base_by_name = {fr.get("f", ""): fr for fr in fields_raw}
             # Refuse to load the table if any _ordered_fields entry has
-            # neither a base NattKh entry NOR a type override providing
+            # neither a base schema entry NOR a type override providing
             # its width. The legacy fallback would silently drop such
             # fields, shifting every later field's offset (CONSENSUS-1
             # adversarial review finding 2026-04-27). Loud failure
@@ -220,8 +223,9 @@ def _load_schemas() -> dict[str, TableSchema]:
                     ftype = f"direct_{type_descriptor}"
                 else:
                     # Variable-length descriptor. Stream_size=0 means
-                    # "ask the walker"; field_type stays whatever NattKh
-                    # had (often `?` or `array_or_complex`) for trace.
+                    # "ask the walker"; field_type stays whatever the
+                    # upstream schema had (often `?` or
+                    # `array_or_complex`) for trace.
                     stream = 0
                 if not is_known_type(type_descriptor or ""):
                     logger.warning(
@@ -230,10 +234,11 @@ def _load_schemas() -> dict[str, TableSchema]:
                     type_descriptor = None
 
             if type_descriptor is None:
-                # No override — use legacy NattKh behavior: skip fields
-                # the schema marks as stream=None or stream=0 (parser
-                # can't walk past them). With Path B, an override fills
-                # most of these gaps for ItemInfo and friends.
+                # No override — use legacy upstream behavior: skip
+                # fields the schema marks as stream=None or stream=0
+                # (parser can't walk past them). With Path B, an
+                # override fills most of these gaps for ItemInfo and
+                # friends.
                 if stream is None:
                     continue
                 if stream == 0:
@@ -267,7 +272,8 @@ def _load_schemas() -> dict[str, TableSchema]:
 
 def _load_type_overrides(schemas_dir: Path) -> dict[str, dict[str, dict]]:
     """Load ``pabgb_type_overrides.json`` — type descriptors that fill
-    NattKh's ``stream=?`` gaps using crimson-rs-derived types. Returns
+    the base schema's ``stream=?`` gaps using crimson-rs-derived
+    types. Returns
     ``{table_name: {field_name: {"type": descriptor}}}``. Missing file
     or parse errors degrade silently to no overrides.
     """

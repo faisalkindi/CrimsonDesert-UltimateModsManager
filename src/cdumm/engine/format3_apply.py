@@ -47,6 +47,7 @@ from cdumm.engine.field_schema import (
 from cdumm.engine.format3_handler import (
     Format3Intent,
     parse_format3_mod,
+    parse_format3_mod_targets,
     validate_intents,
 )
 from cdumm.semantic.parser import (
@@ -72,6 +73,7 @@ def expand_format3_into_aggregated(
     db,
     vanilla_extractor: VanillaExtractor,
     warnings_out: list[str] | None = None,
+    participating_mod_ids: set | None = None,
 ) -> None:
     """For each enabled mod whose json_source is a Format 3 file,
     resolve its intents into v2-style change dicts and append to
@@ -116,13 +118,23 @@ def expand_format3_into_aggregated(
     _WHOLE_TABLE_TARGETS = {"iteminfo.pabgb", "skill.pabgb"}
     whole_table_intents: dict[str, list] = {}
     whole_table_mod_names: dict[str, list[str]] = {}
+    # Track contributing mod ids per whole-table target so the
+    # participating_mod_ids set picks them up on a successful
+    # batch dispatch , H2 fix for Format 3 mods that go through
+    # the whole-table path.
+    whole_table_mod_ids: dict[str, list[int]] = {}
 
     for mod_id, mod_name, json_source, _priority in rows:
         try:
             jp = Path(json_source)
             if not jp.exists():
                 continue
-            target, intents = parse_format3_mod(jp)
+            # parse_format3_mod_targets returns one (target, intents)
+            # pair per .pabgb file the mod modifies. Singular-shape
+            # files yield a 1-pair list; multi-target files (newer
+            # dialect, e.g. Double Resource Buff) yield one pair per
+            # ``targets[i]`` entry.
+            target_pairs = parse_format3_mod_targets(jp)
         except (ValueError, OSError):
             # Either not Format 3 (v2 path already handled it), or
             # the file is malformed. Either way, skip silently —
@@ -130,99 +142,118 @@ def expand_format3_into_aggregated(
             # for the same file.
             continue
 
-        # Confirmed Format 3 mod from here on — count it
+        # Confirmed Format 3 mod from here on — count it once per mod,
+        # not per target.
         n_mods_processed += 1
 
-        # Validate intents against the schema + community field_schema
-        validation = validate_intents(target, intents)
-        if not validation.supported:
-            n_mods_skipped += 1
-            logger.warning(
-                "Format 3 mod '%s' (id=%d): no supported intents "
-                "for %s, %d skipped. Mod produced 0 byte changes.",
-                mod_name, mod_id, target,
-                len(validation.skipped))
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod '{mod_name}' produced 0 byte "
-                    f"changes targeting '{target}': all "
-                    f"{len(validation.skipped)} intent(s) skipped. "
-                    f"Most likely the field_schema for this table "
-                    f"doesn't yet have entries for the intent fields. "
-                    f"Add a field_schema/<table>.json file with "
-                    f"matching tid or rel_offset entries, or use the "
-                    f"mod's offset-based JSON variant if available."
-                )
-            continue
+        for target, intents in target_pairs:
+            # Validate intents against the schema + community field_schema
+            validation = validate_intents(target, intents)
+            if not validation.supported:
+                n_mods_skipped += 1
+                logger.warning(
+                    "Format 3 mod '%s' (id=%d): no supported intents "
+                    "for %s, %d skipped. Mod produced 0 byte changes.",
+                    mod_name, mod_id, target,
+                    len(validation.skipped))
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod '{mod_name}' produced 0 byte "
+                        f"changes targeting '{target}': all "
+                        f"{len(validation.skipped)} intent(s) skipped. "
+                        f"Most likely the field_schema for this table "
+                        f"doesn't yet have entries for the intent fields. "
+                        f"Add a field_schema/<table>.json file with "
+                        f"matching tid or rel_offset entries, or use the "
+                        f"mod's offset-based JSON variant if available."
+                    )
+                continue
 
-        # Extract vanilla bytes for the target file
-        vanilla = vanilla_extractor(target)
-        if vanilla is None:
-            n_mods_skipped += 1
-            logger.warning(
-                "Format 3 mod '%s' (id=%d): vanilla extraction "
-                "failed for %s; skipping.",
-                mod_name, mod_id, target)
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod '{mod_name}' produced 0 byte "
-                    f"changes: could not extract vanilla bytes for "
-                    f"'{target}'. The target file may not exist in "
-                    f"your game's PAZ archives, check the spelling "
-                    f"or run Steam Verify if the file is missing."
-                )
-            continue
-        vanilla_body, vanilla_header = vanilla
+            # Extract vanilla bytes for the target file
+            vanilla = vanilla_extractor(target)
+            if vanilla is None:
+                n_mods_skipped += 1
+                logger.warning(
+                    "Format 3 mod '%s' (id=%d): vanilla extraction "
+                    "failed for %s; skipping.",
+                    mod_name, mod_id, target)
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod '{mod_name}' produced 0 byte "
+                        f"changes: vanilla bytes for '{target}' are "
+                        f"unavailable. Most common cause: the live "
+                        f"PAZ has been modded by another tool and "
+                        f"the vanilla backup is missing. Revert to "
+                        f"vanilla first (Settings -> Fix Everything), "
+                        f"then re-apply. If the file is genuinely "
+                        f"missing from your install, check the "
+                        f"target name spelling or run Steam Verify."
+                    )
+                continue
+            vanilla_body, vanilla_header = vanilla
 
-        # Whole-table writer targets: defer dispatch to the post-loop
-        # phase so all mods' intents land in a single parse+serialize.
-        if target in _WHOLE_TABLE_TARGETS:
-            whole_table_intents.setdefault(target, []).extend(
-                validation.supported)
-            whole_table_mod_names.setdefault(target, []).append(mod_name)
-            n_mods_changed += 1  # provisional; recounted below if no bytes
+            # Whole-table writer targets: defer dispatch to the
+            # post-loop phase so all mods' intents land in a single
+            # parse+serialize.
+            if target in _WHOLE_TABLE_TARGETS:
+                whole_table_intents.setdefault(target, []).extend(
+                    validation.supported)
+                whole_table_mod_names.setdefault(target, []).append(mod_name)
+                whole_table_mod_ids.setdefault(target, []).append(mod_id)
+                n_mods_changed += 1  # provisional; recounted below if no bytes
+                files_touched.add(target)
+                continue
+
+            # Convert each supported intent into a v2-style change dict
+            changes = _intents_to_v2_changes(
+                target, vanilla_body, vanilla_header, validation.supported)
+            if not changes:
+                n_mods_skipped += 1
+                # Don't pollute aggregated with empty lists.
+                logger.debug(
+                    "Format 3 mod '%s' (id=%d): all %d supported intents "
+                    "resolved to zero changes (probably TID-not-found "
+                    "or value out of range).",
+                    mod_name, mod_id, len(validation.supported))
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod '{mod_name}' produced 0 byte "
+                        f"changes targeting '{target}': all "
+                        f"{len(validation.supported)} intents resolved "
+                        f"to write-failures. Possible causes: the byte "
+                        f"walker bailed on a variable-length field "
+                        f"(e.g. a tagged-variant entry whose "
+                        f"discriminator value isn't yet decoded — common "
+                        f"for stageinfo's _sequencerDesc), TID not found "
+                        f"in target entries, or value out of range for "
+                        f"the field width. Check the CDUMM log for "
+                        f"per-intent debug lines."
+                    )
+                continue
+
+            # Tag each change with the contributing mod's id so the apply
+            # pipeline's _record_skip can attribute byte-mismatch failures
+            # back to this mod and persist_skip_summary writes a row that
+            # lights up the yellow SKIPPED badge.
+            for c in changes:
+                c["_source_mod_id"] = mod_id
+                c["_target_file"] = target
+            aggregated.setdefault(target, []).extend(changes)
+            # Report this mod as a participant so persist_skip_summary
+            # resets its last_apply_skipped_count on a clean re-apply.
+            if participating_mod_ids is not None:
+                participating_mod_ids.add(mod_id)
+            # Update summary counters for the apply-time log line.
+            n_mods_changed += 1
             files_touched.add(target)
-            continue
-
-        # Convert each supported intent into a v2-style change dict
-        changes = _intents_to_v2_changes(
-            target, vanilla_body, vanilla_header, validation.supported)
-        if not changes:
-            n_mods_skipped += 1
-            # Don't pollute aggregated with empty lists.
+            for c in changes:
+                patched_hex = c.get("patched", "")
+                n_bytes_changed += len(patched_hex) // 2
             logger.debug(
-                "Format 3 mod '%s' (id=%d): all %d supported intents "
-                "resolved to zero changes (probably TID-not-found "
-                "or value out of range).",
-                mod_name, mod_id, len(validation.supported))
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod '{mod_name}' produced 0 byte "
-                    f"changes targeting '{target}': all "
-                    f"{len(validation.supported)} intents resolved "
-                    f"to write-failures. Possible causes: the byte "
-                    f"walker bailed on a variable-length field "
-                    f"(e.g. a tagged-variant entry whose "
-                    f"discriminator value isn't yet decoded — common "
-                    f"for stageinfo's _sequencerDesc), TID not found "
-                    f"in target entries, or value out of range for "
-                    f"the field width. Check the CDUMM log for "
-                    f"per-intent debug lines."
-                )
-            continue
-
-        aggregated.setdefault(target, []).extend(changes)
-        # Update summary counters for the apply-time log line.
-        n_mods_changed += 1
-        files_touched.add(target)
-        for c in changes:
-            patched_hex = c.get("patched", "")
-            n_bytes_changed += len(patched_hex) // 2
-        logger.debug(
-            "Format 3 mod '%s' (id=%d): expanded %d intents into "
-            "%d changes on %s",
-            mod_name, mod_id, len(validation.supported),
-            len(changes), target)
+                "Format 3 mod '%s' (id=%d): expanded %d intents into "
+                "%d changes on %s",
+                mod_name, mod_id, len(validation.supported),
+                len(changes), target)
 
     # Whole-table writer dispatch: parse vanilla once, apply ALL
     # collected intents from every contributing mod, serialize once,
@@ -242,8 +273,12 @@ def expand_format3_into_aggregated(
                 warnings_out.append(
                     f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
                     f"could not apply: vanilla bytes for '{target}' "
-                    f"could not be extracted from your game's PAZ "
-                    f"archives. Run Steam Verify if the file is missing."
+                    f"are unavailable. Most common cause: the live "
+                    f"PAZ has been modded by another tool and the "
+                    f"vanilla backup is missing. Revert to vanilla "
+                    f"first (Settings -> Fix Everything), then "
+                    f"re-apply. If the file is genuinely missing "
+                    f"from your install, run Steam Verify."
                 )
             continue
         vanilla_body, vanilla_header = vanilla
@@ -258,12 +293,28 @@ def expand_format3_into_aggregated(
                     f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
                     f"produced 0 byte changes for '{target}'. "
                     f"Possible causes: the vendored writer (crimson_rs / "
-                    f"NattKh skill parser) failed to load, or all "
+                    f"vendored skill parser) failed to load, or all "
                     f"target item/skill keys in the mod are missing "
                     f"from this game version's table."
                 )
             continue
+        # Stamp _target_file plus the full list of contributing mod
+        # ids on the merged change. A single int can't represent N
+        # mods' shared intent, so we use _source_mod_ids (plural list)
+        # , persist_skip_summary fans out one row per id when the
+        # change byte-mismatches. H3 fix.
+        contrib_ids = list(whole_table_mod_ids.get(target, []))
+        for c in changes:
+            c["_target_file"] = target
+            if contrib_ids:
+                c["_source_mod_ids"] = list(contrib_ids)
         aggregated.setdefault(target, []).extend(changes)
+        # Whole-table dispatch produced bytes for this target , credit
+        # every contributing mod as a participant so persist_skip_summary
+        # resets their skip rows on a clean apply (H2 fix).
+        if participating_mod_ids is not None:
+            for mid in whole_table_mod_ids.get(target, []):
+                participating_mod_ids.add(mid)
         for c in changes:
             n_bytes_changed += len(c.get("patched", "")) // 2
         logger.info(
@@ -296,10 +347,21 @@ def _intents_to_v2_changes(
     table_name = identify_table_from_path(target) or _strip_pabgb(target)
     from cdumm.engine.format3_handler import LIST_WRITERS
 
+    # buffinfo.pabgb has a CDUMM PABGB schema entry but its declared
+    # field stream sizes are wrong (e.g. _isBlocked declared as
+    # direct_15B when it's actually a u8, _buffDataList declared as
+    # direct_u32 when it's actually a length-prefixed variant array).
+    # The generic schema walker silently lands at the wrong offset.
+    # Route buffinfo through the clean-room buffinfo parser instead,
+    # which knows the actual on-disk layout.
+    if table_name == "buffinfo":
+        return _buffinfo_intents_to_changes(
+            vanilla_body, vanilla_header, intents)
+
     has_cdumm_schema = has_schema(table_name)
     # Tables without a CDUMM PABGB schema are still processable when
     # ALL their intents target a registered list writer (e.g. skill.pabgb
-    # via the vendored NattKh skillinfo_parser). The writer is the
+    # via the vendored skillinfo_parser). The writer is the
     # source of truth for the binary layout.
     if not has_cdumm_schema:
         all_writer_routable = bool(intents) and all(
@@ -481,7 +543,7 @@ def _intents_to_v2_changes(
         if iteminfo_change is not None:
             out.append(iteminfo_change)
 
-    # Same for skill: NattKh's skillinfo_parser needs the .pabgh
+    # Same for skill: the skillinfo_parser needs the .pabgh
     # header to walk records, so we forward `vanilla_header` here.
     if skill_batch:
         from cdumm.engine.skill_writer import (
@@ -492,6 +554,243 @@ def _intents_to_v2_changes(
         if skill_change is not None:
             out.append(skill_change)
 
+    return out
+
+
+def _buffinfo_field_candidates(field: str) -> list[str]:
+    """Yield naming-convention aliases for a buffinfo intent field.
+
+    Mirrors the 4-shape lookup chain in
+    ``format3_apply._resolve_write_pos`` (and the validator) so the
+    apply-time path accepts every name the validator accepts. Without
+    this the validator says "supported" but the apply silently emits
+    nothing for camelCase names like ``_minLevel``.
+
+    Item paths (``buff_data_list[N].xxx``) pass through unchanged ,
+    only the leaf identifier inside wrapper-only paths is normalized.
+    """
+    if "[" in field or "." in field:
+        # Item-path leaves are already snake_case in the parser; we
+        # don't fan out aliases for them yet. (The field-names
+        # dialect is the only known producer of these paths.)
+        return [field]
+    candidates = [field, f"_{field}"]
+    from cdumm.engine.format3_handler import _snake_to_camel
+    if "_" in field:
+        camel = _snake_to_camel(field)
+        if camel != field:
+            candidates.extend([camel, f"_{camel}"])
+    # camelCase → snake_case for inputs that came in camelCase.
+    if any(c.isupper() for c in field):
+        snake = []
+        for i, c in enumerate(field):
+            if c.isupper() and i > 0:
+                snake.append("_")
+            snake.append(c.lower())
+        candidates.append("".join(snake))
+    # Always try the leading-underscore-stripped form too , covers
+    # ``_min_level`` -> ``min_level`` and ``_minLevel`` -> ``minLevel``.
+    if field.startswith("_"):
+        stripped = field[1:]
+        candidates.append(stripped)
+        if any(c.isupper() for c in stripped):
+            snake2 = []
+            for i, c in enumerate(stripped):
+                if c.isupper() and i > 0:
+                    snake2.append("_")
+                snake2.append(c.lower())
+            candidates.append("".join(snake2))
+    # Deduplicate while preserving order.
+    seen = set()
+    out = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+_BUFFINFO_DTYPE_PACK = {
+    "u8": ("B", 1),
+    "u16": ("H", 2),
+    "u32": ("I", 4),
+    "u64": ("Q", 8),
+}
+
+
+def _buffinfo_intents_to_changes(
+    vanilla_body: bytes, vanilla_header: bytes,
+    intents: list[Format3Intent],
+) -> list[dict]:
+    """Resolve buffinfo intents through the clean-room buffinfo parser.
+
+    The generic schema walker can't walk past variable-length items, so
+    the CDUMM PABGB schema for buffinfo is structurally wrong. This
+    helper reads the PABGH key→offset table, slices each entry's bytes,
+    delegates field resolution to ``buffinfo_parser.locate_buff_field``,
+    and packs the new value with the dtype the parser reports.
+
+    Intents whose key isn't in PABGH, whose field path isn't yet
+    resolvable (e.g. items past an unknown variant), or whose new
+    value doesn't fit the declared width, are silently dropped , the
+    same shape the v2 aggregator uses. The expand_format3 caller
+    surfaces "0 byte changes" warnings for whole-mod dropouts.
+    """
+    from cdumm._vendor.buffinfo_parser import locate_buff_field
+
+    key_size, offsets = parse_pabgh_index(vanilla_header, "buffinfo")
+    if not offsets:
+        return []
+    # buffinfo PABGH is u32-keyed in every shipped game version we've
+    # observed. Refuse other widths rather than misalign.
+    if key_size != 4:
+        logger.warning(
+            "Format 3 buffinfo expansion refused: PABGH key_size=%d "
+            "(expected 4). Skipping all %d intent(s).",
+            key_size, len(intents))
+        return []
+
+    sorted_offs = sorted(offsets.items(), key=lambda kv: kv[1])
+    entry_bounds: dict[int, tuple[int, int]] = {}
+    for i, (k, off) in enumerate(sorted_offs):
+        end = (sorted_offs[i + 1][1]
+               if i + 1 < len(sorted_offs) else len(vanilla_body))
+        entry_bounds[k] = (off, end)
+
+    out: list[dict] = []
+    for intent in intents:
+        bounds = entry_bounds.get(intent.key)
+        if bounds is None:
+            continue
+        entry_off, entry_end = bounds
+        entry_bytes = bytes(vanilla_body[entry_off:entry_end])
+        # Mirror the validator's 4-shape field-name lookup so a path
+        # like ``_minLevel`` (CDUMM schema convention) resolves the
+        # same as ``min_level`` (field-names dialect convention). Without
+        # this, intents would validate-then-fail-to-apply and present
+        # to users as "imported, enabled, no effect".
+        located = None
+        for candidate in _buffinfo_field_candidates(intent.field):
+            try:
+                hit = locate_buff_field(entry_bytes, candidate)
+            except (ValueError, struct.error):
+                continue
+            if hit is not None:
+                located = hit
+                break
+        if located is None:
+            continue
+        rel_in_entry, width, dtype = located
+        if dtype == "cstring":
+            # Length-preserving asset_path write: the located offset
+            # points at the u32 length prefix. The string body sits 4
+            # bytes later. We only support same-byte-length writes ,
+            # changing the length would shift every subsequent byte
+            # in the entry and require whole-entry re-encoding (which
+            # then ripples through PAMT/PAPGT integrity hashes).
+            if not isinstance(intent.new, str):
+                continue
+            length_pos = entry_off + rel_in_entry
+            if length_pos + 4 > entry_end:
+                continue
+            current_len = struct.unpack_from(
+                "<I", vanilla_body, length_pos)[0]
+            new_b = intent.new.encode("utf-8")
+            if len(new_b) != current_len:
+                continue  # length change not supported here
+            body_pos = length_pos + 4
+            if body_pos + current_len > entry_end:
+                continue
+            original_bytes = bytes(
+                vanilla_body[body_pos:body_pos + current_len])
+            # Emit a change covering the body bytes only , length
+            # prefix is unchanged.
+            eid_size = 4
+            name_len = struct.unpack_from(
+                "<I", vanilla_body, entry_off + eid_size)[0]
+            name_end = entry_off + eid_size + 4 + name_len
+            try:
+                entry_name = vanilla_body[
+                    entry_off + eid_size + 4:name_end].decode("utf-8")
+            except UnicodeDecodeError:
+                entry_name = intent.entry
+            out.append({
+                "entry": entry_name or intent.entry,
+                "rel_offset": body_pos - name_end,
+                "original": original_bytes.hex(),
+                "patched": new_b.hex(),
+                "label": f"{intent.entry}.{intent.field}",
+            })
+            continue
+        spec = _BUFFINFO_DTYPE_PACK.get(dtype)
+        if spec is None:
+            continue
+        fmt, expected_width = spec
+        if width != expected_width:
+            continue
+        # Writes to the tag byte (reachable via ``.data.variant.type``
+        # OR ``.data.base.tag`` , same byte either way) need careful
+        # handling because the tag determines the variant tail layout.
+        # A real type change would leave the entry with the new tag's
+        # discriminator but the OLD tag's tail bytes after the common
+        # payload , silent corruption.
+        # Accepted shapes:
+        #   * "VariantName" string -> translate via _VARIANT_NAME_TO_TAG
+        #   * int -> use as-is
+        # In both cases the new value must match the current tag byte
+        # (no-op confirmation). Mismatches are skipped silently;
+        # type-changing writes need whole-tail re-encoding (deferred).
+        new_value = intent.new
+        is_tag_write = (
+            intent.field.endswith(".data.variant.type")
+            or intent.field.endswith(".data.base.tag")
+        )
+        if is_tag_write:
+            current_tag = vanilla_body[entry_off + rel_in_entry]
+            if isinstance(new_value, str):
+                from cdumm._vendor.buffinfo_parser import (
+                    _VARIANT_NAME_TO_TAG,
+                )
+                new_tag = _VARIANT_NAME_TO_TAG.get(new_value)
+                if new_tag is None:
+                    continue  # unknown variant name
+                if new_tag != current_tag:
+                    continue  # type change not supported
+                new_value = current_tag
+            elif isinstance(new_value, int):
+                if new_value != current_tag:
+                    continue  # type change not supported
+            else:
+                continue  # unsupported type
+        try:
+            new_bytes = struct.pack(f"<{fmt}", new_value)
+        except (struct.error, TypeError):
+            continue
+        abs_off = entry_off + rel_in_entry
+        if abs_off + width > entry_end:
+            continue
+        original_bytes = bytes(vanilla_body[abs_off:abs_off + width])
+
+        # Compute rel_offset against the same anchor the apply pipeline
+        # uses for buffinfo (name_end), matching the convention in the
+        # generic schema-based path.
+        eid_size = 4
+        name_len = struct.unpack_from(
+            "<I", vanilla_body, entry_off + eid_size)[0]
+        name_end = entry_off + eid_size + 4 + name_len
+        try:
+            entry_name = vanilla_body[
+                entry_off + eid_size + 4:name_end].decode("utf-8")
+        except UnicodeDecodeError:
+            entry_name = intent.entry
+
+        out.append({
+            "entry": entry_name or intent.entry,
+            "rel_offset": abs_off - name_end,
+            "original": original_bytes.hex(),
+            "patched": new_bytes.hex(),
+            "label": f"{intent.entry}.{intent.field}",
+        })
     return out
 
 
@@ -548,7 +847,7 @@ def _resolve_write_pos(
             return None
         return abs_off, size, fmt
 
-    # Field-name lookup: NattKh-style mods use snake_case without
+    # Field-name lookup: field-names mods use snake_case without
     # the leading underscore; the schema/overrides use camelCase
     # with prefix (`_gimmickInfo`). Mirror the validator's four-shape
     # lookup at format3_handler.py: exact / +underscore /

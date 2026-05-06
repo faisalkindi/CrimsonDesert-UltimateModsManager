@@ -1,3 +1,14 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Ported into CDUMM from:
+#   NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS (MPL-2.0 at time
+#   of port)
+#   https://github.com/NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS
+#   CrimsonGameMods/dropset_editor.py
+# Copyright (c) 2026 RicePaddySoftware
+# License text bundled at src/cdumm/_vendor/crimson_rs/LICENSE_MPL2.
 """DropSet record parser + serializer for dropsetinfo.pabgb.
 
 Ported from NattKh's CrimsonGameMods/dropset_editor.py

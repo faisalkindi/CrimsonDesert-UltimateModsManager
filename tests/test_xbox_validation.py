@@ -106,3 +106,31 @@ def test_non_xbox_path_without_exe_is_invalid_even_with_paz(tmp_path):
     (game / "meta" / "0.papgt").write_bytes(b"x")
     assert not is_xbox_install(game)
     assert validate_game_directory(game) is False
+
+
+def test_custom_xbox_path_with_publisher_hash_detected(tmp_path):
+    """GitHub #74 (JofeMofe): user installed Xbox version under a
+    custom path. The publisher-hash suffix ``8wekyb3d8bbwe`` should
+    be enough to detect it as Xbox even when the path doesn't contain
+    XboxGames / WindowsApps."""
+    game = (tmp_path / "F" / "Games" / "Crimson Desert" / "Content"
+            / "PearlAbyss.CrimsonDesert_8wekyb3d8bbwe")
+    (game / "0008").mkdir(parents=True)
+    (game / "0008" / "0.paz").write_bytes(b"x")
+    (game / "meta").mkdir()
+    (game / "meta" / "0.papgt").write_bytes(b"x")
+    assert is_xbox_install(game), (
+        "publisher-hash suffix should mark this as an Xbox install")
+
+
+def test_custom_path_with_content_packages_detected_as_xbox(tmp_path):
+    """``Content/packages`` is the canonical Xbox install layout
+    token that survives custom-path renames. Detect it even on a
+    path with no other Xbox-store markers."""
+    game = (tmp_path / "F" / "Games" / "Crimson Desert"
+            / "Content" / "packages")
+    (game / "0008").mkdir(parents=True)
+    (game / "0008" / "0.paz").write_bytes(b"x")
+    (game / "meta").mkdir()
+    (game / "meta" / "0.papgt").write_bytes(b"x")
+    assert is_xbox_install(game)

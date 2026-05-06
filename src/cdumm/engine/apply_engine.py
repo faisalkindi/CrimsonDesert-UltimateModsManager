@@ -21,6 +21,72 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 
+def persist_skip_summary(
+    db_connection,
+    patch_skips: list[dict],
+    participating_mod_ids: set,
+) -> None:
+    """Write per-mod skip counts to the mods table after Apply.
+
+    For each mod in ``participating_mod_ids``, set:
+    - ``last_apply_skipped_count`` = number of patch_skips with that
+      mod's id
+    - ``last_apply_skip_summary`` = JSON list of {label, reason, file}
+      for the badge tooltip, or NULL when count is 0
+
+    Mods NOT in ``participating_mod_ids`` (e.g. disabled this apply)
+    are left untouched so their last-known skip state persists in the
+    badge until they participate again. Lets the user see the badge
+    after disabling a broken mod without it disappearing.
+
+    The skipped-mod-badge work (chunk 2A): without this persistence,
+    the apply pipeline emitted a transient warning toast and
+    `stamp_enabled_mods_as_current` then cleared the only adjacent
+    badge. Mods looked fine afterward even though half their patches
+    silently failed.
+    """
+    import json as _json
+    # Tally skips per mod_id. A skip entry can carry either:
+    #   _source_mod_id  (single int)  , the v2 / per-mod Format 3 path
+    #   _source_mod_ids (list[int])   , whole-table Format 3 merged
+    # H3 fix: fan _source_mod_ids out so all contributors get credited.
+    by_mod: dict[int, list[dict]] = {}
+    for s in patch_skips:
+        ids: list[int] = []
+        single = s.get("_source_mod_id")
+        if single is not None:
+            ids.append(int(single))
+        plural = s.get("_source_mod_ids")
+        if plural:
+            ids.extend(int(i) for i in plural)
+        if not ids:
+            continue
+        for mid in ids:
+            by_mod.setdefault(mid, []).append(s)
+
+    for mod_id in participating_mod_ids:
+        skips = by_mod.get(int(mod_id), [])
+        if skips:
+            summary = [
+                {"label": s.get("label", ""),
+                 "reason": s.get("reason", ""),
+                 "file": s.get("_target_file", "")}
+                for s in skips
+            ]
+            db_connection.execute(
+                "UPDATE mods SET last_apply_skipped_count = ?, "
+                "last_apply_skip_summary = ? WHERE id = ?",
+                (len(skips), _json.dumps(summary), int(mod_id))
+            )
+        else:
+            db_connection.execute(
+                "UPDATE mods SET last_apply_skipped_count = 0, "
+                "last_apply_skip_summary = NULL WHERE id = ?",
+                (int(mod_id),)
+            )
+    db_connection.commit()
+
+
 def invalidate_apply_fingerprint(game_dir: Path) -> None:
     """Remove ``CDMods/.apply_fingerprint`` so the next Apply genuinely
     re-runs the pipeline.
@@ -39,6 +105,37 @@ def invalidate_apply_fingerprint(game_dir: Path) -> None:
         logger.debug(
             "invalidate_apply_fingerprint: could not remove %s: %s",
             fp_path, e)
+
+
+# Set of file extensions where partial-byte-edits across mods can be
+# safely merged. Anything else falls back to last-wins to avoid
+# corrupting self-contained binary blobs (textures, audio, images,
+# compressed data) that would crash the game when byte-merged.
+# Nexus regression report (mrkillerhomer, 2026-05-03 v3.2.7→v3.2.8):
+# the byte-merge fallback enabled in commit 57cfa29 for non-pabgb
+# entries fired on overlapping DDS textures and produced a corrupt
+# Frankenstein file that froze the game on the loading screen.
+_BYTE_MERGEABLE_EXTS = frozenset({
+    # PABGB tables and their headers
+    "pabgb", "pabgh",
+    # Pearl Abyss XML / sequencer formats
+    "pac_xml", "pamb_xml", "paseq", "paac", "xml",
+    # UI text formats
+    "css", "html",
+})
+
+
+def _entry_supports_byte_merge(entry_path: str) -> bool:
+    """Return True iff ``entry_path``'s extension is one where a
+    multi-mod byte-merge is meaningful. Self-contained binary blobs
+    (textures, audio) and unknown extensions return False so the
+    apply pipeline falls through to last-wins for them.
+    """
+    name = entry_path.rsplit("/", 1)[-1].lower()
+    if "." not in name:
+        return False
+    ext = name.rsplit(".", 1)[-1]
+    return ext in _BYTE_MERGEABLE_EXTS
 
 
 def _yield_gil() -> None:
@@ -275,10 +372,18 @@ def aggregate_json_mods_into_synthetic_patches(
                 all_changes = apply_custom_values(all_changes, custom_vals)
             # Per-mod disabled_patches filter (flat indexed across all
             # of THIS mod's changes, matching how the picker records it).
+            # Also tag each surviving change with `_source_mod_id` so
+            # downstream skip-recording can attribute byte-mismatch
+            # failures back to the mod that supplied the change.
+            # Without this tag, a partial-skip apply knows "N patches
+            # skipped total" but can't badge the responsible mod card.
             filtered = []
             for c in all_changes:
                 if flat_idx not in disabled:
-                    filtered.append(c)
+                    tagged = dict(c)
+                    tagged["_source_mod_id"] = mod_id
+                    tagged["_target_file"] = game_file
+                    filtered.append(tagged)
                 flat_idx += 1
             if not filtered:
                 continue
@@ -336,42 +441,98 @@ def aggregate_json_mods_into_synthetic_patches(
     return synth_patch_data, per_mod_summary
 
 
-def _expand_format3_into_synth_data(
-    synth_data: dict, db, vanilla_dir, game_dir,
+def _make_format3_vanilla_extractor(
+    *, vanilla_dir, game_dir, snapshot_mgr,
     get_vanilla_entry_content, extract_sibling_entry,
-    warnings_out: list[str] | None = None,
-) -> None:
-    """Wire-up helper: decompose synth_data, run Format 3 expansion,
-    repack synth_data["patches"] with the extended set.
+):
+    """Build the ``vanilla_extractor`` callable used by
+    ``expand_format3_into_aggregated``.
 
-    Lives here (not inside aggregate_json_mods_into_synthetic_patches)
-    so the v2 aggregator function stays load-bearing-stable. This
-    helper is the ONE place apply_engine knows about Format 3
-    expansion; the rest of the apply pipeline sees v2-shaped changes.
+    Resolution order mirrors the v2 ``resolve_vanilla_source`` path:
+      1. ``vanilla_dir`` backup PAMT entry — return its bytes.
+      2. ``game_dir`` live PAMT entry — return its bytes ONLY when
+         the live PAZ's hash matches the snapshot fingerprint. If the
+         live file is modded, return None so the caller surfaces a
+         clean "vanilla bytes unavailable" warning instead of feeding
+         modded bytes to a downstream parser (GitHub #62/#68).
 
-    ``warnings_out`` collects user-facing warnings (zero-change mods,
-    extraction failures) that the caller routes through the
-    ``warning`` Qt signal so on_apply_done renders them in the
-    InfoBar.
+    Without the hash check, a Format 3 iteminfo mod applied on top of
+    a previously-applied v2 iteminfo mod hands the writer the modded
+    bytes; the writer hits "CArray count exceeds remaining bytes" and
+    crashes the apply.
     """
-    from cdumm.engine.format3_apply import expand_format3_into_aggregated
     from cdumm.engine.json_patch_handler import (
         _derive_pamt_dir, _find_pamt_entry,
     )
+    from cdumm.engine.snapshot_manager import hash_file
 
-    def _vanilla_extractor(target):
-        """Resolve vanilla bytes for a Format 3 mod's target file.
-        Returns (body, header) or None on any failure."""
+    def _extractor(target):
         try:
-            entry = _find_pamt_entry(target, vanilla_dir)
-            if entry is None:
-                entry = _find_pamt_entry(target, game_dir)
-            if entry is None:
-                return None
-            pamt_dir = _derive_pamt_dir(entry.paz_file)
+            backup_entry = _find_pamt_entry(target, vanilla_dir)
+            chosen_entry = None
+            if backup_entry is not None and Path(
+                    backup_entry.paz_file).exists():
+                chosen_entry = backup_entry
+            else:
+                live_entry = _find_pamt_entry(target, game_dir)
+                if live_entry is None:
+                    return None
+                paz_path = Path(live_entry.paz_file)
+                if not paz_path.exists():
+                    return None
+                # Hash-verify before trusting live bytes.
+                try:
+                    paz_rel = str(paz_path.relative_to(
+                        game_dir)).replace("\\", "/")
+                except ValueError:
+                    paz_rel = paz_path.name
+                snap_hash = snapshot_mgr.get_file_hash(paz_rel)
+                if snap_hash is None:
+                    logger.warning(
+                        "Format 3 vanilla extraction refused for %s: "
+                        "no snapshot hash for %s. Run Settings -> "
+                        "Fix Everything to refresh.",
+                        target, paz_rel)
+                    return None
+                try:
+                    live_hash, _size = hash_file(paz_path)
+                except FileNotFoundError:
+                    return None
+                if live_hash != snap_hash:
+                    logger.warning(
+                        "Format 3 vanilla extraction refused for %s: "
+                        "live PAZ %s diverged from snapshot (already "
+                        "modded). Run Settings -> Fix Everything or "
+                        "revert before re-applying.",
+                        target, paz_rel)
+                    return None
+                chosen_entry = live_entry
+                # Lazy backup so the next Format 3 apply finds the
+                # backup directly. Mirrors the behavior in
+                # ``resolve_vanilla_source`` for the v2 path.
+                # GitHub #68. Skip when paz_rel is just a bare
+                # filename (relative_to fallback) — would write the
+                # backup to the wrong location otherwise.
+                if "/" in paz_rel:
+                    try:
+                        backup_paz = vanilla_dir / paz_rel
+                        if not backup_paz.exists():
+                            backup_paz.parent.mkdir(
+                                parents=True, exist_ok=True)
+                            _backup_copy(paz_path, backup_paz)
+                            sibling_pamt = paz_path.with_suffix(".pamt")
+                            if sibling_pamt.exists():
+                                backup_pamt = backup_paz.with_suffix(".pamt")
+                                if not backup_pamt.exists():
+                                    _backup_copy(sibling_pamt, backup_pamt)
+                    except Exception as e:
+                        logger.debug(
+                            "Lazy vanilla backup failed for %s: %s",
+                            paz_rel, e)
+            pamt_dir = _derive_pamt_dir(chosen_entry.paz_file)
             if not pamt_dir:
                 return None
-            file_path = f"{pamt_dir}/{Path(entry.paz_file).name}"
+            file_path = f"{pamt_dir}/{Path(chosen_entry.paz_file).name}"
             body = get_vanilla_entry_content(file_path, target)
             if body is None:
                 return None
@@ -388,6 +549,40 @@ def _expand_format3_into_synth_data(
                 target, exc_info=True)
             return None
 
+    return _extractor
+
+
+def _expand_format3_into_synth_data(
+    synth_data: dict, db, vanilla_dir, game_dir,
+    get_vanilla_entry_content, extract_sibling_entry,
+    warnings_out: list[str] | None = None,
+    participating_mod_ids: set | None = None,
+) -> None:
+    """Wire-up helper: decompose synth_data, run Format 3 expansion,
+    repack synth_data["patches"] with the extended set.
+
+    Lives here (not inside aggregate_json_mods_into_synthetic_patches)
+    so the v2 aggregator function stays load-bearing-stable. This
+    helper is the ONE place apply_engine knows about Format 3
+    expansion; the rest of the apply pipeline sees v2-shaped changes.
+
+    ``warnings_out`` collects user-facing warnings (zero-change mods,
+    extraction failures) that the caller routes through the
+    ``warning`` Qt signal so on_apply_done renders them in the
+    InfoBar.
+    """
+    from cdumm.engine.format3_apply import expand_format3_into_aggregated
+    from cdumm.engine.snapshot_manager import SnapshotManager
+
+    snapshot_mgr = SnapshotManager(db)
+    _vanilla_extractor = _make_format3_vanilla_extractor(
+        vanilla_dir=vanilla_dir,
+        game_dir=game_dir,
+        snapshot_mgr=snapshot_mgr,
+        get_vanilla_entry_content=get_vanilla_entry_content,
+        extract_sibling_entry=extract_sibling_entry,
+    )
+
     # Decompose synth_data → mutable dicts the expansion mutates
     aggregated = {p["game_file"]: list(p.get("changes", []))
                   for p in synth_data.get("patches", [])}
@@ -400,6 +595,7 @@ def _expand_format3_into_synth_data(
         aggregated, signatures, db,
         vanilla_extractor=_vanilla_extractor,
         warnings_out=warnings_out,
+        participating_mod_ids=participating_mod_ids,
     )
     new_keys = set(aggregated.keys()) - pre_keys
     if new_keys or any(len(aggregated[k]) != len(
@@ -701,6 +897,36 @@ def resolve_vanilla_source(
         raise VanillaSourceUnavailable(
             f"live PAZ '{paz_rel}' diverged from snapshot "
             "\u2014 cannot safely patch (user has modded the base install)")
+
+    # Lazy backup: copy the verified-vanilla live PAZ + sibling PAMT
+    # into vanilla_dir so the next apply finds the backup directly and
+    # skips the warn path entirely. Otherwise the warning fires on
+    # every apply forever, and the recommended "Run Fix Everything"
+    # action doesn't actually create the missing backup (it only
+    # backs up archives critical for currently-enabled JSON mods).
+    # GitHub #68 (mit999sif).
+    # Only attempt lazy backup when paz_rel is a real relative path
+    # (contains a directory component). When relative_to(game_dir)
+    # fell back to ``paz_path.name`` we'd otherwise write the backup
+    # to the wrong location (vanilla_dir/0.paz instead of
+    # vanilla_dir/0008/0.paz).
+    if "/" in paz_rel:
+        try:
+            backup_paz = vanilla_dir / paz_rel
+            if not backup_paz.exists():
+                backup_paz.parent.mkdir(parents=True, exist_ok=True)
+                _backup_copy(paz_path, backup_paz)
+                sibling_pamt = paz_path.with_suffix(".pamt")
+                if sibling_pamt.exists():
+                    backup_pamt = backup_paz.with_suffix(".pamt")
+                    if not backup_pamt.exists():
+                        _backup_copy(sibling_pamt, backup_pamt)
+        except Exception as e:
+            # Backup failure is non-fatal \u2014 the apply itself can still
+            # proceed with the verified-live bytes, the warning just
+            # fires again next apply.
+            logger.debug(
+                "Lazy vanilla backup failed for %s: %s", paz_rel, e)
 
     if warn_callback is not None:
         warn_callback(paz_rel)
@@ -1045,8 +1271,9 @@ class ApplyWorker(QObject):
                 return
             warned_once.add(paz_rel)
             msg = (f"Vanilla backup missing for {paz_rel}, "
-                   "using hash-verified live copy. "
-                   "Run Settings \u2192 Fix Everything to refresh backups.")
+                   "using hash-verified live copy and creating the "
+                   "backup now. Subsequent applies will use the "
+                   "backup directly.")
             logger.warning("mount-time: %s", msg)
             self._soft_warnings.append(msg)
             self.warning.emit(msg)
@@ -1460,12 +1687,17 @@ class ApplyWorker(QObject):
                 # pipeline doesn't need to know which side a change
                 # came from.
                 f3_warnings: list[str] = []
+                # Format 3 mods report their contributing mod ids
+                # here so persist_skip_summary can reset rows on a
+                # clean apply (H2 fix).
+                f3_participating: set[int] = set()
                 _expand_format3_into_synth_data(
                     synth_data, self._db,
                     self._vanilla_dir, self._game_dir,
                     self._get_vanilla_entry_content,
                     self._extract_sibling_entry,
-                    warnings_out=f3_warnings)
+                    warnings_out=f3_warnings,
+                    participating_mod_ids=f3_participating)
                 if f3_warnings:
                     # Same surfacing pattern v3.2.1's skipped-patches
                     # feature uses — InfoBar after Apply via the
@@ -1551,6 +1783,22 @@ class ApplyWorker(QObject):
                             pass
                         if hasattr(self, "_soft_warnings"):
                             self._soft_warnings.append(msg)
+                    # Persist per-mod skip results so the mod card can
+                    # render a yellow badge after the toast dismisses.
+                    # Resets cleanly for mods that participated this
+                    # apply with no skips, so the badge clears when the
+                    # user fixes the underlying issue (skipped-mod
+                    # badge work, chunk 2A).
+                    try:
+                        participating = {m["mod_id"] for m in mod_summary}
+                        # Union in Format 3 contributors so their rows
+                        # also clear on a clean apply (H2 fix).
+                        participating |= f3_participating
+                        persist_skip_summary(
+                            self._db.connection, patch_skips, participating)
+                    except Exception as _e:
+                        logger.debug(
+                            "persist_skip_summary failed: %s", _e)
                     # Tag each overlay entry with the LOWEST priority
                     # number among its contributors (lowest = highest
                     # precedence = CDUMM winner on downstream collisions
@@ -2557,6 +2805,18 @@ class ApplyWorker(QObject):
             pass
 
         for idx, (entry_path, conflicting) in enumerate(entries_to_merge.items()):
+            # Skip byte-merge entirely for self-contained binary blobs
+            # (textures, audio, images, unknown formats). Merging a
+            # DDS texture from two mods produces a corrupt Frankenstein
+            # file the GPU chokes on. Last-wins is the right fallback
+            # for these formats. Nexus regression mrkillerhomer
+            # 2026-05-03 (texture mods 920/2233/2126 broke on v3.2.8).
+            if not _entry_supports_byte_merge(entry_path):
+                logger.debug(
+                    "skipping merge for %s (extension not in byte-"
+                    "merge whitelist; falling through to last-wins)",
+                    entry_path)
+                continue
             # Populate mod_bodies BEFORE the table_name check so the byte-
             # merge tier 2 fallback below works for entries that aren't
             # known pabgb tables. GitHub #59 (DoRoon, 2026-05-01): two
@@ -4094,29 +4354,92 @@ class RevertWorker(QObject):
                             logger.info("Restored implicit backup: %s", implicit_file)
                             reverted += 1
 
-            # Restore any PAMTs and PAZs that differ from vanilla
-            for d in sorted(self._game_dir.iterdir()):
-                if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
-                    continue
-                if int(d.name) >= 36:
-                    continue  # overlay dirs handled separately
+            # Restore any PAMTs and PAZs that differ from vanilla.
+            # GitHub #71 (jscrump1278): this loop reads every vanilla
+            # backup PAZ (some 100+MB) AND the matching live PAZ for a
+            # bytes-equal check, with NO progress updates between 90%
+            # and 91%. On a typical 36-dir install that's ~7GB of disk
+            # I/O while the progress bar appears frozen, leading users
+            # to assume the worker hung. Emit per-dir progress so the
+            # bar moves and add a fast hash-comparison short-circuit
+            # before the full bytes-compare.
+            vanilla_dirs = sorted(
+                d for d in self._game_dir.iterdir()
+                if d.is_dir() and d.name.isdigit() and len(d.name) == 4
+                and int(d.name) < 36
+            )
+            for vd_idx, d in enumerate(vanilla_dirs):
+                # The percent stays at 90 (orphan cleanup is at 91),
+                # but the status message changes per dir so users see
+                # the worker is actively making progress (not hung).
+                self.progress_updated.emit(
+                    90,
+                    f"Verifying {d.name}/ "
+                    f"({vd_idx + 1}/{len(vanilla_dirs)})...")
+                _yield_gil()
                 for fname in ["0.pamt", "0.paz"]:
                     rel = f"{d.name}/{fname}"
-                    vanilla_bytes = self._get_vanilla_bytes(rel)
+                    # Per-file try/except so a single read failure
+                    # (locked file, antivirus interference, transient
+                    # I/O error) doesn't abort the entire revert and
+                    # leave the user stuck. Log + continue.
+                    try:
+                        vanilla_bytes = self._get_vanilla_bytes(rel)
+                    except OSError as e:
+                        logger.warning(
+                            "Revert verify: skipped %s due to read "
+                            "error: %s", rel, e)
+                        continue
                     if vanilla_bytes:
                         fpath = d / fname
                         if fpath.exists():
-                            actual_size = fpath.stat().st_size
-                            if actual_size == len(vanilla_bytes):
-                                # Same size — check content
-                                if fpath.read_bytes() != vanilla_bytes:
+                            try:
+                                actual_size = fpath.stat().st_size
+                                if actual_size == len(vanilla_bytes):
+                                    # Same size — check content. For
+                                    # large files, stream-hash live
+                                    # and compare to in-memory hash of
+                                    # vanilla_bytes. Avoids loading
+                                    # 200MB at once for 100MB PAZ.
+                                    if actual_size > 5 * 1024 * 1024:
+                                        import hashlib
+                                        h = hashlib.sha256()
+                                        with open(fpath, "rb") as f:
+                                            while True:
+                                                chunk = f.read(1024 * 1024)
+                                                if not chunk:
+                                                    break
+                                                h.update(chunk)
+                                        live_h = h.digest()
+                                        van_h = hashlib.sha256(
+                                            vanilla_bytes).digest()
+                                        if live_h != van_h:
+                                            txn.stage_file(rel, vanilla_bytes)
+                                            logger.info(
+                                                "Restored %s (content diff)",
+                                                rel)
+                                            reverted += 1
+                                    else:
+                                        if fpath.read_bytes() != vanilla_bytes:
+                                            txn.stage_file(rel, vanilla_bytes)
+                                            logger.info(
+                                                "Restored %s (content diff)",
+                                                rel)
+                                            reverted += 1
+                                elif actual_size != len(vanilla_bytes):
                                     txn.stage_file(rel, vanilla_bytes)
-                                    logger.info("Restored %s (content diff)", rel)
+                                    logger.info(
+                                        "Restored %s (size diff)", rel)
                                     reverted += 1
-                            elif actual_size != len(vanilla_bytes):
-                                txn.stage_file(rel, vanilla_bytes)
-                                logger.info("Restored %s (size diff)", rel)
-                                reverted += 1
+                            except OSError as e:
+                                # File locked / antivirus / transient
+                                # I/O. Log + continue to next file
+                                # rather than aborting the whole
+                                # revert.
+                                logger.warning(
+                                    "Revert verify: read failure on "
+                                    "%s, skipping: %s", rel, e)
+                                continue
 
             # Clean up orphan mod directories (0036+) that are empty or
             # only existed because of standalone mods

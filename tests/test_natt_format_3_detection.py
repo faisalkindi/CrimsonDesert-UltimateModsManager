@@ -1,4 +1,4 @@
-"""Regression: NattKh's GameMods JSON Format 3 (field-names + intents)
+"""Regression: Format 3 (field-names + intents) JSON files
 must be DETECTED so the importer can show a clear 'coming soon'
 error instead of falling through to 'unsupported file format'.
 
@@ -26,7 +26,7 @@ def f3_file(tmp_path: Path) -> Path:
     """A minimal valid Format 3 file."""
     p = tmp_path / "natt_mod.json"
     _write_json(p, {
-        "modinfo": {"title": "Sample", "version": "1.0", "author": "NattKh"},
+        "modinfo": {"title": "Sample", "version": "1.0", "author": "ModAuthor"},
         "format": 3,
         "target": "dropsetinfo.pabgb",
         "intents": [

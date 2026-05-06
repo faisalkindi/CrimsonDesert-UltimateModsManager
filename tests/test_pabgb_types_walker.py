@@ -4,8 +4,8 @@ Pin three things:
   1. Each primitive / variable type the walker claims to handle
      consumes the right number of bytes for hand-built payloads.
   2. The override schema for ItemInfo loads without errors and
-     replaces NattKh's ``stream=?`` placeholders with descriptors
-     the walker can actually walk.
+     replaces the base schema's ``stream=?`` placeholders with
+     descriptors the walker can actually walk.
   3. ``_consume_field_bytes`` (the format3 apply path) successfully
      walks a synthetic ItemInfo entry past every field up to and
      including ``_cooltime``.
@@ -244,7 +244,7 @@ def test_is_known_type_rejects_garbage():
 
 def test_ordered_fields_typo_refuses_to_load_table(tmp_path, monkeypatch, caplog):
     """Adversarial review CONSENSUS-1: when ``_ordered_fields`` lists a
-    field name that has no base NattKh entry AND no type override, the
+    field name that has no base schema entry AND no type override, the
     loader used to silently fabricate a stub that the legacy stream
     check then dropped — shifting every later field's offset without
     warning.
@@ -628,7 +628,7 @@ def test_field_walker_reachable_rejects_unknown_descriptor():
 def test_schema_loader_logs_warning_for_unknown_descriptor(tmp_path, monkeypatch, caplog):
     """When an override declares ``"type": "Bogus<u32>"`` the loader
     must log at WARNING and ignore the override (fall back to legacy
-    NattKh behavior). Confirms the dead-code-defense path runs."""
+    base-schema behavior). Confirms the dead-code-defense path runs."""
     import json
     import logging
     from cdumm.semantic import parser as parser_mod

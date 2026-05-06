@@ -18,9 +18,46 @@ from pathlib import Path
 
 
 def _emit(obj: dict) -> None:
-    """Write a JSON line to stdout for the parent process to read."""
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    """Write a JSON line to stdout for the parent process to read.
+
+    Swallows OSError on write/flush so the function is safe to call
+    from the outer error handler in :func:`worker_main`. Without this
+    guard, a stdout pipe that's gone EINVAL or EPIPE during apply
+    causes _emit to raise inside _run_apply, the outer except catches
+    it and calls _emit again to report the error upward, and that
+    second _emit raises the SAME error which propagates unhandled
+    and crashes the worker without a clean exit. Nexus bug
+    'CDUMM crashing, NOT THE GAME' (zellmann21b, 2026-05-03).
+
+    When stdout is broken, fall back to stderr so a parent that's
+    still alive can still see the message via subprocess.PIPE on
+    its error stream.
+    """
+    try:
+        line = json.dumps(obj)
+    except (TypeError, ValueError):
+        # Non-serializable value (Path, set, custom object). Fall
+        # back to repr so we still emit SOMETHING the parent can
+        # log, instead of letting the worker crash with TypeError.
+        try:
+            line = json.dumps({"type": "error",
+                               "msg": f"unserializable: {obj!r}"})
+        except Exception:
+            line = '{"type":"error","msg":"unserializable payload"}'
+    try:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+    except OSError:
+        try:
+            sys.stderr.write(
+                f"worker._emit fallback (stdout broken): {line}\n")
+            sys.stderr.flush()
+        except OSError:
+            # Both pipes broken. Nothing more we can do without
+            # crashing the worker. Drop the message silently — the
+            # parent will see the worker exit and treat it as a hard
+            # failure.
+            pass
 
 
 # ── Import ────────────────────────────────────────────────────────────

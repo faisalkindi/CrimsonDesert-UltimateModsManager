@@ -248,24 +248,27 @@ class PapgtManager:
                 pamt_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
                 rehashed += 1
             elif dir_name in existing_hashes and not is_mod_base:
-                # Verify hash against actual PAMT on disk. The PAPGT base
-                # may have stale hashes from previous in-place applies or
-                # other mod managers. Only read small PAMTs (<2MB) to avoid
-                # memory issues in the worker thread.
+                # Verify hash against actual PAMT on disk. The PAPGT
+                # base may have stale hashes from previous in-place
+                # applies, other mod managers, OR a game patch that
+                # rewrote the PAMT (Nexus reports 2026-05-03: 0009
+                # and 0015 mismatch after Crimson Desert 1.05). Always
+                # rehash from live bytes , the parallel mod-base
+                # branch below has done this with no cap since v2.2.1
+                # without crashing, so the old "memory pressure"
+                # 2MB short-circuit was an over-cautious guard that
+                # was actively producing the user-visible bug.
                 pamt_path = self._game_dir / dir_name / "0.pamt"
                 if pamt_path.exists():
                     try:
-                        pamt_size = pamt_path.stat().st_size
-                        if pamt_size < 2_000_000:
-                            pamt_data = pamt_path.read_bytes()
-                            actual_hash = compute_pamt_hash(pamt_data) if len(pamt_data) >= 12 else 0
-                            if actual_hash != existing_hashes[dir_name]:
-                                pamt_hash = actual_hash
-                                rehashed += 1
-                            else:
-                                pamt_hash = existing_hashes[dir_name]
+                        pamt_data = pamt_path.read_bytes()
+                        actual_hash = (
+                            compute_pamt_hash(pamt_data)
+                            if len(pamt_data) >= 12 else 0)
+                        if actual_hash != existing_hashes[dir_name]:
+                            pamt_hash = actual_hash
+                            rehashed += 1
                         else:
-                            # Large PAMT — trust existing hash to avoid memory pressure
                             pamt_hash = existing_hashes[dir_name]
                     except OSError:
                         pamt_hash = existing_hashes[dir_name]

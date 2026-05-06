@@ -4,7 +4,7 @@ bytes. Round-trip the result and verify the new drops list matches
 the JSON.
 
 Bug from kori228 / nizamintestino / UnLuckyLust (GitHub #41 + #55):
-NattKh's tool exports Format 3 mods that set the `drops` list on
+upstream tooling exports Format 3 mods that set the `drops` list on
 dropsetinfo.pabgb. CDUMM's primitive-only writer skips them with a
 "coming in v3.3" message. This module adds list-writer dispatch.
 """
