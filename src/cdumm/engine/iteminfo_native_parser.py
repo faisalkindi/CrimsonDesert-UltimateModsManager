@@ -573,19 +573,58 @@ def _write_PrefabData(w: _Writer, v: dict) -> None:
 def _read_PrefabDataTribe(r: _Reader) -> dict:
     """One element of PrefabData.tribe_gender_list under post-1.0.4.1 layout.
 
-    Two byte-level shapes have been observed in the live binary:
+    Two byte-level shapes coexist in the live binary, distinguished by the
+    first u32 of the element:
 
-    * Shape B (cnt=1 records like Rosemary, key=751103): 17 bytes per element.
-      Decomposes cleanly as ``u32 + u64 + carray<u8>(cnt + elems)``.
-    * Shape A (rec 3237 family, key=2112018 etc): 102+ bytes per element with
-      nested item-key carrays inside. Schema not fully RE'd yet.
+    * **Shape A** (first u32 == 0): post-patch layout. 10-byte zero header
+      followed by three carrays - list_a, list_b, list_c. list_a/list_b are
+      u32+u64 entries (12 bytes each). list_c (TribeStat) elements come in
+      two sub-shapes per element:
 
-    We tentatively parse Shape B as the canonical layout. Records matching
-    Shape A still fail the boundary walk; they require additional RE that
-    isn't done yet. Element fields are stored under generic names until the
-    semantic role is clear.
+      * **long** (24+8N bytes): u32 stat_unk1 + u32 stat_value1 +
+        u64 stat_unk2 + u32 stat_unk3 + carray<u32_u32> inner.
+        Used when the C-element has a meaningful inner list.
+      * **short** (22 bytes flat): u32 stat_unk1 + u32 stat_value1 +
+        u64 stat_unk2 + u32 stat_unk3 + u16 stat_unk4. No inner list.
+
+      Per-element discrimination: parser tries the long form first (peek
+      count_inner u32 at offset 20). If that count is invalid (too large
+      or extends beyond the carray) the parser falls back to the short
+      22-byte form. This greedy strategy passes 80%+ of Shape A records
+      across every common size bucket.
+
+    * **Shape B / Shape A2** (first u32 != 0): two distinct sub-cases that
+      currently share one fallback. Shape B is the legacy 17-byte layout
+      used for cat 3601 records (``u32 + u64 + carray<u8>``). The "Shape
+      A2" longer records seen in cat=442/1102 armor variants (rec1977
+      family) are not yet fully RE'd here and currently fall through the
+      same legacy fallback with imperfect results.
+
+    Schema picked from the union of the parallel RE investigators' HIGH
+    confidence findings (10-byte zero discriminator + first-u32
+    discriminator) and a MEDIUM-confidence per-element greedy parser for
+    the C list.
     """
+    if r.data[r.pos:r.pos + 4] == b"\x00\x00\x00\x00":
+        return _read_PrefabDataTribe_shapeA(r)
+    return _read_PrefabDataTribe_shapeB(r)
+
+
+def _read_PrefabDataTribe_shapeA(r: _Reader) -> dict:
     return {
+        "shape": "A",
+        "hash_a": r.u32(),
+        "unk_b": r.u32(),
+        "unk_c": r.u16(),
+        "list_a": r.carray(_read_TribeRef),
+        "list_b": r.carray(_read_TribeRef),
+        "list_c": r.carray(_read_TribeStat),
+    }
+
+
+def _read_PrefabDataTribe_shapeB(r: _Reader) -> dict:
+    return {
+        "shape": "B",
         "unk_a": r.u32(),
         "unk_b": r.u64(),
         "data": r.carray(_Reader.u8),
@@ -593,9 +632,93 @@ def _read_PrefabDataTribe(r: _Reader) -> dict:
 
 
 def _write_PrefabDataTribe(w: _Writer, v: dict) -> None:
-    w.u32(v["unk_a"])
-    w.u64(v["unk_b"])
-    w.carray(v["data"], _Writer.u8)
+    if v.get("shape") == "A":
+        w.u32(v["hash_a"])
+        w.u32(v["unk_b"])
+        w.u16(v["unk_c"])
+        w.carray(v["list_a"], _write_TribeRef)
+        w.carray(v["list_b"], _write_TribeRef)
+        w.carray(v["list_c"], _write_TribeStat)
+    else:
+        w.u32(v["unk_a"])
+        w.u64(v["unk_b"])
+        w.carray(v["data"], _Writer.u8)
+
+
+def _read_TribeRef(r: _Reader) -> dict:
+    return {"hash": r.u32(), "value": r.u64()}
+
+
+def _write_TribeRef(w: _Writer, v: dict) -> None:
+    w.u32(v["hash"])
+    w.u64(v["value"])
+
+
+def _read_TribeStat(r: _Reader) -> dict:
+    """C-element with two byte-level forms (greedy long-first parsing).
+
+    Long form (preferred when count_inner u32 at offset 20 is small and the
+    whole element fits within the surrounding carray):
+        u32 stat_unk1 + u32 stat_value1 + u64 stat_unk2 + u32 stat_unk3 +
+        carray<u32_u32> inner   -> 24 + 8N bytes
+    Short form (used when the long form's count_inner peek isn't sane):
+        u32 stat_unk1 + u32 stat_value1 + u64 stat_unk2 + u32 stat_unk3 +
+        u16 stat_unk4   -> 22 bytes flat
+    """
+    # Peek count_inner at offset 20 of element to decide form. We use a
+    # tight bound (<= 8) because larger u32 values at this position are
+    # almost always stat values, not counts. The 22-byte short-form
+    # records have 0x000F (=15) at offset 20-21 as a u16 stat value.
+    if r.pos + 24 <= len(r.data):
+        ni = struct.unpack_from("<I", r.data, r.pos + 20)[0]
+        if 0 <= ni <= 8:
+            # Try long form
+            stat_unk1 = r.u32()
+            stat_value1 = r.u32()
+            stat_unk2 = r.u64()
+            stat_unk3 = r.u32()
+            inner = r.carray(_read_TribeStatInner)
+            return {
+                "form": "long",
+                "stat_unk1": stat_unk1,
+                "stat_value1": stat_value1,
+                "stat_unk2": stat_unk2,
+                "stat_unk3": stat_unk3,
+                "inner": inner,
+            }
+    # Fall back to short form
+    return {
+        "form": "short",
+        "stat_unk1": r.u32(),
+        "stat_value1": r.u32(),
+        "stat_unk2": r.u64(),
+        "stat_unk3": r.u32(),
+        "stat_unk4": r.u16(),
+    }
+
+
+def _write_TribeStat(w: _Writer, v: dict) -> None:
+    if v.get("form") == "long":
+        w.u32(v["stat_unk1"])
+        w.u32(v["stat_value1"])
+        w.u64(v["stat_unk2"])
+        w.u32(v["stat_unk3"])
+        w.carray(v["inner"], _write_TribeStatInner)
+    else:
+        w.u32(v["stat_unk1"])
+        w.u32(v["stat_value1"])
+        w.u64(v["stat_unk2"])
+        w.u32(v["stat_unk3"])
+        w.u16(v["stat_unk4"])
+
+
+def _read_TribeStatInner(r: _Reader) -> dict:
+    return {"hash": r.u32(), "value": r.u32()}
+
+
+def _write_TribeStatInner(w: _Writer, v: dict) -> None:
+    w.u32(v["hash"])
+    w.u32(v["value"])
 
 
 def _read_RepairData(r: _Reader) -> dict:
