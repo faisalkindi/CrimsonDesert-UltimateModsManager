@@ -709,6 +709,39 @@ def _write_DockingChildData(w: _Writer, v: dict) -> None:
     w.cstring(v["docking_slot_key"])
 
 
+def _read_ParamString(r: _Reader) -> dict:
+    """ParamString entry inside PatternDescriptionData.param_string_list.
+    Layout RE'd from live binary: u8 flag + u8 unk_flag_2 + u32×2 unk_value
+    + cstring param_string. Confirmed against oracle output for record
+    1003823 (Item_gimmick_resourcestorage_0001)."""
+    return {
+        "flag": r.u8(),
+        "unk_flag_2": r.u8(),
+        "unk_value": [r.u32(), r.u32()],
+        "param_string": r.cstring(),
+    }
+
+
+def _write_ParamString(w: _Writer, v: dict) -> None:
+    w.u8(v["flag"])
+    w.u8(v["unk_flag_2"])
+    for x in v["unk_value"]:
+        w.u32(x)
+    w.cstring(v["param_string"])
+
+
+def _read_PatternDescriptionData(r: _Reader) -> dict:
+    return {
+        "pattern_description_info": r.u32(),
+        "param_string_list": r.carray(_read_ParamString),
+    }
+
+
+def _write_PatternDescriptionData(w: _Writer, v: dict) -> None:
+    w.u32(v["pattern_description_info"])
+    w.carray(v["param_string_list"], _write_ParamString)
+
+
 def _read_optional(r: _Reader, inner_reader):
     flag = r.u8()
     if flag == 0:
@@ -808,9 +841,10 @@ _ITEM_FIELDS = [
     ("drop_default_data", "struct", _read_DropDefaultData,
      _write_DropDefaultData),
     ("prefab_data_list", "carray", _read_PrefabData, _write_PrefabData),
-    # Post-1.0.4.1: enchant_data_list appears to have been REMOVED from
-    # the per-item record. (None of the live binary records expose a
-    # parseable count here; gvp comes immediately after prefab_data_list.)
+    # Post-1.0.4.1: oracle's OLD-fixture output keeps enchant_data_list
+    # between prefab and gvp, but the live binary doesn't expose a
+    # parseable EnchantData here — likely removed in the live schema
+    # along with other layout shifts. Re-evaluating later if needed.
     ("gimmick_visual_prefab_data_list", "carray",
      _read_GimmickVisualPrefabData, _write_GimmickVisualPrefabData),
     ("price_list", "carray", _read_ItemPriceInfo, _write_ItemPriceInfo),
@@ -818,28 +852,20 @@ _ITEM_FIELDS = [
      _write_DockingChildData),
     ("inventory_change_data", "optional", _read_InventoryChangeData,
      _write_InventoryChangeData),
+    # Post-1.0.4.1: NEW cstring "unk_texture_path" (oracle's name) inserted
+    # BEFORE fixed_page_data_list. A cover/title page texture path for
+    # book-type items (e.g., bookpaper_0178.dds on Alustin's Journal).
+    # Empty for records without book-cover artwork.
+    ("unk_texture_path", "cstring"),
     ("fixed_page_data_list", "carray", _read_PageData, _write_PageData),
     ("dynamic_page_data_list", "carray", _read_PageData, _write_PageData),
-    # Post-1.0.4.1 addition: a 4-byte CArray field sits between
-    # dynamic_page_data_list and inspect_data_list. Empty (count=0) in
-    # all sampled records (records 0-63 + record 64). Inner element shape
-    # not yet RE'd. Treat as opaque carray_u32 until a non-empty record is
-    # found to drive RE. Without this field, walker for records with
-    # non-empty inspect_data_list is 4 bytes ahead of the real inspect_data
-    # count position, and the inspect_data_list count is misread as 0.
-    ("unk_post_dynamic_page_data_list", "carray_u32"),
     ("inspect_data_list", "carray", _read_InspectData, _write_InspectData),
     ("inspect_action", "struct", _read_InspectAction, _write_InspectAction),
     ("default_sub_item", "struct", _read_DefaultSubItem, _write_DefaultSubItem),
     ("cooltime", "i64"),
     # Post-1.0.4.1 additions, observed as 8-byte zero fields between
-    # cooltime and item_charge_type. Type assumed i64 by best-fit.
-    # NOTE: For records with item_charge_type==0 (category 4001 quest
-    # papers and similar), unk_post_cooltime_b appears to be 4 bytes
-    # shorter than for type==2 records — the exact RE detail of which
-    # field shrinks is unresolved. Records of type==0 currently fail
-    # to round-trip; type==2 records (records 0..55 in the live fixture)
-    # parse correctly with the layout below.
+    # cooltime and item_charge_type. Match oracle keys "unk_post_cooltime_a"
+    # and "unk_post_cooltime_b". Assumed i64 by best-fit.
     ("unk_post_cooltime_a", "i64"),
     ("unk_post_cooltime_b", "i64"),
     ("item_charge_type", "u8"),
@@ -861,18 +887,28 @@ _ITEM_FIELDS = [
     ("packed_item_info", "u32"),
     ("unpacked_item_info", "u32"),
     ("convert_item_info_by_drop_npc", "u32"),
-    # Post-1.0.4.1: NEW carray of pattern descriptions. In all sampled
-    # records this is empty (count u32 = 0); the inner element shape is
-    # unknown so we treat as opaque carray of u32 (will misparse if a
-    # non-empty record is seen — must be revisited then).
-    ("pattern_description_data_list", "carray_u32"),
+    # Post-1.0.4.1: 5-byte preamble field before pattern_description_data_list.
+    # All zeros in records sampled so far. Identified by the 5-byte gap between
+    # convert_item_info_by_drop_npc end and where the pattern count u32 = 1
+    # actually sits in non-empty records (rec 796 = Item_gimmick_resourcestorage).
+    # Net byte count balanced by removing usable_alert_type/usable_alert below
+    # (oracle places usable_alert_type elsewhere; not yet relocated here).
+    ("unk_pre_pattern_a", "u32"),
+    ("unk_pre_pattern_b", "u8"),
+    # Post-1.0.4.1: pattern_description_data_list = carray<PatternDescriptionData>
+    # where each entry has u32 pattern_description_info + carray<ParamString>.
+    # Confirmed against oracle on record 1003823 with non-empty content.
+    ("pattern_description_data_list", "carray", _read_PatternDescriptionData,
+     _write_PatternDescriptionData),
     ("look_detail_game_advice_info_wrapper", "u32"),
     ("look_detail_mission_info", "u32"),
     ("enable_alert_system_to_ui", "u8"),
-    # Post-1.0.4.1: NEW u32 usable_alert_type sits BEFORE the existing
-    # u8 usable_alert (rather than replacing it).
-    ("usable_alert_type", "u32"),
-    ("usable_alert", "u8"),
+    # Post-1.0.4.1: usable_alert_type and usable_alert (u32+u8) used to live
+    # here per the previous schema attempt, but byte-level RE shows their 5
+    # bytes don't actually exist at this position in the live binary —
+    # they're consumed by the 5-byte preamble before pattern_description.
+    # Oracle places usable_alert_type between item_charge_type and sharpness;
+    # leaving it absent here for now until the rest of the schema balances.
     ("is_save_game_data_at_use_item", "u8"),
     ("is_logout_at_use_item", "u8"),
     ("shared_cool_time_group_name_hash", "u32"),
