@@ -626,8 +626,113 @@ def _read_PrefabDataTribe_shapeA(r: _Reader) -> dict:
         "unk_c": r.u16(),
         "list_a": r.carray(_read_TribeRef),
         "list_b": r.carray(_read_TribeRef),
-        "list_c": r.carray(_read_TribeStat),
+        "list_c": _read_TribeStat_list(r),
     }
+
+
+def _read_TribeStat_list(r: _Reader) -> list:
+    """Read carray<TribeStat> with strategy detection for short(22) vs v3(26).
+
+    Per SIZE_98_findings.md: 162 records use a 26-byte v3 C-element form,
+    indistinguishable from the 22-byte short form by per-element bytes alone.
+    Discriminator is total cregion size: short = 22*N, v3 = 26*N. The chosen
+    form must land the cursor at a valid next-field boundary.
+
+    Strategy:
+      1. Snapshot pos. Read count.
+      2. Try short (22-byte) read of all N elements via _read_TribeStat.
+      3. After short read, peek the bytes that would follow. If they look
+         like the next valid field (GVP carray count + GVP element start
+         carrying the float-1.0 scale needle 8 bytes after), commit short.
+      4. Else rewind and try v3 (26-byte) form.
+      5. Else fall back to short (the original behaviour).
+    """
+    snap_pos = r.pos
+    count = r.u32()
+    if count == 0:
+        return []
+
+    elements_start = r.pos
+
+    def _try_short() -> tuple[list[dict] | None, int]:
+        r.pos = elements_start
+        out: list[dict] = []
+        try:
+            for _ in range(count):
+                out.append(_read_TribeStat(r))
+        except Exception:
+            return None, r.pos
+        return out, r.pos
+
+    def _try_v3() -> tuple[list[dict] | None, int]:
+        r.pos = elements_start
+        out: list[dict] = []
+        try:
+            for _ in range(count):
+                if r.pos + 26 > len(r.data):
+                    return None, r.pos
+                stat_unk1 = r.u32()
+                stat_value1 = r.u32()
+                stat_unk2 = r.u64()
+                stat_unk3 = r.u32()
+                stat_unk4 = r.u32()
+                stat_unk5 = r.u16()
+                out.append({
+                    "form": "v3",
+                    "stat_unk1": stat_unk1,
+                    "stat_value1": stat_value1,
+                    "stat_unk2": stat_unk2,
+                    "stat_unk3": stat_unk3,
+                    "stat_unk4": stat_unk4,
+                    "stat_unk5": stat_unk5,
+                })
+        except Exception:
+            return None, r.pos
+        return out, r.pos
+
+    GVP_NEEDLE = b"\x00\x00\x80\x3F\x00\x00\x80\x3F\x00\x00\x80\x3F"
+
+    def _looks_like_next_field(pos: int) -> bool:
+        """Tight boundary check: when this is the last tribe element AND
+        GVP list has >= 1 entry, the bytes at pos are
+        ``u32 gvp_count(=>=1) + u32 gvp_tag_name_hash + GVP_NEEDLE``. So
+        the needle should sit at exactly pos+8.
+
+        Falls back to a softer check (needle anywhere in next 64 bytes)
+        when the tight check fails, to handle multi-tribe/empty-GVP
+        records.
+        """
+        if pos < 0 or pos > len(r.data):
+            return False
+        if r.data[pos + 8:pos + 20] == GVP_NEEDLE:
+            return True
+        return False
+
+    # Try short first
+    short_out, short_pos = _try_short()
+    short_ok = short_out is not None and _looks_like_next_field(short_pos)
+    if short_ok:
+        return short_out
+
+    # Try v3
+    v3_out, v3_pos = _try_v3()
+    v3_ok = v3_out is not None and _looks_like_next_field(v3_pos)
+    if v3_ok and not short_ok:
+        return v3_out
+
+    # If neither boundary check matched but short parsed cleanly, prefer
+    # short (the historical default). This preserves baseline behaviour
+    # for records where the GVP needle isn't directly downstream (e.g.,
+    # multi-tribe records where the next field is another tribe element).
+    if short_out is not None:
+        r.pos = short_pos
+        return short_out
+    if v3_out is not None:
+        r.pos = v3_pos
+        return v3_out
+    # Last resort: original short read raises naturally
+    r.pos = elements_start
+    return [_read_TribeStat(r) for _ in range(count)]
 
 
 def _read_PrefabDataTribe_shapeB(r: _Reader) -> dict:
@@ -706,12 +811,20 @@ def _read_TribeStat(r: _Reader) -> dict:
 
 
 def _write_TribeStat(w: _Writer, v: dict) -> None:
-    if v.get("form") == "long":
+    form = v.get("form")
+    if form == "long":
         w.u32(v["stat_unk1"])
         w.u32(v["stat_value1"])
         w.u64(v["stat_unk2"])
         w.u32(v["stat_unk3"])
         w.carray(v["inner"], _write_TribeStatInner)
+    elif form == "v3":
+        w.u32(v["stat_unk1"])
+        w.u32(v["stat_value1"])
+        w.u64(v["stat_unk2"])
+        w.u32(v["stat_unk3"])
+        w.u32(v["stat_unk4"])
+        w.u16(v["stat_unk5"])
     else:
         w.u32(v["stat_unk1"])
         w.u32(v["stat_value1"])
