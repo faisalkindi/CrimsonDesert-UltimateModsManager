@@ -380,19 +380,17 @@ def _write_GameEventExecuteData(w: _Writer, v: dict) -> None:
 
 
 def _read_InventoryChangeData(r: _Reader) -> dict:
-    """Post-1.0.4.1 layout: original 13 + 2 = 15 bytes plus a NEW
-    trailing u32. Total 19 bytes (with optional flag = 20)."""
+    """Original .pyi layout: GameEventExecuteData (13 bytes) +
+    to_inventory_info u16 (2 bytes) = 15 bytes inner."""
     return {
         "game_event_execute_data": _read_GameEventExecuteData(r),
         "to_inventory_info": r.u16(),
-        "unk_post_inventory_change": r.u32(),
     }
 
 
 def _write_InventoryChangeData(w: _Writer, v: dict) -> None:
     _write_GameEventExecuteData(w, v["game_event_execute_data"])
     w.u16(v["to_inventory_info"])
-    w.u32(v["unk_post_inventory_change"])
 
 
 def _read_PageData(r: _Reader) -> dict:
@@ -822,6 +820,14 @@ _ITEM_FIELDS = [
      _write_InventoryChangeData),
     ("fixed_page_data_list", "carray", _read_PageData, _write_PageData),
     ("dynamic_page_data_list", "carray", _read_PageData, _write_PageData),
+    # Post-1.0.4.1 addition: a 4-byte CArray field sits between
+    # dynamic_page_data_list and inspect_data_list. Empty (count=0) in
+    # all sampled records (records 0-63 + record 64). Inner element shape
+    # not yet RE'd. Treat as opaque carray_u32 until a non-empty record is
+    # found to drive RE. Without this field, walker for records with
+    # non-empty inspect_data_list is 4 bytes ahead of the real inspect_data
+    # count position, and the inspect_data_list count is misread as 0.
+    ("unk_post_dynamic_page_data_list", "carray_u32"),
     ("inspect_data_list", "carray", _read_InspectData, _write_InspectData),
     ("inspect_action", "struct", _read_InspectAction, _write_InspectAction),
     ("default_sub_item", "struct", _read_DefaultSubItem, _write_DefaultSubItem),
