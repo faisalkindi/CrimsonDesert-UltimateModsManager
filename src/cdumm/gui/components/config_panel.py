@@ -476,8 +476,30 @@ class ConfigPanel(QWidget):
         existing key-value ``Config`` table. Safe to call before or
         after the first ``show_mod``. When a panel is constructed
         without a DB, persistence calls are no-ops.
+
+        Also restores the global ``config_panel_width`` if previously
+        saved. We write directly to ``self._PANEL_WIDTH`` instead of
+        going through ``set_panel_width`` to avoid round-trip persisting
+        the same value we just loaded.
         """
         self._db = db
+        if db is None:
+            return
+        try:
+            from cdumm.storage.config import Config
+            saved = Config(db).get("config_panel_width")
+            if saved:
+                try:
+                    width = int(saved)
+                    self._PANEL_WIDTH = max(
+                        self._MIN_PANEL_WIDTH,
+                        min(self._MAX_PANEL_WIDTH, width),
+                    )
+                except (ValueError, TypeError):
+                    # Garbage value — leave the default in place.
+                    pass
+        except Exception as e:
+            logger.debug("set_db: width restore failed: %s", e)
 
     def show_mod(
         self,
@@ -641,6 +663,14 @@ class ConfigPanel(QWidget):
                     and anim.endValue() not in (None, 0)):
                 anim.stop()
             self.setMaximumWidth(clamped)
+        # Persist globally so the next panel open restores the width.
+        # No-op when no DB has been wired in (legacy callers).
+        if self._db is not None:
+            try:
+                from cdumm.storage.config import Config
+                Config(self._db).set("config_panel_width", str(clamped))
+            except Exception as e:
+                logger.debug("set_panel_width: persist failed: %s", e)
 
     def resizeEvent(self, event):  # noqa: N802
         """Reposition the right-edge drag handle on every resize."""
