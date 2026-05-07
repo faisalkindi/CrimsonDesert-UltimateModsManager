@@ -292,10 +292,10 @@ def expand_format3_into_aggregated(
                 warnings_out.append(
                     f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
                     f"produced 0 byte changes for '{target}'. "
-                    f"Possible causes: the vendored writer (crimson_rs / "
-                    f"vendored skill parser) failed to load, or all "
-                    f"target item/skill keys in the mod are missing "
-                    f"from this game version's table."
+                    f"Possible causes: all target item/skill keys in "
+                    f"the mod are missing from this game version's "
+                    f"table, or every intent set the field to its "
+                    f"current value (no-op)."
                 )
             continue
         # Stamp _target_file plus the full list of contributing mod

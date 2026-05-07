@@ -144,6 +144,64 @@ def test_format3_list_of_dict_apply_round_trip():
     not _have_live_fixture(),
     reason="iteminfo_postpatch.pabgb fixture not present",
 )
+def test_format3_mixed_primitive_and_list_of_dict_apply():
+    """Real production load shape: a single mod batches multiple
+    intents on the same item, mixing primitive and list-of-dict
+    fields. Batched through one build_iteminfo_intent_change call,
+    re-parsed, both fields must reflect their intents.
+    """
+    from cdumm.engine.iteminfo_native_parser import parse_iteminfo_from_bytes
+    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
+    from cdumm.engine.format3_handler import Format3Intent
+
+    body = _LIVE_BODY.read_bytes()
+    items = parse_iteminfo_from_bytes(body)
+
+    # Pick a single item that has BOTH a non-zero max_stack_count
+    # and a non-empty equip_passive_skill_list, so we can mutate
+    # both via the same batch.
+    target = next(
+        it for it in items
+        if it.get("max_stack_count", 0) >= 1
+        and it.get("equip_passive_skill_list")
+        and len(it["equip_passive_skill_list"]) > 0
+    )
+    target_key = target["key"]
+    new_stack = 7777
+    new_passives: list = []
+
+    intents = [
+        Format3Intent(
+            entry=target.get("string_key", str(target_key)),
+            key=target_key,
+            field="max_stack_count",
+            op="set",
+            new=new_stack,
+        ),
+        Format3Intent(
+            entry=target.get("string_key", str(target_key)),
+            key=target_key,
+            field="equip_passive_skill_list",
+            op="set",
+            new=new_passives,
+        ),
+    ]
+
+    change = build_iteminfo_intent_change(body, intents)
+    assert change is not None, (
+        "build_iteminfo_intent_change returned None for two valid intents")
+
+    new_bytes = bytes.fromhex(change["patched"])
+    new_items = parse_iteminfo_from_bytes(new_bytes)
+    new_target = next(it for it in new_items if it["key"] == target_key)
+    assert new_target["max_stack_count"] == new_stack
+    assert new_target["equip_passive_skill_list"] == new_passives
+
+
+@pytest.mark.skipif(
+    not _have_live_fixture(),
+    reason="iteminfo_postpatch.pabgb fixture not present",
+)
 def test_format3_unknown_key_skipped_gracefully():
     """An intent targeting a key that doesn't exist in the table
     should be skipped, not crash. With no real intents surviving,
