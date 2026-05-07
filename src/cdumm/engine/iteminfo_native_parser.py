@@ -1758,6 +1758,35 @@ def _read_item(r: _Reader) -> dict:
                             # after: the GVP carray's first element
                             # would be malformed. Misalignment.
                             suspicious = True
+                        elif gvp_cnt == 0 and r.rec_end is not None:
+                            # gvp_cnt==0 looks fine on its face, but if
+                            # a GVP scale needle exists anywhere within
+                            # the prefab/post-prefab range bounded by
+                            # rec_end, the prefab parser silently over-
+                            # (or under-) consumed past the real GVP
+                            # boundary and we landed on a stray zero.
+                            # Trigger opaque salvage so the existing
+                            # _shapeA2_forward_walk (which scans from
+                            # snap) re-anchors. Validate the needle has
+                            # a sane gvp_count at needle-8 to filter
+                            # out false-positive triples inside real
+                            # prefab tribe data.
+                            scan_end = max(snap, r.rec_end - 40)
+                            search_pos = snap
+                            while True:
+                                cand = _find_gvp_needle(
+                                    r.data, search_pos, scan_end
+                                )
+                                if cand < 0:
+                                    break
+                                if cand - 8 >= snap:
+                                    cnt = struct.unpack_from(
+                                        "<I", r.data, cand - 8
+                                    )[0]
+                                    if 1 <= cnt <= 10:
+                                        suspicious = True
+                                        break
+                                search_pos = cand + 1
                     if suspicious:
                         post_pos = r.pos
                         r.pos = snap
