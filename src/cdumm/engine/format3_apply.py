@@ -376,7 +376,8 @@ def _intents_to_v2_changes(
             from cdumm.engine.iteminfo_writer import (
                 build_iteminfo_intent_change,
             )
-            change = build_iteminfo_intent_change(vanilla_body, list(intents))
+            change = build_iteminfo_intent_change(
+                vanilla_body, list(intents), vanilla_header)
             if change is not None:
                 out.append(change)
         elif table_name == "skill":
@@ -539,7 +540,7 @@ def _intents_to_v2_changes(
             build_iteminfo_intent_change,
         )
         iteminfo_change = build_iteminfo_intent_change(
-            vanilla_body, iteminfo_batch)
+            vanilla_body, iteminfo_batch, vanilla_header)
         if iteminfo_change is not None:
             out.append(iteminfo_change)
 

@@ -2670,7 +2670,8 @@ class CdummWindow(FluentWindow):
         proc = QProcess(self)
         _quiet_qprocess(proc)
         exe = sys.executable
-        args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
+        _wprefix = [] if getattr(sys, "frozen", False) else ["-m", "cdumm.main"]
+        args = _wprefix + ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
         _buf = [""]
 
@@ -2738,7 +2739,8 @@ class CdummWindow(FluentWindow):
         proc = QProcess(self)
         _quiet_qprocess(proc)
         exe = sys.executable
-        args = ["--worker", "diagnose", str(mod_path), str(self._game_dir),
+        _wprefix = [] if getattr(sys, "frozen", False) else ["-m", "cdumm.main"]
+        args = _wprefix + ["--worker", "diagnose", str(mod_path), str(self._game_dir),
                 str(self._db.db_path), error]
         _buf = [""]
 
@@ -3064,7 +3066,8 @@ class CdummWindow(FluentWindow):
         self._active_worker = proc
 
         exe = sys.executable
-        args = ["--worker", "import_batch",
+        _wprefix = [] if getattr(sys, "frozen", False) else ["-m", "cdumm.main"]
+        args = _wprefix + ["--worker", "import_batch",
                 tmp.name, str(self._game_dir),
                 str(self._db.db_path), str(self._deltas_dir)]
 
@@ -4137,7 +4140,8 @@ class CdummWindow(FluentWindow):
 
         # Build command: the exe calls itself with --worker
         exe = sys.executable
-        args = ["--worker", "import",
+        _wprefix = [] if getattr(sys, "frozen", False) else ["-m", "cdumm.main"]
+        args = _wprefix + ["--worker", "import",
                 str(path), str(self._game_dir),
                 str(self._db.db_path), str(self._deltas_dir)]
         if existing_mod_id is not None:
@@ -5666,7 +5670,10 @@ class CdummWindow(FluentWindow):
             self._update_timer.stop()
 
         exe = sys.executable
-        args = ["--worker"] + worker_args
+        if getattr(sys, "frozen", False):
+            args = ["--worker"] + worker_args
+        else:
+            args = ["-m", "cdumm.main", "--worker"] + worker_args
         _buf = [""]
         _msgs = []
 

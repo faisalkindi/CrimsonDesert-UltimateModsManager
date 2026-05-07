@@ -23,6 +23,18 @@ from cdumm.engine.crimson_rs_loader import get_crimson_rs
 if TYPE_CHECKING:
     from cdumm.engine.format3_handler import Format3Intent
 
+try:
+    from cdumm._vendor.iteminfo_parser import (
+        IteminfoFile,
+        PassiveSkill,
+        EquipBuff,
+    )
+    _HAVE_CUSTOM_PARSER = True
+except Exception as _e:
+    _HAVE_CUSTOM_PARSER = False
+    logger = __import__("logging").getLogger(__name__)
+    logger.warning("iteminfo custom parser not available: %s", _e)
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,20 +88,122 @@ def _resolve_field_name(intent_field: str, item: dict) -> Optional[str]:
     return None
 
 
+def _build_with_custom_parser(
+    vanilla_body: bytes,
+    vanilla_hdr: bytes,
+    intents: "list[Format3Intent]",
+) -> Optional[dict]:
+    """Apply intents using the pure-Python iteminfo_parser, which
+    supports the current game format that crimson_rs cannot parse."""
+    try:
+        f = IteminfoFile(vanilla_body, vanilla_hdr)
+    except Exception as e:
+        logger.error("custom iteminfo parser init failed: %s", e)
+        return None
+
+    applied = 0
+    for intent in intents:
+        if intent.op != "set":
+            logger.warning(
+                "iteminfo custom writer: op %r not supported on key=%d field=%r",
+                intent.op, intent.key, intent.field)
+            continue
+        if intent.key not in f.idx:
+            logger.debug(
+                "iteminfo custom writer: key %d not in table", intent.key)
+            continue
+
+        try:
+            if intent.field == "equip_passive_skill_list":
+                passives = [
+                    PassiveSkill(s["skill"], s["level"])
+                    for s in intent.new
+                ]
+                f.write(intent.key, passives=passives)
+                applied += 1
+
+            elif intent.field == "enchant_data_list":
+                # Pull equip_buffs out of the full list replacement.
+                # Stats and prices are preserved from existing binary;
+                # only equip_buffs are replaced.
+                new_buffs = [
+                    EquipBuff(b["buff"], b["level"])
+                    for ed in intent.new
+                    for b in ed.get("equip_buffs", [])
+                ]
+                f.write(intent.key, buffs=new_buffs)
+                applied += 1
+
+            elif intent.field in ("cooltime", "_cooltime"):
+                f.write(intent.key, cooltime=int(intent.new))
+                applied += 1
+
+            elif intent.field in ("gimmick_info", "_gimmickInfo"):
+                f.write(intent.key, gimmick_info=int(intent.new))
+                applied += 1
+
+            elif intent.field in ("equip_type_info", "_equipTypeInfo"):
+                f.write(intent.key, equip_type_info=int(intent.new))
+                applied += 1
+
+            elif intent.field in ("item_type", "_itemType"):
+                f.write(intent.key, item_type=int(intent.new))
+                applied += 1
+
+            else:
+                logger.warning(
+                    "iteminfo custom writer: field %r not handled "
+                    "(key=%d) — add to _build_with_custom_parser if needed",
+                    intent.field, intent.key)
+
+        except Exception as e:
+            logger.warning(
+                "iteminfo custom writer: intent key=%d field=%r failed: %s",
+                intent.key, intent.field, e)
+
+    if applied == 0:
+        return None
+
+    new_body = f.get_body()
+    if new_body == vanilla_body:
+        return None
+
+    logger.info(
+        "iteminfo custom writer: %d intent(s) applied, "
+        "body %d -> %d bytes",
+        applied, len(vanilla_body), len(new_body))
+
+    return {
+        "offset":   0,
+        "original": vanilla_body.hex(),
+        "patched":  new_body.hex(),
+        "label":    f"iteminfo custom parser ({applied} intent(s) applied)",
+    }
+
+
 def build_iteminfo_intent_change(
     vanilla_body: bytes,
     intents: "list[Format3Intent]",
+    vanilla_hdr: bytes | None = None,
 ) -> Optional[dict]:
     """Apply all provided intents to a parsed copy of vanilla
     iteminfo.pabgb and return a single whole-file v2 change dict.
 
-    Returns None if crimson_rs is unavailable, no intents touched
-    a real record, or all intents failed (so the caller can fall
-    back to the regular per-intent path).
+    Tries our Python parser first (handles the current game format).
+    Falls back to crimson_rs if the custom parser is unavailable.
 
-    Per-intent failures (unknown key, unsupported field) are logged
-    and skipped; surviving intents still produce their effect.
+    Returns None if no intents applied or all failed.
     """
+    # --- custom Python parser path ---
+    if _HAVE_CUSTOM_PARSER and vanilla_hdr is not None:
+        return _build_with_custom_parser(vanilla_body, vanilla_hdr, intents)
+
+    if vanilla_hdr is None:
+        logger.warning(
+            "iteminfo writer: pabgh header not supplied, "
+            "falling back to crimson_rs")
+
+    # --- crimson_rs fallback ---
     crimson_rs = get_crimson_rs()
     if crimson_rs is None:
         logger.warning("iteminfo writer unavailable (crimson_rs not loaded)")

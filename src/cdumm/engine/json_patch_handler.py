@@ -1057,12 +1057,12 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 mismatched += 1
                 continue
 
-            if offset + len(patched_bytes) > len(data):
+            # Skip the bounds check when 'original' is present: the
+            # original-match check below validates the bytes and handles
+            # whole-file replacements where patched may be larger than data.
+            if "original" not in change and offset + len(patched_bytes) > len(data):
                 logger.warning("Patch at offset %d exceeds file size %d, skipping",
                                offset, len(data))
-                # Record so the all-or-nothing filter taints the mod
-                # and the user sees the skip in the post-apply toast.
-                # /systematic-debugging finding 2026-05-05.
                 _record_skip(
                     change, offset, None,
                     f"offset {offset} exceeds file size {len(data)}")
