@@ -89,6 +89,12 @@ class SettingsPage(SmoothScrollArea):
     profile_manage_requested = Signal()
     export_list_requested = Signal()
     import_list_requested = Signal()
+    # Hand off cdmods_path migration to the window: the window owns the
+    # DB lifecycle and is the only place that can safely close the live
+    # SQLite connection BEFORE shutil.rmtree (Windows file lock blocks
+    # rmtree otherwise) and reopen at the new path AFTER. Settings page
+    # just collects user intent + confirmation.
+    cdmods_path_change_requested = Signal(Path, Path)  # (old_path, new_path)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1330,17 +1336,16 @@ class SettingsPage(SmoothScrollArea):
         )
 
         if needs_migration:
+            # Confirm the move with the user (potentially several
+            # minutes on a slow drive, non-recoverable mid-flight).
             from PySide6.QtWidgets import QMessageBox
             box = QMessageBox(self.window())
             box.setIcon(QMessageBox.Icon.Question)
             box.setWindowTitle(
                 tr("settings.cdmods_path_migrate_confirm_title"))
             box.setText(
-                tr("settings.cdmods_path_migrate_confirm_text"))
-            box.setInformativeText(
-                f"From:\n{old_path}\n\nTo:\n{new_path}\n\n"
-                "This may take several minutes. Do not close CDUMM "
-                "while the move is in progress.")
+                tr("settings.cdmods_path_migrate_confirm_text",
+                   old=str(old_path), new=str(new_path)))
             box.setStandardButtons(
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.Cancel)
@@ -1351,38 +1356,25 @@ class SettingsPage(SmoothScrollArea):
                 logger.info("cdmods_path: user cancelled migration")
                 return
 
-            from cdumm.storage.cdmods_migration import (
-                migrate_cdmods, MigrationError,
-            )
-            try:
-                migrate_cdmods(old_path, new_path)
-            except MigrationError as e:
-                logger.error("cdmods migration failed: %s", e)
-                InfoBar.error(
-                    title=tr("settings.cdmods_path_migrate_failed_title"),
-                    content=str(e),
-                    duration=10000,
-                    position=InfoBarPosition.TOP,
-                    parent=self.window(),
-                )
-                return
-            except Exception as e:
-                logger.exception("cdmods migration crashed")
-                InfoBar.error(
-                    title=tr("settings.cdmods_path_migrate_failed_title"),
-                    content=str(e),
-                    duration=10000,
-                    position=InfoBarPosition.TOP,
-                    parent=self.window(),
-                )
-                return
+            # Hand off to the window. The window owns the DB lifecycle
+            # and is the only place that can safely:
+            #   1. Close the live SQLite connection (Windows file lock
+            #      otherwise blocks shutil.rmtree of cdumm.db inside
+            #      the old CDMods/ tree , WinError 32).
+            #   2. Run migrate_cdmods(old, new).
+            #   3. Reopen the DB at new_path / "cdumm.db".
+            #   4. Persist cdmods_path to the NEW DB and write the
+            #      bootstrap pointer file (otherwise C3: override
+            #      lands in the deleted-old DB and is lost).
+            # Updating the label happens via refresh() once the window
+            # re-wires this page through set_managers.
+            logger.info(
+                "cdmods_path: requesting window-level migration "
+                "%s -> %s", old_path, new_path)
+            self.cdmods_path_change_requested.emit(old_path, new_path)
+            return
 
-        # Persist the override only AFTER the move succeeded (or was
-        # unnecessary). Order matters: a crash between move and persist
-        # would leave the data at new_path with the config still
-        # pointing at old_path, but the old_path is now gone, far less
-        # bad than persisting first and then failing the move which
-        # would leave the config pointing at an empty new folder.
+        # No migration needed: persist directly to the open DB.
         self._config.set("cdmods_path", str(new_path))
         # Also write a bootstrap-time pointer file in %LOCALAPPDATA%
         # so the NEXT CDUMM launch can find the override BEFORE

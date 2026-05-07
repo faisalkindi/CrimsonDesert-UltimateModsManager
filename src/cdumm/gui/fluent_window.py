@@ -916,6 +916,8 @@ class CdummWindow(FluentWindow):
         if self._db:
             self.settings_page.set_managers(db=self._db, game_dir=self._game_dir)
         self.settings_page.game_dir_changed.connect(self._on_game_dir_changed)
+        self.settings_page.cdmods_path_change_requested.connect(
+            self._on_cdmods_path_change_requested)
         self.settings_page.profile_manage_requested.connect(self._on_profiles)
         self.settings_page.export_list_requested.connect(self._on_export_list)
         self.settings_page.import_list_requested.connect(self._on_import_list)
@@ -5540,6 +5542,149 @@ class CdummWindow(FluentWindow):
             self._db_poll_timer.start(2000)
 
         logger.info("Game directory changed to %s — managers reinitialized", new_path)
+
+    def _on_cdmods_path_change_requested(
+            self, old_path: Path, new_path: Path) -> None:
+        """Migrate CDMods/ to ``new_path`` with the DB closed.
+
+        Why this lives on the window, not on settings_page: the live
+        SQLite handle keeps cdumm.db locked. ``shutil.rmtree`` inside
+        ``migrate_cdmods`` then fails with WinError 32 on Windows. The
+        window owns the DB lifecycle and is the only place that can
+        safely close the connection, run the migration, reopen at the
+        new location, and re-wire every page.
+
+        Sequence (each step matters):
+          1. Block if a worker is active (apply / scan can crash mid-
+             migration if the DB rug-pulls underneath them).
+          2. Close the live DB connection.
+          3. ``migrate_cdmods(old, new)`` , verifies SHA-256 per file,
+             then deletes old tree.
+          4. Reopen the DB at ``new_path / "cdumm.db"``.
+          5. Persist ``cdmods_path = new_path`` in the NEW DB and
+             write the bootstrap pointer file (so next launch finds
+             the override before the DB is open).
+          6. Re-wire managers + every page (this is the same shape
+             as ``_on_game_dir_changed``).
+        """
+        if self._active_worker:
+            InfoBar.warning(
+                title=tr("main.busy"), content=tr("main.busy_msg"),
+                duration=3000, position=InfoBarPosition.TOP, parent=self)
+            return
+
+        # Pause DB watcher + timer.
+        self._db_watcher_paused = True
+        if hasattr(self, '_db_poll_timer'):
+            self._db_poll_timer.stop()
+
+        # Close the live DB before migrate touches the on-disk files.
+        if self._db:
+            try:
+                self._db.close()
+            except Exception:
+                pass
+            self._db = None
+
+        # Run the verified migration.
+        from cdumm.storage.cdmods_migration import (
+            migrate_cdmods, MigrationError,
+        )
+        try:
+            migrate_cdmods(old_path, new_path)
+        except (MigrationError, Exception) as e:
+            logger.exception("cdmods migration failed")
+            # Reopen the OLD DB so the app stays usable. The override
+            # was never persisted, so the user can retry later.
+            try:
+                self._db = Database(old_path / "cdumm.db")
+                self._db.initialize()
+            except Exception:
+                logger.exception(
+                    "cdmods migration: failed to reopen old DB after "
+                    "migration error; user will need to relaunch")
+            InfoBar.error(
+                title=tr("settings.cdmods_path_migrate_failed_title"),
+                content=str(e),
+                duration=10000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+            # Re-wire pages so they have a working DB handle again.
+            if self._db is not None:
+                self._snapshot = SnapshotManager(self._db)
+                self._mod_manager = ModManager(
+                    self._db, self._cdmods_dir / "deltas")
+                self._conflict_detector = ConflictDetector(self._db)
+                from cdumm.engine.activity_log import ActivityLog
+                self._activity_log = ActivityLog(self._db)
+                self._wire_managers()
+            self._db_watcher_paused = False
+            if hasattr(self, '_db_poll_timer'):
+                self._db_poll_timer.start(2000)
+            return
+
+        # Migration succeeded. Update path state and reopen at new
+        # location. The new DB needs the override persisted, otherwise
+        # bootstrap on next launch won't see it (C3).
+        self._cdmods_dir = new_path
+        self._deltas_dir = self._cdmods_dir / "deltas"
+        self._vanilla_dir = self._cdmods_dir / "vanilla"
+
+        new_db_path = self._cdmods_dir / "cdumm.db"
+        self._db = Database(new_db_path)
+        self._db.initialize()
+
+        # Persist the override to the NEW DB (the OLD one is gone).
+        try:
+            from cdumm.storage.config import Config
+            Config(self._db).set("cdmods_path", str(new_path))
+        except Exception:
+            logger.exception(
+                "cdmods migration: failed to persist override to new DB")
+
+        # Pointer file in %LOCALAPPDATA% so the NEXT launch can find
+        # the override BEFORE opening the DB.
+        try:
+            from cdumm.engine.cdmods_paths import write_cdmods_path_pointer
+            write_cdmods_path_pointer(new_path)
+        except Exception:
+            logger.exception(
+                "cdmods migration: failed to write pointer file")
+
+        # Reinitialize managers with new DB.
+        self._snapshot = SnapshotManager(self._db)
+        self._mod_manager = ModManager(self._db, self._deltas_dir)
+        self._conflict_detector = ConflictDetector(self._db)
+        from cdumm.engine.activity_log import ActivityLog
+        self._activity_log = ActivityLog(self._db)
+
+        # Update DB watcher to watch new path.
+        if hasattr(self, '_db_watcher'):
+            old_files = self._db_watcher.files()
+            if old_files:
+                self._db_watcher.removePaths(old_files)
+            self._db_watcher.addPath(str(new_db_path))
+            self._db_wal_path = str(new_db_path) + "-wal"
+
+        # Re-wire pages, refresh, resume.
+        self._wire_managers()
+        self._refresh_all()
+        self._stamp_db_mtime()
+        self._db_watcher_paused = False
+        if hasattr(self, '_db_poll_timer'):
+            self._db_poll_timer.start(2000)
+
+        InfoBar.success(
+            title=tr("settings.cdmods_path_migrate_done_title"),
+            content=str(new_path),
+            duration=5000,
+            position=InfoBarPosition.TOP,
+            parent=self,
+        )
+        logger.info(
+            "cdmods_path migration complete: %s -> %s",
+            old_path, new_path)
 
     def _on_profiles(self) -> None:
         """Open the mod profiles dialog."""
