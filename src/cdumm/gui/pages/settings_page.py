@@ -1384,6 +1384,14 @@ class SettingsPage(SmoothScrollArea):
         # bad than persisting first and then failing the move which
         # would leave the config pointing at an empty new folder.
         self._config.set("cdmods_path", str(new_path))
+        # Also write a bootstrap-time pointer file in %LOCALAPPDATA%
+        # so the NEXT CDUMM launch can find the override BEFORE
+        # opening the DB (chicken-and-egg: cdmods_path config lives
+        # inside cdumm.db which lives inside the override location).
+        # Without this, the next launch creates an empty CDMods/ at
+        # the default and the user's library appears wiped.
+        from cdumm.engine.cdmods_paths import write_cdmods_path_pointer
+        write_cdmods_path_pointer(new_path)
         logger.info("cdmods_path override set to %s", new_path)
         self._refresh_cdmods_path_label()
         InfoBar.success(
