@@ -13,6 +13,16 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.10",
+        "date": "2026-05-07",
+        "notes": [
+            "<b>Iteminfo Format 3 mods (buff, enchant, item-stack, drop, prefab, sealable, transmutation, etc.) apply correctly on the post-2026-04-29 Crimson Desert patch.</b> Pearl Abyss shipped a game update that added 10 bytes per iteminfo record and changed several nested struct shapes (PrefabData tribe layout, sharpness data discriminator, lantern equip block, pattern description list, post-cooltime fields). The previous parser misaligned and either crashed mid-parse or silently produced 0 byte changes. CDUMM now ships a clean-room native Python parser that walks all 6236 iteminfo records byte-perfect (verified by parse + serialize round-trip identity) and handles every nested struct variant the new layout introduced. Originally reported by UnLuckyLust on GitHub #62 (enchant_data_list crash with 'CArray count exceeds remaining bytes'); also fixes gmVIP233's Cliff-armor tribe override and joaomafer's Axiom + stack-mod composition reported on Nexus 2026-05-06.",
+            "<b>Lantern items (equip_type 0x97C2FAE8) parse correctly.</b> The post-patch binary inserts a 12-byte block (3 u32 hashes) between material_match_info and item_desc on items declared as lanterns. Without the conditional branch, the parser overran the record on every lantern and bailed at item_desc2 with an IndexError. The native parser now reads the extra block conditionally on equip_type and round-trips it byte-identical.",
+            "<b>End-to-end Format 3 apply test added.</b> The new test/test_iteminfo_native_apply_e2e.py walks the full intent-to-bytes-to-reparse path against the live extracted iteminfo: primitive intent, list-of-dict intent, mixed batch on one item, and unknown-key skip. Catches regressions before they hit users.",
+            "<b>Post-Apply 0-bytes-changed warning text updated.</b> The diagnostic for Format 3 mods that produce no changes used to suggest the vendored writer 'failed to load' as a possible cause, which was misleading after the parser swap (the native parser is always available). Now lists the two real causes: missing item/skill keys in this game version, or set-to-current-value no-op intents.",
+        ],
+    },
+    {
         "version": "3.2.9",
         "date": "2026-05-05",
         "notes": [
