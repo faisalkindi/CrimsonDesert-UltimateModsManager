@@ -47,9 +47,22 @@ def _build_panel_with_mixed_patches(qtbot, app):
 @pytest.mark.parametrize("width", [480, 640, 800, 1200])
 def test_render_baseline(qtbot, app, theme, width):
     from qfluentwidgets import setTheme, Theme
+    # Apply the theme BEFORE constructing the panel — qfluentwidgets
+    # propagates theme changes asynchronously via the global qconfig
+    # signal. ConfigPanel's __init__ calls _apply_theme() which bakes
+    # isDarkTheme() into the stylesheet at build time. If we set the
+    # theme AFTER construction, the panel's stylesheet stays light
+    # for the lifetime of this fixture even after qtbot.wait — the
+    # event loop processes the theme signal but the panel has already
+    # cached its colors from the wrong theme. So: set theme, settle,
+    # THEN build the panel.
     setTheme(Theme.LIGHT if theme == "light" else Theme.DARK)
+    qtbot.wait(50)
 
     panel = _build_panel_with_mixed_patches(qtbot, app)
+    # Defensive: re-apply theme after construction in case the build
+    # raced the signal. Idempotent — re-runs the same stylesheet write.
+    panel._apply_theme()
     panel.set_panel_width(width)
     # Force layout , animation runs async; for visual capture we
     # want the final state. Stop the open animation, force final
