@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re as _re
+
+logger = logging.getLogger(__name__)
 
 _CATEGORY_PREFIX_RE = _re.compile(r"^(?P<cat>[^/]+?)\s*/\s*(?P<rest>.+)$")
 
@@ -266,6 +269,11 @@ class ConfigPanel(QWidget):
         self.setMinimumWidth(0)
         self.setVisible(False)
 
+        # Optional DB ref for persisting per-mod preferences (e.g.
+        # last-clicked preset radio). When None, persistence is a no-op
+        # so legacy call sites that never wire a DB still work.
+        self._db = None
+
         self._mod_id: int = 0
         self._initial_states: dict[int, bool] = {}
         self._toggles: dict[int, QCheckBox] = {}
@@ -392,6 +400,17 @@ class ConfigPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def set_db(self, db) -> None:
+        """Wire a Database instance into the panel.
+
+        Used by ``mods_page`` so the panel can persist per-mod
+        preferences (e.g. the last-clicked preset radio) via the
+        existing key-value ``Config`` table. Safe to call before or
+        after the first ``show_mod``. When a panel is constructed
+        without a DB, persistence calls are no-ops.
+        """
+        self._db = db
+
     def show_mod(
         self,
         mod_id: int,
@@ -443,7 +462,19 @@ class ConfigPanel(QWidget):
             # Task 1.3 wires them to actually drive the toggles.
             preset_groups = detect_preset_groups(patches)
             if preset_groups is not None:
-                self._add_preset_selector(preset_groups, current_preset=None)
+                # Restore the last-clicked preset for this mod (Task
+                # 1.4). When there is no saved value, _add_preset_selector
+                # falls back to the "Custom" radio.
+                current_preset = None
+                if self._db is not None and self._mod_id is not None:
+                    try:
+                        from cdumm.storage.config import Config
+                        current_preset = Config(self._db).get(
+                            f"mod_{self._mod_id}_preset")
+                    except Exception:
+                        current_preset = None
+                self._add_preset_selector(
+                    preset_groups, current_preset=current_preset)
             for i, p in enumerate(patches):
                 ev = p.get("editable_value")
                 if ev and isinstance(ev, dict) and "type" in ev:
@@ -619,8 +650,13 @@ class ConfigPanel(QWidget):
         group's index list. The "Custom" radio means manual control —
         we leave existing toggles alone so the user retains whatever
         per-checkbox state they had.
+
+        Also persists the clicked tag (including "Custom") to the
+        config DB so the next ``show_mod`` for the same mod restores
+        the same radio. No-op when no DB has been wired in.
         """
         tag = button.text()
+        self._save_preset_selection(tag)
         if tag == "Custom":
             return
         if not self._preset_groups:
@@ -628,6 +664,21 @@ class ConfigPanel(QWidget):
         enable_indices = set(self._preset_groups.get(tag, []))
         for idx, toggle in self._toggles.items():
             toggle.setChecked(idx in enable_indices)
+
+    def _save_preset_selection(self, tag: str) -> None:
+        """Persist the user's preset choice for the current mod.
+
+        Stored as a plain string under ``mod_<id>_preset`` in the
+        existing key-value ``config`` table. Silent no-op when the
+        panel was opened without a DB or before a mod was loaded.
+        """
+        if self._db is None or not self._mod_id:
+            return
+        try:
+            from cdumm.storage.config import Config
+            Config(self._db).set(f"mod_{self._mod_id}_preset", tag)
+        except Exception as e:
+            logger.debug("Could not persist preset selection: %s", e)
 
     def _add_section_header(self, text: str) -> None:
         header = CaptionLabel(text)

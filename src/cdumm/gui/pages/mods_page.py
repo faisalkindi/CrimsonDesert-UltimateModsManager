@@ -491,6 +491,13 @@ class ModsPage(QWidget):
         self._conflict_detector = conflict_detector
         self._db = db
         self._game_dir = game_dir
+        # Hand the DB ref to the side panel so per-mod preferences
+        # (e.g. last-clicked preset radio, Task 1.4) can persist via
+        # the existing key-value Config table.
+        try:
+            self._config_panel.set_db(db)
+        except AttributeError:
+            pass
         self.refresh()
 
     def set_nexus_updates(self, updates: dict) -> None:
