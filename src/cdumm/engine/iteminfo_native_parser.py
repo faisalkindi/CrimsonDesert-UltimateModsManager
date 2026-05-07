@@ -693,14 +693,13 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
                 )
             # Boundary check: same as Shape A2.
             if total_count == 1 and elem_index == 0:
-                gvp_needle = b"\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f"
-                if r.data[r.pos + 8:r.pos + 20] != gvp_needle:
+                if not _looks_like_gvp_scale_needle(r.data, r.pos + 8):
                     # Find first GVP needle with sane (1-10) preceding count
                     nearby = -1
                     sp = r.pos
                     se = min(r.pos + 1500, len(r.data))
                     while True:
-                        cand = r.data.find(gvp_needle, sp, se)
+                        cand = _find_gvp_needle(r.data, sp, se)
                         if cand < 0:
                             break
                         if cand - 8 >= r.pos:
@@ -764,8 +763,7 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
             # the tribe (rare cnt_outer=1 records with extra trailing
             # carray<TribeStat>). Force forward-walk.
             if total_count == 1 and elem_index == 0:
-                gvp_needle = b"\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f"
-                if r.data[r.pos + 8:r.pos + 20] != gvp_needle:
+                if not _looks_like_gvp_scale_needle(r.data, r.pos + 8):
                     # Either GVP is empty (count=0) or we under-consumed.
                     # If a needle exists nearby (within 256 bytes), forward
                     # walk to it.
@@ -774,7 +772,7 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
                     sp = r.pos
                     se = min(r.pos + 1500, len(r.data))
                     while True:
-                        cand = r.data.find(gvp_needle, sp, se)
+                        cand = _find_gvp_needle(r.data, sp, se)
                         if cand < 0:
                             break
                         if cand - 8 >= r.pos:
@@ -807,18 +805,58 @@ def _read_PrefabDataTribe(r: _Reader, elem_index: int = 0, total_count: int = 1)
     return _read_PrefabDataTribe_shapeB(r)
 
 
+def _looks_like_gvp_scale_needle(buf, p: int) -> bool:
+    """True when buf[p:p+12] reads as 3 identical finite f32s with a
+    plausible "scale-shaped" value (per RESIDUAL_20_findings.md).
+
+    Live data shows {1.0, 1.8} and possibly other GVP scale values.
+    Predicate: three equal f32s in (0.01, 100.0), strictly finite (NaN/inf
+    excluded by the equality + range checks).
+    """
+    if p < 0 or p + 12 > len(buf):
+        return False
+    try:
+        a, b, c = struct.unpack_from("<fff", buf, p)
+    except struct.error:
+        return False
+    # Equality check excludes NaN automatically.
+    if not (a == b == c):
+        return False
+    if not (0.01 < a < 100.0):
+        return False
+    return True
+
+
+def _find_gvp_needle(buf, start: int, end: int) -> int:
+    """Scan [start, end) for the first GVP entry start position.
+
+    Returns the absolute position of the 3-equal-f32 scale triple. The
+    caller is responsible for the -8 carray count guard. Sliding 1-byte
+    window: tribe payloads can be byte-aligned anywhere.
+    """
+    if end > len(buf):
+        end = len(buf)
+    p = start
+    limit = end - 12
+    while p <= limit:
+        if _looks_like_gvp_scale_needle(buf, p):
+            return p
+        p += 1
+    return -1
+
+
 def _shapeA2_forward_walk(r: _Reader) -> dict | None:
     """Forward-walk fallback for Shape A2 cnt_outer != 1 (Families B/D/F/G).
 
-    Scans ahead from the current cursor for the GVP scale needle
-    (3 x float 1.0 = b'\\x00\\x00\\x80\\x3f' x 3) which sits 8 bytes into
-    a gimmick_visual_prefab_data_list element when count >= 1. The tribe
-    bytes between the cursor and (needle_pos - 8) are consumed opaquely.
+    Scans ahead from the current cursor for the GVP scale needle (3
+    identical finite f32s in (0.01, 100.0)) which sits 8 bytes into a
+    gimmick_visual_prefab_data_list element when count >= 1. Tribe bytes
+    between the cursor and (needle_pos - 8) are consumed opaquely.
 
-    Returns a dict with shape='A2_opaque' on success, None if no needle
-    is found within a sane range (avoid runaway scans).
+    Live data shows scale values {1.0, 1.8} (and possibly more); see
+    _looks_like_gvp_scale_needle. Returns a dict with shape='A2_opaque'
+    on success, None if no needle is found within a sane range.
     """
-    needle = b"\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f"
     snap = r.pos
     # Cap scan to avoid runaway (tribes observed up to ~1100 bytes per
     # SHAPE_A2_findings_v3 sample data; cap at 1500 bytes to avoid
@@ -830,7 +868,7 @@ def _shapeA2_forward_walk(r: _Reader) -> dict | None:
     search_pos = snap
     needle_pos = -1
     while True:
-        cand = r.data.find(needle, search_pos, scan_end)
+        cand = _find_gvp_needle(r.data, search_pos, scan_end)
         if cand < 0:
             break
         # Validate: GVP count u32 at cand-8 should be small (1-10).
