@@ -1287,19 +1287,108 @@ class SettingsPage(SmoothScrollArea):
 
     def _on_cdmods_path_changed(self, new_path: Path) -> None:
         """Persist the chosen ``new_path`` to the ``cdmods_path`` config
-        key and refresh the displayed label. Migration of existing
-        CDMods/ contents is a follow-up task; for now we surface a
-        placeholder InfoBar so users know the move hasn't happened yet.
+        key, MOVE the existing CDMods/ contents to the new location
+        (with checksum verification), and refresh the displayed label.
+
+        The migration is the load-bearing piece. Without it, switching
+        the path orphans every existing source/vanilla snapshot/cdumm.db
+        at the old location and the user thinks their library vanished.
+        We show a confirmation dialog first because the move can take
+        minutes on a slow drive and is non-recoverable mid-flight.
         """
         if self._config is None:
             logger.warning("cdmods_path change requested with no config")
             return
+
+        # Resolve the OLD path BEFORE we change the setting. That's
+        # the source we're moving away from. If no game_dir is wired
+        # up there's nothing to migrate (fresh install path), so just
+        # persist the override.
+        from cdumm.engine.cdmods_paths import get_cdmods_root
+        old_path: Path | None = None
+        try:
+            if self._game_dir is not None:
+                old_path = get_cdmods_root(self._config, Path(self._game_dir))
+        except Exception as e:
+            logger.debug("cdmods_path: resolving old root failed: %s", e)
+            old_path = None
+
+        # No-op when the user re-picks the same folder. Avoids the
+        # "destination not empty" guard inside migrate_cdmods firing
+        # against itself.
+        if old_path is not None and old_path.resolve() == new_path.resolve():
+            self._config.set("cdmods_path", str(new_path))
+            self._refresh_cdmods_path_label()
+            return
+
+        # Nothing to migrate when old_path doesn't exist or is empty.
+        needs_migration = (
+            old_path is not None
+            and old_path.exists()
+            and old_path.is_dir()
+            and any(old_path.iterdir())
+        )
+
+        if needs_migration:
+            from PySide6.QtWidgets import QMessageBox
+            box = QMessageBox(self.window())
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(
+                tr("settings.cdmods_path_migrate_confirm_title"))
+            box.setText(
+                tr("settings.cdmods_path_migrate_confirm_text"))
+            box.setInformativeText(
+                f"From:\n{old_path}\n\nTo:\n{new_path}\n\n"
+                "This may take several minutes. Do not close CDUMM "
+                "while the move is in progress.")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            run_dialog = getattr(box, "exec_", None) or box.exec
+            choice = run_dialog()
+            if choice != QMessageBox.StandardButton.Yes:
+                logger.info("cdmods_path: user cancelled migration")
+                return
+
+            from cdumm.storage.cdmods_migration import (
+                migrate_cdmods, MigrationError,
+            )
+            try:
+                migrate_cdmods(old_path, new_path)
+            except MigrationError as e:
+                logger.error("cdmods migration failed: %s", e)
+                InfoBar.error(
+                    title=tr("settings.cdmods_path_migrate_failed_title"),
+                    content=str(e),
+                    duration=10000,
+                    position=InfoBarPosition.TOP,
+                    parent=self.window(),
+                )
+                return
+            except Exception as e:
+                logger.exception("cdmods migration crashed")
+                InfoBar.error(
+                    title=tr("settings.cdmods_path_migrate_failed_title"),
+                    content=str(e),
+                    duration=10000,
+                    position=InfoBarPosition.TOP,
+                    parent=self.window(),
+                )
+                return
+
+        # Persist the override only AFTER the move succeeded (or was
+        # unnecessary). Order matters: a crash between move and persist
+        # would leave the data at new_path with the config still
+        # pointing at old_path, but the old_path is now gone, far less
+        # bad than persisting first and then failing the move which
+        # would leave the config pointing at an empty new folder.
         self._config.set("cdmods_path", str(new_path))
         logger.info("cdmods_path override set to %s", new_path)
         self._refresh_cdmods_path_label()
-        InfoBar.info(
-            title=tr("settings.cdmods_path_migration_pending_title"),
-            content=tr("settings.cdmods_path_migration_pending_body"),
+        InfoBar.success(
+            title=tr("settings.cdmods_path_migrate_done_title"),
+            content=str(new_path),
             duration=5000,
             position=InfoBarPosition.TOP,
             parent=self.window(),
