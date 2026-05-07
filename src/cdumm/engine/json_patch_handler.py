@@ -1599,14 +1599,18 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     # Try loading from disk cache (self-generated, safe to unpickle)
     import pickle as _pickle
     import time as _time
-    # Cache lives in CDMods if it exists, otherwise next to the PAMTs.
-    # NOTE: this is a private cache helper called with both real game_dir
-    # and vanilla_dir; we cannot read config here because we have no db
-    # handle in scope. Falls back to default behavior, which preserves
-    # backward compat for the override case.
-    cdmods = get_cdmods_root(None, game_dir)
-    if not cdmods.exists():
-        cdmods = game_dir.parent / "CDMods" if game_dir.name == "vanilla" else game_dir
+    # Cache lives under the CDMods root. NOTE: this private cache helper
+    # is called with both real game_dir and vanilla_dir. When called
+    # with vanilla_dir (= <cdmods>/vanilla), the CDMods root is the
+    # parent directly. Otherwise consult get_cdmods_root, which itself
+    # honors the cdmods_path override via the pointer file at
+    # %LOCALAPPDATA%/cdumm/cdmods_path.txt (set by the settings page on
+    # every override write, so this code path is correct even though
+    # we have no db handle in scope here).
+    if game_dir.name == "vanilla":
+        cdmods = game_dir.parent
+    else:
+        cdmods = get_cdmods_root(None, game_dir)
     cdmods.mkdir(parents=True, exist_ok=True)
     cache_path = cdmods / ".pamt_index.cache"
     if cache_path.exists():
