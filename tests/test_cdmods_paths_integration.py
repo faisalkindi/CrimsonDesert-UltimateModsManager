@@ -20,6 +20,14 @@ def db(tmp_path):
     return d
 
 
+@pytest.fixture(autouse=True)
+def _isolate_pointer_file(monkeypatch, tmp_path):
+    """Sandbox the bootstrap pointer file (see test_cdmods_paths.py)."""
+    from cdumm.engine import cdmods_paths
+    monkeypatch.setattr(
+        cdmods_paths, "_APP_DATA_DIR", tmp_path / "_appdata_isolate")
+
+
 def test_swap_cache_cache_root_for_honors_override(db, tmp_path):
     """``swap_cache.cache_root_for`` must look at the configured override
     when one is provided, not the literal ``game_dir/CDMods``.

@@ -14,6 +14,18 @@ def db(tmp_path):
     return d
 
 
+@pytest.fixture(autouse=True)
+def _isolate_pointer_file(monkeypatch, tmp_path):
+    """Sandbox the bootstrap pointer file so any real pointer in
+    %LOCALAPPDATA%/cdumm/cdmods_path.txt (left over from a real CDUMM
+    install on the test host) cannot bleed into tests that exercise
+    get_cdmods_root(None, ...). Tests that explicitly want to drive
+    pointer behavior re-monkeypatch the same attribute themselves."""
+    from cdumm.engine import cdmods_paths
+    monkeypatch.setattr(
+        cdmods_paths, "_APP_DATA_DIR", tmp_path / "_appdata_isolate")
+
+
 def test_falls_back_to_game_dir_when_no_config():
     from cdumm.engine.cdmods_paths import get_cdmods_root
 

@@ -29,6 +29,17 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _isolate_pointer_file(monkeypatch, tmp_path):
+    """Redirect the cdmods_path pointer file to a temp dir so these
+    tests cannot pollute %LOCALAPPDATA%/cdumm/cdmods_path.txt , a
+    write there would leak into every other test that consults
+    get_cdmods_root(None, ...) with no monkeypatch of its own."""
+    from cdumm.engine import cdmods_paths
+    monkeypatch.setattr(
+        cdmods_paths, "_APP_DATA_DIR", tmp_path / "_appdata_isolate")
+
+
 def test_settings_page_has_cdmods_path_field(qtbot, app, db, tmp_path):
     """The settings page renders a 'Mod storage location' section with
     a label that shows the currently resolved CDMods/ path."""
