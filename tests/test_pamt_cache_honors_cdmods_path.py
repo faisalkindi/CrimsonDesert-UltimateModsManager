@@ -44,19 +44,23 @@ def test_pamt_cache_uses_pointer_for_real_game_dir(tmp_path, monkeypatch):
 
     _get_pamt_index(game_dir)
 
-    expected = override / ".pamt_index.cache"
-    assert expected.exists(), (
+    # Per-dir cache filename: game_dir caches are scoped by a hash of
+    # the game_dir path so two installs sharing a cdmods root don't
+    # collide and so vanilla_dir vs game_dir don't overwrite each
+    # other (#81 fix). Match by glob.
+    matches = list(override.glob(".pamt_index_game_*.cache"))
+    assert matches, (
         "cache file should land at the override location when "
-        "cdmods_path pointer is set; instead saw nothing at %s"
-        % expected)
+        "cdmods_path pointer is set; instead saw nothing matching "
+        "%s/.pamt_index_game_*.cache" % override)
 
     # Cache must NOT have been dropped at the default location.
-    bad_default = game_dir / "CDMods" / ".pamt_index.cache"
-    assert not bad_default.exists(), (
-        "cache leaked into default game_dir/CDMods location even "
-        "though override is active")
-    bad_root = game_dir / ".pamt_index.cache"
-    assert not bad_root.exists(), (
+    bad_default = game_dir / "CDMods"
+    if bad_default.exists():
+        assert not list(bad_default.glob(".pamt_index*.cache")), (
+            "cache leaked into default game_dir/CDMods location "
+            "even though override is active")
+    assert not list(game_dir.glob(".pamt_index*.cache")), (
         "cache leaked into game_dir root , this was the I1 bug "
         "from the stale-CDMods-literal fallback")
 
@@ -77,7 +81,7 @@ def test_pamt_cache_uses_parent_when_called_with_vanilla(
 
     _get_pamt_index(vanilla_dir)
 
-    expected = cdmods_root / ".pamt_index.cache"
+    expected = cdmods_root / ".pamt_index_vanilla.cache"
     assert expected.exists()
     # Must NOT be inside vanilla_dir itself.
-    assert not (vanilla_dir / ".pamt_index.cache").exists()
+    assert not list(vanilla_dir.glob(".pamt_index*.cache"))

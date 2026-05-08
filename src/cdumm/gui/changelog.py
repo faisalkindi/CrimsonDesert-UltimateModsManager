@@ -13,6 +13,13 @@ from cdumm.i18n import tr
 # Changelog entries — newest first. Add new versions at the top.
 CHANGELOG = [
     {
+        "version": "3.2.14",
+        "date": "2026-05-08",
+        "notes": [
+            "<b>JSON patch mods stop failing with \"Target game file(s) not found\" when the vanilla snapshot is incomplete.</b> The PAMT index used a single shared disk cache (<code>.pamt_index.cache</code>) for both the live game directory and the vanilla snapshot. Whichever path was indexed first wrote that cache file; subsequent lookups against the other path loaded the stale entries off disk and returned PAZ paths that pointed at the wrong tree. For Democles85's Character Creator import (GitHub #81), the cache had been built from <code>vanilla/</code>, so the import code asked for <code>gamedata/characterinfo.pabgb</code> against the live game directory but got back an entry whose <code>paz_file</code> pointed at <code>CDMods/vanilla/0008/0.paz</code>. That paz wasn't in the snapshot, the extract failed, and the import bailed out with the misleading \"target not found\" error even though the file is right there in the live install. The cache filename is now scoped per directory: <code>.pamt_index_vanilla.cache</code> for the snapshot and <code>.pamt_index_game_&lt;hash&gt;.cache</code> for the live game, so they can never overwrite each other. Two different game installs sharing one CDMods root also stay separate. Old <code>.pamt_index.cache</code> files are left in place as harmless leftovers — they are never read again.",
+        ],
+    },
+    {
         "version": "3.2.13",
         "date": "2026-05-08",
         "notes": [

@@ -1612,7 +1612,20 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     else:
         cdmods = get_cdmods_root(None, game_dir)
     cdmods.mkdir(parents=True, exist_ok=True)
-    cache_path = cdmods / ".pamt_index.cache"
+    # Per-dir cache filename. Vanilla and game lookups MUST land in
+    # separate cache files, otherwise the second caller loads entries
+    # built from the first caller's dir and the entry.paz_file paths
+    # point at the wrong tree. Bug 2026-05-08 #81 (Democles85): the
+    # collision made game_dir lookups return vanilla paths, and the
+    # vanilla snapshot was incomplete, so import errored out with
+    # "target not found" on a file the live game directory actually
+    # contained. Hashing str(game_dir) also keeps two different game
+    # installs (test/prod) on the same cdmods root from colliding.
+    import hashlib as _hashlib
+    _key = "vanilla" if game_dir.name == "vanilla" else (
+        "game_" + _hashlib.sha1(str(game_dir).encode("utf-8")).hexdigest()[:12]
+    )
+    cache_path = cdmods / f".pamt_index_{_key}.cache"
     if cache_path.exists():
         try:
             cache_mtime = cache_path.stat().st_mtime
