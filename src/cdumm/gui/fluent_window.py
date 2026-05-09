@@ -4633,12 +4633,19 @@ class CdummWindow(FluentWindow):
         # import can hang forever (silent 7z deadlock, infinite-loop in
         # an inner archive scan, etc.) and the user sees a frozen
         # progress tip with no way out. Round 4 GUI/worker audit catch.
-        # Threshold is more lenient than apply (5 min vs 3 min) because
-        # large multi-variant archives can legitimately take a while
-        # to extract + parse.
+        # Threshold is much more lenient than apply (30 min vs 3 min)
+        # because real-world huge mods, like Ny4tsuru's 50k-file audio
+        # pack and srimk's Traduction-Francais voice mod, can spend
+        # well over five minutes inside a single zip-extract or PAMT-
+        # scan stage that does not emit per-file progress events.
+        # 30 min is enough headroom for the 50k-file case verified on
+        # Nexus 2026-05-09 and still kills genuinely hung subprocesses
+        # in a reasonable window. If a future mod legitimately needs
+        # more than this, the right answer is a worker-side heartbeat,
+        # not raising the threshold further.
         import time as _time
         from PySide6.QtCore import QTimer as _QTimer
-        IMPORT_STALL_THRESHOLD_S = 300
+        IMPORT_STALL_THRESHOLD_S = 1800
         _wd_state = {"last_activity": _time.time(), "killed": False}
         _wd_orig_on_stdout = _on_stdout
 
