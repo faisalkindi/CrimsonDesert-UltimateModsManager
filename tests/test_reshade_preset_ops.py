@@ -5,6 +5,7 @@ All engine-level operations; no Qt.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -129,6 +130,11 @@ def test_filter_visible_excludes_hidden_paths(tmp_path: Path) -> None:
     assert result == [a, c]
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows-only path-case insensitivity. POSIX treats upper- and "
+           "lower-case paths as distinct filenames so the .upper() copy "
+           "won't match the original via normcase.")
 def test_filter_visible_handles_case_insensitive_paths(tmp_path: Path) -> None:
     """Windows: hidden path stored as 'C:/Foo/a.ini' should match 'c:/foo/a.ini'."""
     preset = tmp_path / "a.ini"

@@ -22,10 +22,11 @@ def test_byte_merge_does_not_set_synthetic_mod_name():
     'byte_merge' string. It should reflect the real contributing
     mods (e.g. 'Mod A + Mod B' or 'merge of N mods')."""
     import re
-    src_path = (
-        "C:/Users/faisa/Ai/Mods Dev/CrimsonDesert-Mods/"
-        "CrimsonDesert-ModManager/src/cdumm/engine/apply_engine.py"
-    )
+    from pathlib import Path
+    # Resolve apply_engine.py relative to this test file so the test
+    # works on any contributor's checkout (was hardcoded to the
+    # maintainer's machine).
+    src_path = Path(__file__).resolve().parents[1] / "src" / "cdumm" / "engine" / "apply_engine.py"
     with open(src_path, "r", encoding="utf-8") as f:
         text = f.read()
     # Search for the literal assignment patterns that bake in synthetic

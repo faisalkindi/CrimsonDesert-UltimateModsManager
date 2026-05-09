@@ -9,9 +9,7 @@ pipeline and then invokes this module on success.
 """
 from __future__ import annotations
 import logging
-import os
 import subprocess
-import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,14 +18,20 @@ logger = logging.getLogger(__name__)
 def _open_uri(uri: str) -> None:
     """Open a URI via the OS default handler.
 
-    Wrapped so tests can monkey-patch and so non-Windows callers
-    (e.g. macOS PR #64) can swap implementation without touching
-    callers.
+    Wrapped so tests can monkey-patch the dispatch without intercepting
+    the lower-level platform-specific calls. Delegates to
+    :func:`cdumm.platform.open_path`, which handles Windows
+    (``os.startfile``), macOS (``open``), and Linux
+    (``xdg-open`` / ``gio open``) correctly.
+
+    Previously this used a manual ``if win32: os.startfile / else
+    xdg-open`` branch, which was a latent macOS bug — ``xdg-open``
+    is Linux-only and silently fails on macOS where ``open`` is the
+    canonical handler. Routing through ``platform.open_path`` closes
+    that gap (PR #64 review bonus sweep).
     """
-    if sys.platform == "win32":
-        os.startfile(uri)  # noqa: WPS437 — Windows-only, no portable replacement
-    else:
-        subprocess.Popen(["xdg-open", uri])  # best-effort fallback
+    from cdumm.platform import open_path
+    open_path(uri)
 
 
 def _run_exe(exe: Path, cwd: Path) -> None:

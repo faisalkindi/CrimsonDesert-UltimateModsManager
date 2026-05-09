@@ -636,11 +636,17 @@ class WelcomeWizard(QDialog):
             self._next_btn.setEnabled(False)
 
     def _on_path_changed(self, text: str):
-        from cdumm.storage.game_finder import validate_game_directory
+        from cdumm.storage.game_finder import (
+            resolve_game_directory,
+            validate_game_directory,
+        )
         from cdumm.i18n import tr
         path = Path(text)
         if validate_game_directory(path):
-            self._game_dir = text
+            # On macOS the user normally picks ``Crimson Desert.app``
+            # but the app operates on the inner packages/ directory.
+            resolved = resolve_game_directory(path) or path
+            self._game_dir = str(resolved)
             self._path_status.setText(tr("wizard.valid_install"))
             self._path_status.setStyleSheet("color: #16A34A;")
             self._next_btn.setEnabled(True)

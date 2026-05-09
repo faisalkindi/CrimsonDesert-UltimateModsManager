@@ -1,5 +1,6 @@
 """QObject workers for background operations."""
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from cdumm.engine.import_handler import (
     import_from_zip,
 )
 from cdumm.engine.snapshot_manager import SnapshotManager
+from cdumm.platform import app_data_dir
 from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -127,7 +129,7 @@ class PreHashWorker(QObject):
 
             pre_hashes: dict[str, str] = {}
             for i, rel_path in enumerate(all_files):
-                game_file = self._game_dir / rel_path.replace("/", "\\")
+                game_file = self._game_dir / rel_path.replace("/", os.sep)
                 if game_file.exists():
                     h, _ = _hash_file(game_file)
                     pre_hashes[rel_path] = h
@@ -160,7 +162,6 @@ class ScriptPrepWorker(QObject):
 
     def run(self) -> None:
         try:
-            import os
             import shutil
             from cdumm.engine.import_handler import _ensure_vanilla_backup
             from cdumm.engine.snapshot_manager import hash_file as _hash_file
@@ -171,14 +172,14 @@ class ScriptPrepWorker(QObject):
                 self.finished.emit(None)
                 return
 
-            # Load snapshot hashes to check what actually needs work
-            db_path = self._vanilla_dir.parent / ".." / ".." / "AppData" / "Local" / "cdumm" / "cdumm.db"
-            # Find the DB by walking up from vanilla_dir (CDMods/vanilla -> game_dir)
-            # The DB is at AppData, but we can check snapshot inline
+            # Load snapshot hashes to check what actually needs work.
+            # The DB historically lived under AppData; ``app_data_dir()``
+            # resolves to the platform-correct location (Library on macOS,
+            # XDG_DATA_HOME on Linux, AppData on Windows).
             snap_hashes: dict[str, str] = {}
             try:
                 # Try to find DB path from standard location
-                db_path = Path.home() / "AppData" / "Local" / "cdumm" / "cdumm.db"
+                db_path = app_data_dir() / "cdumm.db"
                 if db_path.exists():
                     db = Database(db_path)
                     db.initialize()
@@ -236,7 +237,7 @@ class ScriptPrepWorker(QObject):
             # Use snapshot hashes for non-targeted files (instant).
             # Only actually hash targeted files (which were just restored).
             # This way ScriptCaptureWorker detects ALL changes, not just predicted.
-            db_path2 = Path.home() / "AppData" / "Local" / "cdumm" / "cdumm.db"
+            db_path2 = app_data_dir() / "cdumm.db"
             all_snap: dict[str, str] = {}
             try:
                 if db_path2.exists():
@@ -324,7 +325,7 @@ class ScriptCaptureWorker(QObject):
                         pct, f"Checking {file_idx + 1}/{total_files}...")
                     time.sleep(0)  # yield GIL
 
-                game_file = self._game_dir / rel_path.replace("/", "\\")
+                game_file = self._game_dir / rel_path.replace("/", os.sep)
                 if not game_file.exists():
                     continue
 
@@ -401,11 +402,11 @@ class ScriptCaptureWorker(QObject):
                     pct = 70 + int((idx + 1) / len(other_files) * 20)
                     self.progress_updated.emit(pct, f"Delta: {rel_path}...")
 
-                    vanilla_path = vanilla_dir / rel_path.replace("/", "\\")
+                    vanilla_path = vanilla_dir / rel_path.replace("/", os.sep)
                     if not vanilla_path.exists():
                         continue
                     vanilla_bytes = vanilla_path.read_bytes()
-                    modified_bytes = (self._game_dir / rel_path.replace("/", "\\")).read_bytes()
+                    modified_bytes = (self._game_dir / rel_path.replace("/", os.sep)).read_bytes()
 
                     delta_bytes = generate_delta(vanilla_bytes, modified_bytes)
                     byte_ranges = ([(0, len(modified_bytes))]
@@ -617,7 +618,6 @@ class ScriptCaptureWorker(QObject):
     @staticmethod
     def _extract_entry(entry) -> bytes:
         """Extract and decompress a single PAMT entry from its PAZ file."""
-        import os
         from cdumm.archive.paz_crypto import decrypt, lz4_decompress
 
         with open(entry.paz_file, "rb") as f:
@@ -706,7 +706,7 @@ class ScanChangesWorker(QObject):
             # Find changed files
             changed: list[str] = []
             for i, (rel_path, stored_hash) in enumerate(snapshot_rows):
-                abs_path = self._game_dir / rel_path.replace("/", "\\")
+                abs_path = self._game_dir / rel_path.replace("/", os.sep)
                 if not abs_path.exists():
                     continue
 
@@ -768,11 +768,11 @@ class ScanChangesWorker(QObject):
                     pct = 80 + int((idx + 1) / len(other_files) * 15)
                     self.progress_updated.emit(pct, f"Delta: {rel_path}...")
 
-                    vanilla_path = vanilla_dir / rel_path.replace("/", "\\")
+                    vanilla_path = vanilla_dir / rel_path.replace("/", os.sep)
                     if not vanilla_path.exists():
                         continue
                     vanilla_bytes = vanilla_path.read_bytes()
-                    modified_bytes = (self._game_dir / rel_path.replace("/", "\\")).read_bytes()
+                    modified_bytes = (self._game_dir / rel_path.replace("/", os.sep)).read_bytes()
 
                     delta_bytes = generate_delta(vanilla_bytes, modified_bytes)
                     byte_ranges = ([(0, len(modified_bytes))]
@@ -825,7 +825,6 @@ class BackupVerifyWorker(QObject):
 
     def run(self) -> None:
         try:
-            import os
             from cdumm.engine.snapshot_manager import hash_file
 
             db = Database(self._db_path)

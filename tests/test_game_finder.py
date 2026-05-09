@@ -1,4 +1,7 @@
+import sys
 from pathlib import Path
+
+import pytest
 
 from cdumm.storage.game_finder import (
     validate_game_directory, _parse_library_folders,
@@ -6,6 +9,12 @@ from cdumm.storage.game_finder import (
 )
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="The bin64/CrimsonDesert.exe layout is the Windows / Linux "
+           "convention. macOS validate_game_directory only accepts the "
+           ".app bundle layout (Contents/Resources/packages with PAZ + "
+           "meta) — see test_macos_game_finder.py for the macOS coverage.")
 def test_validate_game_directory_valid(tmp_path: Path) -> None:
     game_dir = tmp_path / "Crimson Desert"
     (game_dir / "bin64").mkdir(parents=True)

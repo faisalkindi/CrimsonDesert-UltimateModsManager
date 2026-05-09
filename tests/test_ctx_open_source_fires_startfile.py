@@ -9,6 +9,7 @@ os.startfile is monkeypatched so the test doesn't actually open Explorer.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -26,6 +27,12 @@ def _make_fake_self(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="On macOS, _ctx_open_source goes through cdumm.platform.open_path "
+           "→ subprocess.Popen(['open', ...]) rather than os.startfile, so "
+           "monkey-patching os.startfile has no effect. The Windows path "
+           "still asserts here.")
 def test_ctx_open_source_calls_startfile_when_path_exists(qtbot, tmp_path, monkeypatch):
     """Happy path: source_path exists, os.startfile gets called with it."""
     from cdumm.gui.pages.mods_page import ModsPage
@@ -68,6 +75,12 @@ def test_ctx_open_source_shows_infobar_when_no_path(qtbot, tmp_path, monkeypatch
     assert not error_mock.called
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="On macOS the open_path() helper catches the OSError internally "
+           "and logs it; the InfoBar.error path is wired off `open_path` "
+           "returning False from a different cause (no opener available). "
+           "Same control flow as Windows, different trigger.")
 def test_ctx_open_source_shows_error_infobar_when_startfile_raises(qtbot, tmp_path, monkeypatch):
     """os.startfile raises OSError -> InfoBar.error, no crash."""
     from cdumm.gui.pages.mods_page import ModsPage

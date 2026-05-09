@@ -36,11 +36,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Mirror of main.APP_DATA_DIR. Duplicated here so this helper has no
-# import-time dependency on the GUI bootstrap module (cli.py imports
-# this; importing main.py would drag PySide6 in for headless commands).
+# Mirror of main.APP_DATA_DIR. Resolved through ``cdumm.platform`` so
+# the per-user state directory lands in the right place per platform
+# (``~/AppData/Local/cdumm`` on Windows, ``~/Library/Application
+# Support/cdumm`` on macOS, ``$XDG_DATA_HOME/cdumm`` on Linux). The
+# helper avoids importing main.py because that would drag PySide6 in
+# for headless cli.py callers; ``cdumm.platform`` is stdlib-only.
 # Tests monkeypatch this attribute to redirect the pointer file.
-_APP_DATA_DIR = Path.home() / "AppData" / "Local" / "cdumm"
+from cdumm.platform import app_data_dir as _resolve_app_data_dir
+
+_APP_DATA_DIR = _resolve_app_data_dir()
 _POINTER_FILENAME = "cdmods_path.txt"
 
 

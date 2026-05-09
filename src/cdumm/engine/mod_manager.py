@@ -1,5 +1,6 @@
 """Core mod state management — CRUD for mod registry."""
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -288,7 +289,7 @@ class ModManager:
                 "WHERE mod_id = ?", (mod_id,)).fetchall()
 
             for file_path, stored_size in size_rows:
-                game_file = game_dir / file_path.replace("/", "\\")
+                game_file = game_dir / file_path.replace("/", os.sep)
                 if game_file.exists():
                     current_size = game_file.stat().st_size
                     if current_size != stored_size:
@@ -398,7 +399,6 @@ class ModManager:
             return "no data"
 
         # Check if any target file differs from vanilla snapshot
-        import os
         from cdumm.engine.snapshot_manager import hash_file
 
         # Check if mod has ENTR deltas — these go to overlay PAZ, not in-place.
@@ -451,7 +451,6 @@ class ModManager:
     def cleanup_orphaned_deltas(self) -> None:
         """Remove delta folders on disk that have no matching mod in the DB.
         Also clean up DB entries pointing to missing delta files."""
-        import os
 
         if self._deltas_dir.exists():
             cursor = self._db.connection.execute("SELECT id FROM mods")

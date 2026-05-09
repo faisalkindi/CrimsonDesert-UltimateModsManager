@@ -17,10 +17,10 @@ Library usage:
 import ctypes
 import os
 import struct
-import sys
 
 from cdumm.archive.paz_parse import PazEntry
 from cdumm.archive.paz_crypto import encrypt, lz4_compress
+from cdumm.platform import IS_WINDOWS
 
 
 # The legacy ``fix_dds_header`` helper and its FourCC / DXGI lookup tables
@@ -35,7 +35,7 @@ from cdumm.archive.paz_crypto import encrypt, lz4_compress
 
 def _save_timestamps(path: str):
     """Capture NTFS timestamps. Returns a callable to restore them."""
-    if sys.platform != 'win32':
+    if not IS_WINDOWS:
         return lambda: None
 
     kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
