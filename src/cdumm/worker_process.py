@@ -9,6 +9,16 @@ Protocol (each line is valid JSON):
     {"type": "error", "msg": "..."}
     {"type": "warning", "msg": "..."}   — non-fatal warnings (revert)
     {"type": "activity", "cat": "...", "msg": "...", "detail": "..."}
+
+Import subcommand::
+
+    import <mod_path> <game_dir> <db_path> <deltas_dir>
+        [existing_mod_id] [--no-sibling-json]
+
+Optional suffix tokens may appear in any order. ``--no-sibling-json``
+skips importing loose-file package sibling JSON patches (folder import
+only); used when swapping PAZ variants via the cog so FemaleAnimations
+etc. are not duplicated.
 """
 
 import json
@@ -64,8 +74,35 @@ def _emit(obj: dict) -> None:
 
 # ── Import ────────────────────────────────────────────────────────────
 
-def _run_import(mod_path: str, game_dir: str, db_path: str,
-                deltas_dir: str, existing_mod_id: str | None = None) -> None:
+def _parse_import_cli_suffix(tokens: list[str]) -> tuple[int | None, bool]:
+    """Parse optional ``existing_mod_id`` and ``--no-sibling-json`` flags.
+
+    Tokens may appear in any order after the four required path arguments.
+    """
+    logger = logging.getLogger(__name__)
+    existing_mod_id: int | None = None
+    import_sibling_json = True
+    for tok in tokens:
+        if tok == "--no-sibling-json":
+            import_sibling_json = False
+        elif tok.isdigit():
+            if existing_mod_id is None:
+                existing_mod_id = int(tok)
+            else:
+                logger.warning(
+                    "worker import: ignoring extra numeric token %r", tok)
+        else:
+            logger.warning("worker import: ignoring unknown token %r", tok)
+    return existing_mod_id, import_sibling_json
+
+
+def _run_import(
+    mod_path: str, game_dir: str, db_path: str,
+    deltas_dir: str,
+    existing_mod_id: int | None = None,
+    *,
+    import_sibling_json: bool = True,
+) -> None:
     from cdumm.storage.database import Database
     from cdumm.engine.snapshot_manager import SnapshotManager
     from cdumm.engine.import_handler import (
@@ -78,7 +115,7 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
     game_dir = Path(game_dir)
     db_path = Path(db_path)
     deltas_dir = Path(deltas_dir)
-    existing_id = int(existing_mod_id) if existing_mod_id else None
+    existing_id = existing_mod_id
 
     db = Database(db_path)
     db.initialize()
@@ -92,7 +129,10 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
         "zip": lambda: import_from_zip(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "7z": lambda: import_from_7z(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "rar": lambda: import_from_rar(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
-        "folder": lambda: import_from_folder(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
+        "folder": lambda: import_from_folder(
+            mod_path, game_dir, db, snapshot, deltas_dir,
+            existing_mod_id=existing_id,
+            import_sibling_json=import_sibling_json),
         "script": lambda: import_from_script(mod_path, game_dir, db, snapshot, deltas_dir),
         "json_patch": lambda: import_from_json_patch(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "natt_format_3": lambda: import_from_natt_format_3(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
@@ -794,9 +834,18 @@ def worker_main(args: list[str]) -> None:
     cmd = args[0]
     try:
         if cmd == "import":
-            # import <mod_path> <game_dir> <db_path> <deltas_dir> [existing_mod_id]
-            _run_import(args[1], args[2], args[3], args[4],
-                        args[5] if len(args) > 5 else None)
+            # import <mod_path> <game_dir> <db_path> <deltas_dir>
+            #     [existing_mod_id] [--no-sibling-json]
+            if len(args) < 5:
+                _emit({"type": "error",
+                       "msg": "import needs mod_path game_dir db_path deltas_dir"})
+                sys.exit(1)
+            _ex_id, _imp_sib = _parse_import_cli_suffix(list(args[5:]))
+            _run_import(
+                args[1], args[2], args[3], args[4],
+                existing_mod_id=_ex_id,
+                import_sibling_json=_imp_sib,
+            )
         elif cmd == "import_batch":
             # import_batch <paths_file> <game_dir> <db_path> <deltas_dir>
             _run_batch_import(args[1], args[2], args[3], args[4])

@@ -3349,11 +3349,68 @@ def _import_sibling_json_patches(
                 cand.name, jp_name, len(entr_result["changed_files"]))
 
 
+def _import_mod_json_package_siblings_if_needed(
+    imported_leaf: Path,
+    game_dir: Path,
+    db: Database,
+    deltas_dir: Path,
+    result: ModImportResult,
+    *,
+    import_sibling_json: bool,
+) -> None:
+    """Import byte-patch JSON siblings next to a loose-file ``mod.json`` package.
+
+    When the worker imports only a variant leaf (e.g. ``HumanFemale/``)
+    under ``CharacterCreator/mod.json``, ``FemaleAnimations.json`` lives
+    beside ``mod.json`` and is not visible to the leaf-only import.
+    Walk up to the package root and reuse :func:`_import_sibling_json_patches`.
+
+    Skipped when ``import_sibling_json`` is False (cog variant swap: siblings
+    already exist as separate mod rows).
+    """
+    if not import_sibling_json:
+        return
+    if result.error or not result.changed_files:
+        return
+    try:
+        pkg: Path | None = None
+        cur = imported_leaf
+        for _ in range(16):
+            if not cur.is_dir():
+                break
+            if (cur / "mod.json").is_file():
+                pkg = cur
+                break
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+        if pkg is None:
+            return
+        try:
+            if pkg.resolve() == imported_leaf.resolve():
+                return
+        except OSError:
+            if pkg == imported_leaf:
+                return
+        _import_sibling_json_patches(
+            pkg, imported_leaf, game_dir, db, deltas_dir)
+    except Exception as e:
+        logger.warning(
+            "Package-root sibling JSON import failed: %s", e,
+            exc_info=True)
+
+
 def import_from_folder(
     folder_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
+    *,
+    import_sibling_json: bool = True,
 ) -> ModImportResult:
-    """Import a mod from a folder of modified files."""
+    """Import a mod from a folder of modified files.
+
+    ``import_sibling_json``: when False, skip importing JSON byte-patch
+    siblings (used when re-importing a variant leaf after cog swap).
+    """
     mod_name = folder_path.name
 
     # Check for Crimson Browser format and convert if needed
@@ -3378,7 +3435,7 @@ def import_from_folder(
                 # stat-buff vs shop-addition independently.
                 cb_base_raw = manifest.get("_base_dir")
                 cb_base = Path(cb_base_raw) if cb_base_raw is not None else None
-                if (cb_base and cb_base != folder_path
+                if (import_sibling_json and cb_base and cb_base != folder_path
                         and cb_result and not cb_result.error
                         and cb_result.changed_files):
                     try:
@@ -3604,7 +3661,8 @@ def import_from_folder(
     # C1: compound layout — the PAZ-dir primary has landed; now
     # import any sibling .json patches as their own separate mods so
     # users can toggle them independently (issue #34).
-    if (_is_compound_layout and result.changed_files and not result.error
+    if (import_sibling_json and _is_compound_layout
+            and result.changed_files and not result.error
             and result.mod_id is not None):
         try:
             # exclude_subdir is used by the helper to skip a CB/LFM
@@ -3618,6 +3676,12 @@ def import_from_folder(
         except Exception as e:
             logger.warning(
                 "Compound-layout sibling JSON scan failed: %s", e)
+
+    # Loose-file pack leaf (e.g. CharacterCreator/HumanFemale): JSON next to
+    # package mod.json is handled here
+    _import_mod_json_package_siblings_if_needed(
+        folder_path, game_dir, db, deltas_dir, result,
+        import_sibling_json=import_sibling_json)
 
     return result
 

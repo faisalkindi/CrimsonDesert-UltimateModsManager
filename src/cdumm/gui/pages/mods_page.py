@@ -1672,7 +1672,8 @@ class ModsPage(QWidget):
                     raw = old_drop_name.split("||", 1)[0]
                     from pathlib import Path as _P
                     window._original_drop_path = _P(raw)
-                window._launch_import_worker(worker_path)
+                window._launch_import_worker(
+                    worker_path, import_sibling_json=False)
             self._config_panel.close_panel()
             self._folder_variant_paths = []
             return
@@ -1772,7 +1773,8 @@ class ModsPage(QWidget):
                     raw = old_drop_name.split("||", 1)[0]
                     from pathlib import Path as _P
                     window._original_drop_path = _P(raw)
-                window._launch_import_worker(worker_path)
+                window._launch_import_worker(
+                    worker_path, import_sibling_json=False)
             self._config_panel.close_panel()
             self._folder_variant_paths = []
             self._folder_variant_is_grid = False
@@ -1939,8 +1941,10 @@ class ModsPage(QWidget):
                         window._update_enabled = old_enabled
                         window._configurable_source = cfg_src
                         if old_drop_name:
-                            window._original_drop_path = Path(old_drop_name)
-                        window._launch_import_worker(worker_path)
+                            raw_dn = old_drop_name.split("||", 1)[0]
+                            window._original_drop_path = Path(raw_dn)
+                        window._launch_import_worker(
+                            worker_path, import_sibling_json=False)
                     self._config_panel.close_panel()
                     self._folder_variant_paths = []
                     return

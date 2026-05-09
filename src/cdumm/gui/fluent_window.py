@@ -4155,7 +4155,10 @@ class CdummWindow(FluentWindow):
         # ── Launch ImportWorker ────────────────────────────────────────
         self._launch_import_worker(path, existing_mod_id)
 
-    def _launch_import_worker(self, path: Path, existing_mod_id: int | None = None) -> None:
+    def _launch_import_worker(
+        self, path: Path, existing_mod_id: int | None = None,
+        *, import_sibling_json: bool = True,
+    ) -> None:
         """Launch import in a SEPARATE PROCESS via QProcess.
 
         Using QProcess instead of QThread completely eliminates GIL contention —
@@ -4198,6 +4201,8 @@ class CdummWindow(FluentWindow):
         ]
         if existing_mod_id is not None:
             _import_args.append(str(existing_mod_id))
+        if not import_sibling_json:
+            _import_args.append("--no-sibling-json")
         exe, args = worker_command(_import_args)
 
         # Buffer for partial JSON lines
@@ -4593,55 +4598,6 @@ class CdummWindow(FluentWindow):
                             _sh.rmtree(parent, ignore_errors=True)
                 except Exception as e:
                     logger.warning("Failed to install staged ASI files: %s", e)
-
-            # Loose-file variant pick (Character Creator): worker imports only
-            # the body-type leaf (e.g. HumanFemale/). Byte-patch JSON next to
-            # mod.json never enters import_from_folder — mirror compound LFM
-            # handling here using the same helper as zip/CB paths.
-            if path.is_dir():
-                try:
-                    from cdumm.engine.import_handler import (
-                        _import_sibling_json_patches,
-                    )
-                    _cur = path
-                    _pkg: Path | None = None
-                    for _ in range(12):
-                        if not _cur.is_dir():
-                            _pkg = None
-                            break
-                        if (_cur / "mod.json").is_file():
-                            _pkg = _cur
-                            break
-                        if _cur.parent == _cur:
-                            _pkg = None
-                            break
-                        _cur = _cur.parent
-                    if _pkg is not None:
-                        try:
-                            _pkg_r = _pkg.resolve()
-                            _leaf_r = path.resolve()
-                        except OSError:
-                            _pkg_r, _leaf_r = _pkg, path
-                        if _pkg_r != _leaf_r:
-                            _sib_fail: list[str] = []
-                            _import_sibling_json_patches(
-                                _pkg,
-                                path,
-                                self._game_dir,
-                                self._db,
-                                self._deltas_dir,
-                                failures_out=_sib_fail,
-                            )
-                            if _sib_fail:
-                                logger.warning(
-                                    "Sibling JSON after variant pick: %s",
-                                    "; ".join(_sib_fail),
-                                )
-                except Exception as _sib_exc:
-                    logger.warning(
-                        "Sibling JSON import after variant pick failed: %s",
-                        _sib_exc,
-                    )
 
             if vtmp is not None:
                 import shutil
