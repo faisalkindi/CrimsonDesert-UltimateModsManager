@@ -4291,13 +4291,12 @@ class CdummWindow(FluentWindow):
                 import shutil
                 shutil.rmtree(str(tmp), ignore_errors=True)
                 self._pending_tmp_cleanup = None
-            # Clean variant-picker pre-extract dir (when a picker fired
-            # and the worker was fed a path inside this temp tree).
+            # Variant-picker pre-extract dir: do NOT delete yet — ASI install
+            # and sibling JSON import below still read files under this tree
+            # (e.g. CharacterCreatorHead.asi, FemaleAnimations.json next to
+            # mod.json). Deleting early left zero-byte / missing ASI installs.
             vtmp = getattr(self, '_pending_variant_cleanup', None)
-            if vtmp:
-                import shutil
-                shutil.rmtree(str(vtmp), ignore_errors=True)
-                self._pending_variant_cleanup = None
+            self._pending_variant_cleanup = None
 
             # Primary mod id captured from the worker's "done" message.
             # Compound imports (Lightsaber: CB + shop JSON siblings) write
@@ -4594,6 +4593,59 @@ class CdummWindow(FluentWindow):
                             _sh.rmtree(parent, ignore_errors=True)
                 except Exception as e:
                     logger.warning("Failed to install staged ASI files: %s", e)
+
+            # Loose-file variant pick (Character Creator): worker imports only
+            # the body-type leaf (e.g. HumanFemale/). Byte-patch JSON next to
+            # mod.json never enters import_from_folder — mirror compound LFM
+            # handling here using the same helper as zip/CB paths.
+            if path.is_dir():
+                try:
+                    from cdumm.engine.import_handler import (
+                        _import_sibling_json_patches,
+                    )
+                    _cur = path
+                    _pkg: Path | None = None
+                    for _ in range(12):
+                        if not _cur.is_dir():
+                            _pkg = None
+                            break
+                        if (_cur / "mod.json").is_file():
+                            _pkg = _cur
+                            break
+                        if _cur.parent == _cur:
+                            _pkg = None
+                            break
+                        _cur = _cur.parent
+                    if _pkg is not None:
+                        try:
+                            _pkg_r = _pkg.resolve()
+                            _leaf_r = path.resolve()
+                        except OSError:
+                            _pkg_r, _leaf_r = _pkg, path
+                        if _pkg_r != _leaf_r:
+                            _sib_fail: list[str] = []
+                            _import_sibling_json_patches(
+                                _pkg,
+                                path,
+                                self._game_dir,
+                                self._db,
+                                self._deltas_dir,
+                                failures_out=_sib_fail,
+                            )
+                            if _sib_fail:
+                                logger.warning(
+                                    "Sibling JSON after variant pick: %s",
+                                    "; ".join(_sib_fail),
+                                )
+                except Exception as _sib_exc:
+                    logger.warning(
+                        "Sibling JSON import after variant pick failed: %s",
+                        _sib_exc,
+                    )
+
+            if vtmp is not None:
+                import shutil
+                shutil.rmtree(str(vtmp), ignore_errors=True)
 
             self._refresh_all()
             if asi_count > 0:

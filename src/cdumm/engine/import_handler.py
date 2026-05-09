@@ -2542,9 +2542,19 @@ def _import_from_extracted(
                 "author": mi.get("author"), "description": mi.get("description"),
                 "force_inplace": mi.get("force_inplace"),
             }
-            return _process_extracted_files(
+            lfm_result = _process_extracted_files(
                 converted, game_dir, db, snapshot, deltas_dir, lfm_name,
                 existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+            lfm_base = lfm.get("_base_dir")
+            if (lfm_base and lfm_base != tmp_path
+                    and lfm_result and not lfm_result.error):
+                try:
+                    _import_sibling_json_patches(
+                        tmp_path, lfm_base, game_dir, db, deltas_dir)
+                except Exception as e:
+                    logger.debug(
+                        "Sibling JSON scan after LFM extract failed: %s", e)
+            return lfm_result
 
     # Check for JSON byte-patch format — use ENTR deltas for proper composition
     jp_data = detect_json_patch(tmp_path)
@@ -2940,9 +2950,27 @@ def import_from_zip(
                     "author": mi.get("author"), "description": mi.get("description"),
                     "force_inplace": mi.get("force_inplace"),
                 }
-                return _process_extracted_files(
+                result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
                     existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+                # Same ASI carryover as the main zip tail — LFM used to return
+                # early without `asi_staged`, so CharacterCreatorHead.asi never
+                # reached the GUI installer (GitHub #49 class bug, LFM path).
+                if _carryover_asi_staged:
+                    result.asi_staged = list(_carryover_asi_staged)
+                # Sibling JSON byte-patches next to mod.json (e.g.
+                # FemaleAnimations.json) are skipped if we return before
+                # detect_json_patch — mirror CB compound-mod handling.
+                lfm_base = lfm.get("_base_dir")
+                if (lfm_base and lfm_base != tmp_path
+                        and result and not result.error):
+                    try:
+                        _import_sibling_json_patches(
+                            tmp_path, lfm_base, game_dir, db, deltas_dir)
+                    except Exception as e:
+                        logger.debug(
+                            "Sibling JSON scan after LFM zip failed: %s", e)
+                return result
 
         # Check for JSON byte-patch format — use ENTR deltas for proper composition
         jp_data = detect_json_patch(tmp_path)

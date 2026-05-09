@@ -1321,7 +1321,35 @@ class ModsPage(QWidget):
                     from cdumm.gui.preset_picker import (
                         find_json_presets, find_folder_variants)
                     presets = find_json_presets(sp)
-                    leaves = _flatten_folder_variants(sp)
+                    # Loose-file packs (Character Creator 837): zip has a
+                    # single top-level folder (CharacterCreator/) with
+                    # mod.json + sibling body-type dirs. find_folder_variants
+                    # on the extract root sees only one subdir and returns
+                    # nothing, so _flatten_folder_variants produced zero
+                    # leaves and the cog showed no swap options. Import
+                    # already uses find_loose_file_variants for this layout —
+                    # mirror that here.
+                    leaves: list[tuple] = []
+                    try:
+                        from cdumm.engine.import_handler import (
+                            find_loose_file_variants,
+                        )
+                        loose_v = find_loose_file_variants(sp)
+                        if len(loose_v) >= 2:
+                            _sp_r = sp.resolve()
+                            for v in loose_v:
+                                _bd = Path(v["_base_dir"])
+                                try:
+                                    _rel = _bd.resolve().relative_to(
+                                        _sp_r).as_posix()
+                                except ValueError:
+                                    _rel = _bd.name
+                                leaves.append((_bd, _rel))
+                    except Exception as _lv_e:
+                        logger.debug(
+                            "cog loose-file variants probe: %s", _lv_e)
+                    if len(leaves) < 2:
+                        leaves = _flatten_folder_variants(sp)
                     # Folder-variant branch — only when there are no JSON
                     # presets (XML-only mods like Vaxis LoD). JSON-preset
                     # mods take priority below.
