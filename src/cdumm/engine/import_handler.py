@@ -571,9 +571,13 @@ def _detect_xml_replacements(extracted_dir: Path) -> list[dict]:
     return results
 
 
+_XML_FAMILY_EXTS = (".xml", ".app_xml", ".pac_xml", ".prefabdata_xml")
+
+
 def _detect_plain_xml_replacements(extracted_dir: Path) -> list[dict]:
-    """Detect plain `.xml` files (no `OG_` prefix, no Crimson Browser
-    manifest) that may be full-file replacements at vanilla basenames.
+    """Detect plain XML-family files (no `OG_` prefix, no Crimson
+    Browser manifest) that may be full-file replacements at vanilla
+    basenames.
 
     Some mod authors ship gamepad / UI XML mods as raw XML files in a
     folder with a `modinfo.json`, relying on the basename matching a
@@ -582,20 +586,28 @@ def _detect_plain_xml_replacements(extracted_dir: Path) -> list[dict]:
     registering, so non-matching XML files (readmes, UI snippets that
     don't replace any vanilla file) get filtered out.
 
+    Crimson Desert ships several XML-family extensions in vanilla
+    PAMTs: ``.xml``, ``.app_xml``, ``.pac_xml``, ``.prefabdata_xml``.
+    All four are basename-replaceable the same way. Threelite on
+    Nexus 2026-05-09: ``.xml files work but .app_xml files don't
+    replace`` was caused by this detector globbing ``*.xml`` only.
+
     Returns list of `{source_path, target_name}` dicts.
     """
     results = []
-    for f in extracted_dir.rglob("*.xml"):
-        stem = f.stem
-        # OG_-prefixed files are handled by `_detect_xml_replacements`,
-        # don't double-process them here.
-        if len(stem) >= 3 and stem[:3].upper() == "OG_":
-            continue
-        # Skip XML files inside numbered PAZ dirs (those are PAZ mod
-        # content, not loose replacements at the top level).
-        if any(p.isdigit() and len(p) == 4 for p in f.parts):
-            continue
-        results.append({"source_path": f, "target_name": f.name})
+    for ext in _XML_FAMILY_EXTS:
+        for f in extracted_dir.rglob(f"*{ext}"):
+            stem = f.stem
+            # OG_-prefixed files are handled by
+            # `_detect_xml_replacements`, don't double-process them
+            # here.
+            if len(stem) >= 3 and stem[:3].upper() == "OG_":
+                continue
+            # Skip files inside numbered PAZ dirs (those are PAZ mod
+            # content, not loose replacements at the top level).
+            if any(p.isdigit() and len(p) == 4 for p in f.parts):
+                continue
+            results.append({"source_path": f, "target_name": f.name})
     return results
 
 
