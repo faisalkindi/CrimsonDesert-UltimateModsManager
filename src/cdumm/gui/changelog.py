@@ -14,7 +14,9 @@ from cdumm.i18n import tr
 # UNRELEASED entries land here, no version field, no date. At tag time
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
-_UNRELEASED_NOTES: list[str] = []
+_UNRELEASED_NOTES: list[str] = [
+    "<b>Loose mod-file detection picks up the game's XML-family extensions, not just .xml.</b> Crimson Desert ships several XML-family extensions in vanilla data: <code>.xml</code>, <code>.app_xml</code>, <code>.pac_xml</code>, <code>.prefabdata_xml</code>. The basename-replacement detector only knew about <code>.xml</code>, so a mod author dropping a loose <code>.app_xml</code> file at the top level of their mod folder got silently ignored even though that file was a real game replacement target. Detector now iterates all four extensions. Thanks to Threelite on Nexus.",
+]
 
 CHANGELOG = [
     {
