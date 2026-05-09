@@ -9,11 +9,23 @@ name: Build macOS release
 #     the .dmg as a workflow artifact (downloadable for 30 days) but
 #     does NOT touch GitHub Releases.
 #
-# Runner: macos-26-arm64 = macOS 26 (Tahoe) on Apple Silicon. Pinned
-# to the explicit -arm64 label rather than ``macos-latest`` so the
-# build stays reproducible if GitHub later bumps ``latest`` to a
-# future image with different defaults. ARM64-only is the right
-# arch because Crimson Desert macOS doesn't run on Intel anyway.
+# Runner: macos-26 = macOS 26 (Tahoe) on Apple Silicon. The bare
+# ``macos-26`` label is GitHub's canonical name for the macOS 26 ARM64
+# image (per actions/runner-images README — ARM64 is the default arch
+# for the unsuffixed label since macOS 14). x86_64 builds need
+# ``macos-26-intel`` explicitly. Pinned to the major-version label
+# rather than ``macos-latest`` so the build stays reproducible if
+# GitHub later bumps ``latest`` to a future image with different
+# defaults. ARM64-only is the right arch because Crimson Desert macOS
+# doesn't run on Intel anyway.
+#
+# We previously requested ``macos-26-arm64``. That label exists but
+# routes to a much smaller runner pool (~118 repos use it vs ~1816
+# for ``macos-26``); during the v3.2.13 / v3.2.14 release window it
+# was completely starved (jobs queued >8h with no runner pickup,
+# faisalkindi/CrimsonDesert-UltimateModsManager runs 25590236083 +
+# 25597593347, 2026-05-09). The unsuffixed label maps to the same
+# image, just with proper capacity behind it.
 #
 # Switched from macos-14 because actions/runner-images announced
 # macOS 14 Sonoma deprecation starting 2026-07-06; macos-26 also
@@ -30,7 +42,7 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-26-arm64
+    runs-on: macos-26
     timeout-minutes: 30
 
     steps:
