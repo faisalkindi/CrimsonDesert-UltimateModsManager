@@ -665,61 +665,24 @@ def _detect_raw_file_replacements_via_pamt(
     return matches
 
 
-def _import_raw_file_replacements_as_entr(
+def _persist_raw_match_deltas(
+    mod_id: int,
     matches: list[tuple],
-    game_dir: Path,
     db: "Database",
     deltas_dir: Path,
-    mod_name: str,
-    existing_mod_id: int | None = None,
-    modinfo: dict | None = None,
-) -> "ModImportResult":
-    """Persist raw-file PAMT-resolved matches as ENTR deltas.
+) -> list[str]:
+    """Write one ENTR delta per ``(pamt_path, source_file, PazEntry)``
+    match into ``mod_id``'s delta directory and ``mod_deltas`` rows.
 
-    Each tuple from ``_detect_raw_file_replacements_via_pamt`` becomes
-    one ENTR delta keyed on the entry's path inside the PAZ archive,
-    with the user-dropped file's full content as the new bytes. The
-    storage path mirrors what ``import_json_as_entr`` already does for
-    JSON byte-patch mods so apply-time composition works identically.
+    Pure delta-write helper. Does NOT create or modify the parent
+    ``mods`` row, so callers can use this both to populate a new mod
+    (after creating the row themselves) and to add additional deltas
+    to an already-imported mod (e.g. raw-file siblings discovered
+    after a JSON byte-patch import landed on the same drop folder).
+    Returns the list of PAMT entry paths that got delta rows.
     """
     from cdumm.engine.delta_engine import save_entry_delta
-    from cdumm.engine.json_patch_handler import (
-        _derive_pamt_dir, _prettify,
-    )
-    from cdumm.engine.version_detector import detect_game_version
-
-    result = ModImportResult(_prettify(mod_name))
-
-    priority = db.connection.execute(
-        "SELECT COALESCE(MAX(priority), 0) + 1 FROM mods").fetchone()[0]
-    author = (modinfo or {}).get("author")
-    version = (modinfo or {}).get("version")
-    description = (modinfo or {}).get("description")
-    try:
-        game_ver_hash = detect_game_version(game_dir)
-    except Exception:  # noqa: BLE001 — version stamp is best-effort
-        game_ver_hash = None
-
-    if existing_mod_id:
-        mod_id = existing_mod_id
-        db.connection.execute(
-            "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-        if game_ver_hash:
-            db.connection.execute(
-                "UPDATE mods SET game_version_hash = ? WHERE id = ?",
-                (game_ver_hash, mod_id))
-        import shutil
-        old_delta_dir = deltas_dir / str(mod_id)
-        if old_delta_dir.exists():
-            shutil.rmtree(old_delta_dir)
-    else:
-        cursor = db.connection.execute(
-            "INSERT INTO mods (name, mod_type, priority, author, "
-            "version, description, game_version_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (_prettify(mod_name), "paz", priority, author, version,
-             description, game_ver_hash))
-        mod_id = cursor.lastrowid
+    from cdumm.engine.json_patch_handler import _derive_pamt_dir
 
     changed_files: list[str] = []
     for pamt_path, source_file, entry in matches:
@@ -758,6 +721,64 @@ def _import_raw_file_replacements_as_entr(
             (mod_id, paz_file_path, str(delta_path),
              entry.offset, entry.offset + entry.comp_size, entry.path))
         changed_files.append(entry.path)
+    return changed_files
+
+
+def _import_raw_file_replacements_as_entr(
+    matches: list[tuple],
+    game_dir: Path,
+    db: "Database",
+    deltas_dir: Path,
+    mod_name: str,
+    existing_mod_id: int | None = None,
+    modinfo: dict | None = None,
+) -> "ModImportResult":
+    """Persist raw-file PAMT-resolved matches as ENTR deltas.
+
+    Each tuple from ``_detect_raw_file_replacements_via_pamt`` becomes
+    one ENTR delta keyed on the entry's path inside the PAZ archive,
+    with the user-dropped file's full content as the new bytes. The
+    storage path mirrors what ``import_json_as_entr`` already does for
+    JSON byte-patch mods so apply-time composition works identically.
+    """
+    from cdumm.engine.json_patch_handler import _prettify
+    from cdumm.engine.version_detector import detect_game_version
+
+    result = ModImportResult(_prettify(mod_name))
+
+    priority = db.connection.execute(
+        "SELECT COALESCE(MAX(priority), 0) + 1 FROM mods").fetchone()[0]
+    author = (modinfo or {}).get("author")
+    version = (modinfo or {}).get("version")
+    description = (modinfo or {}).get("description")
+    try:
+        game_ver_hash = detect_game_version(game_dir)
+    except Exception:  # noqa: BLE001 — version stamp is best-effort
+        game_ver_hash = None
+
+    if existing_mod_id:
+        mod_id = existing_mod_id
+        db.connection.execute(
+            "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+        if game_ver_hash:
+            db.connection.execute(
+                "UPDATE mods SET game_version_hash = ? WHERE id = ?",
+                (game_ver_hash, mod_id))
+        import shutil
+        old_delta_dir = deltas_dir / str(mod_id)
+        if old_delta_dir.exists():
+            shutil.rmtree(old_delta_dir)
+    else:
+        cursor = db.connection.execute(
+            "INSERT INTO mods (name, mod_type, priority, author, "
+            "version, description, game_version_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (_prettify(mod_name), "paz", priority, author, version,
+             description, game_ver_hash))
+        mod_id = cursor.lastrowid
+
+    changed_files = _persist_raw_match_deltas(
+        mod_id, matches, db, deltas_dir)
 
     db.connection.commit()
     logger.info(
@@ -2910,6 +2931,44 @@ def import_from_zip(
                     )
                 if jp_data.get("patches"):
                     _store_json_patches(db, result, jp_data, game_dir)
+
+                # Sibling raw-file replacements: some mods (e.g.
+                # crewny23 mod 1543, "ALL Weapons and Armor Fully
+                # Usable") ship a JSON byte-patch alongside loose-file
+                # replacements at the engine's internal path layout
+                # (gamedata/binary__/.../iteminfo.pabgb). The JSON
+                # branch above handles the byte patches; without this
+                # follow-up the loose files were silently dropped,
+                # which is exactly the symptom goodygoosey reported on
+                # Nexus 2026-05-09 ("weapons work but armor doesn't").
+                # Reuse the v3.2.13 PAMT lookup pass to find any
+                # remaining game-internal-path files in the same drop
+                # and add them as deltas under the JSON mod's row.
+                _jp_mod_id = entr_result.get("mod_id")
+                if _jp_mod_id is not None:
+                    sibling_matches = (
+                        _detect_raw_file_replacements_via_pamt(
+                            tmp_path, game_dir))
+                    # Drop any matches whose source file is the JSON
+                    # itself; the byte-patch branch already handled
+                    # those.
+                    sibling_matches = [
+                        m for m in sibling_matches
+                        if m[1].suffix.lower() != ".json"
+                    ]
+                    if sibling_matches:
+                        added = _persist_raw_match_deltas(
+                            _jp_mod_id, sibling_matches, db, deltas_dir)
+                        db.connection.commit()
+                        logger.info(
+                            "JSON byte-patch mod %d also imported "
+                            "%d sibling raw-file replacement(s): %s",
+                            _jp_mod_id, len(added), added)
+                        # Surface the additional files so the GUI's
+                        # "X files changed" stat reflects the merged
+                        # delta set, not just the JSON portion.
+                        result.changed_files = list(
+                            result.changed_files) + added
                 return result
 
         # Format 3 mods (field-names + intents) ship as a
