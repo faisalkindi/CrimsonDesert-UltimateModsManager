@@ -52,6 +52,31 @@ _TREE_BORDER_PAD = 4
 _RANK_ROW_H = 36
 
 
+def _sort_priority_mods_for_display(
+    mod_ids: list[int],
+    mods_by_id: dict[int, dict],
+) -> list[int]:
+    """Order mods so the engine winner sits at the top of the
+    load-order card.
+
+    The engine treats the LOWEST priority number as the winner. The
+    UI hint reads "Higher rows win." Until 2026-05-10 the panel
+    sorted descending (highest priority number on top), which made
+    the hint a lie -- scottykyzer Nexus 2026-05-09. Sort ascending
+    so row 1 of the panel matches the mod the engine actually picks.
+    Mods with no priority key sort to the bottom (treated as
+    +infinity) so they cannot accidentally claim the top slot.
+    """
+    inf = float("inf")
+    return sorted(
+        mod_ids,
+        key=lambda mid:
+            mods_by_id.get(mid, {}).get("priority", inf)
+            if isinstance(mods_by_id.get(mid, {}).get("priority"), int)
+            else inf,
+    )
+
+
 class ConflictsDialog(MessageBoxBase):
     """Fluent modal — split by actionable vs auto-resolved."""
 
@@ -336,9 +361,8 @@ class ConflictsDialog(MessageBoxBase):
                 if mid not in seen_ids:
                     seen_ids.add(mid)
                     priority_mods.append(mid)
-        priority_mods.sort(
-            key=lambda mid: mods_by_id.get(mid, {}).get("priority", 0),
-            reverse=True)
+        priority_mods = _sort_priority_mods_for_display(
+            priority_mods, mods_by_id)
         if not priority_mods:
             return
 

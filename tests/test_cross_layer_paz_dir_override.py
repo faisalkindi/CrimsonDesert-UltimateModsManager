@@ -144,9 +144,15 @@ def test_resolver_returns_override_entry_instead_of_vanilla(monkeypatch, tmp_pat
     assert result is override_entry, (
         "resolver must return the override's PazEntry exactly, not a "
         "copy or freshly-looked-up vanilla entry")
-    assert any("cross-layer" in m for m in warn_calls), (
-        "caller must be told about the cross-layer base change so the "
-        "GUI can surface it like the live-PAZ self-heal warning")
+    # Cross-layer warning text rewritten 2026-05-10 (scottykyzer Nexus
+    # report): no longer says "cross-layer base" verbatim, but does
+    # plainly tell the user a mod is providing the base for this file.
+    assert any(
+        "providing the base" in m and "stacking JSON patches" in m
+        for m in warn_calls), (
+        "caller must be told a mod is providing the base for the "
+        "file so the GUI can surface it like the live-PAZ self-heal "
+        "warning")
 
 
 def test_resolver_falls_through_when_no_override_for_game_file(monkeypatch, tmp_path):

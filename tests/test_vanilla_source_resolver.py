@@ -103,7 +103,13 @@ def test_vanilla_missing_live_hash_match_falls_back_and_warns(dirs, monkeypatch)
         snapshot, warn_callback=warned.append,
     )
     assert result.paz_file == str(live_paz)
-    assert warned == ["0008/0.paz"]
+    # resolve_vanilla_source now emits the complete sentence so the
+    # worker's _warn callback is a thin pass-through (the cross-layer
+    # call site stops inheriting the wrong prefix). The paz_rel must
+    # appear inside the sentence.
+    assert len(warned) == 1
+    assert "Vanilla backup missing for 0008/0.paz" in warned[0]
+    assert "hash-verified live copy" in warned[0]
 
 
 def test_vanilla_missing_live_hash_mismatch_raises(dirs, monkeypatch):

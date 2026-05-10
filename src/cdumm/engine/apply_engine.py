@@ -867,10 +867,19 @@ def resolve_vanilla_source(
     if paz_dir_overrides is not None and game_file in paz_dir_overrides:
         ov = paz_dir_overrides[game_file]
         if warn_callback is not None:
+            # Build the complete sentence here so the callback is a
+            # thin pass-through. Earlier the callback prepended
+            # "Vanilla backup missing for {arg}, using hash-verified
+            # live copy ..." to whatever it received, which produced
+            # a grammatically broken message when the cross-layer
+            # call site passed a complete sentence as the argument
+            # (scottykyzer Nexus 2026-05-09 against
+            # 'Better Unique Gears' + iteminfo.pabgb on v3.2.13).
             warn_callback(
-                f"cross-layer base: {ov['mod_name']!r} "
-                f"(priority={ov['priority']}) provides "
-                f"{game_file} — stacking JSON patches on top")
+                f"Mod {ov['mod_name']!r} is providing the base "
+                f"for {game_file} (priority={ov['priority']}). "
+                f"CDUMM is stacking JSON patches on top of the "
+                f"mod's bytes.")
         return ov["entry"]
 
     vanilla_entry = _find_pamt_entry(game_file, vanilla_dir)
@@ -938,7 +947,17 @@ def resolve_vanilla_source(
                 "Lazy vanilla backup failed for %s: %s", paz_rel, e)
 
     if warn_callback is not None:
-        warn_callback(paz_rel)
+        # Build the complete sentence here so the callback is a thin
+        # pass-through. The worker's deduper used to wrap the paz_rel
+        # fragment with the "Vanilla backup missing for X, using hash-
+        # verified live copy ..." template; moving the template here
+        # lets the cross-layer call site emit its own clean message
+        # without inheriting this prefix.
+        warn_callback(
+            f"Vanilla backup missing for {paz_rel}, using "
+            f"hash-verified live copy and creating the backup "
+            f"now. Subsequent applies will use the backup "
+            f"directly.")
     return live_entry
 
 RANGE_BACKUP_EXT = ".vranges"  # sparse range backup extension
@@ -1275,14 +1294,17 @@ class ApplyWorker(QObject):
         snapshot_mgr = SnapshotManager(self._db)
         warned_once: set[str] = set()
 
-        def _warn(paz_rel: str) -> None:
-            if paz_rel in warned_once:
+        def _warn(msg: str) -> None:
+            # resolve_vanilla_source now passes complete sentences for
+            # both the self-heal path and the cross-layer base path.
+            # This used to prepend "Vanilla backup missing for X, ..."
+            # to whatever the caller passed, which produced grammatical
+            # nonsense when the cross-layer call site passed a
+            # complete sentence (scottykyzer Nexus 2026-05-09 with
+            # 'Better Unique Gears' on iteminfo.pabgb v3.2.13).
+            if msg in warned_once:
                 return
-            warned_once.add(paz_rel)
-            msg = (f"Vanilla backup missing for {paz_rel}, "
-                   "using hash-verified live copy and creating the "
-                   "backup now. Subsequent applies will use the "
-                   "backup directly.")
+            warned_once.add(msg)
             logger.warning("mount-time: %s", msg)
             self._soft_warnings.append(msg)
             self.warning.emit(msg)
