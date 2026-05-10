@@ -49,12 +49,70 @@ EPIC_GAME_NAMES = [
 ]
 
 
+def _live_local_drives() -> str:
+    """Return the drive letters currently mounted on this Windows host.
+
+    Calls ``kernel32.GetLogicalDrives``, which returns a bitmask
+    where bit N set means drive ``chr(ord('A') + N)`` is present.
+    The result is the concatenation of those letters in alphabetical
+    order, e.g. ``"CDE"`` when only C:/, D:/, E:/ are mounted.
+
+    Why this exists: on Windows, ``Path("X:/...").exists()`` against
+    a stale or disconnected network drive letter can block for ~30 s
+    per probe before timing out. The previous detection loop walked
+    all 26 letters unconditionally, so a user with a handful of
+    stale mounts could hang CDUMM launch for minutes (Nexus reports
+    from spike1234 / studoo12 — picker shows, user picks the new
+    folder, then no main window). Filtering the scan down to live
+    drives makes the worst case ``O(live_drives)``, which on a
+    typical box is single-digit.
+
+    Returns ``""`` on any failure (kernel32 missing, ctypes import
+    fails, etc.) so callers can treat the result as ``"may be empty,
+    must not crash"``. Empty-string result means the scan loops
+    iterate zero times — strictly safer than blocking, and the
+    explicit ``STEAM_DEFAULT_PATHS`` probes still run before the
+    drive scan so the common case is unaffected.
+    """
+    if not IS_WINDOWS:
+        return ""
+    try:
+        import ctypes
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:
+        logger.warning(
+            "GetLogicalDrives failed; skipping drive-letter scan",
+            exc_info=True)
+        return ""
+    return "".join(
+        chr(ord("A") + i) for i in range(26) if bitmask & (1 << i)
+    )
+
+
+def _drive_letters_for_scan() -> str:
+    """Drive letters to iterate when probing for Steam libraries.
+
+    Windows: only the live drives reported by ``GetLogicalDrives``
+    (see :func:`_live_local_drives`). Other platforms (Linux,
+    anything that's not macOS — macOS short-circuits earlier in
+    ``find_game_directories``): keep the legacy A-Z behaviour. The
+    legacy path is harmless on Linux because ``Path("X:/...")``
+    just tests a literal nonexistent directory cheaply; the
+    blocking-stale-mount problem is Windows-specific.
+    """
+    if IS_WINDOWS:
+        return _live_local_drives()
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
 def _find_steam_root() -> Path | None:
     for p in STEAM_DEFAULT_PATHS:
         if p.exists():
             return p
-    # Search all drive roots
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    # Search drive roots — Windows: only currently-mounted letters
+    # (avoids ~30 s blocking per stale network drive); other
+    # platforms keep the historical full A-Z sweep.
+    for letter in _drive_letters_for_scan():
         steam = Path(f"{letter}:/Steam")
         if steam.exists():
             return steam
@@ -411,7 +469,7 @@ def find_game_directories() -> list[Path]:
     # paths. Catches Steam libraries the primary install's VDF doesn't
     # know about (issue #43). Dedup happens at end via path resolve.
     direct_bases = []
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    for letter in _drive_letters_for_scan():
         for prefix in ("Steam", "SteamLibrary",
                        "Games/Steam", "Games/SteamLibrary"):
             direct_bases.append(Path(f"{letter}:/{prefix}"))
