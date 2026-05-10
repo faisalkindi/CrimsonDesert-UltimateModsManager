@@ -192,3 +192,99 @@ def test_drag_changes_maximum_width(qtbot, app):
         Qt.KeyboardModifier.NoModifier,
     )
     handle.mouseReleaseEvent(release)
+
+
+# ----------------------------------------------------------------------
+# Bug #5 follow-up (scottykyzer + Bekwit, Nexus 2026-05-09 / 2026-05-10):
+# the handle exists, is positioned correctly, and drags work — but it
+# is invisible (4 px wide WA_TranslucentBackground), so users cannot
+# find it. Verify the handle paints a visible affordance.
+# ----------------------------------------------------------------------
+
+
+def _grab_handle_image(panel, qtbot):
+    """Render the panel and return a QImage of the handle's geometry."""
+    pixmap = panel.grab()
+    return pixmap.toImage()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_resize_handle_paints_visible_strip(qtbot, app, theme):
+    """The handle must paint a non-transparent vertical strip at the
+    panel's right edge, in BOTH themes. Without this the user has
+    nothing to see and grab — the root cause of Nexus bug #5.
+    """
+    from qfluentwidgets import setTheme, Theme
+    from cdumm.gui.components.config_panel import ConfigPanel
+
+    setTheme(Theme.LIGHT if theme == "light" else Theme.DARK)
+    qtbot.wait(50)
+
+    panel = ConfigPanel()
+    qtbot.addWidget(panel)
+    panel._apply_theme()
+
+    panel.set_panel_width(700)
+    _show_simple_mod(panel, qtbot)
+    if hasattr(panel, "_anim"):
+        panel._anim.stop()
+    panel.setMaximumWidth(700)
+    panel.setMinimumWidth(700)
+    panel.resize(700, 600)
+    panel.show()
+    qtbot.wait(150)
+
+    handle = panel._resize_handle
+
+    # Assert the handle is wider than the original 4 px hot-zone — the
+    # fix bumps it to 8 px for a usable hit target.
+    assert handle.width() >= 8, (
+        f"handle width {handle.width()} is too small for users to grab; "
+        "expected >=8 px after the visibility fix"
+    )
+
+    # Translucent background must be OFF so paintEvent's pixels survive.
+    from PySide6.QtCore import Qt as _Qt
+    assert not handle.testAttribute(
+        _Qt.WidgetAttribute.WA_TranslucentBackground
+    ), "handle must not be translucent — its paint must reach the screen"
+
+    image = _grab_handle_image(panel, qtbot)
+    assert not image.isNull(), "panel grab produced a null image"
+
+    # Account for devicePixelRatio when sampling the rendered image.
+    dpr = image.devicePixelRatio() or 1.0
+    handle_geom = handle.geometry()
+    # Sample the vertical center column of the handle, in image coords.
+    sample_x = int((handle_geom.x() + handle_geom.width() / 2) * dpr)
+    sample_x = min(sample_x, image.width() - 1)
+    sample_x = max(sample_x, 0)
+    sample_ys = [
+        int(handle_geom.height() * 0.25 * dpr),
+        int(handle_geom.height() * 0.50 * dpr),
+        int(handle_geom.height() * 0.75 * dpr),
+    ]
+
+    # The faint vertical line should produce pixels distinguishable
+    # from the panel background. We sample the centerline AND a column
+    # one pixel to its left as a control — at least one of the three
+    # vertical samples must differ from the background.
+    bg_x = max(0, int((handle_geom.x() - 6) * dpr))
+    differences = 0
+    for y in sample_ys:
+        y_clamped = min(max(y, 0), image.height() - 1)
+        line_color = image.pixelColor(sample_x, y_clamped)
+        bg_color = image.pixelColor(bg_x, y_clamped)
+        # Compare RGB channels (alpha is irrelevant on grabbed pixmap).
+        d = (
+            abs(line_color.red() - bg_color.red())
+            + abs(line_color.green() - bg_color.green())
+            + abs(line_color.blue() - bg_color.blue())
+        )
+        if d > 6:  # tolerate antialiasing noise
+            differences += 1
+
+    assert differences >= 1, (
+        f"[{theme}] resize handle is invisible: sampled centerline pixels "
+        f"are identical to background. Theme bug #5 still unfixed."
+    )
