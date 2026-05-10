@@ -4416,13 +4416,14 @@ class CdummWindow(FluentWindow):
                 import shutil
                 shutil.rmtree(str(tmp), ignore_errors=True)
                 self._pending_tmp_cleanup = None
-            # Clean variant-picker pre-extract dir (when a picker fired
-            # and the worker was fed a path inside this temp tree).
+            # Variant-picker pre-extract dir cleanup is DEFERRED until
+            # after the ASI install loop below — `_pending_asi_from_variant`
+            # holds paths INSIDE this tree (Character Creator
+            # CharacterCreatorHead.asi). Deleting it here would make every
+            # `p.exists()` check below fail and the .asi would silently
+            # not be copied into bin64.
             vtmp = getattr(self, '_pending_variant_cleanup', None)
-            if vtmp:
-                import shutil
-                shutil.rmtree(str(vtmp), ignore_errors=True)
-                self._pending_variant_cleanup = None
+            self._pending_variant_cleanup = None
 
             # Primary mod id captured from the worker's "done" message.
             # Compound imports (Lightsaber: CB + shop JSON siblings) write
@@ -4719,6 +4720,13 @@ class CdummWindow(FluentWindow):
                             _sh.rmtree(parent, ignore_errors=True)
                 except Exception as e:
                     logger.warning("Failed to install staged ASI files: %s", e)
+
+            # Now that variant-bundled ASIs have been copied to bin64, the
+            # pre-extract tree is safe to remove (see deferred assignment
+            # above the ASI block).
+            if vtmp is not None:
+                import shutil
+                shutil.rmtree(str(vtmp), ignore_errors=True)
 
             self._refresh_all()
             if asi_count > 0:

@@ -18,6 +18,13 @@ _UNRELEASED_NOTES: list[str] = []
 
 CHANGELOG = [
     {
+        "version": "3.2.17",
+        "date": "2026-05-10",
+        "notes": [
+            "<b>Hotfix: companion .asi plugins bundled with variant-pack mods now actually land in bin64.</b> The v3.2.16 variant-pack picker (Character Creator and similar layouts) collected any sibling .asi files from the extracted archive into a pending list so they could be installed alongside whichever body type the user picked. The post-import handler then deleted the archive's pre-extract temp directory at the very top of its work, before reaching the ASI install loop further down. By the time the loop tried to copy <code>CharacterCreatorHead.asi</code> into <code>bin64\\</code>, the staged path no longer existed on disk and every <code>p.exists()</code> check returned false, so the .asi was silently skipped. The post-import banner read \"imported\" with no plugin count, the ASI Mods tab stayed empty, and the in-game features that depended on the plugin never worked. Cleanup of the pre-extract directory is now deferred to AFTER the ASI install loop runs, so the staged plugins survive long enough to be copied. Thanks to Democles85 (GitHub #81 follow-up) for catching the regression.",
+        ],
+    },
+    {
         "version": "3.2.16",
         "date": "2026-05-10",
         "notes": [
