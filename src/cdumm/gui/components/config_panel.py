@@ -179,6 +179,34 @@ def _group_variants_by_category_prefix(
     return groups
 
 
+def compute_bulk_toggle_indices(
+    all_indices: list[int],
+    preset_groups: dict[str, list[int]] | None,
+    always_on: list[int],
+    *,
+    target: bool,
+) -> list[int]:
+    """Indices the Select-All / Deselect-All bar should flip.
+
+    Indices that belong to a preset family (mutex radio group) are
+    excluded so a single Select-All click cannot try to enable every
+    Ride Duration variant at once. Indices outside any family,
+    including the always-on toggles, are eligible.
+
+    ``target`` is whether we're moving toggles to checked (Select All)
+    or unchecked (Deselect All). The same exclusion applies in both
+    directions, so the parameter currently only affects how the
+    caller interprets the returned indices.
+    """
+    excluded: set[int] = set()
+    if preset_groups:
+        for tag, indices in preset_groups.items():
+            if tag.startswith("__"):
+                continue  # __always_on__ etc.
+            excluded.update(indices)
+    return [i for i in all_indices if i not in excluded]
+
+
 def _strip_category_prefix(label: str) -> str:
     """Return the right-hand side of 'Category / Rest' labels, else
     the label unchanged."""
@@ -688,6 +716,17 @@ class ConfigPanel(QWidget):
                         current_preset = None
                 self._add_preset_selector(
                     preset_groups, current_preset=current_preset)
+            # Select-All / Deselect-All bar. Only shows for mods with
+            # 5+ independent toggles; under that threshold the user
+            # can just click each one (scottykyzer Nexus 2026-05-09:
+            # "scroll in a tiny panel for days and days clicking
+            # and clicking" against Simple BackPack Visual Swap).
+            independent_count = len(compute_bulk_toggle_indices(
+                list(range(len(patches))), preset_groups,
+                getattr(self, "_preset_always_on_indices", []),
+                target=True))
+            if independent_count >= 5:
+                self._add_select_all_bar(patches, preset_groups)
             for i, p in enumerate(patches):
                 ev = p.get("editable_value")
                 if ev and isinstance(ev, dict) and "type" in ev:
@@ -993,6 +1032,53 @@ class ConfigPanel(QWidget):
             Config(self._db).set(f"mod_{self._mod_id}_preset", tag)
         except Exception as e:
             logger.debug("Could not persist preset selection: %s", e)
+
+    def _add_select_all_bar(
+        self,
+        patches: list[dict],
+        preset_groups: dict[str, list[int]] | None,
+    ) -> None:
+        """Render a Select-All / Deselect-All button row above the
+        patch list. Indices that belong to a preset family are
+        skipped so the radio choice survives a bulk click.
+        """
+        from qfluentwidgets import PushButton
+
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 4, 0, 8)
+        bar.setSpacing(8)
+
+        target_indices = compute_bulk_toggle_indices(
+            list(range(len(patches))), preset_groups,
+            getattr(self, "_preset_always_on_indices", []),
+            target=True)
+
+        sel_btn = PushButton("Select all")
+        sel_btn.setFixedHeight(26)
+        sel_btn.clicked.connect(
+            lambda _checked=False, idxs=target_indices:
+                self._bulk_set_toggles(idxs, True))
+        bar.addWidget(sel_btn)
+
+        des_btn = PushButton("Deselect all")
+        des_btn.setFixedHeight(26)
+        des_btn.clicked.connect(
+            lambda _checked=False, idxs=target_indices:
+                self._bulk_set_toggles(idxs, False))
+        bar.addWidget(des_btn)
+
+        bar.addStretch(1)
+        wrap = QWidget()
+        wrap.setLayout(bar)
+        self._body_layout.addWidget(wrap)
+
+    def _bulk_set_toggles(
+        self, indices: list[int], target: bool,
+    ) -> None:
+        for idx in indices:
+            tog = self._toggles.get(idx)
+            if tog is not None:
+                tog.setChecked(target)
 
     def _add_section_header(self, text: str) -> None:
         header = CaptionLabel(text)
