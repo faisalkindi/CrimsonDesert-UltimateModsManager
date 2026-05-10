@@ -1,6 +1,7 @@
 """Check GitHub for new CDUMM releases."""
 import json
 import logging
+import sys
 import urllib.request
 
 from PySide6.QtCore import QObject, Signal
@@ -9,6 +10,45 @@ logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "faisalkindi/CrimsonDesert-UltimateModsManager"
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# Canonical Windows asset name produced by the release workflow. Stable across
+# versions because the spec file always emits ``CDUMM3.exe`` (see cdumm.spec).
+WINDOWS_ASSET = "CDUMM3.exe"
+
+
+def _release_asset_url(version: str, asset: str) -> str:
+    """Build the canonical GitHub direct-download URL for a release asset.
+
+    ``version`` may be passed with or without a leading ``v`` — the result
+    always contains exactly one ``v`` prefix because that's how GitHub tags
+    the releases (matches the ``v*`` trigger in the workflows).
+    """
+    v = version.lstrip("v")
+    return (f"https://github.com/{GITHUB_REPO}"
+            f"/releases/download/v{v}/{asset}")
+
+
+def macos_asset_name(version: str) -> str:
+    """Name of the macOS DMG attached to release ``version``.
+
+    Mirrors ``DMG_NAME`` in scripts/build-macos.sh and the artifact path in
+    .github/workflows/release-macos.yml — ``CDUMM-<version>-macos-arm64.dmg``.
+    """
+    return f"CDUMM-{version.lstrip('v')}-macos-arm64.dmg"
+
+
+def asset_for_current_platform(version: str) -> str | None:
+    """Return the asset filename that matches the running platform, or
+    ``None`` if there's no first-class direct-download for it.
+
+    Linux currently has no signed release asset — the banner falls back to
+    the GitHub release page in that case (current behaviour).
+    """
+    if sys.platform == "win32":
+        return WINDOWS_ASSET
+    if sys.platform == "darwin":
+        return macos_asset_name(version)
+    return None
 
 
 def check_for_update(current_version: str) -> dict | None:
@@ -59,3 +99,49 @@ class UpdateCheckWorker(QObject):
         if result:
             self.update_available.emit(result)
         self.finished.emit()
+
+
+class UpdateDownloadWorker(QObject):
+    """Background worker that streams a release asset to ``dest_path``.
+
+    Emits ``progress(received, total)`` with byte counts (``total`` may be
+    -1 if the server omits Content-Length), then exactly one of
+    ``done(path)`` or ``failed(reason)``. Network errors are caught and
+    surfaced via ``failed`` so the GUI can fall back to the release page
+    without the banner taking down the app.
+    """
+    progress = Signal(int, int)
+    done = Signal(str)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, url: str, dest_path: str) -> None:
+        super().__init__()
+        self._url = url
+        self._dest = dest_path
+
+    def run(self) -> None:
+        try:
+            req = urllib.request.Request(
+                self._url, headers={"User-Agent": "CDUMM"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length", -1) or -1)
+                received = 0
+                # 64 KiB chunks — small enough that progress signals fire
+                # several times per second on slow connections, large
+                # enough that we don't spam the GUI thread on fast ones.
+                chunk = 64 * 1024
+                with open(self._dest, "wb") as f:
+                    while True:
+                        block = resp.read(chunk)
+                        if not block:
+                            break
+                        f.write(block)
+                        received += len(block)
+                        self.progress.emit(received, total)
+            self.done.emit(self._dest)
+        except Exception as e:
+            logger.warning("Direct download failed: %s", e)
+            self.failed.emit(str(e))
+        finally:
+            self.finished.emit()

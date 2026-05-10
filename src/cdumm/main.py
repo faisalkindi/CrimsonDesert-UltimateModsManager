@@ -479,21 +479,14 @@ def main() -> int:
     # (vanilla / deltas / sources) once the engine is running.
     from cdumm.engine.cdmods_paths import get_cdmods_root
     cdmods_dir = get_cdmods_root(None, game_path)
-    cdmods_dir.mkdir(parents=True, exist_ok=True)
-    new_db = cdmods_dir / "cdumm.db"
 
-    # Migrate from old AppData location if needed.
-    # Check if new DB is empty/fresh (small) vs already populated.
-    import shutil
-    new_db_is_fresh = not new_db.exists() or new_db.stat().st_size < 200_000
-    if new_db_is_fresh:
-        for old_db in [old_appdata_db, old_cdmm_db]:
-            if old_db.exists() and old_db.stat().st_size > 200_000:
-                if new_db.exists():
-                    new_db.unlink()
-                shutil.copy2(old_db, new_db)
-                logger.info("Migrated database from %s to %s", old_db, new_db)
-                break
+    # File-system layer: pick the DB path, optionally migrating an
+    # AppData backup forward. Kept in a dedicated helper so the
+    # "is this DB fresh?" decision can be tested without Qt / SQLite
+    # open paths. See ``cdumm.storage.db_bootstrap``.
+    from cdumm.storage.db_bootstrap import resolve_db_path
+    bootstrap = resolve_db_path(cdmods_dir, APP_DATA_DIR)
+    new_db = bootstrap.db_path
 
     db = Database(new_db)
     db.initialize()

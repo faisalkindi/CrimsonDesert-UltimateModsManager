@@ -1776,13 +1776,162 @@ class CdummWindow(FluentWindow):
             self._update_banner.deleteLater()
             self._update_banner = None
 
+    def _start_direct_update_download(self, tag: str, asset: str,
+                                      release_url: str) -> None:
+        """Stream the release asset to the user's Downloads folder, show
+        a progress toast, then reveal the file in the OS file manager so
+        the user can drag-replace their old exe / mount the dmg.
+
+        Falls back to opening ``release_url`` (the GitHub release page)
+        if the request fails for any reason — same as the legacy
+        behaviour, just with a Toast explaining what happened.
+        """
+        from pathlib import Path
+        from PySide6.QtCore import QThread, QUrl
+        from PySide6.QtGui import QDesktopServices
+        from cdumm.engine.update_checker import (
+            UpdateDownloadWorker, _release_asset_url)
+
+        # Refuse to start a second download if one's already running —
+        # avoids spawning duplicate workers when the user hammers the
+        # banner button (each click would write to the same file).
+        existing = getattr(self, "_update_dl_thread", None)
+        if existing is not None:
+            try:
+                if existing.isRunning():
+                    return
+            except RuntimeError:
+                # C++ side already gone — clear the stale handle.
+                self._update_dl_thread = None
+
+        downloads = Path.home() / "Downloads"
+        try:
+            downloads.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning("Couldn't create Downloads folder: %s", e)
+            QDesktopServices.openUrl(QUrl(release_url))
+            return
+        dest = downloads / asset
+        url = _release_asset_url(tag, asset)
+
+        # StateToolTip is the qfluentwidgets equivalent of a
+        # progress-bar-as-toast. We update the title with the percentage
+        # as bytes stream in, then close it on done/failed.
+        try:
+            tip = StateToolTip(
+                tr("update.downloading_title"),
+                tr("update.downloading_body", asset=asset),
+                self)
+            tip.move(self.width() - tip.width() - 24, 60)
+            tip.show()
+        except Exception as e:
+            logger.debug("StateToolTip setup failed: %s", e)
+            tip = None
+
+        worker = UpdateDownloadWorker(url, str(dest))
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _on_progress(received: int, total: int) -> None:
+            if tip is None:
+                return
+            try:
+                if total > 0:
+                    pct = int(received * 100 / total)
+                    tip.setContent(
+                        tr("update.downloading_progress",
+                           pct=pct, asset=asset))
+                else:
+                    mb = received / (1024 * 1024)
+                    tip.setContent(
+                        tr("update.downloading_unknown",
+                           mb=f"{mb:.1f}", asset=asset))
+            except Exception:
+                pass
+
+        def _on_done(path: str) -> None:
+            if tip is not None:
+                try:
+                    tip.setState(True)
+                except Exception:
+                    pass
+            try:
+                InfoBar.success(
+                    tr("update.downloaded_title"),
+                    tr("update.downloaded_body", path=path),
+                    duration=8000, position=InfoBarPosition.TOP, parent=self)
+            except Exception as e:
+                logger.debug("downloaded InfoBar failed: %s", e)
+            self._reveal_in_file_manager(path)
+
+        def _on_failed(reason: str) -> None:
+            if tip is not None:
+                try:
+                    tip.setState(True)
+                    tip.close()
+                except Exception:
+                    pass
+            try:
+                InfoBar.warning(
+                    tr("update.download_failed_title"),
+                    tr("update.download_failed_body"),
+                    duration=8000, position=InfoBarPosition.TOP, parent=self)
+            except Exception as e:
+                logger.debug("download-failed InfoBar failed: %s", e)
+            QDesktopServices.openUrl(QUrl(release_url))
+
+        worker.progress.connect(_on_progress)
+        worker.done.connect(_on_done)
+        worker.failed.connect(_on_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda: setattr(self, "_update_dl_thread", None))
+        self._update_dl_thread = thread
+        self._update_dl_worker = worker
+        thread.start()
+
+    def _reveal_in_file_manager(self, path: str) -> None:
+        """Open the OS file manager with ``path`` selected.
+
+        Windows: ``explorer.exe /select,<path>`` highlights the file in
+        an Explorer window so the user can drag it onto their Crimson
+        Desert install (or onto their old CDUMM3.exe).
+
+        macOS: ``open -R <path>`` does the equivalent in Finder.
+
+        Linux / fallback: just open the parent folder via ``open_path``,
+        because xdg-open has no portable "select" verb.
+        """
+        from pathlib import Path
+        import subprocess
+        p = Path(path)
+        try:
+            if IS_WINDOWS:
+                subprocess.Popen(
+                    ["explorer.exe", f"/select,{p}"],
+                    **subprocess_no_window_kwargs())
+                return
+            if IS_MACOS:
+                subprocess.Popen(["open", "-R", str(p)])
+                return
+        except Exception as e:
+            logger.debug("reveal-in-file-manager failed: %s", e)
+        # Fallback: open the parent directory.
+        try:
+            open_path(str(p.parent))
+        except Exception as e:
+            logger.debug("fallback open_path(parent) failed: %s", e)
+
     def _show_update_banner(self, tag: str, url: str) -> None:
         """Show a persistent update banner at the top of the window."""
         from PySide6.QtWidgets import QHBoxLayout, QWidget
         from PySide6.QtGui import QFont, QDesktopServices
         from PySide6.QtCore import QUrl
         from qfluentwidgets import (BodyLabel, PushButton, TransparentToolButton,
-                                    FluentIcon)
+                                    HyperlinkButton, FluentIcon)
 
         if hasattr(self, '_update_banner') and self._update_banner:
             self._update_banner.deleteLater()
@@ -1803,13 +1952,42 @@ class CdummWindow(FluentWindow):
         layout.addWidget(label)
         layout.addStretch()
 
+        # Primary "Download" button. On Windows / macOS we resolve the
+        # release asset (CDUMM3.exe / CDUMM-<v>-macos-arm64.dmg) and
+        # download it directly into the user's Downloads folder, then
+        # reveal it in the file manager. scottykyzer on Nexus reported
+        # being dropped on the GitHub releases page and getting confused
+        # by .dmg + source-zip clutter — non-developer users can't
+        # always find the right file. On unsupported platforms (Linux),
+        # fall back to opening the GitHub release page (legacy behaviour).
+        from cdumm.engine.update_checker import asset_for_current_platform
+        asset = asset_for_current_platform(tag)
+
         btn = PushButton(tr("main.download"), banner)
         bf = btn.font()
         bf.setPixelSize(12)
         btn.setFont(bf)
         btn.setFixedHeight(26)
-        btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+        if asset:
+            btn.clicked.connect(
+                lambda: self._start_direct_update_download(tag, asset, url))
+        else:
+            btn.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(url)))
         layout.addWidget(btn)
+
+        # Secondary "Release notes" link — keeps the GitHub page one
+        # click away for users who do want the changelog / source
+        # tarball / older builds. HyperlinkButton renders as plain
+        # underlined text, so it doesn't compete visually with the
+        # primary Download button.
+        if url:
+            notes_btn = HyperlinkButton(url, tr("main.release_notes"), banner)
+            nf = notes_btn.font()
+            nf.setPixelSize(12)
+            notes_btn.setFont(nf)
+            notes_btn.setFixedHeight(26)
+            layout.addWidget(notes_btn)
 
         # Close (X) button — dismisses the banner this session AND
         # remembers the tag so it won't reappear next launch (until

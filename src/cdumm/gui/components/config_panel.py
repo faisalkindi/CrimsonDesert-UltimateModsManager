@@ -299,6 +299,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -361,7 +362,8 @@ def _make_badge(text: str, bg: str = "#2878D0", fg: str = "#FFFFFF") -> QLabel:
 # ======================================================================
 
 class _ResizeHandle(QWidget):
-    """A 4-pixel-wide invisible drag handle on the panel's right edge.
+    """An 8-pixel-wide drag handle on the panel's right edge with a
+    1 px visible centerline so users can SEE where to grab.
 
     On press, snapshots the panel's current width and the global mouse
     X. On move, computes ``new_width = start_width + (cursor_dx)``.
@@ -370,6 +372,12 @@ class _ResizeHandle(QWidget):
     panel and dragging LEFT grows it from the user's perspective. We
     flip the delta sign so the gesture matches user intuition: drag
     LEFT to make the panel wider, drag RIGHT to shrink it.
+
+    Bug #5 (scottykyzer + Bekwit, Nexus 2026-05-09 / 2026-05-10): the
+    original 4 px translucent handle was invisible, so users reported
+    "It can't be resized." Widening to 8 px and painting a faint
+    centerline gives the gesture a discoverable affordance. Hover
+    brightens the line for stronger feedback.
     """
 
     def __init__(self, parent_panel) -> None:
@@ -377,10 +385,46 @@ class _ResizeHandle(QWidget):
         self._panel = parent_panel
         self._drag_start_x: float | None = None
         self._drag_start_width: int | None = None
+        self._hovered: bool = False
         self.setCursor(Qt.CursorShape.SizeHorCursor)
-        self.setFixedWidth(4)
-        # Transparent — no visual chrome, just a hot zone for the cursor.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # 8 px gives both a usable hit zone and room for a visible
+        # centerline that doesn't sit flush against the panel edge.
+        self.setFixedWidth(8)
+        # Track hover for paintEvent feedback. Without this we never
+        # get enterEvent/leaveEvent on a plain QWidget.
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def enterEvent(self, e):  # noqa: N802
+        self._hovered = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):  # noqa: N802
+        self._hovered = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, e):  # noqa: N802
+        # Paint a 1 px vertical line centered in the handle. Theme-aware
+        # muted gray; brightens on hover so the user can confirm the
+        # handle is interactive. We deliberately do NOT fill the whole
+        # rect — the panel's own background should show through so the
+        # handle reads as a subtle separator, not a chunky bar.
+        painter = QPainter(self)
+        try:
+            dark = isDarkTheme()
+            if dark:
+                base = QColor(180, 180, 180, 90)
+                hover = QColor(220, 220, 220, 180)
+            else:
+                base = QColor(120, 120, 120, 90)
+                hover = QColor(70, 70, 70, 180)
+            color = hover if self._hovered else base
+            painter.setPen(color)
+            cx = self.width() // 2
+            painter.drawLine(cx, 0, cx, self.height())
+        finally:
+            painter.end()
 
     def mousePressEvent(self, e):  # noqa: N802
         self._drag_start_x = e.globalPosition().x()

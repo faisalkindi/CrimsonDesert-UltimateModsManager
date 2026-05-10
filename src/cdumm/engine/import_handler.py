@@ -2593,6 +2593,31 @@ def _import_from_extracted(
                 )
             if jp_data.get("patches"):
                 _store_json_patches(db, result, jp_data, game_dir)
+            # Sibling raw-file replacements (7z / rar path). Same
+            # shape as the zip + folder branches; without this
+            # follow-up users importing crewny23 mod 1543 from a
+            # 7z or rar download lost the loose-file iteminfo.pabgb
+            # and got weapons but no armor.
+            _jp_mod_id = entr_result.get("mod_id")
+            if _jp_mod_id is not None:
+                sibling_matches = (
+                    _detect_raw_file_replacements_via_pamt(
+                        tmp_path, game_dir))
+                sibling_matches = [
+                    m for m in sibling_matches
+                    if m[1].suffix.lower() != ".json"
+                ]
+                if sibling_matches:
+                    added = _persist_raw_match_deltas(
+                        _jp_mod_id, sibling_matches, db, deltas_dir)
+                    db.connection.commit()
+                    logger.info(
+                        "JSON byte-patch mod %d (extracted-archive "
+                        "import) also imported %d sibling raw-file "
+                        "replacement(s): %s",
+                        _jp_mod_id, len(added), added)
+                    result.changed_files = list(
+                        result.changed_files) + added
             return result
         # Fall through if ENTR import failed
 
@@ -3472,6 +3497,33 @@ def import_from_folder(
                     "(%d files changed)",
                     jp_data["_json_path"].name, jp_name,
                     len(result.changed_files))
+            # Sibling raw-file replacements: same shape as the
+            # import_from_zip branch (lines 3001-3037). v3.2.15's
+            # original fix only patched the zip path; folder-drops
+            # of the same mod (crewny23 mod 1543 extracted)
+            # silently dropped the loose-file iteminfo.pabgb so
+            # users got weapons but no armor. Hot regression
+            # reported by niyaruza + IIIF0RERUNNER 2026-05-10.
+            _jp_mod_id = entr_result.get("mod_id")
+            if _jp_mod_id is not None:
+                sibling_matches = (
+                    _detect_raw_file_replacements_via_pamt(
+                        folder_path, game_dir))
+                sibling_matches = [
+                    m for m in sibling_matches
+                    if m[1].suffix.lower() != ".json"
+                ]
+                if sibling_matches:
+                    added = _persist_raw_match_deltas(
+                        _jp_mod_id, sibling_matches, db, deltas_dir)
+                    db.connection.commit()
+                    logger.info(
+                        "JSON byte-patch mod %d (folder import) also "
+                        "imported %d sibling raw-file "
+                        "replacement(s): %s",
+                        _jp_mod_id, len(added), added)
+                    result.changed_files = list(
+                        result.changed_files) + added
         if primary_result is not None:
             return primary_result
 

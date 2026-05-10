@@ -80,7 +80,10 @@ def test_single_json_only_folder_still_uses_json_branch():
     # (that short-circuit is correct when there are no NNNN dirs).
     anchor = src.find("jp_list = detect_json_patches_all(folder_path)")
     assert anchor != -1
-    branch = src[anchor:anchor + 3500]
+    # Window widened 2026-05-10 after the JSON branch grew its own
+    # sibling raw-file pass (mod 1543 armor regression fix); the
+    # `return primary_result` short-circuit moved further down.
+    branch = src[anchor:anchor + 6000]
     assert "return primary_result" in branch, (
         "JSON-only folders must still return early after importing "
         "their JSON patches")
