@@ -1,5 +1,7 @@
 """CDUMM v3 mod list components: StatusBadge, ModCard, FolderGroup, DragTargetIndicator."""
 
+import logging
+
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QMimeData
 from PySide6.QtGui import QColor, QDrag, QFont, QPixmap
 from PySide6.QtWidgets import (
@@ -23,6 +25,8 @@ from qfluentwidgets import (
 )
 
 from cdumm.i18n import tr
+
+logger = logging.getLogger(__name__)
 
 
 def _is_draggable_card(widget) -> bool:
@@ -1100,59 +1104,70 @@ class FolderGroup(QWidget):
         is null-checked before ``.widget()`` is invoked. This eliminates a
         reported crash where dragging a batch of cards into a folder mid-
         reparent would dereference a None layout item.
+
+        Crash diagnostics: any unexpected exception during the layout
+        mutation is logged with a full stack trace before being re-raised
+        so we can capture actionable traces from user crash reports
+        (Nexus bug #6, RubyR47, "drag a mod to a folder" crash).
         """
-        self._drag_indicator.setVisible(False)
+        try:
+            self._drag_indicator.setVisible(False)
 
-        # Convert logical slot to layout index
-        cards_in_layout = []
-        for i in range(self._content_layout.count()):
-            item = self._content_layout.itemAt(i)
-            if item is None:
-                continue
-            w = item.widget()
-            if _is_draggable_card(w):
-                cards_in_layout.append(i)
+            # Convert logical slot to layout index
+            cards_in_layout = []
+            for i in range(self._content_layout.count()):
+                item = self._content_layout.itemAt(i)
+                if item is None:
+                    continue
+                w = item.widget()
+                if _is_draggable_card(w):
+                    cards_in_layout.append(i)
 
-        slot = max(0, self._drop_slot)
-        if slot < len(cards_in_layout):
-            indicator_index = cards_in_layout[slot]
-        elif cards_in_layout:
-            indicator_index = cards_in_layout[-1] + 1
-        else:
-            indicator_index = self._content_layout.count()
+            slot = max(0, self._drop_slot)
+            if slot < len(cards_in_layout):
+                indicator_index = cards_in_layout[slot]
+            elif cards_in_layout:
+                indicator_index = cards_in_layout[-1] + 1
+            else:
+                indicator_index = self._content_layout.count()
 
-        # Collect all cards and remove them from their current groups
-        cards = []
-        source_groups: set[FolderGroup] = set()
-        for mid in mod_ids:
-            card = self._find_card_anywhere(mid)
-            if card is None:
-                continue
-            # Find which group owns this card and remove it
-            owner = card.parent()
-            while owner and not isinstance(owner, FolderGroup):
-                owner = owner.parent()
-            if owner and isinstance(owner, FolderGroup):
-                owner._content_layout.removeWidget(card)
-                source_groups.add(owner)
-            cards.append(card)
+            # Collect all cards and remove them from their current groups
+            cards = []
+            source_groups: set[FolderGroup] = set()
+            for mid in mod_ids:
+                card = self._find_card_anywhere(mid)
+                if card is None:
+                    continue
+                # Find which group owns this card and remove it
+                owner = card.parent()
+                while owner and not isinstance(owner, FolderGroup):
+                    owner = owner.parent()
+                if owner and isinstance(owner, FolderGroup):
+                    owner._content_layout.removeWidget(card)
+                    source_groups.add(owner)
+                cards.append(card)
 
-        if not cards:
-            return
+            if not cards:
+                return
 
-        # Insert all cards at the indicator position (in order)
-        insert_at = min(indicator_index, self._content_layout.count())
-        for i, card in enumerate(cards):
-            self._content_layout.insertWidget(insert_at + i, card)
+            # Insert all cards at the indicator position (in order)
+            insert_at = min(indicator_index, self._content_layout.count())
+            for i, card in enumerate(cards):
+                self._content_layout.insertWidget(insert_at + i, card)
 
-        # Update counts on all affected groups
-        for fg in source_groups | {self}:
-            fg.set_count(len(fg.get_mod_ids()))
+            # Update counts on all affected groups
+            for fg in source_groups | {self}:
+                fg.set_count(len(fg.get_mod_ids()))
 
-        # Emit signals only for mods that were actually moved
-        self.order_changed.emit(self.get_mod_ids())
-        for card in cards:
-            self.mod_moved_to_group.emit(card.mod_id, self._group_id)
+            # Emit signals only for mods that were actually moved
+            self.order_changed.emit(self.get_mod_ids())
+            for card in cards:
+                self.mod_moved_to_group.emit(card.mod_id, self._group_id)
+        except Exception as e:
+            logger.error(
+                "drop-event crash in _handle_drop_batch: %s", e, exc_info=True
+            )
+            raise
 
     # ── Header events ───────────────────────────────────────────────────
 
@@ -1166,31 +1181,37 @@ class FolderGroup(QWidget):
 
     def _on_header_move(self, event) -> None:
         """Start a folder drag if the header is dragged far enough."""
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            return
-        if self._group_id is None:
-            return  # Can't drag the Ungrouped folder
-        if not hasattr(self, '_folder_drag_start'):
-            return
-        distance = (event.pos() - self._folder_drag_start).manhattanLength()
-        if distance < 20:
-            return
+        try:
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                return
+            if self._group_id is None:
+                return  # Can't drag the Ungrouped folder
+            if not hasattr(self, '_folder_drag_start'):
+                return
+            distance = (event.pos() - self._folder_drag_start).manhattanLength()
+            if distance < 20:
+                return
 
-        self._folder_drag_started = True
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData("application/x-cdumm-folder-id", str(self._group_id).encode())
-        drag.setMimeData(mime)
+            self._folder_drag_started = True
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setData("application/x-cdumm-folder-id", str(self._group_id).encode())
+            drag.setMimeData(mime)
 
-        # Render header as drag pixmap
-        pixmap = QPixmap(self._header.size())
-        bg = QColor(_CARD_COLORS[_theme_key()]["bg"])
-        pixmap.fill(bg)
-        self._header.render(pixmap)
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(event.pos())
+            # Render header as drag pixmap
+            pixmap = QPixmap(self._header.size())
+            bg = QColor(_CARD_COLORS[_theme_key()]["bg"])
+            pixmap.fill(bg)
+            self._header.render(pixmap)
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(event.pos())
 
-        drag.exec(Qt.DropAction.MoveAction)
+            drag.exec(Qt.DropAction.MoveAction)
+        except Exception as exc:
+            logger.error(
+                "drop-event crash in _on_header_move: %s", exc, exc_info=True
+            )
+            raise
 
     # ── Drag-drop onto group header ────────────────────────────────────
 
@@ -1208,28 +1229,34 @@ class FolderGroup(QWidget):
 
     def dropEvent(self, event):  # noqa: N802
         """Accept drops on the group header — mod cards or folder reorder."""
-        # Folder reorder: a folder was dropped onto this folder's header
-        if event.mimeData().hasFormat("application/x-cdumm-folder-id"):
-            dragged_id = int(event.mimeData().data("application/x-cdumm-folder-id").data().decode())
-            if self._group_id is not None and dragged_id != self._group_id:
-                self.folder_dropped.emit(dragged_id, self._group_id)
-            event.acceptProposedAction()
-            return
+        try:
+            # Folder reorder: a folder was dropped onto this folder's header
+            if event.mimeData().hasFormat("application/x-cdumm-folder-id"):
+                dragged_id = int(event.mimeData().data("application/x-cdumm-folder-id").data().decode())
+                if self._group_id is not None and dragged_id != self._group_id:
+                    self.folder_dropped.emit(dragged_id, self._group_id)
+                event.acceptProposedAction()
+                return
 
-        # Mod card drop
-        if not event.mimeData().hasFormat("application/x-cdumm-mod-id"):
-            return
-        if event.mimeData().hasFormat("application/x-cdumm-mod-ids"):
-            ids_bytes = event.mimeData().data("application/x-cdumm-mod-ids").data()
-            mod_ids = [int(x) for x in ids_bytes.decode().split(",") if x]
-        else:
-            mod_id_bytes = event.mimeData().data("application/x-cdumm-mod-id").data()
-            mod_ids = [int(mod_id_bytes.decode())]
-        # Drop at end of group — null-safe via _iter_cards.
-        card_count = sum(1 for _ in self._iter_cards())
-        self._drop_slot = card_count
-        self._handle_drop_batch(mod_ids)
-        event.acceptProposedAction()
+            # Mod card drop
+            if not event.mimeData().hasFormat("application/x-cdumm-mod-id"):
+                return
+            if event.mimeData().hasFormat("application/x-cdumm-mod-ids"):
+                ids_bytes = event.mimeData().data("application/x-cdumm-mod-ids").data()
+                mod_ids = [int(x) for x in ids_bytes.decode().split(",") if x]
+            else:
+                mod_id_bytes = event.mimeData().data("application/x-cdumm-mod-id").data()
+                mod_ids = [int(mod_id_bytes.decode())]
+            # Drop at end of group — null-safe via _iter_cards.
+            card_count = sum(1 for _ in self._iter_cards())
+            self._drop_slot = card_count
+            self._handle_drop_batch(mod_ids)
+            event.acceptProposedAction()
+        except Exception as exc:
+            logger.error(
+                "drop-event crash in FolderGroup.dropEvent: %s", exc, exc_info=True
+            )
+            raise
 
     def contextMenuEvent(self, event):  # noqa: N802
         # Only emit for header area
@@ -1262,14 +1289,22 @@ class _DroppableContainer(QWidget):
         self._group._hide_indicator()
 
     def dropEvent(self, event):  # noqa: N802
-        if not event.mimeData().hasFormat("application/x-cdumm-mod-id"):
-            return
-        # Check for multi-id drop
-        if event.mimeData().hasFormat("application/x-cdumm-mod-ids"):
-            ids_bytes = event.mimeData().data("application/x-cdumm-mod-ids").data()
-            mod_ids = [int(x) for x in ids_bytes.decode().split(",") if x]
-        else:
-            mod_id_bytes = event.mimeData().data("application/x-cdumm-mod-id").data()
-            mod_ids = [int(mod_id_bytes.decode())]
-        self._group._handle_drop_batch(mod_ids)
-        event.acceptProposedAction()
+        try:
+            if not event.mimeData().hasFormat("application/x-cdumm-mod-id"):
+                return
+            # Check for multi-id drop
+            if event.mimeData().hasFormat("application/x-cdumm-mod-ids"):
+                ids_bytes = event.mimeData().data("application/x-cdumm-mod-ids").data()
+                mod_ids = [int(x) for x in ids_bytes.decode().split(",") if x]
+            else:
+                mod_id_bytes = event.mimeData().data("application/x-cdumm-mod-id").data()
+                mod_ids = [int(mod_id_bytes.decode())]
+            self._group._handle_drop_batch(mod_ids)
+            event.acceptProposedAction()
+        except Exception as exc:
+            logger.error(
+                "drop-event crash in _DroppableContainer.dropEvent: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
