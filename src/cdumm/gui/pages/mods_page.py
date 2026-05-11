@@ -285,6 +285,19 @@ class ModsPage(QWidget):
         # Ctrl+A shortcut — select all visible cards (visual selection, not enable/disable)
         QShortcut(QKeySequence.StandardKey.SelectAll, self, self._on_ctrl_a)
 
+        # Esc — clear visual highlights, mirroring the muscle memory from
+        # Windows Explorer / VS Code multi-cursor / every other multi-
+        # select UI. Only clears the transient highlight; the per-card
+        # enable-checkbox is untouched on purpose, because that
+        # represents persistent game state and Esc is "abort selection",
+        # not "revert state". Scoped to this page's widget tree so we
+        # don't compete with Esc handlers elsewhere (search clears its
+        # own field, inline rename commits via editingFinished, etc.).
+        esc_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Escape), self,
+            self._deselect_all_cards)
+        esc_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -353,6 +366,30 @@ class ModsPage(QWidget):
             "PushButton:hover { background: #223450; }"
             "PushButton:pressed { background: #2A3C58; }")
         select_row.addWidget(self._new_folder_btn)
+
+        # Bulk uninstall button — sits alongside New Folder / View
+        # Conflicts so users can do a one-shot cleanup ("start fresh"
+        # workflow). Stays disabled while nothing is selected so it
+        # can't accidentally fire. Sized to match the other action
+        # buttons in this row.
+        self._uninstall_selected_btn = PushButton(
+            FluentIcon.DELETE, tr("mod_list.uninstall_selected"))
+        self._uninstall_selected_btn.setFixedHeight(32)
+        self._uninstall_selected_btn.setFont(_nbf)
+        self._uninstall_selected_btn.setEnabled(False)
+        self._uninstall_selected_btn.setToolTip(
+            tr("mod_list.uninstall_selected_tooltip"))
+        self._uninstall_selected_btn.clicked.connect(self._on_uninstall_selected)
+        setCustomStyleSheet(self._uninstall_selected_btn,
+            "PushButton { background: #FFF4F0; color: #D04848; border: 1px solid #F0B8B0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #FFE8E0; }"
+            "PushButton:pressed { background: #FFD8CC; }"
+            "PushButton:disabled { background: #F5F5F5; color: #B0B0B0; border: 1px solid #E0E0E0; }",
+            "PushButton { background: #401A1A; color: #F08080; border: 1px solid #602828; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
+            "PushButton:hover { background: #502222; }"
+            "PushButton:pressed { background: #582828; }"
+            "PushButton:disabled { background: #252830; color: #5A5E68; border: 1px solid #3A3E48; }")
+        select_row.addWidget(self._uninstall_selected_btn)
 
         # Dedicated conflict-order view (Miki990 UX request). Opens a
         # modal dialog listing every currently-active conflict alongside
@@ -619,6 +656,9 @@ class ModsPage(QWidget):
         self._select_all_cb.blockSignals(True)
         self._select_all_cb.setChecked(bool(all_checked))
         self._select_all_cb.blockSignals(False)
+        # Cards were rebuilt fresh — visual selection state is wiped, so
+        # the bulk-uninstall button must drop back to its empty state.
+        self._sync_uninstall_selected_btn()
         # Re-apply cached NexusMods update colors to the newly-built cards.
         # Without this, any refresh() after an import/apply wipes green/red
         # pills back to default grey until the 30-min update timer re-fires.
@@ -632,6 +672,12 @@ class ModsPage(QWidget):
         self._search_edit.setPlaceholderText(tr("mod_list.search_placeholder"))
         self._select_all_cb.setText(tr("mod_list.select_all"))
         self._new_folder_btn.setText(tr("mod_list.new_folder"))
+        # Re-render the bulk-uninstall button — its label includes the
+        # selection count so we re-run the sync helper instead of just
+        # calling setText with the static fallback.
+        self._uninstall_selected_btn.setToolTip(
+            tr("mod_list.uninstall_selected_tooltip"))
+        self._sync_uninstall_selected_btn()
         self._summary_bar.retranslate_ui()
         # Re-render every red "Click To Update" pill in the new
         # locale (H3 fix). Without this, the pill stays in the old
@@ -1091,6 +1137,7 @@ class ModsPage(QWidget):
                 else:
                     card.set_pending(None)
         self._update_stats()
+        self._sync_uninstall_selected_btn()
         self._resume_db_watcher()
 
     def _sync_select_all(self) -> None:
@@ -1144,6 +1191,10 @@ class ModsPage(QWidget):
                 break
 
         self._update_stats()
+        # The bulk-uninstall button falls back to checkbox state when
+        # there's no visual selection, so a single checkbox toggle has
+        # to refresh its label/enabled state.
+        self._sync_uninstall_selected_btn()
         self._resume_db_watcher()
 
     # ------------------------------------------------------------------
@@ -1182,6 +1233,7 @@ class ModsPage(QWidget):
             visible[clicked_idx].set_selected(True)
 
         self._last_clicked_index = clicked_idx
+        self._sync_uninstall_selected_btn()
 
     def _on_ctrl_a(self) -> None:
         """Ctrl+A: select all visible cards."""
@@ -1189,6 +1241,7 @@ class ModsPage(QWidget):
         all_selected = all(c.is_selected for c in visible)
         for c in visible:
             c.set_selected(not all_selected)
+        self._sync_uninstall_selected_btn()
 
     def _on_select_all_in_group(self, group_id) -> None:
         """Toggle all checkboxes (enable/disable) for mods in a specific group."""
@@ -1213,15 +1266,85 @@ class ModsPage(QWidget):
                 else:
                     c.set_pending(None)
         self._update_stats()
+        self._sync_uninstall_selected_btn()
 
     def _deselect_all_cards(self) -> None:
         """Clear selection from all cards."""
         for card in self._mod_cards:
             card.set_selected(False)
+        self._sync_uninstall_selected_btn()
 
     def _get_selected_mod_ids(self) -> list[int]:
         """Return mod_ids of all selected cards."""
         return [c.mod_id for c in self._mod_cards if c.is_selected]
+
+    def _get_uninstall_target_ids(self) -> list[int]:
+        """Return mod_ids the bulk-uninstall button should act on.
+
+        UNION of the two ways users tell us "I picked this one":
+
+        - Per-card enable-checkbox is ticked.
+        - Card is visually highlighted via Ctrl+Click / Shift+Click /
+          a plain card-body click (Explorer-style).
+
+        The earlier "visual selection wins" priority rule caused a
+        sticky-mode bug — plain-clicking a card body locked the button
+        onto the visual set and silently ignored checkbox toggles
+        until the user double-tapped "Select all" to clear the
+        highlight. A union dodges that: both inputs always count, the
+        button can only grow from extra clicks, and the count is
+        always explainable as "ticked OR highlighted".
+
+        Order is preserved as it appears in ``_mod_cards`` so the
+        batch-uninstall flow processes mods in load-order.
+        """
+        target_ids: list[int] = []
+        seen: set[int] = set()
+        for c in self._mod_cards:
+            if c.mod_id in seen:
+                continue
+            if c._checkbox.isChecked() or c.is_selected:
+                target_ids.append(c.mod_id)
+                seen.add(c.mod_id)
+        return target_ids
+
+    def _sync_uninstall_selected_btn(self) -> None:
+        """Update the bulk-uninstall button's label and enabled state.
+
+        Called from every selection-changing path (select-all, Ctrl+A,
+        click/Ctrl+Click/Shift+Click, context-menu pre-select, refresh,
+        and per-card checkbox toggles). The button shows the live count
+        so users know exactly what the click will hit before they pull
+        the trigger.
+        """
+        # Guard against early calls during teardown — the button is
+        # constructed once in `_build_ui`, but `_sync_*` helpers can also
+        # be invoked from refresh paths that run before/after teardown
+        # in tests.
+        btn = getattr(self, "_uninstall_selected_btn", None)
+        if btn is None:
+            return
+        count = len(self._get_uninstall_target_ids())
+        if count > 0:
+            btn.setText(tr("mod_list.uninstall_selected_n", count=count))
+            btn.setEnabled(True)
+        else:
+            btn.setText(tr("mod_list.uninstall_selected"))
+            btn.setEnabled(False)
+
+    def _on_uninstall_selected(self) -> None:
+        """Bulk-uninstall everything that is currently selected.
+
+        Thin wrapper over the existing batch-uninstall path so the
+        button + the right-click "Uninstall N mods" menu share one code
+        path (confirm dialog, disable → apply → remove flow). When the
+        user selects all and clicks this, it doubles as a "start fresh"
+        cleanup.
+        """
+        target_ids = self._get_uninstall_target_ids()
+        if not target_ids:
+            return
+        self._ctx_batch_uninstall(target_ids)
 
     # ------------------------------------------------------------------
     # Config panel
@@ -2092,6 +2215,7 @@ class ModsPage(QWidget):
                     c.set_selected(True)
                     break
             selected_ids = [mod_id]
+            self._sync_uninstall_selected_btn()
 
         multi = len(selected_ids) > 1
 
