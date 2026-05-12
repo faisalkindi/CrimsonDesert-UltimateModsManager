@@ -38,18 +38,45 @@ class TransactionalIO:
         surfaces clearly.
         """
         if Path(rel_path).is_absolute():
-            # Log the caller stack so the apply error tells us which
-            # call site is constructing absolute paths.
-            import traceback
-            stack = "".join(traceback.format_stack()[-5:-1])
-            logger.error(
-                "stage_file got absolute path %r — caller stack:\n%s",
-                rel_path, stack)
-            raise ValueError(
-                f"stage_file requires a relative path; got absolute "
-                f"{rel_path!r}. Pass the path relative to game_dir "
-                f"(e.g. '0012/4.paz')."
-            )
+            # Faisal 2026-05-12 GitHub #103 (OneManErmey) and the
+            # earlier intermittent on Eldrax2 #95: prior CDUMM versions
+            # left absolute paths inside mod_deltas.file_path for some
+            # import code paths. Once those rows are in the DB, every
+            # subsequent Phase 3 revert hard-raises here until the user
+            # re-imports the affected mods, which is not the right
+            # failure mode. If the absolute path is actually under our
+            # game_dir, strip the prefix and continue; this lets users
+            # with stale buggy DB rows apply mods again without forcing
+            # a re-import. The guard still raises for genuinely-broken
+            # callers whose absolute path is NOT under game_dir (eg a
+            # path leaked from another install). Log the caller stack
+            # at warning level so the upstream bug is still visible.
+            abs_path = Path(rel_path)
+            try:
+                normalised = abs_path.relative_to(self._game_dir)
+                rel_path = str(normalised).replace(os.sep, "/")
+                import traceback
+                stack = "".join(traceback.format_stack()[-5:-1])
+                logger.warning(
+                    "stage_file received absolute path %r under "
+                    "game_dir; normalising to %r and continuing. "
+                    "Upstream caller stack (please fix the importer "
+                    "if this repeats):\n%s",
+                    str(abs_path), rel_path, stack)
+            except ValueError:
+                # Absolute path is NOT under game_dir, this is the
+                # genuine-bug case the original guard was added for.
+                import traceback
+                stack = "".join(traceback.format_stack()[-5:-1])
+                logger.error(
+                    "stage_file got absolute path %r outside game_dir "
+                    "%r — refusing. Caller stack:\n%s",
+                    rel_path, str(self._game_dir), stack)
+                raise ValueError(
+                    f"stage_file requires a relative path; got "
+                    f"absolute {rel_path!r}. Pass the path relative to "
+                    f"game_dir (e.g. '0012/4.paz')."
+                )
         staged_path = self._staging_dir / rel_path.replace("/", os.sep)
         staged_path.parent.mkdir(parents=True, exist_ok=True)
         staged_path.write_bytes(data)
