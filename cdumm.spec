@@ -208,6 +208,22 @@ a = Analysis(
         'cryptography.hazmat.primitives.ciphers.aead',
         'cryptography.hazmat.primitives.kdf.pbkdf2',
         'cryptography.hazmat.backends',
+        # Faisal 2026-05-12 GitHub #113 (hhkbble): Nexus SSO login uses
+        # the websocket-client package (imported as ``websocket``) inside
+        # cdumm.engine.nexus_sso. PyInstaller's static analyser missed it
+        # because the import is wrapped in a try/except and only fires on
+        # the SSO code path, not at app startup. Add it explicitly so the
+        # frozen exe ships the package and the SSO flow does not fail
+        # with "The 'websocket-client' Python package is required".
+        'websocket',
+        'websocket._app',
+        'websocket._core',
+        'websocket._exceptions',
+        'websocket._handshake',
+        'websocket._http',
+        'websocket._socket',
+        'websocket._url',
+        'websocket._utils',
     ] + _qflw_hiddenimports,
     hookspath=[],
     hooksconfig={},

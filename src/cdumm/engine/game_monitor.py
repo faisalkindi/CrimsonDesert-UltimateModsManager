@@ -187,13 +187,36 @@ def find_latest_dump(after_ts: float) -> Path | None:
 
 # ── Steam integration ─────────────────────────────────────────────
 
+def _sanitise_app_id(raw: str) -> str | None:
+    """Return ``raw`` if it is a clean numeric app id, else None.
+
+    Faisal 2026-05-12 GitHub #88 (zvitko-hue): Franci's steam_appid.txt
+    or its source equivalent contained an embedded null character.
+    ``.strip()`` only removes leading/trailing whitespace, not inner
+    nulls, so the resulting id was something like "3321460\x00".
+    Python's ``os.startfile`` rejects strings containing embedded
+    nulls with ``ValueError: startfile: embedded null character in
+    filepath`` and the launcher silently bailed. Steam app ids are
+    always purely numeric, so the fix is to filter to digits and
+    require the result is non-empty; otherwise the caller falls back
+    to the known-good FALLBACK_APP_ID.
+    """
+    if not raw:
+        return None
+    digits = "".join(c for c in raw if c.isdigit())
+    return digits or None
+
+
 def get_steam_app_id(game_dir: Path) -> str:
     """Detect Steam app ID for Crimson Desert."""
     for sub in ["", "bin64"]:
         appid_file = game_dir / sub / "steam_appid.txt"
         if appid_file.exists():
             try:
-                return appid_file.read_text(encoding="utf-8").strip()
+                cleaned = _sanitise_app_id(
+                    appid_file.read_text(encoding="utf-8"))
+                if cleaned:
+                    return cleaned
             except OSError:
                 pass
     steamapps = game_dir.parent.parent
@@ -203,7 +226,11 @@ def get_steam_app_id(game_dir: Path) -> str:
                 try:
                     content = (steamapps / fn).read_text(encoding="utf-8")
                     if "Crimson Desert" in content:
-                        return fn.replace("appmanifest_", "").replace(".acf", "")
+                        manifest_id = fn.replace(
+                            "appmanifest_", "").replace(".acf", "")
+                        cleaned = _sanitise_app_id(manifest_id)
+                        if cleaned:
+                            return cleaned
                 except OSError:
                     pass
     return FALLBACK_APP_ID
