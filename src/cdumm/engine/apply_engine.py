@@ -360,6 +360,35 @@ def aggregate_json_mods_into_synthetic_patches(
         except (ValueError, TypeError):
             custom_vals = None
 
+        # Format 3 mods carry their target + intent count in a different
+        # shape than Format 1 / 2 patch-list mods. They are routed
+        # through cdumm.engine.format3_apply which produces its own
+        # summary line, but the per-mod display log here used to render
+        # them as "0 change(s) → []" because data.get("patches", [])
+        # returned an empty list. That misled pitonpp GitHub #105 into
+        # thinking his Format 3 mods were not applying when the real
+        # problem (the iteminfo intent silently dropping on macOS) was
+        # separate. Detect Format 3 here so the display log can label
+        # the entry honestly. Parsing failures fall through to the
+        # legacy 0-change record (which matches the old behaviour).
+        is_format3 = False
+        f3_target_files: list[str] = []
+        f3_intent_count = 0
+        if data.get("format") == 3:
+            try:
+                from cdumm.engine.format3_handler import (
+                    parse_format3_mod_targets)
+                target_pairs = parse_format3_mod_targets(jp_path)
+                is_format3 = True
+                for tgt, ints in target_pairs:
+                    f3_target_files.append(tgt)
+                    f3_intent_count += len(ints)
+            except (ValueError, OSError, ImportError) as _e_f3:
+                logger.debug(
+                    "aggregate: mod %d parse_format3_mod_targets failed "
+                    "(%s); falling back to legacy summary row",
+                    mod_id, _e_f3)
+
         targets_this_mod: set[str] = set()
         flat_idx = 0
         for patch in data.get("patches", []):
@@ -422,12 +451,26 @@ def aggregate_json_mods_into_synthetic_patches(
                         signatures[game_file])
             targets_this_mod.add(game_file)
 
-        per_mod_summary.append({
-            "mod_id": mod_id, "mod_name": mod_name,
-            "priority": priority,
-            "targets": sorted(targets_this_mod),
-            "change_count": flat_idx - len(disabled),
-        })
+        if is_format3 and not targets_this_mod:
+            # Pure Format 3 mod (no legacy patches[] entries): report
+            # the parsed intent count + targets so the display log
+            # reflects what the mod actually ships. The Format 3 apply
+            # pipeline runs separately and writes its own summary line.
+            per_mod_summary.append({
+                "mod_id": mod_id, "mod_name": mod_name,
+                "priority": priority,
+                "targets": sorted(set(f3_target_files)),
+                "change_count": f3_intent_count,
+                "is_format3": True,
+            })
+        else:
+            per_mod_summary.append({
+                "mod_id": mod_id, "mod_name": mod_name,
+                "priority": priority,
+                "targets": sorted(targets_this_mod),
+                "change_count": flat_idx - len(disabled),
+                "is_format3": is_format3,
+            })
 
     synth_patch_data = {
         "modinfo": {
@@ -1754,10 +1797,24 @@ class ApplyWorker(QObject):
                     "file(s) for single-pass patching",
                     len(mod_summary), len(synth_data.get("patches", [])))
                 for m in mod_summary:
-                    logger.info(
-                        "  mod %d '%s' (priority=%d): %d change(s) → %s",
-                        m["mod_id"], m["mod_name"], m["priority"],
-                        m["change_count"], m["targets"])
+                    # Format 3 mods route through a separate writer
+                    # pipeline (cdumm.engine.format3_apply); annotate the
+                    # display line so the count is read as "intents this
+                    # mod ships" not "bytes written through this path".
+                    # The Format 3 apply summary logs actual write counts
+                    # at INFO level immediately after this loop.
+                    if m.get("is_format3"):
+                        logger.info(
+                            "  mod %d '%s' (priority=%d): %d Format 3 "
+                            "intent(s) → %s (applied via Format 3 "
+                            "pipeline, see Format 3 apply summary)",
+                            m["mod_id"], m["mod_name"], m["priority"],
+                            m["change_count"], m["targets"])
+                    else:
+                        logger.info(
+                            "  mod %d '%s' (priority=%d): %d change(s) → %s",
+                            m["mod_id"], m["mod_name"], m["priority"],
+                            m["change_count"], m["targets"])
 
                 if synth_data.get("patches"):
                     # Write synth JSON to a temp file so
