@@ -202,6 +202,18 @@ def expand_format3_into_aggregated(
                 whole_table_mod_ids.setdefault(target, []).append(mod_id)
                 n_mods_changed += 1  # provisional; recounted below if no bytes
                 files_touched.add(target)
+                # Instrumentation for GitHub #105: macOS bundle showed
+                # Buffed Axiom Bracelet (iteminfo Format 3) produce
+                # zero changes with no iteminfo whole-table-writer log
+                # anywhere. This INFO line proves whether the intent
+                # reached this branch on this platform, and exactly
+                # which intents got batched.
+                logger.info(
+                    "Format 3 batched %d supported intent(s) from mod "
+                    "'%s' (id=%d) into whole-table writer queue for %s "
+                    "(queue depth now %d)",
+                    len(validation.supported), mod_name, mod_id,
+                    target, len(whole_table_intents[target]))
                 continue
 
             # Convert each supported intent into a v2-style change dict
@@ -259,8 +271,22 @@ def expand_format3_into_aggregated(
     # collected intents from every contributing mod, serialize once,
     # emit a SINGLE change. This is what makes multi-mod composition
     # work for iteminfo / skill.
+    # Instrumentation for GitHub #105: log the queue depth for every
+    # whole-table target before we dispatch. If a target appears here
+    # with zero intents (or is missing entirely from the dict despite
+    # being expected), the per-mod batched log above will have told us
+    # which mods contributed; this loop tells us what made it through.
+    for _wtt in sorted(_WHOLE_TABLE_TARGETS):
+        logger.info(
+            "Format 3 whole-table dispatch entering for %s: %d "
+            "intent(s) batched",
+            _wtt, len(whole_table_intents.get(_wtt, [])))
     for target, batched in whole_table_intents.items():
         if not batched:
+            logger.info(
+                "Format 3 whole-table writer for %s: queue empty, "
+                "nothing to dispatch (no mod contributed any supported "
+                "intents this run)", target)
             continue
         contributing_mods = whole_table_mod_names.get(target, [])
         vanilla = vanilla_extractor(target)
