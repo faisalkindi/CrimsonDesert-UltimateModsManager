@@ -15,8 +15,8 @@ from cdumm.platform import (
 )
 
 from PySide6.QtCore import Property, QEasingCurve, QObject, QPropertyAnimation, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     FluentWindow,
@@ -862,6 +862,19 @@ class CdummWindow(FluentWindow):
                     lambda: mark_clean_shutdown(self._lock_state))
         except Exception as _e_aq:
             logger.debug("aboutToQuit wiring skipped: %s", _e_aq)
+
+        # ── System tray (game-launch hide-to-tray; GitHub #117) ───────
+        # DankKnight250 reported launching the game through CDUMM dropped
+        # FPS from 60+ to 10-30, but launching through Steam directly
+        # kept 60+. Killing CDUMM3.exe from Task Manager restored FPS.
+        # Root cause: a minimized PySide6/qfluentwidgets window still
+        # paints for DWM's Alt-Tab thumbnail + acrylic compositing, which
+        # contends with the game for GPU. showMinimized() does not stop
+        # this. Truly hide()-ing the window does. To keep that UX safe,
+        # set up a tray icon now so the user can restore CDUMM after the
+        # game session without relaunching the exe.
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._setup_tray_icon()
 
         # ── Deferred startup (after window is visible) ────────────────
         QTimer.singleShot(500, self._deferred_startup)
@@ -5868,6 +5881,71 @@ class CdummWindow(FluentWindow):
             # Recheck NexusMods for updates after apply
             QTimer.singleShot(2000, self._run_nexus_update_check)
 
+    # ── System tray for hide-on-launch (GitHub #117) ──────────────────
+    def _setup_tray_icon(self) -> None:
+        """Create a tray icon used by the game-launch hide-to-tray flow.
+
+        If the platform does not provide a system tray (some Linux
+        sessions, headless), this is a no-op and the launch path falls
+        back to showMinimized().
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.info("System tray not available, hide-on-launch will "
+                        "fall back to minimize")
+            return
+        tray = QSystemTrayIcon(self)
+        tray.setIcon(self.windowIcon())
+        tray.setToolTip(tr("app.name_short") + " v" + __version__)
+        menu = QMenu(self)
+        show_action = QAction(tr("tray.show"), self)
+        show_action.triggered.connect(self._restore_from_tray)
+        quit_action = QAction(tr("tray.quit"), self)
+        quit_action.triggered.connect(self._quit_from_tray)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        self._tray_icon = tray
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._restore_from_tray()
+
+    def _restore_from_tray(self) -> None:
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        self.show()
+        self.setWindowState(
+            (self.windowState() & ~Qt.WindowState.WindowMinimized)
+            | Qt.WindowState.WindowActive)
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        self.close()
+
+    def _hide_for_game_launch(self) -> None:
+        """Truly hide the main window so it stops painting while the
+        game runs. Falls back to showMinimized() when no tray icon is
+        available so the user can still get the window back.
+        """
+        if self._tray_icon is None:
+            self.showMinimized()
+            return
+        self._tray_icon.show()
+        try:
+            self._tray_icon.showMessage(
+                tr("app.name_short"),
+                tr("tray.hidden_msg"),
+                self.windowIcon(),
+                4000)
+        except (RuntimeError, Exception) as _e:
+            logger.debug("Tray balloon failed: %s", _e)
+        self.hide()
+
     def _on_launch_game(self) -> None:
         """Launch the game (cross-platform).
 
@@ -5902,7 +5980,7 @@ class CdummWindow(FluentWindow):
                     title=tr("main.game_launched"),
                     content=tr("main.game_launched_msg"),
                     duration=3000, position=InfoBarPosition.TOP, parent=self)
-                self.showMinimized()
+                self._hide_for_game_launch()
             except Exception as e:
                 InfoBar.error(
                     title=tr("infobar.launch_failed"), content=str(e),
@@ -5947,7 +6025,7 @@ class CdummWindow(FluentWindow):
             InfoBar.success(
                 title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
-            self.showMinimized()
+            self._hide_for_game_launch()
         except Exception as e:
             if steam:
                 # Could not reach Steam. Spawning the bare exe here
@@ -5972,7 +6050,7 @@ class CdummWindow(FluentWindow):
                 InfoBar.success(
                     title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
                     duration=3000, position=InfoBarPosition.TOP, parent=self)
-                self.showMinimized()
+                self._hide_for_game_launch()
             except Exception as e2:
                 InfoBar.error(
                     title=tr("infobar.launch_failed"), content=str(e2),
@@ -7379,6 +7457,16 @@ class CdummWindow(FluentWindow):
                 listener.deleteLater()
             except (RuntimeError, Exception) as _e:
                 logger.debug("Theme listener teardown failed: %s", _e)
+        # Tear down the tray icon so it does not linger after the
+        # process exits. Qt parent-teardown handles deleteLater, but
+        # the visible icon can hang around in the notification area
+        # for a few seconds without an explicit hide() first.
+        tray = getattr(self, "_tray_icon", None)
+        if tray is not None:
+            try:
+                tray.hide()
+            except RuntimeError:
+                pass
         # Stop timers (guard against already-deleted C++ objects — Qt may
         # have reaped children by the time closeEvent fires)
         for timer_name in (

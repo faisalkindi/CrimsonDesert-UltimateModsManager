@@ -14,7 +14,9 @@ from cdumm.i18n import tr
 # UNRELEASED entries land here, no version field, no date. At tag time
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
-_UNRELEASED_NOTES: list[str] = []
+_UNRELEASED_NOTES: list[str] = [
+    "<b>Launching the game now truly hides CDUMM to the system tray instead of just minimising it.</b> DankKnight250 GitHub #117 reported that launching Crimson Desert through CDUMM dropped frames from 60+ to 10-30 while launching directly through Steam stayed at 60+. Killing CDUMM3.exe from Task Manager mid-game restored the frame rate, which pinned the cause to CDUMM continuing to consume GPU while the game ran. The old <code>showMinimized()</code> call left the window in DWM's compositor and qfluentwidgets kept painting for the Alt-Tab thumbnail and acrylic effects even though nothing was on screen. The new behaviour creates a system tray icon on startup and calls <code>hide()</code> on launch, which removes the window from the compositor entirely. Double-click the tray icon or right-click and pick Show CDUMM to bring it back. If the platform does not provide a system tray (some Linux sessions, headless environments), the launch path falls back to <code>showMinimized()</code> so the window does not vanish without a way to restore it.",
+]
 
 CHANGELOG = [
     {
