@@ -649,6 +649,53 @@ def _expand_format3_into_synth_data(
         warnings_out=warnings_out,
         participating_mod_ids=participating_mod_ids,
     )
+
+    # GitHub #121 BloodGozilla: Format 3 mods use the bare basename
+    # form for their `target` field (e.g. "iteminfo.pabgb"), while
+    # legacy Format 1 / 2 patch mods use the full PAZ-internal path
+    # (e.g. "gamedata/iteminfo.pabgb"). Both resolve to the same
+    # physical PAZ entry at mount time, but `aggregated` keys them
+    # separately so process_json_patches_for_overlay produces two
+    # overlay entries with the same destination path. The PAMT
+    # lookup at game launch then returns only one, silently dropping
+    # the other mod's changes. Normalising bare basenames to their
+    # canonical full path here merges Format 3 + legacy contributors
+    # for the same target into a single overlay entry.
+    try:
+        from cdumm.engine.json_patch_handler import _find_pamt_entry
+        normalized: dict[str, list] = {}
+        normalized_sigs: dict[str, str] = {}
+        for key in list(aggregated.keys()):
+            canonical = key
+            if "/" not in key:
+                entry = _find_pamt_entry(key, game_dir)
+                if entry is None and vanilla_dir is not None:
+                    entry = _find_pamt_entry(key, vanilla_dir)
+                if entry is not None and entry.path and entry.path != key:
+                    canonical = entry.path
+            normalized.setdefault(canonical, []).extend(aggregated[key])
+            if key in signatures:
+                normalized_sigs.setdefault(canonical, signatures[key])
+        # Log any merges so a bundle shows the normalisation worked.
+        merges = {
+            k: v for k, v in normalized.items()
+            if k not in aggregated and len(v) > 1
+        }
+        if merges:
+            for canonical, changes in merges.items():
+                logger.info(
+                    "Format 3 aggregator: merged %d change(s) under "
+                    "canonical path %r (was split across bare-name + "
+                    "full-path keys)", len(changes), canonical)
+        aggregated.clear()
+        aggregated.update(normalized)
+        signatures.clear()
+        signatures.update(normalized_sigs)
+    except Exception as _e_norm:
+        logger.warning(
+            "Format 3 aggregator: bare-basename normalisation failed "
+            "(%s); falling through with original keys", _e_norm)
+
     new_keys = set(aggregated.keys()) - pre_keys
     if new_keys or any(len(aggregated[k]) != len(
             next((p["changes"] for p in synth_data.get("patches", [])
