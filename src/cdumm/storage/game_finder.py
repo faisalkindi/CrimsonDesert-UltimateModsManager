@@ -4,7 +4,7 @@ import re
 import sys
 from pathlib import Path
 
-from cdumm.platform import IS_MACOS, IS_WINDOWS
+from cdumm.platform import IS_LINUX, IS_MACOS, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,26 @@ STEAM_DEFAULT_PATHS = [
 # the Linux-style scan below picks those up.
 STEAM_DEFAULT_PATHS_MACOS = [
     Path.home() / "Library" / "Application Support" / "Steam",
+]
+
+# Linux Steam install locations. Steam can live in a few places
+# depending on whether the user installed the native distro package,
+# the Flatpak, or the Snap. ``~/.steam/steam`` is a long-standing
+# symlink most distros maintain pointing at the active install; we
+# still probe the canonical paths so we don't miss installs where
+# the symlink is broken or absent. Crimson Desert itself runs under
+# Proton — the bin64/CrimsonDesert.exe layout that Steam ships on
+# Windows is identical on Linux because Steam doesn't rewrite game
+# files, Proton runs the Windows binary directly.
+STEAM_DEFAULT_PATHS_LINUX = [
+    Path.home() / ".local" / "share" / "Steam",
+    Path.home() / ".steam" / "steam",
+    Path.home() / ".steam" / "root",
+    Path.home() / ".var" / "app" / "com.valvesoftware.Steam"
+    / "data" / "Steam",
+    Path.home() / ".var" / "app" / "com.valvesoftware.Steam"
+    / ".local" / "share" / "Steam",
+    Path.home() / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
 ]
 
 # Common macOS game install locations users pick when not using Steam.
@@ -426,6 +446,66 @@ def _find_macos_game_directories() -> list[Path]:
     return candidates
 
 
+def _find_linux_steam_libraries() -> list[Path]:
+    """Search Linux Steam libraries for Crimson Desert.
+
+    Steam on Linux uses the same ``steamapps/libraryfolders.vdf``
+    layout as Windows and macOS, but lives at different default roots
+    depending on how Steam was installed (native distro package,
+    Flatpak, Snap). The Crimson Desert install layout is identical
+    to the Windows install — Steam doesn't rewrite game files, and
+    Proton runs ``bin64/CrimsonDesert.exe`` directly via Wine. So
+    detection only needs to find the install directory and verify
+    ``bin64/CrimsonDesert.exe`` is present, exactly as on Windows.
+    """
+    candidates: list[Path] = []
+    seen_roots: set[str] = set()
+    for root in STEAM_DEFAULT_PATHS_LINUX:
+        try:
+            if not root.exists():
+                continue
+            # ``~/.steam/steam`` and ``~/.steam/root`` are usually
+            # symlinks to ``~/.local/share/Steam``; resolve once and
+            # dedup so we don't parse the same libraryfolders.vdf
+            # three times.
+            key = str(root.resolve())
+        except OSError:
+            continue
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+
+        library_dirs: list[Path] = [root]
+        vdf = root / LIBRARY_FOLDERS_VDF
+        if vdf.exists():
+            library_dirs.extend(_parse_library_folders(vdf))
+        for lib in library_dirs:
+            game_dir = lib / "steamapps" / "common" / "Crimson Desert"
+            try:
+                if (game_dir / GAME_EXE).exists():
+                    candidates.append(game_dir)
+                    logger.info(
+                        "Found Crimson Desert (Steam Linux) at %s", game_dir)
+            except OSError:
+                continue
+    return candidates
+
+
+def _find_linux_game_directories() -> list[Path]:
+    """Native Linux auto-detect.
+
+    Walks the well-known Steam install locations on Linux (native
+    package, Flatpak, Snap) and returns every plausible Crimson
+    Desert install. Crimson Desert runs under Proton, so the game
+    directory layout is identical to the Windows install — only the
+    Steam host paths differ. No Epic or Xbox detection on Linux:
+    Epic doesn't ship a native Linux launcher and Xbox Game Pass for
+    PC is Windows-only. Users who run Epic via Heroic or similar
+    have to point CDUMM at the install directory manually.
+    """
+    return _find_linux_steam_libraries()
+
+
 def find_game_directories() -> list[Path]:
     """Search Steam, Epic Games Store, and Xbox for Crimson Desert install."""
     # macOS native build: scan Steam macOS + ~/Games + ~/Applications +
@@ -435,6 +515,27 @@ def find_game_directories() -> list[Path]:
     if IS_MACOS:
         candidates = _find_macos_game_directories()
         # Dedup by resolved path (same as the Windows path below).
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for c in candidates:
+            try:
+                key = str(c.resolve()).lower()
+            except Exception:
+                key = str(c).lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+        return unique
+
+    # Native Linux: Steam only. Crimson Desert runs under Proton so
+    # the bin64/CrimsonDesert.exe layout is preserved; detection
+    # mirrors the Windows VDF parse but rooted at Linux Steam paths.
+    # Epic and Xbox detection short-circuits here because neither
+    # has a native Linux launcher whose install dirs we'd recognise
+    # — the Windows fallbacks below would iterate A-Z drive letters
+    # against literal nonexistent paths, which is wasted work.
+    if IS_LINUX:
+        candidates = _find_linux_game_directories()
         seen: set[str] = set()
         unique: list[Path] = []
         for c in candidates:
