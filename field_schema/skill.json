@@ -1,4 +1,8 @@
 {
+  "_credit": "Initial entries for skill.pabgb primitive Format 3 mods contributed by voiddoiv via Nexus comments on 2026-05-08. CDUMM ships these as community-curated values; correctness verified against author's working build, not independently re-derived from a vanilla skill.pabgb dump.",
+  "_format": "JMM-compatible field_schema. Each entry maps a Format 3 'field' name to a tid (0xNNNNNNNN little-endian type tag the engine writes before the value), value_offset (bytes from the tid to the actual value), and type (i8/u8/i16/u16/i32/u32/f32/i64/u64/f64).",
+  "_contribute": "Open a PR at https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager with new entries for skill primitives you have verified.",
+
   "worker_skill_farming": {
     "tid": "0x0F427600",
     "value_offset": 5,
