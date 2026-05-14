@@ -21,12 +21,15 @@ from cdumm.storage.database import Database
 pytest_qt = pytest.importorskip("pytestqt")
 
 # The ASI loader installs a Win32 ``winmm.dll`` proxy that hooks
-# ``CrimsonDesert.exe``. There's no equivalent on the native macOS
-# build (no Windows exe to inject into) so ``_install_bundled_loader``
-# short-circuits on non-Windows. The toggle-gating tests below
-# assume the install path actually fires; skip them on darwin.
+# ``CrimsonDesert.exe``. There's no equivalent outside Windows —
+# the native macOS build has no Windows exe to inject into, and
+# the native Linux build deliberately stays out of the Proton/Wine
+# prefix that would otherwise host such a proxy. Accordingly,
+# ``_install_bundled_loader`` short-circuits on ``not IS_WINDOWS``.
+# The toggle-gating tests below assume the install path actually
+# fires; skip them on every non-Windows host.
 pytestmark = pytest.mark.skipif(
-    sys.platform == "darwin",
+    sys.platform != "win32",
     reason="ASI loader auto-install short-circuits on non-Windows; "
            "the toggle gating logic is Windows-only.")
 
