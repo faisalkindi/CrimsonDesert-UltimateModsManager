@@ -982,11 +982,15 @@ class AsiPluginsPage(QWidget):
     def set_managers(self, game_dir: Path | None = None, db=None, **kwargs) -> None:
         """Receive engine references from CdummWindow.
 
-        On macOS the page renders a "Windows-only" placeholder and
-        never touches the engine, so we early-return without wiring
-        AsiManager or kicking off a refresh.
+        On macOS / Linux the page renders a "Windows-only" placeholder
+        and never touches the engine (no ``_scroll_layout``, no
+        ``_summary_bar``, no ``_asi_manager``), so we early-return
+        without wiring AsiManager or kicking off a refresh. Without
+        this guard fluent_window's unconditional ``set_managers``
+        call during startup crashes the GUI before the main window
+        appears.
         """
-        if IS_MACOS:
+        if IS_MACOS or IS_LINUX:
             return
         self._game_dir = game_dir
         if db is not None:
@@ -1246,15 +1250,17 @@ class AsiPluginsPage(QWidget):
     def refresh(self) -> None:
         """Rescan ASI plugins and rebuild the card list with folder groups.
 
-        No-op on macOS where ``_build_ui`` rendered the platform-not-
-        supported placeholder instead of the normal scroll/card UI —
-        none of the widgets refresh() touches (``_scroll_layout``,
-        ``_summary_bar`` etc.) exist on the placeholder page.
-        ``fluent_window`` calls refresh() unconditionally during
-        startup; without this guard the AttributeError gets caught at
-        the call site but logs a noisy DEBUG line.
+        No-op on macOS / Linux where ``_build_ui`` rendered the
+        platform-not-supported placeholder instead of the normal
+        scroll/card UI — none of the widgets refresh() touches
+        (``_scroll_layout``, ``_summary_bar`` etc.) exist on the
+        placeholder page. ``fluent_window`` calls refresh()
+        unconditionally during startup; without this guard the
+        AttributeError crashes the whole window (seen on Linux: GUI
+        booted, found Crimson Desert, then died on the asi_plugins_page
+        refresh inside _init_navigation).
         """
-        if IS_MACOS:
+        if IS_MACOS or IS_LINUX:
             return
         from cdumm.gui.components.mod_card import FolderGroup
 
@@ -1396,10 +1402,11 @@ class AsiPluginsPage(QWidget):
         Args:
             updates: {nexus_mod_id: ModUpdateStatus}
 
-        No-op on macOS — the placeholder page has no version pills to
-        update and ``_db`` is never wired up by ``set_managers``.
+        No-op on macOS / Linux — the placeholder page has no version
+        pills to update and ``_db`` is never wired up by
+        ``set_managers``.
         """
-        if IS_MACOS:
+        if IS_MACOS or IS_LINUX:
             return
         self._nexus_updates = updates
         if not self._db:
