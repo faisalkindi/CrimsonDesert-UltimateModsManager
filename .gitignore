@@ -32,6 +32,12 @@ tests/_test_mods_external/
 .tmp_*
 reviewcode_diff.patch
 
+# Runtime logs. The worker subprocess writes cdumm_worker.log relative
+# to its working directory; on a run-from-source Linux launch that
+# lands inside the source tree (the frozen Windows build writes it to
+# the app-data dir instead). Never commit runtime logs.
+*.log
+
 # macOS
 .DS_Store
 # macOS build artifacts. cdumm.icns is regenerated from
