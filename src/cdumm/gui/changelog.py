@@ -14,7 +14,9 @@ from cdumm.i18n import tr
 # UNRELEASED entries land here, no version field, no date. At tag time
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
-_UNRELEASED_NOTES: list[str] = []
+_UNRELEASED_NOTES: list[str] = [
+    "<b>Mount-time JSON overlay path now logs which early-exit branch dropped each patch group.</b> pitonpp GitHub #105 retested v3.3.5 on macOS and confirmed via file modification time that the iteminfo.pabgb on disk did not change even though the Format 3 dispatcher reported 5.4MB of bytes applied. Traced the failure to <code>process_json_patches_for_overlay</code> returning zero overlay entries, but the function's early-exit branches were silent (debug level or no log at all) so the bundle did not reveal which branch fired. The function now logs an entry summary at INFO level (how many patch groups it received, which game_file went through which early-exit, and how many overlay entries it returned). The next macOS bundle from pitonpp will pinpoint the exact failure branch in one line of log. No behavioural change otherwise.",
+]
 
 CHANGELOG = [
     {

@@ -2379,10 +2379,21 @@ def process_json_patches_for_overlay(
     disabled = set(disabled_indices) if disabled_indices else set()
     flat_idx = 0  # global index across all patches' changes
 
+    # GitHub #105 pitonpp instrumentation: log how many patches we are
+    # about to process so a bundle that produces APPLY_SILENT_FAILURE
+    # can be cross-referenced against the early-exit branches below.
+    logger.info(
+        "mount-time: process_json_patches_for_overlay entering with "
+        "%d patch group(s) from synth %s", len(patches),
+        Path(json_source).name)
+
     for patch in patches:
         game_file = patch["game_file"]
         all_changes = patch.get("changes", [])
         if not all_changes:
+            logger.info(
+                "mount-time: patch group %r has no changes, skipping",
+                game_file)
             continue
 
         # Filter out disabled changes (per-patch toggle)
@@ -2475,6 +2486,10 @@ def process_json_patches_for_overlay(
             # Every contributing mod was tainted , nothing left to
             # apply for this target. The synthetic skip entries are
             # already in skipped_out.
+            logger.info(
+                "mount-time: %r had all %d change(s) filtered out by "
+                "tainted-mod guard, skipping (no overlay entry emitted)",
+                game_file, len(all_changes))
             continue
 
         # Apply byte patches with pattern scan against vanilla. Also capture
@@ -2549,7 +2564,17 @@ def process_json_patches_for_overlay(
                 f"disabling it or changing load order.")
 
         if bytes(modified) == plaintext:
-            logger.debug("mount-time: no changes for '%s', skipping", game_file)
+            # GitHub #105 pitonpp diagnostic: this branch fired silently
+            # at DEBUG level before, masking macOS apply failures that
+            # produced no byte diff. Promote to INFO with the change
+            # count so a bundle named this branch can be distinguished
+            # from "all patches mismatched" (which is a different bug
+            # signature).
+            logger.info(
+                "mount-time: %r produced no byte diff after applying "
+                "%d change(s) (%d relocated, %d inserts). No overlay "
+                "entry emitted.",
+                game_file, applied, relocated, len(inserts_out))
             continue
 
         pamt_dir = _derive_pamt_dir(entry.paz_file)
@@ -2615,4 +2640,14 @@ def process_json_patches_for_overlay(
                         pabgh_file, e_fix, exc_info=True,
                     )
 
+    # GitHub #105 pitonpp instrumentation: final tally so a bundle that
+    # produces APPLY_SILENT_FAILURE can pin whether this function
+    # silently returned no entries (and which branch ate them) vs the
+    # caller dropping them after they were emitted.
+    logger.info(
+        "mount-time: process_json_patches_for_overlay returning %d "
+        "overlay entr%s for synth %s",
+        len(overlay_entries),
+        "y" if len(overlay_entries) == 1 else "ies",
+        Path(json_source).name)
     return overlay_entries
