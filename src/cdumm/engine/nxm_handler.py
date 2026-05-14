@@ -1,4 +1,4 @@
-"""``nxm://`` URL protocol handler — parse + Windows registry registration.
+"""``nxm://`` URL protocol handler — parse + per-OS registration.
 
 NexusMods uses the ``nxm://`` URL scheme to route "Mod Manager Download"
 button clicks from the website into a registered desktop application.
@@ -15,22 +15,29 @@ downloads carry ``campaign=collection`` instead.
 This module:
 
 1. :func:`parse_nxm_url` — validates + tokenizes an incoming URL.
-2. :func:`register_windows_handler` — writes the HKCU\\Software\\Classes
+2. :func:`register_handler` / :func:`unregister_handler` — generic
+   per-platform dispatchers. Callers should prefer these over the
+   ``_windows_`` / ``_linux_`` variants.
+3. :func:`register_windows_handler` — writes the HKCU\\Software\\Classes
    entries needed so Windows hands ``nxm://...`` URLs to CDUMM.
-3. :func:`unregister_windows_handler` — removes those entries.
-4. :func:`is_handler_registered` — reports whether CDUMM is currently
-   the registered handler (so we don't stomp on Vortex/MO2 without
-   asking the user).
+4. :func:`register_linux_handler` — writes a freedesktop ``.desktop``
+   file under ``~/.local/share/applications`` and associates the
+   ``x-scheme-handler/nxm`` MIME type via ``xdg-mime default``.
+5. :func:`is_handler_registered` — reports whether CDUMM is currently
+   the registered handler on this platform (so we don't stomp on
+   Vortex/MO2 without asking the user).
 """
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from cdumm.platform import IS_WINDOWS
+from cdumm.platform import IS_LINUX, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -223,9 +230,10 @@ def unregister_windows_handler() -> bool:
     return ok
 
 
-def is_handler_registered() -> bool:
-    """True when the nxm:// handler under HKCU points at the current
-    CDUMM executable."""
+def _is_handler_registered_windows() -> bool:
+    """Windows-only branch of :func:`is_handler_registered`. Pulled
+    out so the public function can dispatch cleanly across platforms
+    without growing a nested conditional."""
     if not IS_WINDOWS:
         return False
     try:
@@ -244,6 +252,318 @@ def is_handler_registered() -> bool:
     if current is None or ours is None:
         return False
     return current.casefold() == ours.casefold()
+
+
+def is_handler_registered() -> bool:
+    """True when the nxm:// handler is currently CDUMM on this platform.
+
+    Dispatches to the OS-specific check: Windows reads HKCU\\Software\\
+    Classes\\nxm; Linux runs ``xdg-mime query default x-scheme-handler/
+    nxm`` and compares against our ``.desktop`` filename. Returns False
+    on platforms where CDUMM doesn't (yet) implement URL-scheme
+    registration (e.g. macOS — see MACOS.md).
+    """
+    if IS_WINDOWS:
+        return _is_handler_registered_windows()
+    if IS_LINUX:
+        return _is_handler_registered_linux()
+    return False
+
+
+# ── Linux: freedesktop .desktop + xdg-mime registration ─────────────
+
+
+# The .desktop file name. Kept short and unique so it doesn't collide
+# with another app's installed entry, and so ``xdg-mime query default``
+# returns a stable identifier we can match against.
+LINUX_DESKTOP_FILE_NAME = "cdumm-nxm.desktop"
+
+# The MIME-type token freedesktop uses for ``nxm://`` URLs. NexusMods
+# documents this as ``x-scheme-handler/nxm`` in their Vortex guide and
+# every Linux mod manager that supports nxm registers under this key.
+LINUX_NXM_MIME_TYPE = "x-scheme-handler/nxm"
+
+
+def _linux_applications_dir() -> Path:
+    """Per-user XDG applications directory where the ``.desktop`` file
+    is installed. Respects ``$XDG_DATA_HOME``; falls back to
+    ``~/.local/share`` per the spec."""
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "applications"
+
+
+def _linux_mimeapps_list_path() -> Path:
+    """Path to the freedesktop ``mimeapps.list`` that ``xdg-mime
+    default`` writes to. Respects ``$XDG_CONFIG_HOME``; falls back
+    to ``~/.config``."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    return root / "mimeapps.list"
+
+
+def _linux_desktop_file_path() -> Path:
+    return _linux_applications_dir() / LINUX_DESKTOP_FILE_NAME
+
+
+def _linux_exec_command() -> str:
+    """The ``Exec=`` line for the generated ``.desktop`` file.
+
+    Frozen builds (PyInstaller / AppImage) get a direct exe invocation;
+    source builds (``pip install -e .`` or otherwise on PYTHONPATH) get
+    ``<python> -m cdumm.main`` so the package's entry-point logic still
+    runs. The ``%u`` placeholder is the freedesktop token for "the URL
+    that triggered this launch" — xdg-open substitutes the clicked
+    ``nxm://...`` URL into it.
+    """
+    exe = str(Path(sys.executable).resolve())
+    if getattr(sys, "frozen", False):
+        return f"{exe} --nxm %u"
+    return f"{exe} -m cdumm.main --nxm %u"
+
+
+def _linux_desktop_file_content() -> str:
+    """Body of the generated ``.desktop`` file. ``NoDisplay=true``
+    keeps it out of the application menu — CDUMM is launched normally
+    via its own desktop entry (or AppImage); this file exists solely
+    to bind the ``nxm://`` MIME type to our executable."""
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=CDUMM (nxm:// handler)\n"
+        "Comment=Crimson Desert Ultimate Mods Manager — Nexus URL handler\n"
+        f"Exec={_linux_exec_command()}\n"
+        "NoDisplay=true\n"
+        "Terminal=false\n"
+        f"MimeType={LINUX_NXM_MIME_TYPE};\n"
+        "Categories=Game;\n"
+    )
+
+
+def _linux_query_current_handler() -> str | None:
+    """Run ``xdg-mime query default x-scheme-handler/nxm`` and return
+    the .desktop file name (e.g. ``"cdumm-nxm.desktop"``), or ``None``
+    when nothing is registered or xdg-mime isn't installed.
+
+    The call is bounded to a short timeout so an unresponsive desktop
+    environment can't wedge the Settings page; failures fall through
+    to "no handler", which is the safe default for the
+    register-button-state UI."""
+    try:
+        result = subprocess.run(
+            ["xdg-mime", "query", "default", LINUX_NXM_MIME_TYPE],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    name = (result.stdout or "").strip()
+    return name or None
+
+
+def _is_handler_registered_linux() -> bool:
+    """True when xdg-mime reports our ``.desktop`` file as the
+    default for ``x-scheme-handler/nxm``. Checked by comparing the
+    file *name* (not path) because ``xdg-mime`` reports the bare
+    filename."""
+    if not IS_LINUX:
+        return False
+    return _linux_query_current_handler() == LINUX_DESKTOP_FILE_NAME
+
+
+def register_linux_handler(force: bool = False) -> bool:
+    """Register CDUMM as the ``nxm://`` handler via a freedesktop
+    ``.desktop`` file + ``xdg-mime default``.
+
+    Writes ``~/.local/share/applications/cdumm-nxm.desktop`` (or the
+    ``$XDG_DATA_HOME`` equivalent) and runs ``xdg-mime default
+    cdumm-nxm.desktop x-scheme-handler/nxm`` to set CDUMM as the
+    default handler for the current user. Best-effort refreshes the
+    desktop-file database via ``update-desktop-database`` so GNOME /
+    KDE / XFCE pick up the new entry without a session restart.
+
+    When ``force`` is False and another desktop entry already owns
+    the ``nxm://`` scheme (e.g. a previously-installed Vortex flatpak
+    or a competing mod manager), this leaves the existing handler in
+    place and returns False so the caller can prompt the user.
+
+    No-ops on non-Linux. Returns True on success.
+    """
+    if not IS_LINUX:
+        return False
+    if not force:
+        current = _linux_query_current_handler()
+        if current and current != LINUX_DESKTOP_FILE_NAME:
+            logger.info(
+                "nxm handler: another app is registered (%s); skipping",
+                current)
+            return False
+
+    desktop_path = _linux_desktop_file_path()
+    try:
+        desktop_path.parent.mkdir(parents=True, exist_ok=True)
+        desktop_path.write_text(
+            _linux_desktop_file_content(), encoding="utf-8")
+        # Some desktop environments expect the .desktop file to be
+        # executable. Set the bit defensively — owner-rwx + others-rx
+        # mirrors what installer scripts produce.
+        desktop_path.chmod(0o755)
+    except OSError as e:
+        logger.warning(
+            "nxm handler: could not write %s: %s", desktop_path, e)
+        return False
+
+    # Associate the scheme. xdg-mime missing isn't fatal — minimal WMs
+    # (sway, hyprland without a portal) read the .desktop file directly
+    # via xdg-utils when xdg-open is invoked, so the registration may
+    # still work; log and continue.
+    try:
+        subprocess.run(
+            ["xdg-mime", "default",
+             LINUX_DESKTOP_FILE_NAME, LINUX_NXM_MIME_TYPE],
+            check=False, timeout=5,
+            capture_output=True)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        logger.info(
+            "nxm handler: xdg-mime call failed (%s) — .desktop file "
+            "was still written and may be picked up directly", e)
+
+    # Refresh the desktop-database cache. Optional; absence is harmless.
+    try:
+        subprocess.run(
+            ["update-desktop-database", str(_linux_applications_dir())],
+            check=False, timeout=5, capture_output=True)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    logger.info(
+        "nxm handler: registered CDUMM as nxm:// handler (%s)", desktop_path)
+    return True
+
+
+def _linux_strip_mimeapps_entry() -> None:
+    """Remove the ``x-scheme-handler/nxm=cdumm-nxm.desktop`` line from
+    ``mimeapps.list``. xdg-mime has no "unset default" command — it
+    only sets — so we edit the file ourselves. Only lines that match
+    *our* .desktop filename are stripped; entries pointing at other
+    apps are left untouched.
+
+    Idempotent and silently skips a missing file (a user who never
+    registered won't have one). Failures are logged at debug — losing
+    the cleanup step is recoverable (the file we deleted has gone,
+    so the dangling entry resolves to "no handler" anyway)."""
+    mimeapps = _linux_mimeapps_list_path()
+    if not mimeapps.exists():
+        return
+    try:
+        lines = mimeapps.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        logger.debug("nxm handler: could not read %s: %s", mimeapps, e)
+        return
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{LINUX_NXM_MIME_TYPE}="):
+            value = stripped.split("=", 1)[1]
+            if LINUX_DESKTOP_FILE_NAME in value:
+                # Drop this line — it pointed at our (now-deleted) file.
+                continue
+        out.append(line)
+    try:
+        mimeapps.write_text("\n".join(out) + "\n", encoding="utf-8")
+    except OSError as e:
+        logger.debug("nxm handler: could not rewrite %s: %s", mimeapps, e)
+
+
+def unregister_linux_handler() -> bool:
+    """Remove the CDUMM ``.desktop`` file and clean up its mimeapps
+    entry. Refuses to act when the current registered handler isn't
+    ours — defense in depth so a future direct caller can't strip
+    Vortex / MO2 out from under the user.
+
+    No-ops on non-Linux. Returns True on success.
+    """
+    if not IS_LINUX:
+        return False
+
+    current = _linux_query_current_handler()
+    if current and current != LINUX_DESKTOP_FILE_NAME:
+        logger.info(
+            "nxm handler: refusing to unregister — current handler "
+            "is %r, not ours", current)
+        return False
+
+    desktop_path = _linux_desktop_file_path()
+    ok = True
+    try:
+        if desktop_path.exists():
+            desktop_path.unlink()
+    except OSError as e:
+        logger.warning(
+            "nxm handler: could not remove %s: %s", desktop_path, e)
+        ok = False
+
+    _linux_strip_mimeapps_entry()
+
+    # Refresh the desktop-database cache so the .desktop disappearance
+    # propagates. Optional.
+    try:
+        subprocess.run(
+            ["update-desktop-database", str(_linux_applications_dir())],
+            check=False, timeout=5, capture_output=True)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    if ok:
+        logger.info("nxm handler: unregistered")
+    return ok
+
+
+# ── Generic dispatchers ─────────────────────────────────────────────
+
+
+def register_handler(force: bool = False) -> bool:
+    """Register CDUMM as the ``nxm://`` handler on the current
+    platform. Dispatches to the OS-specific implementation. Returns
+    False on platforms where URL-scheme registration isn't (yet)
+    implemented (e.g. macOS)."""
+    if IS_WINDOWS:
+        return register_windows_handler(force=force)
+    if IS_LINUX:
+        return register_linux_handler(force=force)
+    return False
+
+
+def unregister_handler() -> bool:
+    """Remove the CDUMM ``nxm://`` handler registration on the current
+    platform. Dispatches to the OS-specific implementation."""
+    if IS_WINDOWS:
+        return unregister_windows_handler()
+    if IS_LINUX:
+        return unregister_linux_handler()
+    return False
+
+
+def existing_handler_description() -> str | None:
+    """Human-readable description of whatever app currently owns the
+    ``nxm://`` scheme on this platform, or ``None`` if nothing does.
+
+    On Windows this is the raw registry command string
+    (``"C:\\...\\Vortex.exe" -d "%1"`` style). On Linux it's the
+    ``.desktop`` filename returned by ``xdg-mime query default``
+    (e.g. ``"net.nexusmods.vortex.desktop"``). The Settings page
+    displays this in the "replace existing handler?" prompt without
+    interpreting it further — the format differs by OS but the user
+    just needs to recognise the other app.
+    """
+    if IS_WINDOWS:
+        try:
+            import winreg
+        except ImportError:
+            return None
+        return _read_command_string(winreg)
+    if IS_LINUX:
+        return _linux_query_current_handler()
+    return None
 
 
 def _read_command_string(winreg_mod) -> str | None:
