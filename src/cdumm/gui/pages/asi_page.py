@@ -45,7 +45,7 @@ from qfluentwidgets import (
 
 from cdumm.asi.asi_manager import AsiManager, AsiPlugin
 from cdumm.i18n import tr
-from cdumm.platform import IS_MACOS, IS_WINDOWS
+from cdumm.platform import IS_LINUX, IS_MACOS, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -773,13 +773,56 @@ class AsiPluginsPage(QWidget):
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
-        # macOS doesn't support ASI plugins (Win32-only winmm.dll proxy
-        # against CrimsonDesert.exe — no Windows exe in the macOS .app
-        # build). Render a placeholder card explaining the gap rather
-        # than the normal scan + card list. Hiding the tab entirely
-        # confused users with downloaded ASI mods (PR #64 review #3).
+        # ASI plugins are a Windows-only mod format (winmm.dll proxy
+        # against CrimsonDesert.exe). Render a placeholder card
+        # explaining the gap rather than the normal scan + card
+        # list on platforms where ASI doesn't apply. Hiding the tab
+        # entirely confused users with downloaded ASI mods (PR #64
+        # review #3) — keep it visible with a clear "not supported"
+        # message instead.
+        #
+        # macOS: no Windows exe in the native .app build, so ASI
+        # has nowhere to inject.
+        #
+        # Linux: the game runs under Proton/Wine where ASI *would*
+        # work in principle, but the loader needs Wine DLL-override
+        # plumbing on Steam's launch options to bind winmm.dll. The
+        # Linux-native CDUMM build deliberately stays out of the
+        # Wine prefix — point users at the upstream LINUX.md if they
+        # really need ASI and tell them to use the Wine build of
+        # CDUMM for that case.
         if IS_MACOS:
-            self._build_macos_placeholder_view(main)
+            self._build_unsupported_placeholder_view(
+                main,
+                title=tr("asi.macos_unavailable_title"),
+                body=tr("asi.macos_unavailable_body"),
+                reassure=tr("asi.macos_unavailable_reassure"),
+                link_label=tr("asi.macos_unavailable_link"),
+                link_url=(
+                    "https://github.com/faisalkindi/CrimsonDesert-"
+                    "UltimateModsManager/blob/master/MACOS.md"))
+            return
+        if IS_LINUX:
+            self._build_unsupported_placeholder_view(
+                main,
+                title="ASI plugins are not supported on Linux",
+                body=(
+                    "ASI mods inject a Windows DLL (winmm.dll proxy) "
+                    "into CrimsonDesert.exe to run code in the game "
+                    "process. The Linux-native CDUMM build runs the "
+                    "manager outside the Proton/Wine prefix, so it "
+                    "can't safely wire up the WINEDLLOVERRIDES that "
+                    "the loader needs on Steam's launch options."),
+                reassure=(
+                    "Texture, XML, JSON, PAZ overlay, and ReShade "
+                    "mods all work normally — only ASI / .addon64 "
+                    "plugins are skipped on Linux. If you need ASI "
+                    "support, run the Windows build of CDUMM under "
+                    "Wine instead (see LINUX.md)."),
+                link_label="Read more (LINUX.md)",
+                link_url=(
+                    "https://github.com/faisalkindi/CrimsonDesert-"
+                    "UltimateModsManager/blob/master/LINUX.md"))
             return
 
         # Summary bar (pinned top)
@@ -863,20 +906,35 @@ class AsiPluginsPage(QWidget):
         main.addLayout(body, 1)
 
     # ------------------------------------------------------------------
-    # macOS placeholder
+    # Unsupported-platform placeholder (macOS / Linux)
     # ------------------------------------------------------------------
 
-    def _build_macos_placeholder_view(self, main: QVBoxLayout) -> None:
+    def _build_unsupported_placeholder_view(
+            self,
+            main: QVBoxLayout,
+            title: str,
+            body: str,
+            reassure: str,
+            link_label: str,
+            link_url: str,
+    ) -> None:
         """Render a Windows-only-feature explanation in place of the
-        normal ASI card list when running on macOS.
+        normal ASI card list.
 
         Mirrors the structure of ``ReshadePage._build_not_installed_view``
         for visual consistency: a single CardWidget with a strong-weight
         title, word-wrapped body paragraph, and a primary action button
-        that opens the macOS docs in the user's browser. Avoids
+        that opens platform-specific docs in the user's browser. Avoids
         instantiating any of the engine-side ASI machinery
         (``_summary_bar``, ``_asi_manager``, scan timers) so the page
         is cheap and never tries to scan a non-existent ``bin64/``.
+
+        Strings are passed in by the caller because the macOS path
+        uses translated keys (``asi.macos_unavailable_*``) and the
+        Linux path uses literal English copy until the i18n catalogues
+        get a ``linux_unavailable_*`` set — keeping the parameterised
+        form means adding translations later is one edit to the
+        caller, not a refactor here.
         """
         import webbrowser
 
@@ -890,27 +948,24 @@ class AsiPluginsPage(QWidget):
         card_lay.setContentsMargins(32, 24, 32, 24)
         card_lay.setSpacing(12)
 
-        title = StrongBodyLabel(tr("asi.macos_unavailable_title"), card)
-        tf = title.font()
+        title_lbl = StrongBodyLabel(title, card)
+        tf = title_lbl.font()
         tf.setPixelSize(18)
-        title.setFont(tf)
-        card_lay.addWidget(title)
+        title_lbl.setFont(tf)
+        card_lay.addWidget(title_lbl)
         card_lay.addSpacing(4)
 
-        body_text = BodyLabel(tr("asi.macos_unavailable_body"), card)
-        body_text.setWordWrap(True)
-        card_lay.addWidget(body_text)
+        body_lbl = BodyLabel(body, card)
+        body_lbl.setWordWrap(True)
+        card_lay.addWidget(body_lbl)
 
-        reassure = BodyLabel(tr("asi.macos_unavailable_reassure"), card)
-        reassure.setWordWrap(True)
-        card_lay.addWidget(reassure)
+        reassure_lbl = BodyLabel(reassure, card)
+        reassure_lbl.setWordWrap(True)
+        card_lay.addWidget(reassure_lbl)
 
         card_lay.addSpacing(8)
-        link_btn = PrimaryPushButton(
-            FluentIcon.LINK, tr("asi.macos_unavailable_link"), card)
-        link_btn.clicked.connect(lambda: webbrowser.open(
-            "https://github.com/faisalkindi/CrimsonDesert-"
-            "UltimateModsManager/blob/master/MACOS.md"))
+        link_btn = PrimaryPushButton(FluentIcon.LINK, link_label, card)
+        link_btn.clicked.connect(lambda: webbrowser.open(link_url))
         btn_row = QHBoxLayout()
         btn_row.addWidget(link_btn)
         btn_row.addStretch()
