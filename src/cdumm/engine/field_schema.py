@@ -230,6 +230,25 @@ def locate_field(body: bytes, blob_start: int, blob_end: int,
                  tid_index: int | None = None) -> int | None:
     """Return the absolute byte offset where the field's value
     should be written, or None if it can't be located.
+
+    Two modes (matching JMM's IteminfoBlobPatcher):
+      * ``rel_offset``: ``blob_start + rel_offset``
+      * ``tid``: search ``[blob_start, blob_end)`` for the 4-byte
+        TID marker, return ``tid_pos + value_offset``
+      * ``tid_index``: when a TID appears more than once, select the
+        zero-based occurrence before applying ``value_offset``
+
+    Multi-match safety: when a TID appears more than once inside
+    the entry blob (real risk on 4-byte search patterns —
+    integer constants, CString bytes, neighboring fields can all
+    coincidentally match), refuse to guess which match was meant
+    unless ``tid_index`` is supplied. JMM takes the first match
+    silently; we surface this case as None so the caller can skip
+    with a clear reason. The mod author can disambiguate by switching
+    to ``tid_index`` or ``rel_offset``.
+
+    ``blob_end`` is the exclusive upper bound — the search must
+    not match a TID belonging to the next entry.
     """
     if entry.rel_offset is not None:
         return blob_start + entry.rel_offset
