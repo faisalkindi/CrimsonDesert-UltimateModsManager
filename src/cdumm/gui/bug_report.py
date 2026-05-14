@@ -524,6 +524,22 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
         snap_count = 0
         snap_created: str | None = None
         try:
+            # GitHub #127 BloodGozilla: the bug-report panel was
+            # reporting the snapshot from N hours / days ago even after
+            # the user had just clicked Rescan Game Files. SQLite in
+            # WAL mode with the default deferred isolation level holds
+            # a read transaction open on the GUI's connection until a
+            # non-SELECT statement closes it. The snapshot itself was
+            # written by SnapshotManager on a different (worker thread)
+            # connection, so the GUI never saw the new rows until the
+            # next app restart. Calling commit() on the GUI connection
+            # here closes the lingering read txn so the very next
+            # SELECT sees the worker's COMMIT and reports the real
+            # current snapshot count and timestamp.
+            try:
+                db.connection.commit()
+            except Exception:
+                pass
             row = db.connection.execute(
                 "SELECT COUNT(*), MAX(created_at) FROM snapshots").fetchone()
             snap_count, snap_created = (row[0] or 0), row[1]
