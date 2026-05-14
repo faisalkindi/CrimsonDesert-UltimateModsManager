@@ -317,15 +317,17 @@ class SettingsPage(SmoothScrollArea):
         # Populate label/button state for the current key.
         self._refresh_sso_button()
 
-        # nxm:// scheme registration is OS-specific and CDUMM only
-        # implements the Windows registry path today. macOS would need
+        # nxm:// scheme registration is OS-specific. Windows uses the
+        # registry path under HKCU\Software\Classes\nxm; Linux writes
+        # a freedesktop ``.desktop`` file under
+        # ``~/.local/share/applications`` and calls ``xdg-mime
+        # default`` to associate the ``x-scheme-handler/nxm`` MIME
+        # type with it. macOS would need
         # ``LSSetDefaultHandlerForURLScheme`` + a packaged .app
-        # (see MACOS.md); Linux would need an ``nxm.desktop`` install
-        # under ``~/.local/share/applications`` plus ``xdg-mime
-        # default``. Until those are in place, hide the row entirely
-        # on non-Windows so users don't tap a button that does nothing.
-        from cdumm.platform import IS_WINDOWS
-        if IS_WINDOWS:
+        # (see MACOS.md) and isn't yet implemented — hide the row
+        # there so users don't tap a button that does nothing.
+        from cdumm.platform import IS_LINUX, IS_WINDOWS
+        if IS_WINDOWS or IS_LINUX:
             nxm_row = QWidget()
             nxm_layout = QHBoxLayout(nxm_row)
             nxm_layout.setContentsMargins(6, 4, 6, 4)
@@ -807,23 +809,24 @@ class SettingsPage(SmoothScrollArea):
         auto-retried with ``force=True`` in the same click, defeating
         the explicit-opt-in contract documented in ``nxm_handler.py``.
 
-        macOS / Linux: nxm:// scheme registration is per-OS and
-        ``register_windows_handler`` is a no-op there. The button
-        is hidden by ``set_managers`` on those platforms; this
-        early-return is belt-and-braces for any direct caller.
+        macOS: nxm:// scheme registration isn't yet implemented
+        (see MACOS.md). The button is hidden by ``set_managers`` on
+        that platform; the early-return below is belt-and-braces
+        for any direct caller.
         """
-        from cdumm.platform import IS_WINDOWS
-        if not IS_WINDOWS:
+        from cdumm.platform import IS_LINUX, IS_WINDOWS
+        if not (IS_WINDOWS or IS_LINUX):
             self._set_nexus_status(
-                "nxm:// handler registration is Windows-only.",
+                "nxm:// handler registration isn't supported on this "
+                "platform yet.",
                 InfoLevel.INFOAMTION)
             return
         from cdumm.engine.nxm_handler import (
-            is_handler_registered, register_windows_handler,
-            unregister_windows_handler, _read_command_string,
+            existing_handler_description, is_handler_registered,
+            register_handler, unregister_handler,
         )
         if is_handler_registered():
-            ok = unregister_windows_handler()
+            ok = unregister_handler()
             msg = ("nxm:// handler unregistered." if ok
                    else "Could not fully unregister nxm:// handler — check the log.")
             self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
@@ -831,7 +834,7 @@ class SettingsPage(SmoothScrollArea):
             return
 
         # Try non-destructive register first.
-        ok = register_windows_handler(force=False)
+        ok = register_handler(force=False)
         if ok:
             self._set_nexus_status(
                 "CDUMM is now the nxm:// handler for your user account.",
@@ -840,11 +843,7 @@ class SettingsPage(SmoothScrollArea):
             return
 
         # Another mod manager owns the scheme — ask before stomping.
-        try:
-            import winreg
-            existing_cmd = _read_command_string(winreg) or "(unknown)"
-        except Exception:
-            existing_cmd = "(unknown)"
+        existing_cmd = existing_handler_description() or "(unknown)"
         from PySide6.QtWidgets import QMessageBox
         box = QMessageBox(self.window())
         box.setIcon(QMessageBox.Icon.Warning)
@@ -868,11 +867,11 @@ class SettingsPage(SmoothScrollArea):
             self._refresh_nxm_button()
             return
 
-        ok = register_windows_handler(force=True)
+        ok = register_handler(force=True)
         msg = ("CDUMM is now the nxm:// handler for your user "
                "account." if ok else "Registration failed — CDUMM "
-               "must be running as the packaged .exe, not the dev "
-               "source, to register as a handler.")
+               "must be running from a stable install path (packaged "
+               "build or editable install) to register as a handler.")
         self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
         self._refresh_nxm_button()
 
