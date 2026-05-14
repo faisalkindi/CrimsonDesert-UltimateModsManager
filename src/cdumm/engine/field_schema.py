@@ -280,7 +280,7 @@ def locate_field(body: bytes, blob_start: int, blob_end: int,
         if len(matches) > 1:
             logger.warning(
                 "TID 0x%08X appears %d times in entry blob "
-                "[%d, %d); use tid_index or rel_offset",
+                "[%d, %d); use tid_index, rel_offset, or a more unique TID",
                 entry.tid, len(matches), blob_start, blob_end)
             return None
         return matches[0] + entry.value_offset
