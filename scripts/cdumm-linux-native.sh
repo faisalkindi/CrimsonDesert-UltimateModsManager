@@ -140,5 +140,26 @@ provision_venv
 install_deps
 build_native
 
+# Route Qt file dialogs through the XDG desktop portal.
+#
+# CDUMM forces the Fusion QStyle and themes its own UI via
+# qfluentwidgets, but the QFileDialog convenience methods
+# (getExistingDirectory etc.) are plain Qt widgets that don't
+# inherit the qfluentwidgets dark palette — so on a setup where
+# QT_QPA_PLATFORMTHEME=qt6ct (which doesn't delegate file dialogs
+# to the portal), the picker pops up in light mode regardless of
+# the app theme.
+#
+# Setting the platform theme to 'xdgdesktopportal' makes Qt use
+# the portal's file chooser (the gtk backend), which renders with
+# the system GTK theme — so the picker follows your desktop's
+# light/dark preference instead of CDUMM's internal theme. Only
+# affects this process; your global qt6ct setting is untouched.
+#
+# Override with CDUMM_QT_PLATFORMTHEME=... (or set it empty to
+# fall back to whatever your environment already has) if the
+# portal isn't available on a given machine.
+export QT_QPA_PLATFORMTHEME="${CDUMM_QT_PLATFORMTHEME-xdgdesktopportal}"
+
 log "Launching CDUMM"
 exec "$VENV_DIR/bin/python" -m cdumm.main "${CDUMM_ARGS[@]+"${CDUMM_ARGS[@]}"}"
