@@ -245,7 +245,7 @@ def locate_field(body: bytes, blob_start: int, blob_end: int,
     unless ``tid_index`` is supplied. JMM takes the first match
     silently; we surface this case as None so the caller can skip
     with a clear reason. The mod author can disambiguate by switching
-    to ``tid_index`` or ``rel_offset``.
+    to ``tid_index``, ``rel_offset``, or picking a more unique TID.
 
     ``blob_end`` is the exclusive upper bound — the search must
     not match a TID belonging to the next entry.
