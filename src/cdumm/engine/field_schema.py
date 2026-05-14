@@ -53,6 +53,7 @@ class FieldSchemaEntry:
     value_offset: int = 5
     tid: int | None = None
     rel_offset: int | None = None
+    tid_index: int | None = None
 
 
 def _coerce_tid(raw) -> int | None:
@@ -198,11 +199,23 @@ def load_field_schema(table_name: str,
                 key, table_name, value_offset)
             continue
 
+        tid_index = val.get("tid_index")
+        if tid_index is not None:
+            if (isinstance(tid_index, bool)
+                    or not isinstance(tid_index, int)
+                    or tid_index < 0):
+                logger.warning(
+                    "field_schema entry '%s' in '%s' has invalid "
+                    "tid_index=%r; skipping",
+                    key, table_name, tid_index)
+                continue
+
         result[key] = FieldSchemaEntry(
             tid=tid,
             rel_offset=rel_offset,
             value_offset=value_offset,
             data_type=data_type,
+            tid_index=tid_index,
         )
 
     if result:
@@ -213,43 +226,44 @@ def load_field_schema(table_name: str,
 
 
 def locate_field(body: bytes, blob_start: int, blob_end: int,
-                 entry: FieldSchemaEntry) -> int | None:
+                 entry: FieldSchemaEntry,
+                 tid_index: int | None = None) -> int | None:
     """Return the absolute byte offset where the field's value
     should be written, or None if it can't be located.
-
-    Two modes (matching JMM's IteminfoBlobPatcher):
-      * ``rel_offset``: ``blob_start + rel_offset``
-      * ``tid``: search ``[blob_start, blob_end)`` for the 4-byte
-        TID marker, return ``tid_pos + value_offset``
-
-    Multi-match safety: when a TID appears more than once inside
-    the entry blob (real risk on 4-byte search patterns —
-    integer constants, CString bytes, neighboring fields can all
-    coincidentally match), refuse to guess which match was meant.
-    JMM takes the first match silently; we surface this case as
-    None so the caller can skip with a clear reason. The mod
-    author can disambiguate by switching to ``rel_offset`` or
-    picking a more unique TID.
-
-    ``blob_end`` is the exclusive upper bound — the search must
-    not match a TID belonging to the next entry.
     """
     if entry.rel_offset is not None:
         return blob_start + entry.rel_offset
 
     if entry.tid is not None:
         tid_bytes = struct.pack("<I", entry.tid & 0xFFFFFFFF)
-        # bytes.count + bytes.find both bounded by [start, end).
-        n_matches = body.count(tid_bytes, blob_start, blob_end)
-        if n_matches == 0:
+        matches: list[int] = []
+        pos = body.find(tid_bytes, blob_start, blob_end)
+        while pos != -1:
+            matches.append(pos)
+            pos = body.find(tid_bytes, pos + 1, blob_end)
+
+        if not matches:
             return None
-        if n_matches > 1:
+
+        selected_index = (
+            tid_index if tid_index is not None else entry.tid_index
+        )
+        if selected_index is not None:
+            if selected_index >= len(matches):
+                logger.warning(
+                    "TID 0x%08X tid_index=%d out of range "
+                    "(%d match(es)) in entry blob [%d, %d)",
+                    entry.tid, selected_index, len(matches),
+                    blob_start, blob_end)
+                return None
+            return matches[selected_index] + entry.value_offset
+
+        if len(matches) > 1:
             logger.warning(
                 "TID 0x%08X appears %d times in entry blob "
-                "[%d, %d); refusing to guess which match — "
-                "use rel_offset or a more unique TID",
-                entry.tid, n_matches, blob_start, blob_end)
+                "[%d, %d); use tid_index or rel_offset",
+                entry.tid, len(matches), blob_start, blob_end)
             return None
-        return body.find(tid_bytes, blob_start, blob_end) + entry.value_offset
+        return matches[0] + entry.value_offset
 
     return None

@@ -48,5 +48,25 @@
     "tid": "0x0F427500",
     "value_offset": 5,
     "type": "i64"
+  },
+  "skill_stamina_cost": {
+    "tid": "0x0F425A03",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_spirit_cost": {
+    "tid": "0x0F425B03",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_stamina_amount": {
+    "tid": "0x0F425A00",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_spirit_amount": {
+    "tid": "0x0F425B00",
+    "value_offset": 5,
+    "type": "i64"
   }
 }

@@ -126,6 +126,7 @@ class Format3Intent:
     op: str
     new: Any
     old: str | None = None
+    tid_index: int | None = None
 
 
 @dataclass
@@ -220,6 +221,16 @@ def _parse_intents_block(
                 f"({type(raw_old).__name__}); 'old' must be a hex "
                 f"string when present"
             )
+        raw_tid_index = raw.get("tid_index")
+        if raw_tid_index is not None:
+            if (isinstance(raw_tid_index, bool)
+                    or not isinstance(raw_tid_index, int)
+                    or raw_tid_index < 0):
+                raise ValueError(
+                    f"{label} intent #{i} has invalid tid_index "
+                    f"{raw_tid_index!r}; tid_index must be a "
+                    f"non-negative integer"
+                )
         intents.append(Format3Intent(
             entry=str(raw["entry"]),
             key=raw_key,
@@ -227,6 +238,7 @@ def _parse_intents_block(
             op=str(raw.get("op", "set")),
             new=raw["new"],
             old=raw_old,
+            tid_index=raw_tid_index,
         ))
     return intents
 
