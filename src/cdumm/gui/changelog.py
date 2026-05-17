@@ -15,6 +15,7 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
+    "<b>DMM Field JSON v3.1 documents (format_minor: 1) are now first-class in CDUMM, alongside the pre-existing targets[] support.</b> RichmondS1337 GitHub #125 reported that Refinement Cost Reforged (Nexus 1342) would not import because the mod author marked it as a DMM-exclusive format. Investigation against NattKh's open MPL-2.0 spec (CrimsonGameMods/FIELD_JSON_V3_1_SPEC.md) confirmed v3.1 is the same wire format CDUMM already accepted via the plural targets[] path that landed in v3.2.13. Three hardening changes make the dialect explicit and safe: the parser logs at INFO level when it sees format_minor >= 1 so bundles show which dialect a mod used, the intent parser rejects unsupported ops (list_set / list_append / list_remove / list_merge are deferred to v3.2 per the spec) with a clear 'not yet supported by CDUMM, only set is supported' message instead of letting them silently fall through to the set-only writer, and a new test fixture (dmm_v3_1_multi_target.json) plus 6 dialect tests guard the end-to-end path so a future refactor cannot regress this.",
 ]
 
 CHANGELOG = [

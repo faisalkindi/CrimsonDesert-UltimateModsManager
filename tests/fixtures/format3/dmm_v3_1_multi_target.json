@@ -1,0 +1,37 @@
+{
+  "modinfo": {
+    "title": "Test DMM v3.1 multi-target document",
+    "version": "1.0",
+    "author": "CDUMM test suite",
+    "description": "Two targets, one set intent each. Matches the example from CrimsonGameMods/FIELD_JSON_V3_1_SPEC.md so we can prove CDUMM accepts the v3.1 shape end-to-end.",
+    "note": "Format 3.1 (format_minor: 1)"
+  },
+  "format": 3,
+  "format_minor": 1,
+  "targets": [
+    {
+      "file": "iteminfo.pabgb",
+      "intents": [
+        {
+          "entry": "Oath_Of_Darkness",
+          "key": 391518535,
+          "field": "cooltime",
+          "op": "set",
+          "new": 1
+        }
+      ]
+    },
+    {
+      "file": "gimmick_info.pabgb",
+      "intents": [
+        {
+          "entry": "Sword_Aura_FX",
+          "key": 70001,
+          "field": "duration_ms",
+          "op": "set",
+          "new": 5000
+        }
+      ]
+    }
+  ]
+}

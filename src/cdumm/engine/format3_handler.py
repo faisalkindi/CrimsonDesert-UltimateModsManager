@@ -220,11 +220,30 @@ def _parse_intents_block(
                 f"({type(raw_old).__name__}); 'old' must be a hex "
                 f"string when present"
             )
+        # v3.1 spec explicitly defers list_set, list_append, list_remove,
+        # list_merge to v3.2 (see CrimsonGameMods/FIELD_JSON_V3_1_SPEC.md
+        # under "Supported Operations"). The DMM v1.3.4 loader will reject
+        # them; CDUMM should too so a mod author who uses a v3.2 op gets a
+        # clear "not yet supported" message instead of having the intent
+        # silently drop through to a writer that ignores op and just
+        # overwrites the value. RichmondS1337 GitHub #125.
+        raw_op = raw.get("op", "set")
+        if not isinstance(raw_op, str):
+            raise ValueError(
+                f"{label} intent #{i} has non-string 'op' "
+                f"({type(raw_op).__name__})"
+            )
+        if raw_op not in ("set",):
+            raise ValueError(
+                f"{label} intent #{i} uses op {raw_op!r}, which is "
+                f"reserved for Field JSON v3.2 and not yet supported by "
+                f"CDUMM. Only 'set' is supported today."
+            )
         intents.append(Format3Intent(
             entry=str(raw["entry"]),
             key=raw_key,
             field=str(raw["field"]),
-            op=str(raw.get("op", "set")),
+            op=raw_op,
             new=raw["new"],
             old=raw_old,
         ))
@@ -275,6 +294,18 @@ def parse_format3_mod_targets(
             "Not a Format 3 file: missing or wrong "
             "\"format\": 3 marker"
         )
+
+    # format_minor: 1 marks the v3.1 DMM-compatible dialect (targets[]
+    # array, multi-table writes). v3.0 documents either omit this key or
+    # set it to 0. Log when we see a v3.1 marker so bundles make it
+    # obvious which dialect a mod is using. CDUMM accepts both dialects
+    # uniformly so the log is purely informational. See
+    # CrimsonGameMods/FIELD_JSON_V3_1_SPEC.md.
+    format_minor = data.get("format_minor", 0)
+    if isinstance(format_minor, int) and format_minor >= 1:
+        logger.info(
+            "Format 3.%d document accepted from %s",
+            format_minor, path.name)
 
     has_singular = "target" in data
     has_plural = "targets" in data
