@@ -2493,12 +2493,43 @@ class ApplyWorker(QObject):
             if hasattr(self, '_overlay_dir_name') and self._overlay_dir_name:
                 enabled_dirs.add(self._overlay_dir_name)
 
+            # External-tool protection (GitHub #83 mrkillerhomerxD): some
+            # users layer a separate patcher on top (HAWT writes to 0036+
+            # with its own 0.pamt + .paz). That directory is not in the
+            # CDUMM vanilla snapshot, not managed by any CDUMM mod, but
+            # has a fully-valid PAMT + PAZ pair on disk. Nuking it
+            # silently breaks the external patch and the user's game
+            # crashes at boot. Treat any 0036+ directory with a 0.pamt
+            # file as externally-managed and leave it alone. Also pick
+            # them up below for PAPGT rebuild discovery.
+            user_protected = set()
+            try:
+                from cdumm.storage.config import Config as _Cfg
+                _raw = _Cfg(self._db).get("protected_external_dirs") or ""
+                if _raw.strip():
+                    user_protected = {
+                        s.strip() for s in _raw.split(",") if s.strip()}
+            except Exception as _e:
+                logger.debug("protected_external_dirs lookup failed: %s", _e)
+
             for d in sorted(self._game_dir.iterdir()):
                 if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
                     continue
                 if int(d.name) < 36:
                     continue
                 if d.name in enabled_dirs:
+                    continue
+                if d.name in user_protected:
+                    logger.info(
+                        "Skipping orphan cleanup for user-protected dir: %s",
+                        d.name)
+                    continue
+                # Externally-managed dirs have a valid 0.pamt file. Keep
+                # those even though they aren't in our snapshot.
+                if (d / "0.pamt").exists():
+                    logger.info(
+                        "Skipping orphan cleanup for externally-managed "
+                        "dir (has 0.pamt): %s", d.name)
                     continue
                 # Check if directory is in snapshot (vanilla)
                 snap_check = self._db.connection.execute(
@@ -4752,12 +4783,32 @@ class RevertWorker(QObject):
                                 continue
 
             # Clean up orphan mod directories (0036+) that are empty or
-            # only existed because of standalone mods
+            # only existed because of standalone mods. Respect the same
+            # external-tool protection as the apply path (#83): a 0036+
+            # dir with a 0.pamt file is being actively used by some
+            # other patcher (e.g. HAWT) and must not be touched.
             self.progress_updated.emit(91, "Cleaning orphan directories...")
+            try:
+                from cdumm.storage.config import Config as _Cfg
+                _raw = _Cfg(self._db).get("protected_external_dirs") or ""
+                _user_protected = {
+                    s.strip() for s in _raw.split(",") if s.strip()}
+            except Exception:
+                _user_protected = set()
             for d in sorted(self._game_dir.iterdir()):
                 if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
                     continue
                 if int(d.name) < 36:
+                    continue
+                if d.name in _user_protected:
+                    logger.info(
+                        "Fix Everything: keeping user-protected dir %s",
+                        d.name)
+                    continue
+                if (d / "0.pamt").exists():
+                    logger.info(
+                        "Fix Everything: keeping externally-managed dir "
+                        "%s (has 0.pamt)", d.name)
                     continue
                 # Check if this directory is in the snapshot (vanilla)
                 snap_check = self._db.connection.execute(
