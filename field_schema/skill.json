@@ -2,9 +2,73 @@
   "_credit": "Initial entries for skill.pabgb primitive Format 3 mods contributed by voiddoiv via Nexus comments on 2026-05-08. CDUMM ships these as community-curated values; correctness verified against author's working build, not independently re-derived from a vanilla skill.pabgb dump.",
   "_format": "JMM-compatible field_schema. Each entry maps a Format 3 'field' name to a tid (0xNNNNNNNN little-endian type tag the engine writes before the value), value_offset (bytes from the tid to the actual value), and type (i8/u8/i16/u16/i32/u32/f32/i64/u64/f64).",
   "_contribute": "Open a PR at https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager with new entries for skill primitives you have verified.",
-
-  "mission_eff_farming_i": {
+  "worker_skill_farming": {
     "tid": "0x0F427600",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_ranching": {
+    "tid": "0x0F427700",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_logging": {
+    "tid": "0x0F427800",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_mining": {
+    "tid": "0x0F427400",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_forging": {
+    "tid": "0x0F427900",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_strengthening": {
+    "tid": "0x0F426600",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_fishing": {
+    "tid": "0x0F426100",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_gathering": {
+    "tid": "0x0F428100",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_banking": {
+    "tid": "0x0F427500",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "worker_skill_superworker": {
+    "tid": "0x0F427500",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_stamina_cost": {
+    "tid": "0x0F425A03",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_spirit_cost": {
+    "tid": "0x0F425B03",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_stamina_delta": {
+    "tid": "0x0F425A00",
+    "value_offset": 5,
+    "type": "i64"
+  },
+  "skill_spirit_delta": {
+    "tid": "0x0F425B00",
     "value_offset": 5,
     "type": "i64"
   }

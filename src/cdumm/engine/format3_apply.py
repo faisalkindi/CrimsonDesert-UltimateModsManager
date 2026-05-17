@@ -465,7 +465,8 @@ def _intents_to_v2_changes(
                     fmt_ns, size_ns = fmt_size
                     abs_off_ns = locate_field(
                         vanilla_body, payload_off_ns,
-                        entry_end_ns, fs_entry)
+                        entry_end_ns, fs_entry,
+                        tid_index=intent.tid_index)
                     if abs_off_ns is None:
                         continue
                     if abs_off_ns + size_ns > entry_end_ns:
@@ -1049,7 +1050,8 @@ def _resolve_write_pos(
             return None
         fmt, size = fmt_size
         abs_off = locate_field(
-            body, payload_off, entry_end, fs_entry)
+            body, payload_off, entry_end, fs_entry,
+            tid_index=intent.tid_index)
         if abs_off is None:
             return None
         return abs_off, size, fmt
