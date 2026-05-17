@@ -5937,7 +5937,18 @@ class CdummWindow(FluentWindow):
         """Truly hide the main window so it stops painting while the
         game runs. Falls back to showMinimized() when no tray icon is
         available so the user can still get the window back.
+
+        Honors the ``hide_on_game_launch`` config flag (default true).
+        When set to ``"false"`` the window stays where it is after a
+        successful launch (GitHub #102).
         """
+        try:
+            if self._db is not None:
+                from cdumm.storage.config import Config as _Config
+                if _Config(self._db).get("hide_on_game_launch") == "false":
+                    return
+        except Exception as _e:
+            logger.debug("hide_on_game_launch config lookup failed: %s", _e)
         if self._tray_icon is None:
             self.showMinimized()
             return

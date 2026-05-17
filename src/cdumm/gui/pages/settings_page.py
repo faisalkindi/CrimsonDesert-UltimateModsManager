@@ -178,6 +178,25 @@ class SettingsPage(SmoothScrollArea):
         self._asi_loader_card.hBoxLayout.addSpacing(16)
         self._game_group.addSettingCard(self._asi_loader_card)
 
+        # Hide-on-launch toggle. CDUMM hides the window after pressing
+        # Launch Game so it doesn't contend with the game for GPU. Some
+        # users want to keep the manager visible (e.g. for monitoring,
+        # alt-tabbing) so this exposes the behavior as a setting.
+        # GitHub #102 (d3dsh0t).
+        self._hide_on_launch_card = SettingCard(
+            FluentIcon.MINIMIZE,
+            tr("settings.hide_on_launch"),
+            tr("settings.hide_on_launch_desc"),
+            self._game_group,
+        )
+        self._hide_on_launch_switch = SwitchButton()
+        self._hide_on_launch_switch.setOnText("")
+        self._hide_on_launch_switch.setOffText("")
+        self._hide_on_launch_card.hBoxLayout.addWidget(
+            self._hide_on_launch_switch, 0, Qt.AlignmentFlag.AlignRight)
+        self._hide_on_launch_card.hBoxLayout.addSpacing(16)
+        self._game_group.addSettingCard(self._hide_on_launch_card)
+
         self._layout.addWidget(self._game_group)
 
         # ── Profiles group ────────────────────────────────────────
@@ -471,6 +490,8 @@ class SettingsPage(SmoothScrollArea):
         self._game_dir_card.clicked.connect(self._on_game_dir_browse)
         self._asi_loader_switch.checkedChanged.connect(
             self._on_asi_loader_toggle_changed)
+        self._hide_on_launch_switch.checkedChanged.connect(
+            self._on_hide_on_launch_toggle_changed)
         self._manage_profiles_card.clicked.connect(self.profile_manage_requested.emit)
         self._export_list_card.clicked.connect(self.export_list_requested.emit)
         self._import_list_card.clicked.connect(self.import_list_requested.emit)
@@ -526,6 +547,8 @@ class SettingsPage(SmoothScrollArea):
         self._asi_loader_card.setTitle(tr("settings.asi_auto_install_loader"))
         self._asi_loader_card.setContent(
             tr("settings.asi_auto_install_loader_desc"))
+        self._hide_on_launch_card.setTitle(tr("settings.hide_on_launch"))
+        self._hide_on_launch_card.setContent(tr("settings.hide_on_launch_desc"))
         self._profiles_group.titleLabel.setText(tr("settings.profiles"))
         self._manage_profiles_card.setTitle(tr("settings.manage_profiles"))
         self._manage_profiles_card.setContent(tr("settings.manage_profiles_desc"))
@@ -577,6 +600,13 @@ class SettingsPage(SmoothScrollArea):
         self._asi_loader_switch.blockSignals(True)
         self._asi_loader_switch.setChecked(checked)
         self._asi_loader_switch.blockSignals(False)
+
+        # Hide-on-launch — unset defaults to "true" (existing behavior).
+        hide_pref = self._config.get("hide_on_game_launch")
+        hide_checked = hide_pref != "false"
+        self._hide_on_launch_switch.blockSignals(True)
+        self._hide_on_launch_switch.setChecked(hide_checked)
+        self._hide_on_launch_switch.blockSignals(False)
 
         # NexusMods API key. Pre-fill the Advanced field so it's there
         # if/when the user clicks the toggle, but keep the row hidden
@@ -687,6 +717,15 @@ class SettingsPage(SmoothScrollArea):
             "asi_auto_install_loader", "true" if checked else "false")
         logger.info(
             "ASI loader auto-install %s", "enabled" if checked else "disabled")
+
+    def _on_hide_on_launch_toggle_changed(self, checked: bool) -> None:
+        """Persist the hide-on-game-launch preference."""
+        if self._config is None:
+            return
+        self._config.set(
+            "hide_on_game_launch", "true" if checked else "false")
+        logger.info(
+            "Hide on game launch %s", "enabled" if checked else "disabled")
 
     def _on_game_dir_browse(self) -> None:
         """Open a folder browser to change the game directory."""

@@ -602,6 +602,8 @@
   "settings.browse": "Browse",
   "settings.asi_auto_install_loader": "Manage ASI loader (winmm.dll)",
   "settings.asi_auto_install_loader_desc": "Keep CDUMM's bundled ASI loader current in bin64. Turn off if OptiScaler or another tool already ships its own winmm.dll.",
+  "settings.hide_on_launch": "Hide window when launching the game",
+  "settings.hide_on_launch_desc": "Stops CDUMM contending with the game for GPU. Turn off to keep the manager visible after pressing Launch Game.",
   "settings.profiles": "Profiles",
   "settings.manage_profiles": "Mod Profiles",
   "settings.manage_profiles_desc": "Save and load mod configurations",

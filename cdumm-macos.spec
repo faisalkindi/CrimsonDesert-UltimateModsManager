@@ -217,6 +217,20 @@ a = Analysis(
         # already in pyproject.toml so PyInstaller picks it up
         # automatically, but the explicit hidden-import is defensive.
         'psutil',
+        # websocket-client (imported as `websocket`) for Nexus SSO login.
+        # Without these explicit imports, PyInstaller can miss the package
+        # entirely (it's imported lazily inside cdumm.engine.nexus_sso) and
+        # SSO login surfaces "The 'websocket-client' Python package is
+        # required". Matches the Windows spec (GitHub #113).
+        'websocket',
+        'websocket._app',
+        'websocket._core',
+        'websocket._exceptions',
+        'websocket._handshake',
+        'websocket._http',
+        'websocket._socket',
+        'websocket._url',
+        'websocket._utils',
     ] + _qflw_hiddenimports,
     hookspath=[],
     hooksconfig={},
