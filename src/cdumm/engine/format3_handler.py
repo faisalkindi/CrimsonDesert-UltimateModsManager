@@ -220,30 +220,16 @@ def _parse_intents_block(
                 f"({type(raw_old).__name__}); 'old' must be a hex "
                 f"string when present"
             )
-        # v3.1 spec explicitly defers list_set, list_append, list_remove,
-        # list_merge to v3.2 (see CrimsonGameMods/FIELD_JSON_V3_1_SPEC.md
-        # under "Supported Operations"). The DMM v1.3.4 loader will reject
-        # them; CDUMM should too so a mod author who uses a v3.2 op gets a
-        # clear "not yet supported" message instead of having the intent
-        # silently drop through to a writer that ignores op and just
-        # overwrites the value. RichmondS1337 GitHub #125.
-        raw_op = raw.get("op", "set")
-        if not isinstance(raw_op, str):
-            raise ValueError(
-                f"{label} intent #{i} has non-string 'op' "
-                f"({type(raw_op).__name__})"
-            )
-        if raw_op not in ("set",):
-            raise ValueError(
-                f"{label} intent #{i} uses op {raw_op!r}, which is "
-                f"reserved for Field JSON v3.2 and not yet supported by "
-                f"CDUMM. Only 'set' is supported today."
-            )
+        # Parser stays lenient on op (#66 deadriver35 contract): accept
+        # any string, default missing op to 'set'. The actual rejection
+        # of unsupported ops happens in validate_intents downstream, so
+        # one unsupported intent shows up in the per-mod skipped summary
+        # instead of taking the whole import down.
         intents.append(Format3Intent(
             entry=str(raw["entry"]),
             key=raw_key,
             field=str(raw["field"]),
-            op=raw_op,
+            op=str(raw.get("op", "set")),
             new=raw["new"],
             old=raw_old,
         ))
@@ -396,6 +382,42 @@ def _table_name_from_target(target: str) -> str:
     return name.lower()
 
 
+_SUPPORTED_OPS = frozenset({"set"})
+_V32_RESERVED_OPS = frozenset({
+    "list_set", "list_append", "list_remove", "list_merge",
+    # Older mods sometimes used the unprefixed verbs; map them to the
+    # same v3.2-reserved bucket so the skip reason is consistent.
+    "append", "remove", "merge",
+})
+
+
+def _partition_unsupported_op(
+    intent: Format3Intent,
+) -> str | None:
+    """If the intent uses an op CDUMM cannot apply, return the
+    skipped-reason string. Otherwise return None.
+
+    Currently only "set" applies. v3.2-reserved list mutation ops get
+    a specific message naming the spec; everything else gets a generic
+    "unknown op" reason. RichmondS1337 GitHub #125, in service of
+    DMM Field JSON v3.1 compatibility.
+    """
+    if intent.op in _SUPPORTED_OPS:
+        return None
+    if intent.op in _V32_RESERVED_OPS:
+        return (
+            f"intent uses op {intent.op!r} which is reserved for "
+            f"Field JSON v3.2 (list mutation). CDUMM only supports "
+            f"'set' today. Ask the mod author for a 'set'-shaped "
+            f"variant, or wait for the v3.2 ops to land."
+        )
+    return (
+        f"intent uses unknown op {intent.op!r}; CDUMM only "
+        f"supports 'set'. If this is a real op from a newer spec, "
+        f"file an issue with the mod's JSON attached."
+    )
+
+
 def validate_intents(
     target: str, intents: list[Format3Intent]
 ) -> Format3Validation:
@@ -429,7 +451,11 @@ def validate_intents(
 
         if bool(intents) and all(_routable(i) for i in intents):
             for intent in intents:
-                result.supported.append(intent)
+                op_reason = _partition_unsupported_op(intent)
+                if op_reason is not None:
+                    result.skipped.append((intent, op_reason))
+                else:
+                    result.supported.append(intent)
             return result
         reason = (
             f"target '{target}' has no schema in CDUMM "
@@ -437,7 +463,10 @@ def validate_intents(
             f"and field not in field_schema/{table_name}.json)"
         )
         for intent in intents:
-            if _routable(intent):
+            op_reason = _partition_unsupported_op(intent)
+            if op_reason is not None:
+                result.skipped.append((intent, op_reason))
+            elif _routable(intent):
                 result.supported.append(intent)
             else:
                 result.skipped.append((intent, reason))
@@ -451,6 +480,13 @@ def validate_intents(
     fs_entries = load_field_schema(table_name)
 
     for intent in intents:
+        # Unsupported op is checked first; the schema/field walker
+        # below assumes op == 'set' and would silently do a set-style
+        # write for e.g. op='append' otherwise.
+        op_reason = _partition_unsupported_op(intent)
+        if op_reason is not None:
+            result.skipped.append((intent, op_reason))
+            continue
         reason = _classify_intent(
             intent, schema, field_specs, fs_entries, table_name)
         if reason is None:

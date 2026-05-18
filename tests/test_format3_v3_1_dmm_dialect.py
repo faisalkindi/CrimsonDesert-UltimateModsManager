@@ -22,6 +22,7 @@ import pytest
 from cdumm.engine.format3_handler import (
     parse_format3_mod,
     parse_format3_mod_targets,
+    validate_intents,
 )
 from cdumm.engine.json_patch_handler import is_natt_format_3
 
@@ -95,11 +96,13 @@ def test_v3_1_format_minor_emits_log_line(tmp_path, caplog):
     ), "expected an INFO line announcing the v3.1 dialect"
 
 
-def test_v3_1_unsupported_op_raises_clear_error(tmp_path):
+def test_v3_1_unsupported_op_skipped_at_validate_time(tmp_path):
     """v3.1 spec defers list_set / list_append / list_remove / list_merge
-    to v3.2. CDUMM rejects them up front with a clear message so the mod
-    author sees 'not yet supported' instead of having the intent silently
-    drop through to a writer that ignores op and just overwrites.
+    to v3.2. Parser stays lenient (existing GitHub #66 contract), but
+    validate_intents partitions these intents into 'skipped' with a
+    clear reason naming the spec, so the mod author sees 'reserved for
+    v3.2' instead of having the intent silently drop through to the
+    set-only writer.
     """
     doc = {
         "format": 3,
@@ -115,8 +118,18 @@ def test_v3_1_unsupported_op_raises_clear_error(tmp_path):
     }
     p = tmp_path / "list_append.json"
     p.write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(ValueError, match="list_append.*v3.2.*not yet"):
-        parse_format3_mod_targets(p)
+    # Parser accepts the intent (lenient).
+    pairs = parse_format3_mod_targets(p)
+    assert len(pairs) == 1
+    target, intents = pairs[0]
+    assert intents[0].op == "list_append"
+    # Validator routes it to skipped with the v3.2-reserved reason.
+    validation = validate_intents(target, intents)
+    assert len(validation.supported) == 0
+    assert len(validation.skipped) == 1
+    _intent, reason = validation.skipped[0]
+    assert "list_append" in reason
+    assert "v3.2" in reason
 
 
 def test_v3_0_singular_shape_still_accepted(tmp_path):
