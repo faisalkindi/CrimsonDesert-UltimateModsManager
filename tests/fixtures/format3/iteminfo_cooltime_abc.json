@@ -1,0 +1,24 @@
+{
+  "modinfo": {
+    "title": "Test iteminfo cooltime a/b/c aliases",
+    "version": "1.0",
+    "author": "CDUMM test suite",
+    "description": "Mirrors the NattKh-exporter shape from Better Unique Gears (GitHub #135): cooltime and max_charged_useable_count are written as a/b/c triplets.",
+    "note": "Format 3.1"
+  },
+  "format": 3,
+  "format_minor": 1,
+  "targets": [
+    {
+      "file": "iteminfo.pabgb",
+      "intents": [
+        {"entry": "WeatherWeaver_Necklace", "key": 1001182, "field": "cooltime.a", "op": "set", "new": 180000},
+        {"entry": "WeatherWeaver_Necklace", "key": 1001182, "field": "cooltime.b", "op": "set", "new": 180000},
+        {"entry": "WeatherWeaver_Necklace", "key": 1001182, "field": "cooltime.c", "op": "set", "new": 180000},
+        {"entry": "AbyssReward_Titan_TwoHandSpear", "key": 15701, "field": "max_charged_useable_count.a", "op": "set", "new": 10},
+        {"entry": "AbyssReward_Titan_TwoHandSpear", "key": 15701, "field": "max_charged_useable_count.b", "op": "set", "new": 10},
+        {"entry": "AbyssReward_Titan_TwoHandSpear", "key": 15701, "field": "max_charged_useable_count.c", "op": "set", "new": 10}
+      ]
+    }
+  ]
+}

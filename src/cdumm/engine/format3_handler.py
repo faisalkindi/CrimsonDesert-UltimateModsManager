@@ -251,6 +251,54 @@ def _parse_intents_block(
     return intents
 
 
+# GitHub #135 (Better Unique Gears, Luxxbell): NattKh's exporter
+# models a few iteminfo fields as a three-element a/b/c group, e.g.
+# it writes cooltime.a / cooltime.b / cooltime.c. CDUMM's iteminfo
+# native parser flattens those same three on-disk i64 slots into
+# three separate top-level fields. Verified 2026-05-20 against a
+# vanilla 1.07.00 iteminfo.pabgb dump: cooltime, unk_post_cooltime_a
+# and unk_post_cooltime_b always hold an identical value per record
+# (e.g. WeatherWeaver_Necklace = 1800000 in all three), confirming
+# they are one logical a/b/c triplet, not the "8-byte zero padding"
+# the parser comment originally guessed. Same holds for
+# max_charged_useable_count and its two unk_post_max_charged slots.
+# Mapping the dotted a/b/c names onto CDUMM's flat field names lets
+# the existing flat-field writer handle them with no special-casing.
+_ITEMINFO_FIELD_ALIASES: dict[str, str] = {
+    "cooltime.a": "cooltime",
+    "cooltime.b": "unk_post_cooltime_a",
+    "cooltime.c": "unk_post_cooltime_b",
+    "max_charged_useable_count.a": "max_charged_useable_count",
+    "max_charged_useable_count.b": "unk_post_max_charged_a",
+    "max_charged_useable_count.c": "unk_post_max_charged_b",
+}
+
+
+def _apply_field_aliases(
+    target: str, intents: list[Format3Intent]
+) -> None:
+    """Rewrite known dotted alias field names to CDUMM's flat field
+    names, mutating the ``intents`` list in place. Currently only the
+    iteminfo cooltime / max_charged_useable_count a/b/c triplets
+    (GitHub #135). Applied at parse time so the validator and the
+    writer both see the canonical flat name and need no per-call
+    special-casing.
+
+    Format3Intent is a frozen dataclass, so each aliased entry is
+    replaced with a fresh dataclasses.replace() copy rather than
+    mutated in place.
+    """
+    tname = target.lower()
+    if not (tname == "iteminfo.pabgb"
+            or tname.endswith("/iteminfo.pabgb")):
+        return
+    import dataclasses
+    for i, intent in enumerate(intents):
+        canonical = _ITEMINFO_FIELD_ALIASES.get(intent.field)
+        if canonical is not None:
+            intents[i] = dataclasses.replace(intent, field=canonical)
+
+
 def parse_format3_mod_targets(
     path: Path,
 ) -> list[tuple[str, list[Format3Intent]]]:
@@ -330,6 +378,7 @@ def parse_format3_mod_targets(
                 "naming the .pabgb file the mod modifies"
             )
         intents = _parse_intents_block(data.get("intents"), label="intents")
+        _apply_field_aliases(target, intents)
         return [(target, intents)]
 
     raw_targets = data.get("targets")
@@ -359,6 +408,7 @@ def parse_format3_mod_targets(
             raw_t.get("intents"),
             label=f"targets[{ti}] ({file_value}) intents",
         )
+        _apply_field_aliases(file_value, intents)
         pairs.append((file_value, intents))
     return pairs
 
