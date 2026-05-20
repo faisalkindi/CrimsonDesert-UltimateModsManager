@@ -19,6 +19,14 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.3.9",
+        "date": "2026-05-20",
+        "notes": [
+            "<b>DMM Field JSON v3.1 mods that ship intents without a numeric 'key' field now import correctly.</b> AgentRatchet GitHub #125 retested Refinement Cost Reforged v2.3 (Nexus 1342) on v3.3.8 and the parser still rejected with 'targets[0] (multichangeinfo.pabgb) intents intent #0 is missing required key key'. The v3.1 spec lists key as required but also defines lookup as 'try entry name first, then numeric key' (CrimsonGameMods/FIELD_JSON_V3_1_SPEC.md), so in practice mod authors omit key when the entry name is unique. The parser now treats key as optional when entry is present and defaults to 0 as a sentinel for 'no numeric fallback'. The apply path resolves by entry name first so a 0 default cannot silently land on the wrong record (real iteminfo / multichangeinfo keys are 8 to 9 digit ints). When key IS present it still has to be an integer; bools and strings still raise. Two new tests in tests/test_format3_v3_1_dmm_dialect lock the contract.",
+            "<b>Format 3 whole-table writer now logs the per-byte diff between vanilla and the writer's output.</b> pitonpp GitHub #105 retested v3.3.7 on macOS with Better Unique Gears (156 intents) and the new diagnostic logging showed the writer producing exactly one big change at file offset 0 spanning the whole table. mount-time then applied 0 of that change, which points at a content match between writer output and vanilla. New WARNING line fires when the writer's 'original' and 'patched' hex strings compare equal (meaning the writer effectively wrote vanilla despite the intent batch), and an INFO line otherwise shows the first byte index where they diverge along with both lengths. The next macOS bundle will pinpoint whether the writer is failing to mutate (writes vanilla unchanged) or whether mount-time is failing to find the modified bytes that the writer DID produce.",
+        ],
+    },
+    {
         "version": "3.3.8",
         "date": "2026-05-19",
         "notes": [
