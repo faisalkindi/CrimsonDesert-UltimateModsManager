@@ -605,6 +605,38 @@ def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int
     """
     data = bytearray(pamt_path.read_bytes())
 
+    # GitHub #148 mrkillerhomerxD (HD Upscale x2, Nexus 2618): the PAMT
+    # record stores offset / comp_size / orig_size and the PAZ size
+    # table as uint32. A large texture pack (HD Upscale doubles every
+    # texture) can push a PAZ archive past 4 GB, at which point one of
+    # those values exceeds 0xFFFFFFFF and struct.pack_into('<I', ...)
+    # raises "'I' format requires 0 <= number <= 4294967295" — which
+    # surfaced to the user as the opaque "Worker crashed" message.
+    # Pre-check every value so we can raise a clear, user-facing error
+    # instead. The 4 GB ceiling is a hard limit of the game's archive
+    # format; the game itself cannot load a PAZ larger than that, so
+    # this is not a CDUMM bug to "fix" by allowing bigger archives.
+    UINT32_MAX = 0xFFFFFFFF
+    for entry, new_comp_size, new_offset, new_paz_size, new_orig_size in updates:
+        for label, value in (
+            ("file offset", new_offset),
+            ("compressed size", new_comp_size),
+            ("uncompressed size", new_orig_size),
+            ("archive size", new_paz_size),
+        ):
+            if value is not None and value > UINT32_MAX:
+                raise ValueError(
+                    f"This mod is too large for the game's archive "
+                    f"format. The {label} for '{entry.path}' would be "
+                    f"{value:,} bytes, but a single Crimson Desert PAZ "
+                    f"archive cannot exceed 4 GB (the format stores "
+                    f"offsets and sizes as 32-bit values). HD-texture "
+                    f"packs that upscale every texture commonly hit "
+                    f"this ceiling. Try a lower-resolution variant of "
+                    f"the mod, or split it into smaller mods. This is "
+                    f"a hard limit of the game, not a CDUMM bug."
+                )
+
     for entry, new_comp_size, new_offset, new_paz_size, new_orig_size in updates:
         # Update PAZ size table if PAZ grew
         if new_paz_size is not None:
