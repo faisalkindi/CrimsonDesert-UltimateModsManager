@@ -115,7 +115,11 @@ def expand_format3_into_aggregated(
     # collect intents from ALL mods first, dispatch once with the
     # union, emit a single change. Bug from systematic-debugging
     # round on test_iteminfo_multi_mod_compose.
-    _WHOLE_TABLE_TARGETS = {"iteminfo.pabgb", "skill.pabgb"}
+    # multichangeinfo.pabgb is whole-table because its writer reparses
+    # the whole table per record and also rebuilds the companion
+    # multichangeinfo.pabgh (GitHub #125 Refinement Cost Reforged).
+    _WHOLE_TABLE_TARGETS = {
+        "iteminfo.pabgb", "skill.pabgb", "multichangeinfo.pabgb"}
     whole_table_intents: dict[str, list] = {}
     whole_table_mod_names: dict[str, list[str]] = {}
     # Track contributing mod ids per whole-table target so the
@@ -308,6 +312,71 @@ def expand_format3_into_aggregated(
                 )
             continue
         vanilla_body, vanilla_header = vanilla
+
+        # multichangeinfo.pabgb (GitHub #125): its writer produces one
+        # per-record change for the .pabgb plus a rebuilt companion
+        # .pabgh. The .pabgh change is injected under its own
+        # aggregated key so the mount-time pipeline emits it as a
+        # second overlay entry. Handled here, before the generic
+        # _intents_to_v2_changes path, because that path emits changes
+        # for a single target only.
+        if target == "multichangeinfo.pabgb":
+            from cdumm.engine.multichangeinfo_writer import (
+                build_multichangeinfo_changes,
+            )
+            mci_intents = [
+                (i.entry, i.key, i.field, i.new) for i in batched
+            ]
+            try:
+                pabgb_changes, pabgh_change = build_multichangeinfo_changes(
+                    vanilla_body, vanilla_header, mci_intents)
+            except Exception as e:
+                logger.error(
+                    "Format 3 multichangeinfo writer crashed on %d "
+                    "intent(s): %s", len(batched), e, exc_info=True)
+                pabgb_changes, pabgh_change = [], None
+            if not pabgb_changes:
+                logger.warning(
+                    "Format 3 multichangeinfo: %d intent(s) from %d "
+                    "mod(s) produced 0 record changes",
+                    len(batched), len(contributing_mods))
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Format 3 mod(s) "
+                        f"{', '.join(repr(n) for n in contributing_mods)} "
+                        f"produced 0 byte changes for "
+                        f"'multichangeinfo.pabgb'. The targeted "
+                        f"refinement recipes may not exist in this game "
+                        f"version, or every targeted material slot sits "
+                        f"in a record whose material list CDUMM cannot "
+                        f"locate yet."
+                    )
+                continue
+            contrib_ids = list(whole_table_mod_ids.get(target, []))
+            for c in pabgb_changes:
+                c["_target_file"] = target
+                if contrib_ids:
+                    c["_source_mod_ids"] = list(contrib_ids)
+            aggregated.setdefault(target, []).extend(pabgb_changes)
+            if pabgh_change is not None:
+                pabgh_change["_target_file"] = "multichangeinfo.pabgh"
+                if contrib_ids:
+                    pabgh_change["_source_mod_ids"] = list(contrib_ids)
+                aggregated.setdefault(
+                    "multichangeinfo.pabgh", []).append(pabgh_change)
+            if participating_mod_ids is not None:
+                for mid in contrib_ids:
+                    participating_mod_ids.add(mid)
+            for c in pabgb_changes:
+                n_bytes_changed += len(c.get("patched", "")) // 2
+            logger.info(
+                "Format 3 multichangeinfo writer: applied %d intent(s) "
+                "across %d mod(s), %d record change(s)%s",
+                len(batched), len(contributing_mods), len(pabgb_changes),
+                ", + pabgh offset rebuild"
+                if pabgh_change is not None else "")
+            continue
+
         changes = _intents_to_v2_changes(
             target, vanilla_body, vanilla_header, batched)
         if not changes:

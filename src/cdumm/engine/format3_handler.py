@@ -687,6 +687,13 @@ def _diagnose_unsupported_intent(
                     # via the iteminfo writer's nested-path walker.
                     or f.startswith("docking_child_data.")):
                 return None
+        # GitHub #125 (Refinement Cost Reforged): multichangeinfo
+        # fixed_material_data_list[N].item_info / .count are resolved
+        # by the multichangeinfo writer's element patcher at apply
+        # time, not by the generic nested-struct walker.
+        if tn == "multichangeinfo" and (field or "").startswith(
+                "fixed_material_data_list["):
+            return None
         return (
             f"field '{field}' targets a nested struct sub-field "
             f"(dotted path). Format 3 nested-field writes are not "
@@ -820,6 +827,19 @@ def _classify_intent(
             "unk_post_cooltime_b",
         }
     ):
+        return None
+
+    # GitHub #125 (Refinement Cost Reforged): multichangeinfo
+    # fixed_material_data_list[N].item_info / .count intents are
+    # resolved by the multichangeinfo writer at apply time
+    # (multichangeinfo_writer.build_multichangeinfo_changes). The PABGB
+    # schema walker can't reach the array - several fields before it
+    # are variable-length - so early-accept here lets these intents
+    # reach the writer. Intents on records whose array the writer
+    # cannot locate are dropped cleanly at apply time with a logged
+    # warning, mirroring the iteminfo nested-path early-accept above.
+    if tn_norm == "multichangeinfo" and intent.field.startswith(
+            "fixed_material_data_list["):
         return None
 
     # List writer dispatch: this (table, field) pair has a registered
