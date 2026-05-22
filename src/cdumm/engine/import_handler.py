@@ -1645,6 +1645,28 @@ def _f3_variant_distinguishing_id(filename: str, common_prefix: str) -> str:
     return stem.strip("._- ") or filename
 
 
+def _f3_targets_and_intent_count(data: dict) -> tuple[frozenset, int]:
+    """Return (set of target file names, total intent count) for a
+    Format 3 mod.
+
+    Handles both the singular ``target`` / ``intents`` shape and the
+    newer ``targets: [{file, intents}]`` multi-target shape. The
+    variant-pack detector needs this because reading ``intents``
+    directly returns nothing for multi-target exports, which used to
+    make every newer-format variant pack (e.g. Stamina and Spirit
+    Unlimited, Nexus 2684) fail detection and fall through to the
+    generic "import one at a time" rejection. GitHub #154.
+    """
+    tgts = data.get("targets")
+    if isinstance(tgts, list) and tgts:
+        files = frozenset(
+            str(t.get("file")) for t in tgts if isinstance(t, dict))
+        count = sum(len(t.get("intents") or [])
+                    for t in tgts if isinstance(t, dict))
+        return files, count
+    return frozenset({data.get("target")}), len(data.get("intents") or [])
+
+
 def _scan_format3_variant_pack(path: Path) -> list[tuple[Path, str]] | None:
     """Pure-detection variant of `find_format3_variants` — no side
     effects.
@@ -1675,14 +1697,17 @@ def _scan_format3_variant_pack(path: Path) -> list[tuple[Path, str]] | None:
 
     if len(f3_jsons) < 2:
         return None
-    targets = {data.get("target") for _, data in f3_jsons}
-    if len(targets) != 1:
+    # Targets + intent counts, handling both the singular and the
+    # newer targets:[...] shape (GitHub #154).
+    per = [_f3_targets_and_intent_count(data) for _, data in f3_jsons]
+    target_sets = {ts for ts, _ in per}
+    if len(target_sets) != 1:
         return None
     names = [p.name for p, _ in f3_jsons]
     prefix = _common_prefix(names)
     if len(prefix) < _F3_VARIANT_MIN_COMMON_PREFIX:
         return None
-    counts = [len(data.get("intents") or []) for _, data in f3_jsons]
+    counts = [c for _, c in per]
     if min(counts) <= 0:
         return None
     if max(counts) / min(counts) > _F3_VARIANT_INTENT_RATIO_MAX:
@@ -2785,13 +2810,11 @@ def _import_from_extracted(
                 f"archive and import only the variant JSON you want."
             )
             return result
-        names = ", ".join(p.name for p in f3_jsons)
-        result.error = (
-            f"This archive contains {len(f3_jsons)} Format 3 mods "
-            f"({names}). Please import them one at a time so each "
-            f"gets its own row in the mod list."
-        )
-        return result
+        # Not a variant pack: import each Format 3 mod as its own row
+        # instead of rejecting the bundle (#154).
+        return _import_format3_bundle(
+            f3_jsons, game_dir, db, snapshot, deltas_dir,
+            existing_mod_id=existing_mod_id)
 
     # Check for DDS texture mod
     tex_info = detect_texture_mod(tmp_path)
@@ -3221,13 +3244,14 @@ def import_from_zip(
                     f"zip and import only the variant JSON you want."
                 )
                 return result
-            names = ", ".join(p.name for p in f3_jsons)
-            result.error = (
-                f"This zip contains {len(f3_jsons)} Format 3 mods "
-                f"({names}). Please import them one at a time so each "
-                f"gets its own row in the mod list."
-            )
-            return result
+            # Not a variant pack: a bundle of independent Format 3
+            # mods (e.g. CD QOL Suite). Import each as its own mod
+            # row instead of rejecting the whole archive (#154).
+            bundle = _import_format3_bundle(
+                f3_jsons, game_dir, db, snapshot, deltas_dir,
+                existing_mod_id=existing_mod_id)
+            bundle.asi_staged = list(_carryover_asi_staged)
+            return bundle
 
         # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
         tex_info = detect_texture_mod(tmp_path)
@@ -3693,13 +3717,11 @@ def import_from_folder(
                 f"specific variant JSON you want."
             )
             return result
-        names = ", ".join(p.name for p in f3_jsons)
-        result.error = (
-            f"This folder contains {len(f3_jsons)} Format 3 mods "
-            f"({names}). Please import them one at a time so each "
-            f"gets its own row in the mod list."
-        )
-        return result
+        # Not a variant pack: import each Format 3 mod as its own row
+        # instead of rejecting the bundle (#154).
+        return _import_format3_bundle(
+            f3_jsons, game_dir, db, snapshot, deltas_dir,
+            existing_mod_id=existing_mod_id)
 
     # Check for DDS texture mod (folder of .dds files, no PAZ/PAMT)
     tex_info = detect_texture_mod(folder_path)
@@ -4061,6 +4083,77 @@ def import_from_bsdiff(
     logger.info("bsdiff import: %s targets %s (%d byte ranges)",
                 mod_name, target_path, len(byte_ranges))
     return result
+
+
+def _import_format3_bundle(
+    f3_jsons: list[Path], game_dir: Path, db: Database,
+    snapshot: SnapshotManager, deltas_dir: Path,
+    existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Import an archive/folder holding several independent Format 3
+    mods, one mod row per .json (GitHub #154).
+
+    A bundle like CD QOL Suite (Nexus 1591) ships many unrelated
+    Format 3 mods in one zip. CDUMM used to reject the whole thing and
+    tell the user to import 19 files by hand. Importing each json as
+    its own row lets the user enable what they want; any
+    mutually-exclusive variant groups inside the bundle surface
+    through CDUMM's normal same-target conflict detection.
+
+    The first json is returned as the primary result (and reuses
+    ``existing_mod_id`` on re-import); the rest become additional mod
+    rows. A summary is attached to the primary result's ``info`` so
+    the user sees the whole bundle landed.
+    """
+    ordered = sorted(f3_jsons, key=lambda p: p.name.lower())
+    primary: ModImportResult | None = None
+    first_any: ModImportResult | None = None
+    imported = 0
+    failed: list[str] = []
+    for idx, jp in enumerate(ordered):
+        target_id = existing_mod_id if idx == 0 else None
+        try:
+            res = import_from_natt_format_3(
+                json_path=jp, game_dir=game_dir, db=db,
+                snapshot=snapshot, deltas_dir=deltas_dir,
+                existing_mod_id=target_id)
+        except Exception as e:  # noqa: BLE001 — one bad json must not
+            # abort the whole bundle.
+            logger.error(
+                "Format 3 bundle: '%s' failed to import: %s",
+                jp.name, e, exc_info=True)
+            failed.append(jp.name)
+            continue
+        if first_any is None:
+            first_any = res
+        if res.error:
+            failed.append(jp.name)
+        else:
+            imported += 1
+            if primary is None:
+                primary = res
+            else:
+                logger.info(
+                    "Format 3 bundle: imported '%s' as a separate "
+                    "mod row", jp.name)
+    if primary is None:
+        # Nothing imported cleanly — surface the first result so the
+        # user sees a concrete error rather than a blank one.
+        return first_any or ModImportResult("Format 3 bundle")
+
+    total = len(ordered)
+    note = (
+        f"This archive bundled {total} Format 3 mods. {imported} were "
+        f"imported as separate entries in the mod list. Enable the "
+        f"ones you want; where a group offers multiple versions "
+        f"(named \"Select One Version of ...\"), enable only one."
+    )
+    if failed:
+        shown = ", ".join(failed[:5]) + (
+            f", and {len(failed) - 5} more" if len(failed) > 5 else "")
+        note += f" {len(failed)} could not be imported: {shown}."
+    primary.info = f"{primary.info}\n{note}" if primary.info else note
+    return primary
 
 
 def import_from_natt_format_3(

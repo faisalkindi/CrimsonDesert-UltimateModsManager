@@ -159,6 +159,60 @@ def test_variant_dirs_each_contain_exactly_one_f3_json(tmp_path):
             f"its base_dir contains {len(f3_jsons)}")
 
 
+def _make_f3_json_multitarget(folder: Path, name: str,
+                              target: str = "skill.pabgb",
+                              intent_count: int = 7) -> Path:
+    """Write a synthetic Format 3 JSON in the newer targets:[...]
+    multi-target shape (no top-level target / intents keys)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    p = folder / name
+    p.write_text(json.dumps({
+        "modinfo": {"name": name},
+        "format": 3,
+        "format_minor": 1,
+        "targets": [{
+            "file": target,
+            "intents": [
+                {"entry": f"E{i}", "key": i, "field": "x",
+                 "op": "set", "new": i}
+                for i in range(intent_count)
+            ],
+        }],
+    }))
+    return p
+
+
+def test_multitarget_shape_variant_pack_is_detected(tmp_path):
+    """GitHub #154 (Stamina and Spirit Unlimited, Nexus 2684): the
+    three variant JSONs use the newer targets:[{file,intents}] shape.
+    The detector used to read the top-level `intents` key, which is
+    absent in that shape, so every intent count came back 0 and the
+    pack fell through to the generic "import one at a time" rejection.
+    It must now be detected as a variant pack."""
+    from cdumm.engine.import_handler import find_format3_variants
+
+    src = tmp_path / "Stamina_FieldJson"
+    for level in ("50", "90", "Unlimited"):
+        _make_f3_json_multitarget(src, f"Stamina_Spirit_{level}.json")
+
+    variants = find_format3_variants(tmp_path)
+    assert len(variants) == 3, (
+        f"multi-target-shape variant pack must be detected; got "
+        f"{len(variants)}: {[v.get('id') for v in variants]}")
+
+
+def test_multitarget_different_target_files_not_variants(tmp_path):
+    """Newer-shape JSONs targeting different files are independent
+    mods, not a variant pack."""
+    from cdumm.engine.import_handler import find_format3_variants
+
+    src = tmp_path / "mixed"
+    _make_f3_json_multitarget(src, "Pack_a.json", target="iteminfo.pabgb")
+    _make_f3_json_multitarget(src, "Pack_b.json", target="skill.pabgb")
+
+    assert find_format3_variants(tmp_path) == []
+
+
 def test_variant_id_matches_per_variant_distinguishing_part(tmp_path):
     """The variant `id` must be the per-variant distinguishing piece
     (without the common stem) so the picker labels are useful:
