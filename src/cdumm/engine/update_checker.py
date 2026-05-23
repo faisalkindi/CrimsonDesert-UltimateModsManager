@@ -121,6 +121,18 @@ class UpdateDownloadWorker(QObject):
         self._dest = dest_path
 
     def run(self) -> None:
+        # Atomic-write target: download into ``<dest>.part`` and rename
+        # only on full success. A half-finished .part file cannot be
+        # mistaken for the real CDUMM3.exe, so if the worker is killed,
+        # the network drops, the antivirus pauses the stream, or the
+        # user closes CDUMM mid-download, the user's existing exe is
+        # untouched. Pre-fix, a partial overwrite produced an exe that
+        # failed to load its embedded Python DLL on launch
+        # (cde2496 GitHub #147: "Failed to load Python DLL
+        # python314.dll. LoadLibrary: The specified module could not
+        # be found.").
+        import os as _os
+        tmp_dest = self._dest + ".part"
         try:
             req = urllib.request.Request(
                 self._url, headers={"User-Agent": "CDUMM"})
@@ -131,7 +143,7 @@ class UpdateDownloadWorker(QObject):
                 # several times per second on slow connections, large
                 # enough that we don't spam the GUI thread on fast ones.
                 chunk = 64 * 1024
-                with open(self._dest, "wb") as f:
+                with open(tmp_dest, "wb") as f:
                     while True:
                         block = resp.read(chunk)
                         if not block:
@@ -139,9 +151,17 @@ class UpdateDownloadWorker(QObject):
                         f.write(block)
                         received += len(block)
                         self.progress.emit(received, total)
+            _os.replace(tmp_dest, self._dest)
             self.done.emit(self._dest)
         except Exception as e:
             logger.warning("Direct download failed: %s", e)
+            # Clean up the partial file so a later retry starts fresh
+            # and the user does not see a stray .part next to their exe.
+            try:
+                if _os.path.exists(tmp_dest):
+                    _os.unlink(tmp_dest)
+            except Exception:
+                pass
             self.failed.emit(str(e))
         finally:
             self.finished.emit()

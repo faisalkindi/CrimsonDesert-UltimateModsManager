@@ -1942,64 +1942,49 @@ class CdummWindow(FluentWindow):
         thread.start()
 
     def _reveal_in_file_manager(self, path: str) -> None:
-        """Open the OS file manager with ``path`` selected.
+        """Open the OS file manager at ``path``'s parent folder.
 
-        Windows: ``explorer.exe /select,<path>`` highlights the file in
-        an Explorer window so the user can drag it onto their Crimson
-        Desert install (or onto their old CDUMM3.exe).
+        Previously CDUMM ran ``explorer.exe /select,<path>`` on Windows
+        and ``open -R <path>`` on macOS to also highlight the downloaded
+        file. The reveal-the-file UX was nice but the subprocess spawn
+        was the only direct interaction the post-download flow had with
+        OS-level shell extensions and antivirus tooling, and several
+        users reported the GUI freezing right around this stage
+        (GitHub #108, #142, #151, #158, #160). DETACHED_PROCESS plus
+        stdio=DEVNULL plus close_fds was already in place; the spawn
+        was as decoupled as Windows lets it be, and it still wedged on
+        some machines.
 
-        macOS: ``open -R <path>`` does the equivalent in Finder.
-
-        Linux / fallback: just open the parent folder via ``open_path``,
-        because xdg-open has no portable "select" verb.
-
-        GitHub #108 (jscouron, ZapZockt): on Windows the spawn must be
-        fully detached so explorer.exe can't share stdio handles with
-        CDUMM. Without DETACHED_PROCESS, certain antivirus / shell
-        extensions hold the explorer subprocess open long enough that
-        if the caller is on the GUI thread, the GUI can appear to hang
-        (sized to caller's expectations) even though Popen returned.
+        Switching to QDesktopServices.openUrl removes the subprocess
+        entirely. Qt asks the OS shell to open the folder using whatever
+        native call the shell exposes, with no inherited handles from
+        CDUMM and no shared event-loop context. The user loses the
+        "file highlighted in Explorer" nicety, but the file is the only
+        ``CDUMM3.exe`` (or the only ``CDUMM-*-macos-arm64.dmg``) in
+        Downloads, so it stands out fine. This is the defensive cleanup
+        the freeze cluster was waiting for; it is not a confirmed fix
+        because the cluster cannot be reproduced locally, but it removes
+        the one component of the post-download flow that involved
+        external processes.
         """
         from pathlib import Path
-        import subprocess
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
         p = Path(path)
         try:
-            if IS_WINDOWS:
-                # CREATE_NO_WINDOW alone is not enough to fully detach
-                # explorer.exe from the parent. Add DETACHED_PROCESS
-                # and explicit stdio=DEVNULL to break every shared
-                # handle so explorer cannot influence CDUMM's
-                # event loop.
-                DETACHED_PROCESS = 0x00000008
-                creationflags = (
-                    subprocess.CREATE_NO_WINDOW
-                    | DETACHED_PROCESS
-                    | subprocess.CREATE_NEW_PROCESS_GROUP
-                )
-                subprocess.Popen(
-                    ["explorer.exe", f"/select,{p}"],
-                    creationflags=creationflags,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                )
-                return
-            if IS_MACOS:
-                subprocess.Popen(
-                    ["open", "-R", str(p)],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.parent)))
         except Exception as e:
-            logger.debug("reveal-in-file-manager failed: %s", e)
-        # Fallback: open the parent directory.
-        try:
-            open_path(str(p.parent))
-        except Exception as e:
-            logger.debug("fallback open_path(parent) failed: %s", e)
+            logger.debug(
+                "reveal-in-file-manager (QDesktopServices) failed: %s",
+                e)
+            # Last-resort fallback for environments where Qt's URL
+            # opener fails (unusual). open_path is a thin wrapper that
+            # does the same shell call without Qt involvement.
+            try:
+                open_path(str(p.parent))
+            except Exception as e2:
+                logger.debug(
+                    "fallback open_path(parent) failed: %s", e2)
 
     def _show_update_banner(self, tag: str, url: str) -> None:
         """Show a persistent update banner at the top of the window."""
