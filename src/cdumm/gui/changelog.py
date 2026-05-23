@@ -19,6 +19,14 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.3.12",
+        "date": "2026-05-23",
+        "notes": [
+            "<b>The self-update download is now written atomically, so a failed download cannot leave you with a half-written CDUMM3.exe that refuses to launch.</b> cde2496 GitHub #147 reported \"Failed to load Python DLL python314.dll. LoadLibrary: The specified module could not be found.\" after a CDUMM self-update. The PyInstaller-frozen exe carries its embedded Python DLL inside the exe itself, so a partial write at the destination either fails to load that DLL or extracts an incomplete _MEIPASS bundle. The downloader now streams into <code>CDUMM3.exe.part</code> and only renames it onto the real path on full success. A network drop, an antivirus pause, or a user closing CDUMM mid-download now leaves the existing exe untouched and the .part file cleaned up.",
+            "<b>The post-update reveal-the-file step no longer spawns an explorer subprocess, which closes one of the freeze paths the updater cluster keeps reporting.</b> jscouron #108, #142, AeGhBrA / JustDen1234 #151, xenoi60 #158 and HantooS0l0 #160 all see the GUI freeze around the post-download stage despite v3.3.7's deferred-timer plus DETACHED_PROCESS plus close_fds mitigations. CDUMM used to run <code>explorer.exe /select,&lt;path&gt;</code> via subprocess.Popen to highlight the downloaded file in Explorer; that Popen call was the one piece of the post-download flow that touched external processes and shell extensions. The reveal now goes through Qt's QDesktopServices.openUrl with no subprocess, no inherited handles, and no shared event-loop context. You lose the \"file highlighted in Explorer\" UX but the file is the only CDUMM3.exe in your Downloads folder, so it stands out fine. This is honest defensive mitigation, not a confirmed fix, because the cluster cannot be reproduced locally; it removes the one external-process touchpoint the freeze flow was passing through.",
+        ],
+    },
+    {
         "version": "3.3.11",
         "date": "2026-05-22",
         "notes": [
