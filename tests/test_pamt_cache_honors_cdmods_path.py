@@ -48,11 +48,11 @@ def test_pamt_cache_uses_pointer_for_real_game_dir(tmp_path, monkeypatch):
     # the game_dir path so two installs sharing a cdmods root don't
     # collide and so vanilla_dir vs game_dir don't overwrite each
     # other (#81 fix). Match by glob.
-    matches = list(override.glob(".pamt_index_game_*.cache"))
+    matches = list(override.glob(".pamt_index_v*_game_*.cache"))
     assert matches, (
         "cache file should land at the override location when "
         "cdmods_path pointer is set; instead saw nothing matching "
-        "%s/.pamt_index_game_*.cache" % override)
+        "%s/.pamt_index_v*_game_*.cache" % override)
 
     # Cache must NOT have been dropped at the default location.
     bad_default = game_dir / "CDMods"
@@ -81,7 +81,9 @@ def test_pamt_cache_uses_parent_when_called_with_vanilla(
 
     _get_pamt_index(vanilla_dir)
 
-    expected = cdmods_root / ".pamt_index_vanilla.cache"
-    assert expected.exists()
+    matches = list(cdmods_root.glob(".pamt_index_v*_vanilla.cache"))
+    assert matches, (
+        "vanilla cache should land in the cdmods root; saw nothing "
+        "matching %s/.pamt_index_v*_vanilla.cache" % cdmods_root)
     # Must NOT be inside vanilla_dir itself.
     assert not list(vanilla_dir.glob(".pamt_index*.cache"))

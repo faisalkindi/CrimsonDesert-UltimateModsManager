@@ -4910,6 +4910,34 @@ class CdummWindow(FluentWindow):
                 drop_ver = self._get_drop_version(orig) if orig else ""
                 if not drop_ver:
                     drop_ver = self._get_drop_version(path)
+                # #164 LordOfRhun: click-to-update downloads land as
+                # nxm_<mod>_<file>.bin temp files with no version in the
+                # name and no modinfo.json, so both _get_drop_version
+                # probes return ''. Without this branch the fallback
+                # below copies the OLD DB version back into the row, the
+                # next 15-minute Nexus update poll sees "local < latest"
+                # again, and the red "Click to update" pill reappears
+                # the moment Apply finishes. The row was bound to the
+                # original local mod via intended_mod_id and already
+                # carries nexus_mod_id; use the latest_version that the
+                # cached Nexus update entry exposes for that id.
+                if not drop_ver:
+                    nm_id = nexus_id
+                    if not nm_id:
+                        try:
+                            row = self._db.connection.execute(
+                                "SELECT nexus_mod_id FROM mods WHERE id = ?",
+                                (mod_id,)).fetchone()
+                            if row and row[0]:
+                                nm_id = int(row[0])
+                        except Exception:
+                            nm_id = None
+                    if nm_id:
+                        latest = getattr(self, "_nexus_updates", None) or {}
+                        cached = latest.get(int(nm_id))
+                        cached_ver = getattr(cached, "latest_version", "") if cached else ""
+                        if cached_ver:
+                            drop_ver = cached_ver.strip()
                 if not drop_ver:
                     row = self._db.connection.execute(
                         "SELECT version FROM mods WHERE id = ?", (mod_id,)).fetchone()
@@ -7604,3 +7632,17 @@ class CdummWindow(FluentWindow):
             except Exception:
                 pass
         super().closeEvent(event)
+        # #162: when the main window was hidden (game-launch
+        # hide-to-tray) at the moment close() was called, Qt does
+        # not fire quitOnLastWindowClosed because there were no
+        # visible primary windows to begin with. The process then
+        # lingers in the background holding .gui_lock and the next
+        # launch refuses with "another_running". Force the event
+        # loop to exit so atexit releases the lock file handle.
+        try:
+            from PySide6.QtWidgets import QApplication
+            _qapp = QApplication.instance()
+            if _qapp is not None:
+                _qapp.quit()
+        except Exception:
+            pass

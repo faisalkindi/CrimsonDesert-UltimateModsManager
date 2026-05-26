@@ -173,11 +173,16 @@ class TestOpenPathErrorLogging:
             result = plat.open_path("/some/file.txt")
 
         assert result is False
-        assert any(
-            "/some/file.txt" in rec.message
-            and "permission denied" in rec.message
-            for rec in caplog.records
-        ), f"expected OSError detail in WARNING log; got: {caplog.records}"
+        # The open_path failure log was split in b7deb6c so the exception
+        # type survives email-wrapping in bug reports: one line carries
+        # the path, the other carries the exception details. Search both
+        # records (via getMessage so %-format args resolve) for the
+        # combined evidence.
+        combined = " ".join(
+            rec.getMessage() for rec in caplog.records)
+        assert "/some/file.txt" in combined and "permission denied" in combined, (
+            f"expected path AND OSError detail across WARNING logs; "
+            f"got: {[r.getMessage() for r in caplog.records]}")
 
     def test_no_opener_available_logs_clear_message(
             self, monkeypatch, caplog):

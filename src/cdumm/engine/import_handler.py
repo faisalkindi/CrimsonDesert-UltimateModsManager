@@ -4069,7 +4069,7 @@ def import_from_bsdiff(
         )
 
     db.connection.execute(
-        "INSERT OR IGNORE INTO mod_vanilla_sizes (mod_id, file_path, vanilla_size) "
+        "INSERT OR REPLACE INTO mod_vanilla_sizes (mod_id, file_path, vanilla_size) "
         "VALUES (?, ?, ?)",
         (mod_id, target_path, len(vanilla_bytes)),
     )
@@ -4965,7 +4965,7 @@ def _process_extracted_files(
                     (mod_id, rel_path, str(delta_path), mod_size),
                 )
                 db.connection.execute(
-                    "INSERT OR IGNORE INTO mod_vanilla_sizes "
+                    "INSERT OR REPLACE INTO mod_vanilla_sizes "
                     "(mod_id, file_path, vanilla_size) VALUES (?, ?, ?)",
                     (mod_id, rel_path, van_size),
                 )
@@ -5054,7 +5054,7 @@ def _process_extracted_files(
                     )
 
                 db.connection.execute(
-                    "INSERT OR IGNORE INTO mod_vanilla_sizes "
+                    "INSERT OR REPLACE INTO mod_vanilla_sizes "
                     "(mod_id, file_path, vanilla_size) VALUES (?, ?, ?)",
                     (mod_id, rel_path, van_size),
                 )
@@ -5111,7 +5111,7 @@ def _process_extracted_files(
                 )
 
             db.connection.execute(
-                "INSERT OR IGNORE INTO mod_vanilla_sizes (mod_id, file_path, vanilla_size) "
+                "INSERT OR REPLACE INTO mod_vanilla_sizes (mod_id, file_path, vanilla_size) "
                 "VALUES (?, ?, ?)",
                 (mod_id, rel_path, len(vanilla_bytes)),
             )

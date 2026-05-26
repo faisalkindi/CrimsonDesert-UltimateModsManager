@@ -426,7 +426,7 @@ class ScriptCaptureWorker(QObject):
                             (mod_id, rel_path, str(delta_path), bs, be, vh),
                         )
                     db.connection.execute(
-                        "INSERT OR IGNORE INTO mod_vanilla_sizes "
+                        "INSERT OR REPLACE INTO mod_vanilla_sizes "
                         "(mod_id, file_path, vanilla_size) VALUES (?, ?, ?)",
                         (mod_id, rel_path, len(vanilla_bytes)),
                     )
@@ -597,7 +597,7 @@ class ScriptCaptureWorker(QObject):
                 )
 
                 db.connection.execute(
-                    "INSERT OR IGNORE INTO mod_vanilla_sizes "
+                    "INSERT OR REPLACE INTO mod_vanilla_sizes "
                     "(mod_id, file_path, vanilla_size) VALUES (?, ?, ?)",
                     (mod_id, paz_file_path,
                      ref_entry.comp_size if van_entry else 0),
@@ -794,7 +794,7 @@ class ScanChangesWorker(QObject):
                             (mod_id, rel_path, str(delta_path), bs, be, vh),
                         )
                     db.connection.execute(
-                        "INSERT OR IGNORE INTO mod_vanilla_sizes "
+                        "INSERT OR REPLACE INTO mod_vanilla_sizes "
                         "(mod_id, file_path, vanilla_size) VALUES (?, ?, ?)",
                         (mod_id, rel_path, len(vanilla_bytes)),
                     )

@@ -23,6 +23,11 @@ import pytest
 
 
 def test_stage_file_rejects_absolute_path(tmp_path: Path):
+    """Absolute paths OUTSIDE game_dir must still hard-raise. Faisal
+    2026-05-12 #103 softened the in-game_dir case to accept-and-
+    normalise (legacy DB rows with absolute file_path can still
+    revert), but a path that does NOT live under game_dir is a
+    genuine importer bug and the guard must surface it."""
     from cdumm.archive.transactional_io import TransactionalIO
 
     game_dir = tmp_path / "game"
@@ -32,14 +37,37 @@ def test_stage_file_rejects_absolute_path(tmp_path: Path):
 
     txn = TransactionalIO(game_dir, staging_dir)
 
-    abs_path = str(game_dir / "0012" / "4.paz")
+    outside_abs = str(tmp_path / "outside" / "0012" / "4.paz")
     with pytest.raises(ValueError) as exc_info:
-        txn.stage_file(abs_path, b"PAZ_BYTES")
+        txn.stage_file(outside_abs, b"PAZ_BYTES")
 
     msg = str(exc_info.value)
     assert "absolute" in msg.lower() or "relative" in msg.lower(), (
         f"Error must explain that rel_path is absolute. Got: {msg!r}"
     )
+
+
+def test_stage_file_normalises_absolute_path_under_game_dir(
+        tmp_path: Path):
+    """Legacy DB rows that stored an absolute file_path UNDER game_dir
+    must be stripped and staged successfully (Faisal 2026-05-12 #103
+    OneManErmey). The guard logs a warning with the caller stack but
+    keeps the apply moving so users with stale buggy rows can still
+    revert without forcing a re-import."""
+    from cdumm.archive.transactional_io import TransactionalIO
+
+    game_dir = tmp_path / "game"
+    staging_dir = game_dir / ".cdumm_staging"
+    game_dir.mkdir()
+    staging_dir.mkdir()
+
+    txn = TransactionalIO(game_dir, staging_dir)
+    abs_under = str(game_dir / "0012" / "4.paz")
+    txn.stage_file(abs_under, b"PAZ_BYTES")
+
+    staged = staging_dir / "0012" / "4.paz"
+    assert staged.exists()
+    assert staged.read_bytes() == b"PAZ_BYTES"
 
 
 def test_stage_file_accepts_relative_path(tmp_path: Path):

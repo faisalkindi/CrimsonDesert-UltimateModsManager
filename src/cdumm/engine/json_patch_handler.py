@@ -1442,6 +1442,57 @@ def convert_json_patch_to_paz(
             logger.info("Applied %d/%d patches to %s (mismatched=%d)",
                          applied, len(changes), game_file, mismatched)
 
+        # #167 (AeGhBrA / jikulopo): if every patch mismatched against
+        # this candidate but the PAMT holds another entry that shares
+        # the same basename (twin paths, multi-PAMT collisions), retry
+        # on the alternates and adopt whichever lands more patches.
+        # Paseq files like Skip More Animations' gimmick_craft_stone_repair_01
+        # live twice in 0014 with the same stored path but different
+        # blobs; the wrong twin produced 0 applied / N mismatched and
+        # the partial-table guard below would have aborted the import.
+        if mismatched > 0 and applied == 0:
+            tried_keys = {(entry.paz_file, entry.offset)}
+            candidates: list[PazEntry] = []
+            for src_dir in (vanilla_dir, game_dir):
+                for cand in _find_pamt_entries(game_file, src_dir):
+                    key = (cand.paz_file, cand.offset)
+                    if key in tried_keys:
+                        continue
+                    tried_keys.add(key)
+                    candidates.append(cand)
+            for cand in candidates:
+                if not os.path.exists(cand.paz_file):
+                    continue
+                try:
+                    alt_plain = _extract_from_paz(cand)
+                except Exception as e_alt:
+                    logger.debug(
+                        "#167 retry: skip candidate %s for %s: %s",
+                        cand.paz_file, game_file, e_alt)
+                    continue
+                alt_modified = bytearray(alt_plain)
+                alt_applied, alt_mis, alt_reloc = _apply_byte_patches(
+                    alt_modified, changes, signature=signature,
+                    vanilla_data=bytes(alt_plain),
+                    record_offsets=record_offsets,
+                    name_offsets=name_offsets)
+                if alt_applied > applied:
+                    logger.info(
+                        "#167 twin-retry: %s now resolves to %s "
+                        "(applied %d->%d, mismatched %d->%d)",
+                        game_file,
+                        os.path.basename(cand.paz_file),
+                        applied, alt_applied, mismatched, alt_mis)
+                    entry = cand
+                    entry_cache[game_file.lower()] = entry
+                    plaintext = alt_plain
+                    modified = alt_modified
+                    applied = alt_applied
+                    mismatched = alt_mis
+                    relocated_count = alt_reloc
+                    if mismatched == 0:
+                        break
+
         # Strict-abort for data-table files (.pabgb / .pabgh / .pamt) at
         # IMPORT time too: if any patch mismatches, refuse to store a
         # half-patched delta. Kliff Wears Damiane V2 and similar mods
@@ -1638,14 +1689,14 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     _key = "vanilla" if game_dir.name == "vanilla" else (
         "game_" + _hashlib.sha1(str(game_dir).encode("utf-8")).hexdigest()[:12]
     )
-    # Cache version bumped to v2 on 2026-05-12 when basename-index
-    # disambiguation changed (first-seen-wins instead of last-seen-wins).
-    # Older v1 caches encode the buggy mapping where ui/iteminfo.pabgb
-    # overwrote gamedata/iteminfo.pabgb under the bare key
-    # "iteminfo.pabgb", and Format 3 mods like paloroycevincent-sketch's
-    # Combat God's Plate Gloves on GitHub #99 hit the wrong file.
-    # Bumping the filename forces a one-time rebuild on the next run.
-    cache_path = cdmods / f".pamt_index_v2_{_key}.cache"
+    # Cache version bumped to v3 on 2026-05-26 when the twin-entry
+    # tracking landed (AeGhBrA/jikulopo #167). Older caches only have
+    # the single-entry path map; the twin retry path needs the new
+    # "__twins:<path>" keys, so the cache must rebuild once.
+    # v2 was the first-seen-wins basename fix (paloroycevincent-sketch
+    # GitHub #99). Bumping the filename forces a one-time rebuild on
+    # the next run.
+    cache_path = cdmods / f".pamt_index_v3_{_key}.cache"
     if cache_path.exists():
         try:
             cache_mtime = cache_path.stat().st_mtime
@@ -1685,6 +1736,24 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
             entries = parse_pamt(str(pamt), paz_dir=str(d))
             for e in entries:
                 ep = e.path.lower().replace("\\", "/")
+                # #167 (AeGhBrA, jikulopo): some PAMTs hold the same
+                # full path twice with different binary content. Skip
+                # More Animations (Nexus 774) patches paseq files that
+                # live in 0014 at "sequencer/gimmick_craft_stone_repair_01.paseq"
+                # for both copies; the mod JSON declares the longer
+                # "sequencer/binary__/baseseq/.../foo.paseq" form. The
+                # old index overwrote one entry with the other, so the
+                # apply path could only ever see whichever copy was
+                # parsed last. Track every copy under a sidecar
+                # "__twins:" key so the apply loop can retry on the
+                # other twin when the first one's bytes don't match.
+                if ep in index:
+                    twins_key = "__twins:" + ep
+                    twins = index.get(twins_key)
+                    if not isinstance(twins, list):
+                        twins = [index[ep]]
+                        index[twins_key] = twins
+                    twins.append(e)
                 index[ep] = e
                 bname = ep.rsplit("/", 1)[-1]
                 # First-seen-wins for bare-basename collisions. Crimson
@@ -1705,6 +1774,16 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
                 # "ui/iteminfo.pabgb"); the exact-match branch in
                 # _find_pamt_entry handles those without ambiguity.
                 index.setdefault(bname, e)
+                # #167: also track EVERY entry with this basename, so
+                # _find_pamt_entries can hand all candidates back to
+                # the apply loop when the first-seen pick mismatches
+                # the patch's expected bytes.
+                bn_key = "__basename_all:" + bname
+                bn_list = index.get(bn_key)
+                if not isinstance(bn_list, list):
+                    bn_list = []
+                    index[bn_key] = bn_list
+                bn_list.append(e)
         except Exception:
             continue
 
@@ -1749,16 +1828,71 @@ def _find_pamt_entry(game_file: str, game_dir: Path) -> PazEntry | None:
 
     # Exact match
     e = index.get(game_file_lower)
-    if e:
+    if isinstance(e, PazEntry):
         return e
 
     # Basename match
     game_basename = game_file_lower.rsplit("/", 1)[-1]
     e = index.get(game_basename)
-    if e:
+    if isinstance(e, PazEntry):
         logger.info("Matched '%s' to '%s' by basename", game_file, e.path)
         return e
     return None
+
+
+def _find_pamt_entries(game_file: str,
+                       game_dir: Path) -> list[PazEntry]:
+    """Return every PAMT entry that could plausibly match ``game_file``.
+
+    #167 (AeGhBrA, jikulopo): Skip More Animations (Nexus 774) ships
+    JSON intents whose ``game_file`` is e.g.
+    ``sequencer/binary__/baseseq/gimmickcalledseq/foo.paseq`` but the
+    real PAMT in 0014 only stores the basename-only form
+    ``sequencer/foo.paseq``, and stores it TWICE under the same path
+    (each pointing to a different blob). The old single-entry lookup
+    only ever returned one twin, and if its bytes didn't match the
+    patch's ``original`` field every change skipped and the file came
+    out wrong. The apply loop now iterates this list and picks the
+    twin whose bytes actually carry the patch's expected ``original``
+    bytes; the leftover candidates remain a free retry pool for any
+    future PAMT layout we haven't seen yet.
+
+    The first entry of the returned list is the historical
+    single-entry pick, so callers that retain "apply to entry 0"
+    semantics never regress for files with a unique location.
+    """
+    index = _get_pamt_index(game_dir)
+    game_file_lower = game_file.lower().replace("\\", "/")
+    seen: set[tuple] = set()
+    out: list[PazEntry] = []
+
+    def _add(entry: PazEntry) -> None:
+        key = (entry.paz_file, entry.offset, entry.comp_size,
+               entry.orig_size)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(entry)
+
+    # Exact full-path match wins first.
+    e = index.get(game_file_lower)
+    if isinstance(e, PazEntry):
+        _add(e)
+    twins = index.get("__twins:" + game_file_lower)
+    if isinstance(twins, list):
+        for t in twins:
+            _add(t)
+
+    # Basename fallback walks every entry sharing this basename.
+    game_basename = game_file_lower.rsplit("/", 1)[-1]
+    bn_first = index.get(game_basename)
+    if isinstance(bn_first, PazEntry):
+        _add(bn_first)
+    bn_all = index.get("__basename_all:" + game_basename)
+    if isinstance(bn_all, list):
+        for t in bn_all:
+            _add(t)
+    return out
 
 
 def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
@@ -2549,6 +2683,58 @@ def process_json_patches_for_overlay(
             modified, changes, signature=signature, vanilla_data=vanilla_ref,
             name_offsets=name_offsets, inserts_out=inserts_out,
             skipped_out=skipped_out)
+
+        # #167 (AeGhBrA / jikulopo): when every patch missed against
+        # the first PAMT pick AND the resolver wasn't doing the
+        # selection itself, try the basename twins before giving up.
+        # 0014 holds two entries with the same stored "sequencer/foo.paseq"
+        # path but different blobs; without retry the apply path picks
+        # whichever copy parse_pamt walked last and silently skips
+        # every change.
+        if (applied == 0 and mismatched > 0
+                and vanilla_source_resolver is None):
+            tried_keys = {(entry.paz_file, entry.offset)}
+            for src_dir in (vanilla_dir, game_dir):
+                for cand in _find_pamt_entries(game_file, src_dir):
+                    key = (cand.paz_file, cand.offset)
+                    if key in tried_keys:
+                        continue
+                    tried_keys.add(key)
+                    if not os.path.exists(cand.paz_file):
+                        continue
+                    try:
+                        alt_plain = _extract_from_paz(cand)
+                    except Exception as e_alt:
+                        logger.debug(
+                            "#167 mount-time retry: skip %s: %s",
+                            cand.paz_file, e_alt)
+                        continue
+                    alt_modified = bytearray(alt_plain)
+                    alt_inserts: list[tuple[int, int]] = []
+                    alt_applied, alt_mis, alt_reloc = _apply_byte_patches(
+                        alt_modified, changes, signature=signature,
+                        vanilla_data=bytes(alt_plain),
+                        name_offsets=name_offsets,
+                        inserts_out=alt_inserts,
+                        skipped_out=skipped_out)
+                    if alt_applied > applied:
+                        logger.info(
+                            "#167 mount-time twin-retry: %s now resolves "
+                            "to %s (applied %d->%d, mismatched %d->%d)",
+                            game_file,
+                            os.path.basename(cand.paz_file),
+                            applied, alt_applied, mismatched, alt_mis)
+                        entry = cand
+                        plaintext = alt_plain
+                        modified = alt_modified
+                        applied = alt_applied
+                        mismatched = alt_mis
+                        relocated = alt_reloc
+                        inserts_out = alt_inserts
+                        if mismatched == 0:
+                            break
+                if mismatched == 0 and applied > 0:
+                    break
 
         if applied == 0 and mismatched > 0:
             logger.warning("mount-time: all patches mismatched for '%s' (game update?)",
