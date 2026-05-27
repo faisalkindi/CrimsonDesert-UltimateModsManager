@@ -17,6 +17,7 @@ The handler:
 import json
 import logging
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,31 @@ if TYPE_CHECKING:
     from cdumm.storage.config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def _rglob_follow(root: Path, pattern: str = "*"):
+    """``root.rglob(pattern)`` that recurses into symlinked directories
+    on every supported Python version.
+
+    Python 3.13 changed ``Path.rglob`` to default ``recurse_symlinks=
+    False`` — it no longer descends into symlinked subdirectories. The
+    frozen Windows build (and the pre-3.13 behaviour this module was
+    written against) DID follow them. On a native Linux run under
+    Python 3.13+, any mod file that lives behind a symlinked directory
+    is silently skipped: ``has_files`` reads False, no PAZ is built,
+    and the mod imports as a stray PATHC instead. Reported by RoGreat
+    on a Nix-packaged build (PR #123), where symlinked paths are
+    pervasive.
+
+    Restoring the follow-symlinks behaviour is safe here because every
+    caller that reads file contents re-checks ``f.resolve()`` stays
+    within the mod's files_dir before reading (the symlink-escape
+    guard), so a malicious symlink pointing outside the tree is still
+    refused — it just no longer takes legitimate files down with it.
+    """
+    if sys.version_info >= (3, 13):
+        return root.rglob(pattern, recurse_symlinks=True)
+    return root.rglob(pattern)
 
 
 def fix_xml_format(
@@ -141,7 +167,7 @@ def detect_crimson_browser(path: Path) -> dict | None:
                 # often omit the format field)
                 files_dir_name = manifest.get("files_dir", "files")
                 files_dir = candidate.parent / files_dir_name
-                if files_dir.exists() and files_dir.is_dir() and any(files_dir.rglob("*")):
+                if files_dir.exists() and files_dir.is_dir() and any(_rglob_follow(files_dir)):
                     manifest.setdefault("files_dir", files_dir_name)
                     manifest["_manifest_path"] = candidate
                     manifest["_base_dir"] = candidate.parent
@@ -179,8 +205,8 @@ def convert_to_paz_mod(
     patches_dir_name = manifest.get("patches_dir")
     patches_dir = base_dir / patches_dir_name if patches_dir_name else None
 
-    has_files = files_dir.exists() and any(files_dir.rglob("*"))
-    has_patches = patches_dir and patches_dir.exists() and any(patches_dir.rglob("*.json"))
+    has_files = files_dir.exists() and any(_rglob_follow(files_dir))
+    has_patches = patches_dir and patches_dir.exists() and any(_rglob_follow(patches_dir, "*.json"))
 
     if not has_files and not has_patches:
         logger.error("CB mod: no files_dir or patches_dir found in %s", base_dir)
@@ -190,7 +216,7 @@ def convert_to_paz_mod(
     patches_succeeded = 0
     if has_patches:
         from cdumm.engine.json_patch_handler import convert_json_patch_to_paz
-        for patch_file in patches_dir.rglob("*.json"):
+        for patch_file in _rglob_follow(patches_dir, "*.json"):
             try:
                 with open(patch_file, "r", encoding="utf-8") as f:
                     patch_data = json.load(f)
@@ -226,14 +252,16 @@ def convert_to_paz_mod(
 
     _SKIP_FILES = {"mod.json", "manifest.json", "modinfo.json"}
     files_dir_resolved = files_dir.resolve()
-    for f in files_dir.rglob("*"):
+    for f in _rglob_follow(files_dir):
         if not f.is_file() or f.name.lower() in _SKIP_FILES:
             continue
-        # Symlink / junction safety: rglob follows links by default
-        # on Windows, so a malicious mod ZIP with a symlink under
-        # files/ pointing outside the extracted dir could expose
+        # Symlink / junction safety: _rglob_follow descends into
+        # symlinked directories (see its docstring re: the Python 3.13
+        # rglob default change), so a malicious mod ZIP with a symlink
+        # under files/ pointing outside the extracted dir could expose
         # arbitrary filesystem content via subsequent read_bytes().
-        # Round 10 audit catch.
+        # Resolve and confirm the file stays within files_dir before
+        # trusting it. Round 10 audit catch.
         try:
             f_resolved = f.resolve()
             f_resolved.relative_to(files_dir_resolved)
@@ -270,7 +298,7 @@ def convert_to_paz_mod(
             continue
         if sibling.name.lower() not in _SIBLING_CONTENT_DIRS:
             continue
-        for f in sibling.rglob("*"):
+        for f in _rglob_follow(sibling):
             if not f.is_file() or f.name.lower() in _SKIP_FILES:
                 continue
             rel = f.relative_to(sibling)
