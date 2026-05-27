@@ -2639,9 +2639,65 @@ def process_json_patches_for_overlay(
         # + drain rate + regen rate) leave the game in a worse state
         # when partially applied than when fully skipped.
         signature = patch.get("signature")
+        # #167 follow-up (jikulopo retest on v3.3.13): the tainted-mod
+        # guard runs BEFORE _apply_byte_patches, so the post-apply
+        # twin-retry that shipped in v3.3.13 never fired for
+        # gimmick_craft_stone_repair_01 and its two siblings: the
+        # guard saw every change mismatch the wrong twin's bytes,
+        # dropped all 6 changes, and the code below skipped the file
+        # before any retry could happen. Try the alternate twins HERE
+        # too, using a temp skipped buffer so the wrong-twin skips
+        # don't leak into skipped_out if a twin actually matches.
+        _pre_filter_changes = list(changes)
+        _pre_filter_count = len(_pre_filter_changes)
+        _tmp_skipped: list = []
         changes = filter_changes_by_tainted_mods(
             changes, bytes(plaintext), signature=signature,
-            name_offsets=name_offsets, skipped_out=skipped_out)
+            name_offsets=name_offsets, skipped_out=_tmp_skipped)
+        if not changes and _pre_filter_count > 0 and vanilla_source_resolver is None:
+            tried_keys = {(entry.paz_file, entry.offset)}
+            for src_dir in (vanilla_dir, game_dir):
+                for cand in _find_pamt_entries(game_file, src_dir):
+                    key = (cand.paz_file, cand.offset)
+                    if key in tried_keys:
+                        continue
+                    tried_keys.add(key)
+                    if not os.path.exists(cand.paz_file):
+                        continue
+                    try:
+                        alt_plain = _extract_from_paz(cand)
+                    except Exception as e_alt:
+                        logger.debug(
+                            "#167 pre-filter retry: skip %s: %s",
+                            cand.paz_file, e_alt)
+                        continue
+                    alt_skipped: list = []
+                    alt_changes = filter_changes_by_tainted_mods(
+                        list(_pre_filter_changes), bytes(alt_plain),
+                        signature=signature,
+                        name_offsets=name_offsets,
+                        skipped_out=alt_skipped)
+                    if len(alt_changes) > len(changes):
+                        logger.info(
+                            "#167 mount-time pre-filter twin-retry: %s "
+                            "now resolves to %s (kept %d/%d vs %d/%d)",
+                            game_file,
+                            os.path.basename(cand.paz_file),
+                            len(alt_changes), _pre_filter_count,
+                            len(changes), _pre_filter_count)
+                        entry = cand
+                        plaintext = alt_plain
+                        vanilla_ref = bytes(plaintext)
+                        changes = alt_changes
+                        _tmp_skipped = alt_skipped
+                        if len(changes) == _pre_filter_count:
+                            break
+                if len(changes) == _pre_filter_count:
+                    break
+        # Commit whichever skipped_out entries belong to the winning
+        # candidate (empty list when a twin matched cleanly).
+        if _tmp_skipped and skipped_out is not None:
+            skipped_out.extend(_tmp_skipped)
         if not changes:
             # Every contributing mod was tainted , nothing left to
             # apply for this target. The synthetic skip entries are

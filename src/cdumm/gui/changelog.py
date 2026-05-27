@@ -19,6 +19,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.3.14",
+        "date": "2026-05-27",
+        "notes": [
+            "<b>Skip More Animations now lands all 18 of its previously-skipped paseq patches.</b> jikulopo GitHub #167 retested v3.3.13 and reported the same 18-patch skip on a fresh apply with the v3.3.13 twin-retry in place. The bundle showed the cause: the v3.3.13 retry fires AFTER _apply_byte_patches reports a mismatch, but the tainted-mod guard runs BEFORE the apply and drops every change from a mod when any one of them fails the original-bytes check against the picked PAMT entry. With the wrong twin picked, the guard wiped all 6 changes for each of the three gimmick_craft_*.paseq files and the apply loop skipped the file before the retry could trigger. The retry now runs at the guard step too: when the guard drops every change against the first pick, the apply path walks the basename twins, retests with each, and adopts whichever twin keeps the most changes. Wrong-twin skip records do not leak into the user-visible skipped list when a clean twin is found.",
+        ],
+    },
+    {
         "version": "3.3.13",
         "date": "2026-05-26",
         "notes": [
