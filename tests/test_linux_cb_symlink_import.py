@@ -18,10 +18,11 @@ outside the mod tree.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
-from cdumm.engine.crimson_browser_handler import _rglob_follow
+from cdumm.engine.crimson_browser_handler import _rglob_follow, convert_to_paz_mod
 
 
 def _make_files_with_symlinked_dir(base: Path) -> Path:
@@ -120,3 +121,90 @@ class TestSymlinkEscapeGuardStillHolds:
             except ValueError:
                 pass
         assert "real.paz" in safe and "alias.paz" in safe
+
+
+class TestTrustSymlinksParameter:
+    """``convert_to_paz_mod(trust_symlinks=...)`` distinguishes folder
+    imports (user picked the directory — symlinks are trusted local
+    references) from archive extractions (untrusted — the escape
+    guard must stay active).
+
+    Reported by RoGreat on a Nix-packaged build (PR #123): his mod's
+    individual .dds files are symlinks into the Nix store. Before
+    this fix, the escape guard refused every such file and the
+    import fell through to the standalone-texture-overlay fallback
+    instead of producing a proper CB PAZ build.
+    """
+
+    def _build_cb_mod_with_escaping_symlink(
+            self, base: Path) -> tuple[dict, Path]:
+        """Construct a minimal CB-format mod folder where one file is
+        a symlink pointing OUTSIDE the mod's files/ tree (mirrors the
+        Nix-store-into-mod-folder layout). Returns the manifest dict
+        and the files/ Path."""
+        mod_dir = base / "ModRoot"
+        files_dir = mod_dir / "files" / "0008"
+        files_dir.mkdir(parents=True)
+        (files_dir / "real.dds").write_bytes(b"REAL")
+        outside = base / "elsewhere" / "stash.dds"
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(b"STASH")
+        (files_dir / "linked.dds").symlink_to(outside)
+        manifest = {
+            "id": "test_mod",
+            "files_dir": "files",
+            "_base_dir": mod_dir,
+        }
+        return manifest, mod_dir / "files"
+
+    def _run_convert(self, manifest: dict, tmp_path: Path,
+                     *, trust_symlinks: bool) -> None:
+        """Call convert_to_paz_mod with the given flag. The function's
+        post-loop machinery needs a real game_dir + vanilla PAZ files
+        which we don't have here, so the call typically raises after
+        the symlink-handling loop runs. We only care about the
+        in-loop warning, so swallow any exception."""
+        game_dir = tmp_path / "junk_game_dir"
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        try:
+            convert_to_paz_mod(
+                manifest, game_dir, work_dir,
+                trust_symlinks=trust_symlinks)
+        except Exception:
+            pass
+
+    def test_default_keeps_escape_guard_active(
+            self, tmp_path: Path, caplog) -> None:
+        """``trust_symlinks=False`` (default — what every zip /
+        extraction call site uses) still emits the symlink-escape
+        warning for files whose target resolves outside files_dir.
+        The 6 archive-extraction callers in import_handler.py rely
+        on this default to stay protected against malicious archives
+        with symlinks pointing at arbitrary filesystem locations."""
+        manifest, _ = self._build_cb_mod_with_escaping_symlink(tmp_path)
+        caplog.set_level(
+            logging.WARNING,
+            logger="cdumm.engine.crimson_browser_handler")
+        self._run_convert(manifest, tmp_path, trust_symlinks=False)
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "CB import: skipping" in msgs and "linked.dds" in msgs, (
+            "default trust_symlinks=False must emit the symlink-escape "
+            "warning for files resolving outside files_dir; got: "
+            + msgs)
+
+    def test_trust_symlinks_true_suppresses_escape_warning(
+            self, tmp_path: Path, caplog) -> None:
+        """``trust_symlinks=True`` (folder-import call sites only)
+        follows the symlink to its target rather than refusing it.
+        The escape warning must NOT fire — Nix-store-symlinked mod
+        files are legitimate user content, not a security threat."""
+        manifest, _ = self._build_cb_mod_with_escaping_symlink(tmp_path)
+        caplog.set_level(
+            logging.WARNING,
+            logger="cdumm.engine.crimson_browser_handler")
+        self._run_convert(manifest, tmp_path, trust_symlinks=True)
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "CB import: skipping" not in msgs, (
+            "trust_symlinks=True must NOT emit symlink-escape warnings; "
+            "got: " + msgs)

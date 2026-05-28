@@ -182,6 +182,7 @@ def convert_to_paz_mod(
     game_dir: Path,
     work_dir: Path,
     config: "Config | None" = None,
+    trust_symlinks: bool = False,
 ) -> Path | None:
     """Convert a Crimson Browser mod to a standard PAZ mod directory.
 
@@ -193,6 +194,24 @@ def convert_to_paz_mod(
         manifest: parsed manifest dict (from detect_crimson_browser)
         game_dir: path to game installation root
         work_dir: temporary directory for output
+        config: optional Config (currently unused by this function)
+        trust_symlinks: if True, files whose ``.resolve()`` lands
+            outside ``files_dir`` are READ (following the symlink to
+            its target) instead of skipped. Set this only when the
+            caller knows the mod came from a user-selected local
+            folder (the user chose the directory and could equally
+            point CDUMM at the symlink targets themselves) — never
+            for archive extractions, where a malicious zip could ship
+            symlinks pointing at arbitrary files on disk.
+
+            Default False keeps the Round 10 symlink-escape guard
+            active, so zip/7z extractions stay protected. Folder
+            imports (``import_from_folder``) opt in by passing True.
+            Reported by RoGreat on a Nix-packaged build (PR #123):
+            his mod's individual .dds/.css files are symlinks into
+            the Nix store, which made the previous unconditional
+            guard skip them and force the import down the standalone
+            texture-overlay fallback path.
 
     Returns:
         Path to directory containing modified PAZ files, or None on failure.
@@ -262,14 +281,22 @@ def convert_to_paz_mod(
         # arbitrary filesystem content via subsequent read_bytes().
         # Resolve and confirm the file stays within files_dir before
         # trusting it. Round 10 audit catch.
-        try:
-            f_resolved = f.resolve()
-            f_resolved.relative_to(files_dir_resolved)
-        except (ValueError, OSError):
-            logger.warning(
-                "CB import: skipping %s (resolves outside files_dir, "
-                "possible symlink escape)", f)
-            continue
+        #
+        # ``trust_symlinks=True`` (folder imports only) skips this
+        # check: the user picked a local directory, so a symlinked
+        # file inside it pointing elsewhere on their filesystem is
+        # a legitimate reference (RoGreat's Nix-packaged mods do
+        # exactly this — individual .dds files are symlinks into the
+        # Nix store). PR #123.
+        if not trust_symlinks:
+            try:
+                f_resolved = f.resolve()
+                f_resolved.relative_to(files_dir_resolved)
+            except (ValueError, OSError):
+                logger.warning(
+                    "CB import: skipping %s (resolves outside files_dir, "
+                    "possible symlink escape)", f)
+                continue
         rel = f.relative_to(files_dir)
         parts = rel.parts
         if len(parts) >= 2 and parts[0].isdigit():
