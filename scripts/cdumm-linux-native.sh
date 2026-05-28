@@ -32,7 +32,14 @@ readonly DESKTOP_MARKER="$VENV_DIR/.cdumm-desktop-installed"
 
 readonly XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 readonly DESKTOP_FILE="$XDG_DATA/applications/cdumm.desktop"
-readonly ICON_DEST="$XDG_DATA/icons/cdumm.png"
+# Install the icon under the hicolor theme so waybar / wlr-taskbar /
+# any GTK icon-theme lookup (which is what most Wayland taskbars use
+# — they map app_id straight to an icon-theme name, NOT to the
+# .desktop's Icon= path) finds it as ``cdumm``. The earlier flat
+# ~/.local/share/icons/cdumm.png location wasn't in any theme path
+# so the lookup returned nothing on Hyprland+waybar (PR #123).
+readonly ICON_DEST="$XDG_DATA/icons/hicolor/512x512/apps/cdumm.png"
+readonly ICON_DEST_LEGACY="$XDG_DATA/icons/cdumm.png"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
@@ -159,13 +166,18 @@ install_desktop_entry() {
     warn "Icon source $src_icon missing — skipping desktop entry install."
     return 0
   fi
-  log "Installing cdumm.desktop + icon (Wayland icon + taskbar entry)"
+  log "Installing cdumm.desktop + hicolor icon (Wayland taskbar)"
   mkdir -p "$(dirname "$DESKTOP_FILE")" "$(dirname "$ICON_DEST")"
   cp -f "$src_icon" "$ICON_DEST"
-  # Write the .desktop file. Use absolute paths for Exec and Icon so
-  # the entry works regardless of icon-theme cache state and the
-  # user's PATH at click time. StartupWMClass must match the
-  # app_id Qt advertises (the "cdumm" we pass to setDesktopFileName).
+  # Clean up the pre-fix flat icon location if present (left by an
+  # earlier version of this script that put the PNG outside any
+  # theme path). Harmless leftover otherwise.
+  rm -f "$ICON_DEST_LEGACY"
+  # Write the .desktop file. ``Icon=cdumm`` (theme name, NOT an
+  # absolute path) so taskbars that route through the GTK icon-theme
+  # API resolve it via the hicolor entry above. ``StartupWMClass``
+  # must match the app_id Qt advertises (the "cdumm" string we pass
+  # to setDesktopFileName in main.py).
   {
     echo "[Desktop Entry]"
     echo "Type=Application"
@@ -173,16 +185,21 @@ install_desktop_entry() {
     echo "GenericName=Mod Manager"
     echo "Comment=Crimson Desert Ultimate Mods Manager (native Linux build)"
     echo "Exec=$REPO_ROOT/scripts/cdumm-linux-native.sh"
-    echo "Icon=$ICON_DEST"
+    echo "Icon=cdumm"
     echo "Terminal=false"
     echo "Categories=Game;Utility;"
     echo "StartupWMClass=cdumm"
     echo "StartupNotify=true"
   } > "$DESKTOP_FILE"
-  # Best-effort cache refresh so GNOME / KDE see the entry without
-  # a session restart. Absence of the binary is fine on minimal WMs.
+  # Best-effort cache refreshes. update-desktop-database is for the
+  # applications/ side; gtk-update-icon-cache is what waybar and
+  # GTK-icon-theme consumers re-read. Absence of either binary is
+  # fine on minimal WMs.
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -t -f "$XDG_DATA/icons/hicolor" >/dev/null 2>&1 || true
   fi
   touch "$DESKTOP_MARKER"
 }
