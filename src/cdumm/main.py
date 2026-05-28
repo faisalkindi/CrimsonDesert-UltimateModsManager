@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-from cdumm.platform import IS_WINDOWS, app_data_dir
+from cdumm.platform import IS_LINUX, IS_WINDOWS, app_data_dir
 
 APP_DATA_DIR = app_data_dir()
 
@@ -315,10 +315,29 @@ def main() -> int:
 
     # Minimal import for QApplication — everything else is lazy
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QGuiApplication
     app = QApplication(sys.argv)
     # Fix PySide6 6.7+ Win11 style causing double borders on menus/shadows
     app.setStyle("fusion")
     app.setApplicationName("Crimson Desert Ultimate Mods Manager")
+
+    # Wayland: bind this process to ``cdumm.desktop`` so the
+    # compositor uses its ``Icon=`` field for both the window
+    # decoration and the taskbar entry. Without this, the
+    # ``setWindowIcon`` call below has no visible effect on Wayland —
+    # the compositor ignores client-set icons and reverts to the
+    # default app icon shortly after the window first appears
+    # (reported by RoGreat on a Sway + Nix-packaged setup, PR #123).
+    # Also fixes the "no icon in the taskbar after hide-on-launch"
+    # case: Wayland matches the iconified app to ``cdumm.desktop``
+    # via the app_id this call sets.
+    #
+    # The launcher (``scripts/cdumm-linux-native.sh``) installs the
+    # corresponding ``cdumm.desktop`` and PNG icon under
+    # ``$XDG_DATA_HOME`` on first run. X11 picks the same name up via
+    # ``StartupWMClass`` in that file.
+    if IS_LINUX:
+        QGuiApplication.setDesktopFileName("cdumm")
 
     # Set application-level icon (shows in taskbar)
     from PySide6.QtGui import QIcon
@@ -326,6 +345,16 @@ def main() -> int:
         _app_ico = Path(sys._MEIPASS) / "cdumm.ico"
     else:
         _app_ico = Path(__file__).resolve().parents[2] / "cdumm.ico"
+    # On Linux prefer the source PNG over the Windows .ico: Qt's ICO
+    # plugin reads the file but produces a lower-fidelity QIcon than
+    # loading the native 735x735 PNG directly. The .desktop entry
+    # installed by the launcher uses the same PNG so the in-window
+    # and taskbar icons match.
+    if IS_LINUX:
+        _app_png = (Path(__file__).resolve().parents[2]
+                    / "assets" / "cdumm-icon-square.png")
+        if _app_png.exists():
+            _app_ico = _app_png
     if _app_ico.exists():
         app.setWindowIcon(QIcon(str(_app_ico)))
 

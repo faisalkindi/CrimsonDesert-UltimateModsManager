@@ -58,6 +58,30 @@ to `~/.local/share/applications/cdumm-nxm.desktop` and runs
 handles Unregister, and refuses to displace an existing Vortex / MO2
 registration without explicit user confirmation.
 
+### Desktop integration
+
+The launcher installs a freedesktop entry on first run so the app
+shows the correct icon on Wayland (where compositors ignore
+client-set `setWindowIcon` and look up icons via the `.desktop`
+file matched to the window's `app_id`):
+
+- `~/.local/share/applications/cdumm.desktop` — `Exec=` points at
+  the launcher, `Icon=` is an absolute path, `StartupWMClass=cdumm`.
+- `~/.local/share/icons/cdumm.png` — copied from
+  `assets/cdumm-icon-square.png` (735×735 RGBA).
+
+`main.py` sets the Qt app_id via `QGuiApplication.setDesktopFileName(
+"cdumm")` on Linux, matching the `.desktop` basename so Wayland
+compositors bind the window to the entry. The same path fixes the
+"icon disappears from the taskbar after hide-on-launch" case on
+compositors that show iconified windows.
+
+**Packagers (Nix, Flatpak, distro packages):** if you're not using
+the launcher, install the equivalent yourself — the `.desktop` file
+with `StartupWMClass=cdumm` and an icon that matches the
+`setDesktopFileName` call in `main.py`. The launcher's
+`install_desktop_entry()` function is the reference implementation.
+
 Steam install paths probed by the auto-detect: `~/.local/share/Steam`,
 the `~/.steam/steam` and `~/.steam/root` symlinks (deduped by
 `Path.resolve()`), the Flatpak install under

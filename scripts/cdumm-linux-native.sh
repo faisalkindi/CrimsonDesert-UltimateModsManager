@@ -28,6 +28,11 @@ readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly VENV_DIR="$REPO_ROOT/.venv"
 readonly DEPS_MARKER="$VENV_DIR/.cdumm-deps-installed"
 readonly NATIVE_MARKER="$VENV_DIR/.cdumm-native-built"
+readonly DESKTOP_MARKER="$VENV_DIR/.cdumm-desktop-installed"
+
+readonly XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+readonly DESKTOP_FILE="$XDG_DATA/applications/cdumm.desktop"
+readonly ICON_DEST="$XDG_DATA/icons/cdumm.png"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
@@ -134,11 +139,60 @@ build_native() {
   log "cdumm_native built and installed in the venv"
 }
 
+# Install a freedesktop ``cdumm.desktop`` + PNG icon under
+# ``$XDG_DATA_HOME/{applications,icons}``. Required for Wayland to
+# show CDUMM's icon — the compositor matches the running window's
+# app_id (set from main.py via QGuiApplication.setDesktopFileName)
+# to the .desktop file's basename, then loads the Icon= field. Also
+# fixes the post-launch icon revert and the missing-icon-on-
+# hide-to-taskbar case RoGreat reported in PR #123.
+#
+# Idempotent — re-runs only when the marker is missing or --reinstall
+# is passed. Both files live under ~/.local/share (user-local), so
+# no sudo and nothing system-wide is touched.
+install_desktop_entry() {
+  if [[ -f "$DESKTOP_MARKER" && $REINSTALL -eq 0 ]]; then
+    return 0
+  fi
+  local src_icon="$REPO_ROOT/assets/cdumm-icon-square.png"
+  if [[ ! -f "$src_icon" ]]; then
+    warn "Icon source $src_icon missing — skipping desktop entry install."
+    return 0
+  fi
+  log "Installing cdumm.desktop + icon (Wayland icon + taskbar entry)"
+  mkdir -p "$(dirname "$DESKTOP_FILE")" "$(dirname "$ICON_DEST")"
+  cp -f "$src_icon" "$ICON_DEST"
+  # Write the .desktop file. Use absolute paths for Exec and Icon so
+  # the entry works regardless of icon-theme cache state and the
+  # user's PATH at click time. StartupWMClass must match the
+  # app_id Qt advertises (the "cdumm" we pass to setDesktopFileName).
+  {
+    echo "[Desktop Entry]"
+    echo "Type=Application"
+    echo "Name=CDUMM"
+    echo "GenericName=Mod Manager"
+    echo "Comment=Crimson Desert Ultimate Mods Manager (native Linux build)"
+    echo "Exec=$REPO_ROOT/scripts/cdumm-linux-native.sh"
+    echo "Icon=$ICON_DEST"
+    echo "Terminal=false"
+    echo "Categories=Game;Utility;"
+    echo "StartupWMClass=cdumm"
+    echo "StartupNotify=true"
+  } > "$DESKTOP_FILE"
+  # Best-effort cache refresh so GNOME / KDE see the entry without
+  # a session restart. Absence of the binary is fine on minimal WMs.
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
+  fi
+  touch "$DESKTOP_MARKER"
+}
+
 # ── main ────────────────────────────────────────────────────────────
 
 provision_venv
 install_deps
 build_native
+install_desktop_entry
 
 # Route Qt file dialogs through the XDG desktop portal.
 #
