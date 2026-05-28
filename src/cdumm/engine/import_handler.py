@@ -3518,12 +3518,20 @@ def import_from_folder(
     """Import a mod from a folder of modified files."""
     mod_name = folder_path.name
 
-    # Check for Crimson Browser format and convert if needed
+    # Check for Crimson Browser format and convert if needed.
+    # trust_symlinks=True: the user picked this local folder, so a
+    # mod file that's a symlink to its real target elsewhere on the
+    # filesystem (e.g. RoGreat's Nix-derivation outputs in PR #123)
+    # is a legitimate reference and must be followed rather than
+    # treated as a symlink-escape attack. Archive-extraction call
+    # sites keep the default (False) — see convert_to_paz_mod's
+    # docstring for the threat-model distinction.
     manifest = detect_crimson_browser(folder_path)
     if manifest is not None:
         with import_staging_dir(game_dir) as cb_tmp:
             cb_work = Path(cb_tmp) / "_cb_converted"
-            converted = convert_to_paz_mod(manifest, game_dir, cb_work)
+            converted = convert_to_paz_mod(
+                manifest, game_dir, cb_work, trust_symlinks=True)
             if converted is not None:
                 cb_name = _pick_cb_display_name(manifest.get("id"), mod_name)
                 modinfo = _read_modinfo(folder_path)
@@ -3550,12 +3558,16 @@ def import_from_folder(
                         logger.debug("Sibling JSON scan after CB failed: %s", e)
                 return cb_result
 
-    # Check for loose file mod (mod.json + files/ directory)
+    # Check for loose file mod (mod.json + files/ directory).
+    # trust_symlinks=True: same reasoning as the CB branch above —
+    # user-selected folder, symlinks inside it are trusted local
+    # references.
     lfm = detect_loose_file_mod(folder_path)
     if lfm is not None:
         with import_staging_dir(game_dir) as lfm_tmp:
             lfm_work = Path(lfm_tmp) / "_lfm_converted"
-            converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
+            converted = convert_to_paz_mod(
+                lfm, game_dir, lfm_work, trust_symlinks=True)
             if converted is not None:
                 mi = lfm.get("_modinfo", {})
                 lfm_name = mi.get("title", mod_name)
