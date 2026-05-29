@@ -1,0 +1,105 @@
+name: Upload release to NexusMods
+
+# Fires once when the maintainer publishes a GitHub Release (which
+# release-macos.yml leaves as draft so the .exe can be attached first).
+# That single Publish click mirrors both release assets to NexusMods:
+#   * macOS .dmg  → zipped → nexusmods.com/crimsondesert/mods/2253
+#   * Windows .exe → as-is → nexusmods.com/crimsondesert/mods/207
+#
+# NexusMods rejects .dmg, so the macOS file is wrapped in a .zip whose
+# base name matches the .dmg (e.g. CDUMM-3.3.15-macos-arm64.zip). The
+# Windows .exe is accepted directly — no repackaging.
+#
+# Uses Nexus-Mods/upload-action — the upstream-maintained uploader.
+# v1.0.0-beta.6 is the latest tag (no stable release exists yet) and is
+# the first version with archive_existing_file (added in v1.0.0-beta.5).
+#
+# File group IDs come from repo Variables (not Secrets) — they are not
+# sensitive but should be editable in the GitHub UI without a code
+# change. The maintainer must set, under Settings → Secrets and
+# variables → Actions:
+#   Secret    NEXUSMODS_API_KEY            (nexusmods.com/settings/api-keys)
+#   Variable  NEXUS_FILE_GROUP_ID_MACOS    (file group ID on mod 2253)
+#   Variable  NEXUS_FILE_GROUP_ID_WINDOWS  (file group ID on mod 207)
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read # gh release download reads release assets
+
+jobs:
+  macos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download .dmg from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'CDUMM-*-macos-arm64.dmg' \
+            --dir artifacts
+
+      - name: Wrap .dmg in a .zip
+        id: prep
+        run: |
+          dmg_file=$(ls artifacts/CDUMM-*-macos-arm64.dmg)
+          base=$(basename "$dmg_file" .dmg)
+          zip_path="artifacts/${base}.zip"
+          # -j strips the artifacts/ path so the zip contains the .dmg
+          # at its root, matching how the macOS archiver wraps it for
+          # the manual upload flow this workflow replaces.
+          zip -j "$zip_path" "$dmg_file"
+          tag="${{ github.event.release.tag_name }}"
+          {
+            echo "filename=$zip_path"
+            echo "version=${tag#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload to NexusMods (macOS, mod 2253)
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.6
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_group_id: ${{ vars.NEXUS_FILE_GROUP_ID_MACOS }}
+          filename: ${{ steps.prep.outputs.filename }}
+          version: ${{ steps.prep.outputs.version }}
+          display_name: CDUMM macOS
+          description: Unzip the .dmg and install like any other apps packaged in a .dmg
+          archive_existing_file: true
+          allow_mod_manager_download: false
+
+  windows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download .exe from release
+        id: prep
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          # `|| true` so a release published before CDUMM3.exe is
+          # attached doesn't fail the job — the upload step's hashFiles
+          # guard then skips cleanly. The maintainer attaches the .exe
+          # and re-runs just this job from the Actions UI.
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'CDUMM3.exe' \
+            --dir artifacts || true
+          tag="${{ github.event.release.tag_name }}"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to NexusMods (Windows, mod 207)
+        if: hashFiles('artifacts/CDUMM3.exe') != ''
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.6
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_group_id: ${{ vars.NEXUS_FILE_GROUP_ID_WINDOWS }}
+          filename: artifacts/CDUMM3.exe
+          version: ${{ steps.prep.outputs.version }}
+          display_name: CDUMM3 ${{ github.event.release.tag_name }}
+          archive_existing_file: true

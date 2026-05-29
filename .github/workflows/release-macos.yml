@@ -133,6 +133,12 @@ jobs:
         with:
           files: dist/CDUMM-*-macos-arm64.dmg
           fail_on_unmatched_files: true
+          # Keep the release in draft until the maintainer attaches
+          # CDUMM3.exe and clicks Publish — that click fires
+          # release-nexusmods.yml, which mirrors both files to
+          # NexusMods. Auto-publishing here would fire the upload
+          # before the .exe is attached.
+          draft: true
           # Don't auto-create the release body — the maintainer's
           # manual release notes (matching the RELEASE_NOTES_*.md
           # files in the repo) are richer than anything we'd
