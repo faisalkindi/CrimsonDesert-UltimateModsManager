@@ -14,13 +14,13 @@ name: Upload release to NexusMods
 # v1.0.0-beta.6 is the latest tag (no stable release exists yet) and is
 # the first version with archive_existing_file (added in v1.0.0-beta.5).
 #
-# File group IDs come from repo Variables (not Secrets) — they are not
-# sensitive but should be editable in the GitHub UI without a code
-# change. The maintainer must set, under Settings → Secrets and
-# variables → Actions:
-#   Secret    NEXUSMODS_API_KEY            (nexusmods.com/settings/api-keys)
-#   Variable  NEXUS_FILE_GROUP_ID_MACOS    (file group ID on mod 2253)
-#   Variable  NEXUS_FILE_GROUP_ID_WINDOWS  (file group ID on mod 207)
+# The maintainer must set, under Settings → Secrets and variables →
+# Actions → Secrets:
+#   NEXUSMODS_API_KEY            (nexusmods.com/settings/api-keys)
+#   NEXUS_FILE_GROUP_ID_MACOS    (file group ID on mod 2253)
+#   NEXUS_FILE_GROUP_ID_WINDOWS  (file group ID on mod 207)
+# All three are stored as Secrets so they're masked (***) in workflow
+# logs and rotatable via the GitHub UI without a code change.
 
 on:
   release:
@@ -64,7 +64,7 @@ jobs:
         uses: Nexus-Mods/upload-action@v1.0.0-beta.6
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_group_id: ${{ vars.NEXUS_FILE_GROUP_ID_MACOS }}
+          file_group_id: ${{ secrets.NEXUS_FILE_GROUP_ID_MACOS }}
           filename: ${{ steps.prep.outputs.filename }}
           version: ${{ steps.prep.outputs.version }}
           display_name: CDUMM macOS
@@ -98,7 +98,7 @@ jobs:
         uses: Nexus-Mods/upload-action@v1.0.0-beta.6
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_group_id: ${{ vars.NEXUS_FILE_GROUP_ID_WINDOWS }}
+          file_group_id: ${{ secrets.NEXUS_FILE_GROUP_ID_WINDOWS }}
           filename: artifacts/CDUMM3.exe
           version: ${{ steps.prep.outputs.version }}
           display_name: CDUMM3 ${{ github.event.release.tag_name }}
