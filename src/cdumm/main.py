@@ -235,6 +235,25 @@ def main() -> int:
     logger = logging.getLogger(__name__)
     logger.info("Starting Crimson Desert Ultimate Mods Manager")
 
+    # #170: when a self-update on Windows hit the running-exe lock
+    # path, UpdateDownloadWorker parked the previous CDUMM3.exe at
+    # CDUMM3.exe.old before swapping the new exe in. The .old file is
+    # safe to delete now that we are running on the new exe. Best
+    # effort: if the file is somehow still held open by AV, leave it
+    # and try again next launch.
+    if IS_WINDOWS and getattr(sys, "frozen", False):
+        try:
+            stale_old = Path(sys.executable + ".old")
+            if stale_old.exists():
+                stale_old.unlink()
+                logger.info(
+                    "Removed leftover %s from prior self-update",
+                    stale_old.name)
+        except OSError as _e_old:
+            logger.debug(
+                "Could not remove leftover .old exe (probably AV): %s",
+                _e_old)
+
     # Sweep stale extraction workspaces left over from prior runs that
     # crashed or were force-killed before atexit fired. Scoped strictly
     # to cdumm_* prefixes — never touches other apps' temp dirs. On

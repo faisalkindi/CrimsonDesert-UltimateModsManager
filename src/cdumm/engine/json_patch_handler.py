@@ -2105,6 +2105,56 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             logger.info("Applied %d/%d patches to %s (mismatched=%d)",
                          applied, len(changes), game_file, mismatched)
 
+        # #167 follow-up (jikulopo retest of v3.3.14): the v3.3.13 retry
+        # block landed in convert_json_patch_to_paz, but Format 3 mods
+        # like Skip More Animations come through import_json_as_entr
+        # which had no retry at all. With the wrong twin picked, every
+        # change mismatched and the file was skipped at import time so
+        # the mount-time retry never got a chance to see anything. Walk
+        # the basename twins here too and adopt whichever twin lands
+        # the most patches.
+        if mismatched > 0 and applied == 0:
+            tried_keys = {(entry.paz_file, entry.offset)}
+            candidates: list[PazEntry] = []
+            for src_dir in (vanilla_dir, game_dir):
+                for cand in _find_pamt_entries(game_file, src_dir):
+                    key = (cand.paz_file, cand.offset)
+                    if key in tried_keys:
+                        continue
+                    tried_keys.add(key)
+                    candidates.append(cand)
+            for cand in candidates:
+                if not os.path.exists(cand.paz_file):
+                    continue
+                try:
+                    alt_plain = _extract_from_paz(cand)
+                except Exception as e_alt:
+                    logger.debug(
+                        "#167 import retry: skip candidate %s for %s: %s",
+                        cand.paz_file, game_file, e_alt)
+                    continue
+                alt_modified = bytearray(alt_plain)
+                alt_applied, alt_mis, alt_reloc = _apply_byte_patches(
+                    alt_modified, changes, signature=signature,
+                    vanilla_data=bytes(alt_plain),
+                    name_offsets=name_offsets)
+                if alt_applied > applied:
+                    logger.info(
+                        "#167 import twin-retry: %s now resolves to %s "
+                        "(applied %d->%d, mismatched %d->%d)",
+                        game_file,
+                        os.path.basename(cand.paz_file),
+                        applied, alt_applied, mismatched, alt_mis)
+                    entry = cand
+                    entry_cache[game_file.lower()] = entry
+                    plaintext = alt_plain
+                    modified = alt_modified
+                    applied = alt_applied
+                    mismatched = alt_mis
+                    relocated_count = alt_reloc
+                    if mismatched == 0:
+                        break
+
         # All patches failed for THIS file due to byte mismatch.
         # For a single-file mod, this is a genuine version-incompat
         # rejection. For a multi-file mod, this might be ONE bad

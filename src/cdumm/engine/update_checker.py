@@ -151,7 +151,46 @@ class UpdateDownloadWorker(QObject):
                         f.write(block)
                         received += len(block)
                         self.progress.emit(received, total)
-            _os.replace(tmp_dest, self._dest)
+            try:
+                _os.replace(tmp_dest, self._dest)
+            except PermissionError as e_replace:
+                # #170 (Elec0 / devCKVargas / AwfulLon): when the
+                # destination is the running CDUMM exe (Windows
+                # default Downloads location matches the live exe
+                # path), Windows refuses to overwrite it with
+                # [WinError 5] Access is denied. Windows DOES allow
+                # renaming a running exe out of the way, so we park
+                # the live exe at <dest>.old and replace. main.py
+                # cleans up <dest>.old on the next launch. macOS and
+                # Linux do not hit this case (their kernels allow
+                # overwriting a running binary outright), so re-raise
+                # elsewhere.
+                if sys.platform != "win32":
+                    raise
+                backup = self._dest + ".old"
+                try:
+                    if _os.path.exists(backup):
+                        _os.unlink(backup)
+                except OSError as e_clean:
+                    logger.debug(
+                        "Self-replace fallback: stale .old cleanup "
+                        "failed (%s), continuing", e_clean)
+                try:
+                    _os.rename(self._dest, backup)
+                except OSError as e_rename:
+                    # Last-resort: the running exe is genuinely
+                    # unlocked (or the user moved it). Re-raise the
+                    # original PermissionError so the caller falls
+                    # back to opening the release page.
+                    logger.warning(
+                        "Self-replace fallback: rename live exe to "
+                        ".old failed (%s); surfacing original error",
+                        e_rename)
+                    raise e_replace
+                _os.replace(tmp_dest, self._dest)
+                logger.info(
+                    "Self-replace fallback used: parked live exe at "
+                    "%s, new exe in place at %s", backup, self._dest)
             self.done.emit(self._dest)
         except Exception as e:
             logger.warning("Direct download failed: %s", e)

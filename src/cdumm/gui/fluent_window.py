@@ -1929,9 +1929,20 @@ class CdummWindow(FluentWindow):
                 logger.debug("download-failed InfoBar failed: %s", e)
             QDesktopServices.openUrl(QUrl(release_url))
 
-        worker.progress.connect(_on_progress)
-        worker.done.connect(_on_done)
-        worker.failed.connect(_on_failed)
+        # #170 (Elec0 / jikulopo / devCKVargas / AwfulLon): PySide6
+        # defaults a signal-to-Python-callable connection to
+        # DirectConnection because a free function has no thread
+        # affinity, which means the slot ran in the WORKER thread when
+        # the download finished. _on_done then tried to create an
+        # InfoBar parented to self (main window, main thread), and Qt
+        # refused with "Cannot set parent, new parent is in a
+        # different thread", silently freezing the UI. QTimer.singleShot
+        # for the deferred reveal also no-op'd because the worker has
+        # no event loop. Force QueuedConnection so every slot runs on
+        # the main thread, where InfoBar and QTimer work.
+        worker.progress.connect(_on_progress, Qt.ConnectionType.QueuedConnection)
+        worker.done.connect(_on_done, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(_on_failed, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)

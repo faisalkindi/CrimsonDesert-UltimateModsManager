@@ -271,6 +271,20 @@ _ITEMINFO_FIELD_ALIASES: dict[str, str] = {
     "max_charged_useable_count.a": "max_charged_useable_count",
     "max_charged_useable_count.b": "unk_post_max_charged_a",
     "max_charged_useable_count.c": "unk_post_max_charged_b",
+    # GitHub #171 (pinapana): DMM's exports name socket-equipment
+    # fields with the binary-side underscored camelCase
+    # (_addSocketMaterialItemList / _socketValidCount / _useSocket).
+    # CDUMM's iteminfo parser already knows them under their
+    # snake_case path inside the drop_default_data struct
+    # (drop_default_data.add_socket_material_item_list etc.) and the
+    # iteminfo writer's nested-path resolver handles the dotted form
+    # at apply time. Aliasing at parse time makes both the validator
+    # and the writer see the canonical dotted form with no per-call
+    # special-casing.
+    "_addSocketMaterialItemList":
+        "drop_default_data.add_socket_material_item_list",
+    "_socketValidCount": "drop_default_data.socket_valid_count",
+    "_useSocket": "drop_default_data.use_socket",
 }
 
 
