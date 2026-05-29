@@ -340,7 +340,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='CDUMM',
+    name='CDUMM3',
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,

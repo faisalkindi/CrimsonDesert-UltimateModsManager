@@ -1,0 +1,91 @@
+name: Build Windows release
+
+# Triggers:
+#   * push of a tag matching v*  — attaches CDUMM3.exe to the GitHub Release.
+#   * workflow_dispatch — manual run; produces exe as a workflow artifact
+#     (downloadable for 30 days) but does NOT touch GitHub Releases.
+#
+# Runner: windows-latest (currently windows-2025).
+# Python: 3.13 — latest release with PySide6 and bsdiff4 wheel support.
+#
+# Build steps mirror the macOS workflow (release-macos.yml):
+#   maturin builds the cdumm_native Rust extension, then PyInstaller
+#   freezes the whole app into a single-file exe.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create / update GitHub Releases
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo + native target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            native\target
+          key: cargo-windows-x64-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: cargo-windows-x64-
+
+      - name: Install Python build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pyinstaller
+
+      - name: Build cdumm_native Rust extension
+        # maturin develop installs the .pyd into the active venv so
+        # PyInstaller's importlib.find_spec('cdumm_native') resolves it.
+        run: |
+          cd native
+          maturin develop --release
+          cd ..
+
+      - name: Install project dependencies
+        # Editable install is fine — PyInstaller resolves the package via
+        # importlib.find_spec. certifi is now an explicit dep (issue #175).
+        run: python -m pip install -e .
+
+      - name: Build CDUMM3.exe with PyInstaller
+        run: python scripts/build.py
+
+      - name: Upload exe as workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CDUMM3-windows-x64
+          path: dist/CDUMM3.exe
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Attach exe to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/CDUMM3.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
