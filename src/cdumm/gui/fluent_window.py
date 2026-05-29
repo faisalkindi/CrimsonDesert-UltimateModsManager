@@ -38,6 +38,7 @@ from cdumm.engine.snapshot_manager import SnapshotManager
 from cdumm.gui.components.drop_overlay import DropOverlay
 from cdumm.i18n import tr
 from cdumm.storage.database import Database
+from cdumm.engine.ssl_ctx import make_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -2446,7 +2447,8 @@ class CdummWindow(FluentWindow):
                         "Application-Name": "CDUMM",
                         "Application-Version": __version__,
                     })
-                with urllib.request.urlopen(req, timeout=60) as resp, \
+                with urllib.request.urlopen(req, timeout=60,
+                                            context=make_ssl_context()) as resp, \
                         open(dest, "wb") as f:
                     # Bug #29: content-length sanity check up front.
                     cl_raw = resp.headers.get("Content-Length")

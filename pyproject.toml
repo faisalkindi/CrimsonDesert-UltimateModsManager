@@ -12,6 +12,7 @@ dependencies = [
     "privatebin>=0.3.0",
     "lxml>=5.0",
     "psutil>=5.9",
+    "certifi>=2024.0",
 ]
 
 [project.optional-dependencies]

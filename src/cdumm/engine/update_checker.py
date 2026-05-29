@@ -6,6 +6,8 @@ import urllib.request
 
 from PySide6.QtCore import QObject, Signal
 
+from cdumm.engine.ssl_ctx import make_ssl_context
+
 logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "faisalkindi/CrimsonDesert-UltimateModsManager"
@@ -59,7 +61,8 @@ def check_for_update(current_version: str) -> dict | None:
     """
     try:
         req = urllib.request.Request(RELEASES_URL, headers={"User-Agent": "CDUMM"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10,
+                                    context=make_ssl_context()) as resp:
             data = json.loads(resp.read())
         tag = data.get("tag_name", "")
         remote = tag.lstrip("v")
@@ -136,7 +139,8 @@ class UpdateDownloadWorker(QObject):
         try:
             req = urllib.request.Request(
                 self._url, headers={"User-Agent": "CDUMM"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30,
+                                        context=make_ssl_context()) as resp:
                 total = int(resp.headers.get("Content-Length", -1) or -1)
                 received = 0
                 # 64 KiB chunks — small enough that progress signals fire

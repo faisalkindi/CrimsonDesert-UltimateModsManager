@@ -57,6 +57,12 @@ _qfw_datas = collect_data_files('qfluentwidgets')
 # qframelesswindow — collect everything (binaries, datas, hidden imports)
 _qflw_datas, _qflw_binaries, _qflw_hiddenimports = collect_all('qframelesswindow')
 
+# certifi CA bundle — needed so make_ssl_context() can find cacert.pem
+# inside the frozen exe and avoid CERTIFICATE_VERIFY_FAILED errors when
+# the Python build's embedded CA bundle contains an expired root cert
+# (GitHub issue #175).
+_certifi_datas = collect_data_files('certifi')
+
 
 a = Analysis(
     ['src/cdumm/main.py'],
@@ -79,7 +85,7 @@ a = Analysis(
            ('assets/store-steam-white.svg', 'assets'),
            ('assets/store-xbox-white.svg', 'assets'),
            ('assets/store-epic-white.svg', 'assets'),
-           ] + _crimson_rs_datas + _qfw_datas + _qflw_datas,
+           ] + _crimson_rs_datas + _qfw_datas + _qflw_datas + _certifi_datas,
     hiddenimports=[
         'cdumm.cli',
         'cdumm.worker_process',
@@ -180,7 +186,9 @@ a = Analysis(
         'cdumm.engine.activity_log',
         'cdumm.engine.binary_search',
         'cdumm.engine.nexus_api',
+        'cdumm.engine.ssl_ctx',
         'cdumm.engine.game_monitor',
+        'certifi',
         # GitHub #63: launch-game CLI subcommand. Lazy-imported in
         # cli.cmd_launch_game so static analysis may miss it; list
         # defensively the same way the others are.

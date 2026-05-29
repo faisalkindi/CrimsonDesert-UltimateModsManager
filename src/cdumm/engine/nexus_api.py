@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from cdumm import __version__
+from cdumm.engine.ssl_ctx import make_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,6 @@ def _api_request(endpoint: str, api_key: str) -> dict | list:
     the API while it's already rejecting us.
     """
     global _rate_limited_until
-    import ssl
     import time as _time
     if _rate_limited_until > _time.time():
         # Skip the network call and surface the in-flight cooldown.
@@ -200,7 +200,7 @@ def _api_request(endpoint: str, api_key: str) -> dict | list:
         "Application-Version": __version__,
     }
     req = urllib.request.Request(url, headers=headers)
-    ctx = ssl.create_default_context()
+    ctx = make_ssl_context()
     try:
         with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
             # Log Nexus's rate-limit headers so we have visibility for
