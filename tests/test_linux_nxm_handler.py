@@ -18,6 +18,7 @@ check the exact command line that would have been sent to xdg-mime.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,11 @@ class TestRegisterLinuxHandler:
         assert "%u" in body
         assert "--nxm" in body
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows file mode has no POSIX exec bit; Path.chmod "
+        "to 0o755 is a no-op on NTFS, so the assertion always fails "
+        "even though the underlying Linux behaviour is correct.")
     def test_marks_desktop_file_executable(
             self, linux_xdg, fake_subprocess) -> None:
         """Some desktop environments (Plasma 5 historically) skip
