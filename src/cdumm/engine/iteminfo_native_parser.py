@@ -1,5 +1,44 @@
 """CDUMM-native iteminfo.pabgb parser, clean-room implementation.
 
+GitHub #182 (CD 1.09, in progress):
+  Crimson Desert 1.09 changed the iteminfo schema. _ITEM_FIELDS as
+  shipped here desyncs on the very first record because the new game
+  patch added at least three pieces. Reverse-engineered findings,
+  not yet wired into the writer because shipping a partial schema
+  edit would corrupt round-trip writes on the unmodelled bytes:
+
+    1. After field 30 ``extract_multi_change_info`` (u32) the new
+       layout inserts a struct
+         u16 marker (always 0xFFFF), u32-length-prefixed cstring
+         (Korean filter-category name like "탄약류 아이템그룹"),
+         three u32s (the middle one is a per-group key like 1001367
+         or 18010001, the outer two are 0 in every record sampled).
+       18+N bytes total.
+
+    2. After field 39 ``is_all_gimmick_sealable`` (u8) the new layout
+       inserts an 8-byte marker block
+         u8 0, u8 0, u8 0x01, u32 hash 0x9D7C0DD0.
+       The hash appears exactly once per record across the whole
+       5.5 MB file (6314 hits = 6314 records), so it's a fixed
+       schema sentinel and not data.
+
+    3. Every record ends with a fixed ~28-byte tail
+         four zero bytes, u32 0x000F53E1 (= 1004001), four zero
+         bytes, u32 0x01000000, ten zero bytes, u16 0xFFFF, four
+         zero bytes.
+       Same shape on every record sampled, so it's another fixed
+       sentinel block.
+
+  There is still a region between (the end of the 4 empty sealable
+  carrays at schema position 43) and (the start of the tail
+  sentinel) that misreads, with a 0x000F4240 (= 1,000,000) constant
+  showing through. That's the next thing to bracket. Once it is
+  pinned, both _ITEM_FIELDS and the writer will be updated atomically
+  and the regression test in tests/test_iteminfo_walk_real_game
+  will round-trip a 1.09 vanilla fixture before this lands.
+
+
+
 Replaces the vendored crimson_rs Rust extension's iteminfo functions
 ONLY. Other crimson_rs functions (PAMT, PAPGT, localization) keep
 using the vendored .pyd.
