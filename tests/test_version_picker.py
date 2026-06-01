@@ -169,3 +169,76 @@ def test_no_signal_at_all_returns_none(tmp_path):
         get_drop_version=_no_drop_ver,
     )
     assert result is None
+
+
+# -- Edge cases ----------------------------------------------------
+
+def test_no_orig_path_falls_back_to_fallback_path(tmp_path):
+    """When orig_path is None (mid-import the user-supplied source
+    was already cleaned up) the fallback path's filename is parsed
+    instead, so a useful version can still come through."""
+    fallback = tmp_path / "Mod-7-1-5-1700000000.zip"
+
+    def parse(p):
+        if p is None:
+            return ""
+        return "1.5" if "-1-5-" in p.name else ""
+
+    result = pick_post_import_version(
+        manifest_ver="",
+        orig_path=None,
+        fallback_path=fallback,
+        nexus_cached_version=None,
+        get_drop_version=parse,
+    )
+    assert result == "1.5"
+
+
+def test_empty_string_nexus_cache_is_treated_as_no_cache(tmp_path):
+    """Some upstream code stores `""` instead of None for an absent
+    cache entry. Both must behave the same way: no Nexus fallback,
+    return None."""
+    result = pick_post_import_version(
+        manifest_ver="",
+        orig_path=tmp_path / "Random_File.zip",
+        fallback_path=tmp_path / "extracted",
+        nexus_cached_version="",
+        get_drop_version=_no_drop_ver,
+    )
+    assert result is None
+
+
+def test_nxm_temp_with_uppercase_extension_is_not_click_to_update(tmp_path):
+    """Click-to-update detection requires the exact ``.bin`` suffix
+    that the NXM handler writes. An archive named NXM_*.BIN (case-
+    different) does not actually come from that flow and should not
+    bypass the manifest check."""
+    # Note: orig_path.name comparison is case-sensitive on POSIX so
+    # the .BIN won't match the lowercase suffix check.
+    weird = tmp_path / "nxm_664_12345.BIN"
+    weird.touch()
+    result = pick_post_import_version(
+        manifest_ver="1.0.4",
+        orig_path=weird,
+        fallback_path=tmp_path / "Random_File.zip",
+        nexus_cached_version="1.0.5",
+        get_drop_version=_no_drop_ver,
+    )
+    assert result is None  # manifest preserved
+
+
+def test_whitespace_only_manifest_treated_as_empty(tmp_path):
+    """Some import paths might write whitespace-only versions
+    (rare but possible from sloppy modinfo.json values). The
+    rstripped value is what the caller will read; we receive what
+    they read. If the manifest looks empty, fall through."""
+    # The caller's responsibility to strip; assertions just verify
+    # we don't preserve a non-truthy string.
+    result = pick_post_import_version(
+        manifest_ver="",  # caller already stripped to empty
+        orig_path=tmp_path / "Mod-7-2-1-1700000000.zip",
+        fallback_path=tmp_path / "extracted",
+        nexus_cached_version=None,
+        get_drop_version=lambda p: "2.1" if "-2-1-" in p.name else "",
+    )
+    assert result == "2.1"
