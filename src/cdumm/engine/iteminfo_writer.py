@@ -176,7 +176,18 @@ def build_iteminfo_intent_change(
     try:
         items = parse_iteminfo_from_bytes(vanilla_body)
     except Exception as e:
-        logger.error("iteminfo parse failed: %s", e, exc_info=True)
+        # GitHub #182 (CD 1.09): the new game patch shifted the
+        # iteminfo layout in ways the parser does not yet model.
+        # Surface a recognisable hint in the log so the bug report
+        # bundle that ends up on the issue tracker is easier to
+        # triage, instead of just the raw struct.error.
+        logger.error(
+            "iteminfo parse failed (%s). On Crimson Desert 1.09 this "
+            "is the known schema shift tracked under GitHub #182. "
+            "Format 3 list-of-dict intents on iteminfo will be skipped "
+            "until the parser catches up. Format 2 / offset-based "
+            "byte patches still apply.",
+            e, exc_info=True)
         return None
 
     by_key = {it["key"]: it for it in items}
