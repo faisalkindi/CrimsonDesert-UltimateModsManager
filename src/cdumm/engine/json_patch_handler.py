@@ -2752,9 +2752,26 @@ def process_json_patches_for_overlay(
             # Every contributing mod was tainted , nothing left to
             # apply for this target. The synthetic skip entries are
             # already in skipped_out.
+            #
+            # Hint added for jikulopo / IliyaBrook (GitHub #167 / #182):
+            # this message used to be the only signal users had that
+            # their mod was being rejected, and it reads like a CDUMM
+            # bug. The most common real cause is that the mod's
+            # ``original`` bytes do not match the current vanilla
+            # bytes, usually because either another mod has already
+            # rewritten those offsets, the game patched the file in a
+            # version bump, or a previous half-finished apply left a
+            # different state behind. The actionable hint lets users
+            # try Steam Verify Integrity before opening an issue.
             logger.info(
                 "mount-time: %r had all %d change(s) filtered out by "
-                "tainted-mod guard, skipping (no overlay entry emitted)",
+                "tainted-mod guard, skipping (no overlay entry emitted). "
+                "Hint: the mod's expected vanilla bytes do not match "
+                "this install. Most often that means either another "
+                "enabled mod is also touching this file, the game "
+                "patched it in a version update, or a previous apply "
+                "left the file in a non-vanilla state. Try Steam "
+                "Verify Integrity on this game file, then reapply.",
                 game_file, len(all_changes))
             continue
 
