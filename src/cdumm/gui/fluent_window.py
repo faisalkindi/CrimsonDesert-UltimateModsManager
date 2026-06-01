@@ -4970,42 +4970,59 @@ class CdummWindow(FluentWindow):
                 self._db.connection.execute(
                     "UPDATE mods SET drop_name = ? WHERE id = ?",
                     (drop_name, mod_id))
-                drop_ver = self._get_drop_version(orig) if orig else ""
-                if not drop_ver:
-                    drop_ver = self._get_drop_version(path)
-                # #164 LordOfRhun: click-to-update downloads land as
-                # nxm_<mod>_<file>.bin temp files with no version in the
-                # name and no modinfo.json, so both _get_drop_version
-                # probes return ''. Without this branch the fallback
-                # below copies the OLD DB version back into the row, the
-                # next 15-minute Nexus update poll sees "local < latest"
-                # again, and the red "Click to update" pill reappears
-                # the moment Apply finishes. The row was bound to the
-                # original local mod via intended_mod_id and already
-                # carries nexus_mod_id; use the latest_version that the
-                # cached Nexus update entry exposes for that id.
-                if not drop_ver:
-                    nm_id = nexus_id
-                    if not nm_id:
-                        try:
-                            row = self._db.connection.execute(
-                                "SELECT nexus_mod_id FROM mods WHERE id = ?",
-                                (mod_id,)).fetchone()
-                            if row and row[0]:
-                                nm_id = int(row[0])
-                        except Exception:
-                            nm_id = None
-                    if nm_id:
-                        latest = getattr(self, "_nexus_updates", None) or {}
-                        cached = latest.get(int(nm_id))
-                        cached_ver = getattr(cached, "latest_version", "") if cached else ""
-                        if cached_ver:
-                            drop_ver = cached_ver.strip()
-                if not drop_ver:
-                    row = self._db.connection.execute(
-                        "SELECT version FROM mods WHERE id = ?", (mod_id,)).fetchone()
-                    drop_ver = row[0] if row and row[0] else ""
-                if drop_ver:
+                # #187 (Balzhur): the import worker already wrote the
+                # version from the mod's manifest (modinfo.json for PAZ
+                # mods, the version field for JSON-patch mods) into the
+                # mods.version column. Trust that value first. The
+                # previous post-import logic immediately overwrote it
+                # with whatever _get_drop_version parsed out of the
+                # Nexus filename, which is a stale version when the
+                # mod author bumped the manifest without renaming the
+                # archive ("Easier QTE x2" v1.2.1 packaged in a 1-1
+                # filename slot, reported as v1.1).
+                #
+                # The two cases that legitimately need a post-import
+                # version bump are:
+                #   1. Click-to-update downloads (nxm_<mod>_<file>.bin
+                #      temp filename, no modinfo, GitHub #164). The
+                #      manifest path returns nothing and we need the
+                #      cached Nexus latest_version instead.
+                #   2. Imports with no manifest at all, where the DB
+                #      row carries the import-handler default ("1.0")
+                #      and the filename DOES expose a real version.
+                # Both fall through the manifest_ver check below.
+                row = self._db.connection.execute(
+                    "SELECT version FROM mods WHERE id = ?", (mod_id,)).fetchone()
+                manifest_ver = (row[0] or "").strip() if row else ""
+                is_click_to_update = (
+                    orig is not None and orig.name.startswith("nxm_")
+                    and orig.name.endswith(".bin"))
+                drop_ver = ""
+                if not manifest_ver or manifest_ver == "1.0" or is_click_to_update:
+                    drop_ver = self._get_drop_version(orig) if orig else ""
+                    if not drop_ver:
+                        drop_ver = self._get_drop_version(path)
+                    # Click-to-update Nexus fallback (issue #164).
+                    if not drop_ver:
+                        nm_id = nexus_id
+                        if not nm_id:
+                            try:
+                                row = self._db.connection.execute(
+                                    "SELECT nexus_mod_id FROM mods WHERE id = ?",
+                                    (mod_id,)).fetchone()
+                                if row and row[0]:
+                                    nm_id = int(row[0])
+                            except Exception:
+                                nm_id = None
+                        if nm_id:
+                            latest = getattr(self, "_nexus_updates", None) or {}
+                            cached = latest.get(int(nm_id))
+                            cached_ver = getattr(cached, "latest_version", "") if cached else ""
+                            if cached_ver:
+                                drop_ver = cached_ver.strip()
+                    if not drop_ver:
+                        drop_ver = manifest_ver
+                if drop_ver and drop_ver != manifest_ver:
                     self._db.connection.execute(
                         "UPDATE mods SET version = ? WHERE id = ?",
                         (drop_ver, mod_id))
