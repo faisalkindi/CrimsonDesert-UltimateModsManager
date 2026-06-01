@@ -197,6 +197,34 @@ class SettingsPage(SmoothScrollArea):
         self._hide_on_launch_card.hBoxLayout.addSpacing(16)
         self._game_group.addSettingCard(self._hide_on_launch_card)
 
+        # #186 (lupo1190): the Launch button defaults to firing
+        # steam://rungameid, but Steam's URI handler refuses with
+        # "Game configuration unavailable" on some 1.09 installs while
+        # the Steam Client itself launches the game fine. The Direct
+        # (-applaunch) option runs steam.exe -applaunch <appid>, which
+        # mirrors what the Steam Client uses internally for the Play
+        # button. Default stays on the URI path so nothing changes for
+        # working installs.
+        self._steam_launch_method_card = SettingCard(
+            FluentIcon.PLAY,
+            tr("settings.steam_launch_method"),
+            tr("settings.steam_launch_method_desc"),
+            self._game_group,
+        )
+        self._steam_launch_method_combo = ComboBox()
+        self._steam_launch_method_combo.addItems([
+            tr("settings.steam_launch_method_uri"),
+            tr("settings.steam_launch_method_applaunch"),
+        ])
+        self._steam_launch_method_combo.setFixedWidth(220)
+        self._steam_launch_method_combo.setStyleSheet(
+            "ComboBox { text-align: center; }")
+        self._steam_launch_method_card.hBoxLayout.addWidget(
+            self._steam_launch_method_combo, 0,
+            Qt.AlignmentFlag.AlignRight)
+        self._steam_launch_method_card.hBoxLayout.addSpacing(16)
+        self._game_group.addSettingCard(self._steam_launch_method_card)
+
         self._layout.addWidget(self._game_group)
 
         # ── Profiles group ────────────────────────────────────────
@@ -494,6 +522,8 @@ class SettingsPage(SmoothScrollArea):
             self._on_asi_loader_toggle_changed)
         self._hide_on_launch_switch.checkedChanged.connect(
             self._on_hide_on_launch_toggle_changed)
+        self._steam_launch_method_combo.currentIndexChanged.connect(
+            self._on_steam_launch_method_changed)
         self._manage_profiles_card.clicked.connect(self.profile_manage_requested.emit)
         self._export_list_card.clicked.connect(self.export_list_requested.emit)
         self._import_list_card.clicked.connect(self.import_list_requested.emit)
@@ -609,6 +639,14 @@ class SettingsPage(SmoothScrollArea):
         self._hide_on_launch_switch.blockSignals(True)
         self._hide_on_launch_switch.setChecked(hide_checked)
         self._hide_on_launch_switch.blockSignals(False)
+
+        # Steam launch method (#186). Default index 0 = URI (current
+        # behavior), index 1 = applaunch fallback.
+        launch_method = (self._config.get("steam_launch_method") or "").strip().lower()
+        method_idx = 1 if launch_method == "applaunch" else 0
+        self._steam_launch_method_combo.blockSignals(True)
+        self._steam_launch_method_combo.setCurrentIndex(method_idx)
+        self._steam_launch_method_combo.blockSignals(False)
 
         # NexusMods API key. Pre-fill the Advanced field so it's there
         # if/when the user clicks the toggle, but keep the row hidden
@@ -728,6 +766,14 @@ class SettingsPage(SmoothScrollArea):
             "hide_on_game_launch", "true" if checked else "false")
         logger.info(
             "Hide on game launch %s", "enabled" if checked else "disabled")
+
+    def _on_steam_launch_method_changed(self, idx: int) -> None:
+        """Persist the Steam launch method preference (GitHub #186)."""
+        if self._config is None:
+            return
+        value = "applaunch" if idx == 1 else "uri"
+        self._config.set("steam_launch_method", value)
+        logger.info("Steam launch method set to %s", value)
 
     def _on_game_dir_browse(self) -> None:
         """Open a folder browser to change the game directory."""
