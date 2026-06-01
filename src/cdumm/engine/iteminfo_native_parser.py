@@ -22,20 +22,59 @@ GitHub #182 (CD 1.09, in progress):
        5.5 MB file (6314 hits = 6314 records), so it's a fixed
        schema sentinel and not data.
 
-    3. Every record ends with a fixed ~28-byte tail
-         four zero bytes, u32 0x000F53E1 (= 1004001), four zero
-         bytes, u32 0x01000000, ten zero bytes, u16 0xFFFF, four
-         zero bytes.
-       Same shape on every record sampled, so it's another fixed
-       sentinel block.
+    3. Record tail. Walking back from each record's known boundary
+       (record 0 is exactly 631 bytes, confirmed by sniffing the
+       next record header at offset 631 keyed Arrow=50001), the
+       last 30 bytes look like this on the arrow-family items:
 
-  There is still a region between (the end of the 4 empty sealable
-  carrays at schema position 43) and (the start of the tail
-  sentinel) that misreads, with a 0x000F4240 (= 1,000,000) constant
-  showing through. That's the next thing to bracket. Once it is
-  pinned, both _ITEM_FIELDS and the writer will be updated atomically
-  and the regression test in tests/test_iteminfo_walk_real_game
-  will round-trip a 1.09 vanilla fixture before this lands.
+         offset rec_end-30 to -29  : 00 00            (constant)
+         offset rec_end-28 to -25  : E1 53 0F 00 etc  (varies per
+                                                       item; LE u32
+                                                       reads 1004001
+                                                       on most arrows
+                                                       and 0 / a
+                                                       different key
+                                                       on others)
+         offset rec_end-24 to -21  : 00 00 00 00      (constant - empty
+                                                       cstring length
+                                                       most plausibly
+                                                       emoji_texture_id)
+         offset rec_end-20         : 00               (constant)
+         offset rec_end-19         : 01               (CONSTANT 0x01 -
+                                                       enable_equip_in
+                                                       _clone_actor=1)
+         offset rec_end-18         : 00 or 01         (varies - one of
+                                                       the is_X booleans)
+         offset rec_end-17 to -15  : 00 00 00         (constant)
+         offset rec_end-14 to -7   : 00 00 00 00 00 00 00 00
+                                     (8 zero bytes  - i64
+                                      respawn_time_seconds = 0)
+         offset rec_end-6 to -5    : FF FF            (CONSTANT u16
+                                                       max_endurance =
+                                                       0xFFFF = 65535
+                                                       = "unbreakable")
+         offset rec_end-4 to -1    : 00 00 00 00      (constant u32
+                                                       repair_data_list
+                                                       count = 0)
+
+       So the last ~28 bytes ARE part of the original schema (not
+       a new 1.09 sentinel block - earlier note was wrong). The
+       0xFFFF at -6 is max_endurance=65535, not a marker. The
+       0x000F53E1 at -28 to -25 is a per-item key value that varies.
+
+  Middle region (post-field-43 to pre-tail-fields, ~320 bytes for
+  Pyeonjeon_Arrow) still misreads. The first u32 at "field 44
+  position" reads 65792 (= 0x00010100), which is invalid as a
+  sealable carray count. The 0x000F4240 (= 1,000,000) constant
+  appears 16 bytes later and recurs across arrow records with
+  near-identical surrounding bytes ("00 01 01 00 00 00 00 00 01 02
+  00 00 00 40 42 0F"). Without RTTI mapping for the CD 1.09 build
+  this region cannot be pinned to specific schema fields with
+  confidence; speculating would risk shipping a partial fix that
+  corrupts round-trip writes. Next focused session should compare
+  byte patterns across non-arrow items (Quiver, MultiArrow,
+  Poison_Arrow all give different shapes) to triangulate which
+  schema position varies.
 
 
 
