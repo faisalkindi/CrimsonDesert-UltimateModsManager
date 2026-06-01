@@ -89,7 +89,17 @@ def build_skill_intent_change(
     try:
         entries = parser.parse_all(vanilla_header, vanilla_body)
     except Exception as e:
-        logger.error("skill parse failed: %s", e, exc_info=True)
+        # GitHub #182 (CD 1.09): if the iteminfo schema shifted, the
+        # skill schema may have too. Surface the version context in
+        # the log so users do not waste time debugging their mod
+        # when the actual cause is a game-side layout change.
+        logger.error(
+            "skill parse failed (%s). If you are on Crimson Desert "
+            "1.09 this may be related to the iteminfo schema shift "
+            "tracked under GitHub #182. Format 3 list-of-dict intents "
+            "on skill will be skipped until the parser catches up. "
+            "Format 2 / offset-based byte patches still apply.",
+            e, exc_info=True)
         return None
 
     by_key = {e["key"]: e for e in entries}
