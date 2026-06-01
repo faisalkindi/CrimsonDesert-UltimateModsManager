@@ -6,8 +6,8 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QEasingCurve, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
@@ -28,11 +28,20 @@ logger = logging.getLogger(__name__)
 
 
 class _LinkCard(CardWidget):
-    """Card with an icon, title, description, and hyperlink button."""
+    """Card with an icon, title, description, and hyperlink button.
+
+    #184 (devCKVargas): the whole row is a hit target now, not just
+    the small Open button on the right. Click anywhere on the card
+    and the URL opens in the default browser. The Open button is kept
+    visible for discoverability and continues to work as before.
+    """
 
     def __init__(self, icon: FluentIcon, title: str, description: str,
                  url: str, parent=None):
         super().__init__(parent)
+
+        self._url = url
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 14, 20, 14)
@@ -53,6 +62,13 @@ class _LinkCard(CardWidget):
         link_btn = HyperlinkButton(url, tr("about.link_open"), self, icon)
         self._link_btn = link_btn
         layout.addWidget(link_btn)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            QDesktopServices.openUrl(QUrl(self._url))
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def retranslate_open(self) -> None:
         """Update the 'Open' button text after a language change."""

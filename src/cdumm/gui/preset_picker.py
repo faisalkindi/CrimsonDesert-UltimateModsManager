@@ -476,7 +476,26 @@ class PresetPickerDialog(MessageBoxBase):
         self.yesButton.clicked.connect(self._on_accept)
         self.cancelButton.setText(tr("main.cancel"))
 
-        self.widget.setMinimumWidth(500)
+        # #184 (devCKVargas): the floor of 500 was too narrow at 1440p
+        # full screen, leaving a sliver of dialog against a sea of empty
+        # space. Anchor the minimum width to roughly half the parent
+        # main window so the dialog scales up on big monitors while
+        # still being usable on small ones, and let the layout absorb
+        # the rest. Hard floor of 500 stays in place for tiny windows.
+        try:
+            par_w = parent.window().width() if parent else 0
+        except Exception:
+            par_w = 0
+        target_w = max(500, int(par_w * 0.55))
+        self.widget.setMinimumWidth(target_w)
+        # Also raise the scroll viewport so on big screens the picker
+        # actually shows more presets without a tiny inner scroller.
+        try:
+            par_h = parent.window().height() if parent else 0
+        except Exception:
+            par_h = 0
+        target_h = max(200, int(par_h * 0.45))
+        scroll.setMinimumHeight(target_h)
 
     def _on_customize(self, idx: int) -> None:
         """Open the TogglePickerDialog for one preset so the user can

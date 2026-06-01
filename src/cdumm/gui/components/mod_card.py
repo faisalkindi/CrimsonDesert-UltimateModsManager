@@ -750,6 +750,17 @@ class ModCard(CardWidget):
         if event.button() == Qt.MouseButton.LeftButton and not getattr(self, '_drag_started', False):
             self.card_clicked.emit(self._mod_id, event)
 
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        # #184 (devCKVargas): double-clicking anywhere on a mod card
+        # toggles its enabled state. The checkbox is the canonical
+        # source of truth, so we toggle it programmatically — that
+        # fires _on_toggled, which emits ``toggled`` and routes
+        # through the same path as a manual checkbox click.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._checkbox.toggle()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if not (event.buttons() & Qt.MouseButton.LeftButton):
