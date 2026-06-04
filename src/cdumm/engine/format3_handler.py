@@ -44,6 +44,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cdumm.engine.characterinfo_writer import (
+    SUPPORTED_FIELDS as _CHARACTERINFO_FIELDS,
+)
 from cdumm.engine.field_schema import (
     DTYPE_TABLE,
     FieldSchemaEntry,
@@ -862,19 +865,15 @@ def _classify_intent(
             "fixed_material_data_list["):
         return None
 
-    # GitHub #150 (Female Animations): characterinfo's PABGB schema is
-    # a positional name-less decompiled structure, so the schema walker
-    # can't resolve these field names. The clean-room characterinfo
-    # writer (characterinfo_writer.build_characterinfo_changes) locates
-    # them by walking each record to the action-chart block. Keep this
-    # set in sync with characterinfo_writer.SUPPORTED_FIELDS.
-    if tn_norm == "characterinfo" and intent.field in {
-        "upper_chart.group_lookup",
-        "lower_chart.group_lookup",
-        "skeleton_name",
-        "lookup_25",
-        "flag_c",
-    }:
+    # GitHub #150 (Female Animations) + #192 (mesh swap): characterinfo's
+    # PABGB schema is a positional name-less decompiled structure, so the
+    # schema walker can't resolve these field names. The clean-room
+    # characterinfo writer (characterinfo_writer.build_characterinfo_changes)
+    # locates them by walking each record to the action-chart block. The
+    # accept-set is the writer's own SUPPORTED_FIELDS so the two can never
+    # drift apart (the recurring two-spot edit that #150 flagged and #192
+    # tripped over).
+    if tn_norm == "characterinfo" and intent.field in _CHARACTERINFO_FIELDS:
         return None
 
     # List writer dispatch: this (table, field) pair has a registered

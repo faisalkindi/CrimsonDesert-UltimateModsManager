@@ -164,3 +164,43 @@ def test_writer_skips_intent_for_missing_record():
     intents = [("Ghost", 9999, "skeleton_name", 1)]
     changes = build_characterinfo_changes(pabgb, pabgh, intents)
     assert changes == []
+
+
+def test_writer_patches_lookup_22_appearance_and_lookup_24_prefab():
+    """GitHub #192 (Yorivel): mesh / visual-swap mods set the appearance
+    hash (lookup_22 -> _appearanceName at block+12) and the model path
+    (lookup_24 -> _characterPrefabPath at block+16). Both are plain u32
+    name-hash slots in the same action-chart block as the five #150
+    fields, so they resolve through the same parser-walk mechanism."""
+    rec = _make_record(1, "Kliff", **_vanilla_kwargs())
+    pabgb, pabgh = _make_table([rec])
+    intents = [
+        ("Kliff", 0, "lookup_22", 1234567890),  # appearance hash
+        ("Kliff", 0, "lookup_24", 987654321),   # prefab path hash
+    ]
+    changes = build_characterinfo_changes(pabgb, pabgh, intents)
+    assert len(changes) == 2, (
+        "both lookup_22 and lookup_24 must resolve to a write")
+    patched = _apply(pabgb, changes)
+    assert len(patched) == len(pabgb), "writes must not resize the record"
+    from cdumm.archive.format_parsers.characterinfo_full_parser import (
+        parse_pabgh_index, parse_entry,
+    )
+    r = parse_entry(patched, parse_pabgh_index(pabgh)[1], len(patched))
+    assert r["_appearanceName_key"] == 1234567890
+    assert r["_characterPrefabPath_key"] == 987654321
+    # The neighbouring slots (gameplay at block+8, skeleton at block+20)
+    # must be untouched, proving the offsets are exact.
+    assert r["_skeletonName_key"] == 66      # vanilla skeleton value
+    assert r["_upperActionChartPackageGroupName_key"] == 11
+
+
+def test_lookup_22_24_in_format3_characterinfo_accept_set():
+    """The format3_handler validator must accept lookup_22 / lookup_24
+    on characterinfo, otherwise the writer never sees the intents. This
+    pins the accept-set against the writer's SUPPORTED_FIELDS so the two
+    cannot drift apart again (the recurring maintenance hazard the #150
+    comment warned about)."""
+    from cdumm.engine.characterinfo_writer import SUPPORTED_FIELDS
+    assert "lookup_22" in SUPPORTED_FIELDS
+    assert "lookup_24" in SUPPORTED_FIELDS

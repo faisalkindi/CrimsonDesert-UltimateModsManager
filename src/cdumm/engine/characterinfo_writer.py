@@ -43,6 +43,12 @@ _FIELD_MAP: dict[str, tuple[str, str, int]] = {
         ("_upperActionChartPackageGroupName_offset", "<I", 4),
     "lower_chart.group_lookup":
         ("_lowerActionChartPackageGroupName_offset", "<I", 4),
+    # GitHub #192 (Yorivel): mesh / visual-swap mods set the appearance
+    # hash and the model-path hash. Both are plain u32 name-hash slots
+    # in the same action-chart block (block+12 / block+16), located by
+    # the same parser walk as the four #150 u32 fields.
+    "lookup_22": ("_appearanceName_stream_offset", "<I", 4),
+    "lookup_24": ("_characterPrefabPath_stream_offset", "<I", 4),
     "skeleton_name": ("_skeletonName_offset", "<I", 4),
     "lookup_25": ("_skeletonVariationName_offset", "<I", 4),
     "flag_c": ("_flagC_offset", "<B", 1),
