@@ -570,6 +570,48 @@ def _resolve_post_import_target_id(
     return None
 
 
+def _import_worker_exit_error(
+    exit_code: int,
+    is_crash: bool,
+    had_result: bool,
+) -> str | None:
+    """Return a user-facing error when the import worker finished without
+    a usable result, or None when the completion can be trusted.
+
+    GitHub #193 (RoGreat, Linux native / NixOS): an nxm download produced
+    a file in /tmp/cdumm_nxm_*, the progress UI showed, but nothing
+    imported and there was "no obvious error". The completion handler
+    only caught QProcess.CrashExit, so a worker that exited NormalExit
+    with a non-zero code WITHOUT printing a JSON done/error line flowed
+    into the success branch and showed a fake "import succeeded".
+
+    ``had_result`` is True when the worker emitted a JSON ``done`` or
+    ``error`` line (so its own message already covers the outcome). When
+    it did, trust the worker and return None. Otherwise a crash OR a
+    non-zero exit is a silent failure that must be surfaced with the
+    exit code so the user (and a NixOS bug report) can see it.
+    """
+    if had_result:
+        return None
+    if is_crash:
+        return (
+            f"Import worker crashed (exit code {exit_code}). This usually "
+            f"means a native extension hit a segfault or the worker was "
+            f"killed externally. Try the import again; if it persists, "
+            f"attach the bug report and the cdumm_worker.log file to a new "
+            f"GitHub issue."
+        )
+    if exit_code != 0:
+        return (
+            f"Import worker exited with code {exit_code} without reporting "
+            f"a result, so nothing was imported. On Linux this often means "
+            f"the worker subprocess could not import the cdumm package or "
+            f"could not read the downloaded file. Attach the bug report and "
+            f"cdumm_worker.log to a new GitHub issue."
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Thread-safe callback dispatcher
 # ---------------------------------------------------------------------------
@@ -4693,6 +4735,11 @@ class CdummWindow(FluentWindow):
 
         # Buffer for partial JSON lines
         _buf = [""]
+        # #193: track whether the worker emitted a terminal JSON line
+        # (done/error). If it did, _on_finished trusts the worker's own
+        # outcome; if it didn't and the process still exited non-zero or
+        # crashed, that's a silent failure to surface.
+        _got_result = [False]
 
         def _on_stdout():
             data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
@@ -4712,6 +4759,7 @@ class CdummWindow(FluentWindow):
                     except RuntimeError:
                         pass
                 elif msg.get("type") == "done":
+                    _got_result[0] = True
                     self._import_result_name = msg.get("name", path.stem)
                     self._import_result_error = None
                     self._import_result_asi_staged = msg.get("asi_staged", [])
@@ -4730,6 +4778,7 @@ class CdummWindow(FluentWindow):
                     # lands on the wrong one.
                     self._import_result_mod_id = msg.get("mod_id")
                 elif msg.get("type") == "error":
+                    _got_result[0] = True
                     self._import_result_name = path.stem
                     self._import_result_error = msg.get("msg", "Unknown error")
                     self._import_result_mod_id = None
@@ -4741,23 +4790,22 @@ class CdummWindow(FluentWindow):
             self._active_worker = None
             self._active_progress = None
 
-            # If the worker subprocess crashed (segfault / unhandled
-            # native exception) without emitting a JSON `done`/`error`
-            # line, the previous code silently flowed into the success
-            # branch and showed "Import succeeded". Catch CrashExit
-            # explicitly so the user sees the real failure mode.
-            # Round 4 GUI/worker audit catch.
+            # If the worker subprocess finished WITHOUT emitting a JSON
+            # done/error line, the previous code only caught
+            # QProcess.CrashExit and flowed a non-zero NormalExit into the
+            # success branch, showing a fake "Import succeeded". GitHub
+            # #193 (NixOS nxm import: file downloaded, progress shown,
+            # nothing imported, no error) is exactly that silent failure.
+            # _import_worker_exit_error surfaces both a crash and a
+            # non-zero exit when no result was reported.
             from PySide6.QtCore import QProcess as _QProcess
-            if exit_status == _QProcess.CrashExit:
-                if not getattr(self, '_import_result_error', None):
-                    self._import_result_error = (
-                        f"Import worker crashed (exit code {exit_code}). "
-                        f"This usually means a native extension hit a "
-                        f"segfault or the worker was killed externally. "
-                        f"Try the import again; if it persists, attach "
-                        f"the bug report and the cdumm_worker.log file "
-                        f"to a new GitHub issue."
-                    )
+            _exit_err = _import_worker_exit_error(
+                exit_code,
+                is_crash=(exit_status == _QProcess.CrashExit),
+                had_result=_got_result[0],
+            )
+            if _exit_err and not getattr(self, '_import_result_error', None):
+                self._import_result_error = _exit_err
 
             err = getattr(self, '_import_result_error', None)
             name = getattr(self, '_import_result_name', path.stem)
