@@ -208,20 +208,30 @@ def _sanitise_app_id(raw: str) -> str | None:
 
 
 def get_steam_app_id(game_dir: Path) -> str:
-    """Detect Steam app ID for Crimson Desert."""
-    for sub in ["", "bin64"]:
-        appid_file = game_dir / sub / "steam_appid.txt"
-        if appid_file.exists():
-            try:
-                cleaned = _sanitise_app_id(
-                    appid_file.read_text(encoding="utf-8"))
-                if cleaned:
-                    return cleaned
-            except OSError:
-                pass
+    """Detect Steam app ID for Crimson Desert.
+
+    Resolution order (GitHub #186 reordered the first two):
+      1. The Crimson Desert ``appmanifest_<id>.acf`` in steamapps.
+         This is Steam's own authoritative record of the installed
+         game and the exact id Steam uses for ``steam://rungameid``.
+      2. ``steam_appid.txt`` in the game root / bin64. This is a
+         developer / DRM helper file that can be stale or corrupt.
+      3. The known-good fallback ``3321460``.
+
+    lupo1190 (GitHub #186) had a steam_appid.txt that resolved to the
+    truncated id ``332146`` (the real id 3321460 with the trailing 0
+    dropped). Checking steam_appid.txt first meant CDUMM launched
+    ``steam://rungameid/332146`` and Steam answered 'Game configuration
+    unavailable'. The appmanifest (appmanifest_3321460.acf) was present
+    and correct the whole time, so it now takes precedence.
+    """
     steamapps = game_dir.parent.parent
     if steamapps.is_dir():
-        for fn in os.listdir(steamapps):
+        try:
+            entries = os.listdir(steamapps)
+        except OSError:
+            entries = []
+        for fn in entries:
             if fn.startswith("appmanifest_") and fn.endswith(".acf"):
                 try:
                     content = (steamapps / fn).read_text(encoding="utf-8")
@@ -233,6 +243,16 @@ def get_steam_app_id(game_dir: Path) -> str:
                             return cleaned
                 except OSError:
                     pass
+    for sub in ["", "bin64"]:
+        appid_file = game_dir / sub / "steam_appid.txt"
+        if appid_file.exists():
+            try:
+                cleaned = _sanitise_app_id(
+                    appid_file.read_text(encoding="utf-8"))
+                if cleaned:
+                    return cleaned
+            except OSError:
+                pass
     return FALLBACK_APP_ID
 
 

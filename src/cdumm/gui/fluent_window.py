@@ -612,6 +612,45 @@ def _import_worker_exit_error(
     return None
 
 
+def _resolve_steam_exe(game_dir, find_steam_root):
+    """Locate ``steam.exe`` for the ``-applaunch`` launch path.
+
+    GitHub #186 (lupo1190): the applaunch option logged 'steam.exe not
+    found (steam_root=None)' because ``_find_steam_root`` only probes
+    ``<drive>:/Steam`` and ``<drive>:/SteamLibrary``, and their Steam
+    lived at ``C:\\Games\\Steam`` (game at
+    ``C:\\Games\\Steam\\steamapps\\common\\Crimson Desert``).
+
+    A Steam-installed game is always at
+    ``<steam_root>/steamapps/common/<game>``, so the steam root is
+    ``game_dir.parents[2]`` and ``steam.exe`` sits there. Derive it from
+    the game we already know about FIRST (authoritative — it can't pick
+    the wrong Steam client on a multi-Steam machine), then fall back to
+    ``find_steam_root`` only if the derived path has no ``steam.exe``.
+
+    Returns the ``Path`` to ``steam.exe`` when it exists, else ``None``.
+    ``find_steam_root`` is injected so the resolution is unit-testable.
+    """
+    from pathlib import Path as _Path
+    try:
+        derived_root = _Path(game_dir).parents[2]
+    except IndexError:
+        derived_root = None
+    if derived_root is not None:
+        candidate = derived_root / "steam.exe"
+        if candidate.exists():
+            return candidate
+    try:
+        fallback_root = find_steam_root()
+    except Exception:
+        fallback_root = None
+    if fallback_root is not None:
+        candidate = _Path(fallback_root) / "steam.exe"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Thread-safe callback dispatcher
 # ---------------------------------------------------------------------------
@@ -6259,9 +6298,12 @@ class CdummWindow(FluentWindow):
                     logger.debug("steam_launch_method lookup failed: %s", _cfg_e)
                 if method == "applaunch":
                     from cdumm.storage.game_finder import _find_steam_root
-                    steam_root = _find_steam_root()
-                    steam_exe = steam_root / "steam.exe" if steam_root else None
-                    if steam_exe and steam_exe.exists():
+                    # #186: derive steam.exe from the game's own location
+                    # (game_dir.parents[2]) first; _find_steam_root alone
+                    # missed custom installs like C:\Games\Steam.
+                    steam_exe = _resolve_steam_exe(
+                        self._game_dir, _find_steam_root)
+                    if steam_exe is not None:
                         logger.info(
                             "Launching via Steam -applaunch fallback: "
                             "%s -applaunch %s", steam_exe, app_id)
@@ -6270,8 +6312,8 @@ class CdummWindow(FluentWindow):
                     else:
                         logger.warning(
                             "steam_launch_method=applaunch but steam.exe "
-                            "not found (steam_root=%s); falling back to "
-                            "URI", steam_root)
+                            "could not be located (game_dir=%s); falling "
+                            "back to URI", self._game_dir)
                         uri = f"steam://rungameid/{app_id}"
                         logger.info("Launching via Steam URI: %s", uri)
                         open_path(uri)
