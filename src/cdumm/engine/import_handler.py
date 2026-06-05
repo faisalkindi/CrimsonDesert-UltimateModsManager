@@ -2641,7 +2641,7 @@ def _import_from_extracted(
                 cb_name = modinfo["name"]
             cb_result = _process_extracted_files(
                 converted, game_dir, db, snapshot, deltas_dir, cb_name,
-                existing_mod_id=existing_mod_id, modinfo=modinfo)
+                existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=tmp_path)
             # Compound archive support — see import_from_folder for context.
             cb_base_raw = cb_manifest.get("_base_dir")
             cb_base = Path(cb_base_raw) if cb_base_raw is not None else None
@@ -2670,7 +2670,7 @@ def _import_from_extracted(
             }
             return _process_extracted_files(
                 converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+                existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=tmp_path)
 
     # Check for JSON byte-patch format — use ENTR deltas for proper composition
     jp_data = detect_json_patch(tmp_path)
@@ -2828,7 +2828,7 @@ def _import_from_extracted(
                 tex_name = modinfo["name"]
             return _process_extracted_files(
                 converted, game_dir, db, snapshot, deltas_dir, tex_name,
-                existing_mod_id=existing_mod_id, modinfo=modinfo)
+                existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=tmp_path)
 
     # Check for scripts: when the archive contains ONLY a .bat or .py
     # and no PAZ/PAMT files, treat it as a script mod (e.g. Glider
@@ -3055,7 +3055,7 @@ def import_from_zip(
                     cb_name = modinfo["name"]
                 result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, cb_name,
-                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+                    existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=tmp_path)
                 # Compound-mod support (Lightsaber: CB mod in Lightsaber_v1_3/
                 # plus a sibling Lightsaber_shop.json at archive root). Import
                 # any JSON patches outside the CB subfolder as their own mods.
@@ -3113,7 +3113,7 @@ def import_from_zip(
                 }
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=tmp_path)
 
         # Check for JSON byte-patch format — use ENTR deltas for proper composition
         jp_data = detect_json_patch(tmp_path)
@@ -3265,7 +3265,7 @@ def import_from_zip(
                     tex_name = modinfo["name"]
                 result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, tex_name,
-                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+                    existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=tmp_path)
                 return result
 
         # Check if zip contains a script. When it's a single-script
@@ -3539,7 +3539,7 @@ def import_from_folder(
                     cb_name = modinfo["name"]
                 cb_result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, cb_name,
-                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+                    existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=folder_path)
                 # Compound-mod support: when the CB manifest came from a
                 # SUBFOLDER (Lightsaber_v1_3/ inside a zip that also has a
                 # sibling Lightsaber_shop.json at the root), the sibling
@@ -3578,7 +3578,7 @@ def import_from_folder(
                 }
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo)
+                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=folder_path)
 
     # C1: compound layout detection. Issue #34 (kori228, Character
     # Creator - Female and Male) — a bodytype preset folder shipped
@@ -3748,7 +3748,7 @@ def import_from_folder(
                     tex_name = modinfo["name"]
                 return _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, tex_name,
-                    existing_mod_id=existing_mod_id, modinfo=modinfo)
+                    existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=folder_path)
 
     # Check if folder contains scripts instead of game files
     scripts = list(folder_path.glob("*.bat")) + list(folder_path.glob("*.py"))
@@ -4626,10 +4626,21 @@ def _process_extracted_files(
     mod_name: str,
     existing_mod_id: int | None = None,
     modinfo: dict | None = None,
+    source_archive_dir: Path | None = None,
 ) -> ModImportResult:
     """Common logic for zip and folder imports: match files, generate deltas, store.
 
     If existing_mod_id is provided, reuses that mod entry (for updates).
+
+    ``source_archive_dir`` is the directory copied to
+    ``CDMods/sources/<mod_id>/`` for reimport-from-source. It defaults to
+    ``extracted_dir``, which is correct for plain PAZ mods. Converted
+    formats (Crimson Browser, loose-file, texture) must pass the ORIGINAL
+    extracted archive here: ``extracted_dir`` for those is the
+    post-conversion .paz/.pamt output, which carries vanilla-relative
+    offsets frozen at import time and no manifest, so archiving it makes
+    reimport re-apply stale bytes instead of re-converting against the
+    current vanilla (GitHub #165, jikulopo).
     """
     import time as _time
     _stage_t0 = _time.perf_counter()
@@ -4839,10 +4850,15 @@ def _process_extracted_files(
     # import) — sources were already archived from the first pass.
     if existing_mod_id is None:
         sources_dir = deltas_dir.parent / "sources" / str(mod_id)
+        # For converted formats the caller passes the ORIGINAL archive so
+        # reimport can re-detect + re-convert; plain PAZ mods leave this
+        # None and the extracted dir itself is the source (#165).
+        archive_src = (source_archive_dir
+                       if source_archive_dir is not None else extracted_dir)
         try:
             if sources_dir.exists():
                 shutil.rmtree(sources_dir)
-            shutil.copytree(extracted_dir, sources_dir, dirs_exist_ok=True)
+            shutil.copytree(archive_src, sources_dir, dirs_exist_ok=True)
             db.connection.execute(
                 "UPDATE mods SET source_path = ? WHERE id = ?",
                 (str(sources_dir), mod_id))
