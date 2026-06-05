@@ -47,3 +47,4 @@ cdumm.icns
 # Local-only reference material (firecrawl pulls, mod page caches,
 # external code references). Never committed.
 .firecrawl/
+issue_repro/

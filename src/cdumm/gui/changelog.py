@@ -15,15 +15,21 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
-    "<b>The Launch button now works on more Steam setups.</b> On some installs CDUMM sent a truncated Steam app id and Steam answered 'Game configuration unavailable', and the Direct launch option could not find steam.exe when Steam lived in a custom folder. Both now resolve from the actual game folder. Thanks to lupo1190 on GitHub (#186).",
-    "<b>characterinfo mods can patch the appearance/mesh and model-path fields.</b> The lookup_22 (appearance) and lookup_24 (model path) fields were silently rejected before and are now applied. Thanks to Yorivel on GitHub (#192).",
-    "<b>A failed import is no longer reported as a success.</b> When the import worker died without printing an error, CDUMM treated it as a completed import. It now surfaces the worker's exit code so a silent failure is visible instead of looking like it worked. Thanks to RoGreat on GitHub (#193).",
-    "<b>Crimson Browser mods that add new preview textures no longer lose them.</b> Barber and character-creator images shipped under a numbered folder were treated as replacements of existing files and skipped, so they never loaded in game. They now go through the new-texture path. Thanks to RoGreat on GitHub (#193).",
-    "<b>Find Culprit Mod is disabled on Linux and macOS.</b> It decides crash vs stable from Windows crash dumps that do not exist on those systems, so it would report a false crash every round and blame an innocent mod. It is now turned off there with a short explanation, like the ASI plugins section. Thanks to RoGreat on GitHub (#195).",
-    "<b>Reimport from source now works for Crimson Browser, loose-file and texture mods.</b> CDUMM was storing the converted files as the mod source instead of the original download, so reimport re-applied stale data built for the old game version and the mod stayed outdated. It now keeps the original archive, so reimport rebuilds the mod against the current game. Mods imported before this update need one fresh import (re-download) to store the right source. Thanks to jikulopo on GitHub (#165).",
 ]
 
 CHANGELOG = [
+    {
+        "version": "3.3.17",
+        "date": "2026-06-05",
+        "notes": [
+            "<b>The Launch button now works on more Steam setups.</b> On some installs CDUMM sent a truncated Steam app id and Steam answered 'Game configuration unavailable', and the Direct launch option could not find steam.exe when Steam lived in a custom folder. Both now resolve from the actual game folder. Thanks to lupo1190 on GitHub (#186).",
+            "<b>characterinfo mods can patch the appearance/mesh and model-path fields.</b> The lookup_22 (appearance) and lookup_24 (model path) fields were silently rejected before and are now applied. Thanks to Yorivel on GitHub (#192).",
+            "<b>A failed import is no longer reported as a success.</b> When the import worker died without printing an error, CDUMM treated it as a completed import. It now surfaces the worker's exit code so a silent failure is visible instead of looking like it worked. Thanks to RoGreat on GitHub (#193).",
+            "<b>Crimson Browser mods that add new preview textures no longer lose them.</b> Barber and character-creator images shipped under a numbered folder were treated as replacements of existing files and skipped, so they never loaded in game. They now go through the new-texture path. Thanks to RoGreat on GitHub (#193).",
+            "<b>Find Culprit Mod is disabled on Linux and macOS.</b> It decides crash vs stable from Windows crash dumps that do not exist on those systems, so it would report a false crash every round and blame an innocent mod. It is now turned off there with a short explanation, like the ASI plugins section. Thanks to RoGreat on GitHub (#195).",
+            "<b>Reimport from source now works for Crimson Browser, loose-file and texture mods.</b> CDUMM was storing the converted files as the mod source instead of the original download, so reimport re-applied stale data built for the old game version and the mod stayed outdated. It now keeps the original archive, so reimport rebuilds the mod against the current game. Mods imported before this update need one fresh import (re-download) to store the right source. Thanks to jikulopo on GitHub (#165).",
+        ],
+    },
     {
         "version": "3.3.16",
         "date": "2026-06-02",
