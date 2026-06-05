@@ -413,6 +413,22 @@ def convert_to_paz_mod(
                 entry = basename_map.get(bname)
 
             if entry is None:
+                # A .dds with no PAMT entry is a NEW texture, not a
+                # replacement of an existing one — route it through the
+                # same texture-overlay pipeline the unresolved bucket uses
+                # (fresh PAZ + PAMT + PATHC registration). Mods that ship
+                # new preview DDSes under a NUMBERED dir (e.g.
+                # files/0012/ui/texture/image/customizeimage/*.dds — barber
+                # / character-creator mods) bypass the unresolved bucket
+                # that normally feeds leftover_dds, so they used to land
+                # here and get silently dropped: the import "succeeded" but
+                # the images never loaded. GitHub #193 (RoGreat).
+                if inner_path.lower().endswith(".dds"):
+                    leftover_dds.append((inner_path, source_file))
+                    logger.info(
+                        "CB mod: new texture '%s' (no PAMT entry in dir "
+                        "%s) routed to texture overlay", inner_path, dir_name)
+                    continue
                 logger.warning("CB mod: no PAMT entry for '%s' in dir %s, skipping",
                                inner_path, dir_name)
                 continue
