@@ -488,14 +488,26 @@ class PresetPickerDialog(MessageBoxBase):
             par_w = 0
         target_w = max(500, int(par_w * 0.55))
         self.widget.setMinimumWidth(target_w)
-        # Also raise the scroll viewport so on big screens the picker
-        # actually shows more presets without a tiny inner scroller.
+        # Raise the scroll viewport so on big screens the picker actually
+        # shows more presets without a tiny inner scroller (#184), but cap
+        # it so the whole dialog still fits inside the parent window with
+        # the Install/Cancel buttons visible. Without the cap a long preset
+        # list grew the dialog past the window and pushed the action
+        # buttons off the bottom, so the user could not click Install
+        # (#200, lupo1190). The dialog chrome around the list (title,
+        # header, optional multi-select button, the action-button row and
+        # the MessageBoxBase margins) is roughly 300px; reserve that so the
+        # list scrolls internally instead of overflowing the window.
         try:
             par_h = parent.window().height() if parent else 0
         except Exception:
             par_h = 0
-        target_h = max(200, int(par_h * 0.45))
-        scroll.setMinimumHeight(target_h)
+        DIALOG_CHROME = 300
+        if par_h:
+            avail = max(160, par_h - DIALOG_CHROME)
+            target_h = min(max(200, int(par_h * 0.45)), avail)
+            scroll.setMinimumHeight(target_h)
+            scroll.setMaximumHeight(avail)
 
     def _on_customize(self, idx: int) -> None:
         """Open the TogglePickerDialog for one preset so the user can
