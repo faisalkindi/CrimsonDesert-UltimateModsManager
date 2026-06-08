@@ -15,6 +15,7 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
+    "<b>A mod you just updated no longer keeps asking to be updated.</b> After updating a mod through CDUMM, closing and reopening the app would flag the same mod as needing an update again, every time. The update was applied correctly, but the stored version number was left at the old value, so the next update check thought you were still on the old file. The version is now recorded with the update, so once a mod is current it stays current. Thanks to Faisal for the report.",
 ]
 
 CHANGELOG = [
