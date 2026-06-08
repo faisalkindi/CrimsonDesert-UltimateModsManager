@@ -4969,10 +4969,26 @@ class CdummWindow(FluentWindow):
                 try:
                     _pid = _primary_id()
                     if _pid is not None:
-                        self._db.connection.execute(
-                            "UPDATE mods SET nexus_mod_id = ?, nexus_file_id = ? "
-                            "WHERE id = ?",
-                            (nexus_id, nexus_file_ver, _pid))
+                        # Also refresh mods.version to the file we just
+                        # installed. Without this, an in-app update moved
+                        # nexus_real_file_id to the new file but left
+                        # version at the OLD value, so the update check's
+                        # self-correction saw version disagree with the
+                        # latest file and re-flagged the mod as outdated on
+                        # every launch even though it was current. The
+                        # multi-variant re-import path already does this;
+                        # the direct-update path did not. (Faisal 2026-06-08)
+                        if nexus_file_ver:
+                            self._db.connection.execute(
+                                "UPDATE mods SET nexus_mod_id = ?, "
+                                "nexus_file_id = ?, version = ? WHERE id = ?",
+                                (nexus_id, nexus_file_ver, nexus_file_ver,
+                                 _pid))
+                        else:
+                            self._db.connection.execute(
+                                "UPDATE mods SET nexus_mod_id = ?, "
+                                "nexus_file_id = ? WHERE id = ?",
+                                (nexus_id, nexus_file_ver, _pid))
                         self._db.connection.commit()
                         logger.info("Stored NexusMods ID: mod=%d file=%s",
                                     nexus_id, nexus_file_ver)
