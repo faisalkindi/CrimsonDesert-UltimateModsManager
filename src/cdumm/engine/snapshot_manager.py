@@ -394,6 +394,38 @@ class SnapshotWorker(QObject):
                 logger.debug("Hashed: %s -> %s", rel_path, file_hash[:16])
                 time.sleep(0)  # yield GIL so GUI stays responsive
 
+            # #163 (xenoi60 Self-Reimporting / jikulopo recovery loop /
+            # Faisal local on CD v1.10): stamp the game-version
+            # fingerprint INSIDE this same transaction, on the worker's
+            # own connection, so it is atomic with the snapshot it
+            # describes. The previous code stamped it on the main thread
+            # in _on_snapshot_finished AFTER this worker subprocess
+            # finished, where a lingering SQLite write lock made the
+            # Config.set throw "database table is locked" — swallowed by
+            # a bare except, so the stale fingerprint survived every
+            # snapshot and main.py's startup check (stored_fp !=
+            # current_fp) re-prompted recovery on every launch forever.
+            # Writing it here cannot lose to that cross-process race.
+            try:
+                from cdumm.engine.version_detector import detect_game_version
+                fp = detect_game_version(self._game_dir)
+                if fp:
+                    self._thread_db.connection.execute(
+                        "INSERT INTO config (key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        ("game_version_fingerprint", fp))
+                    logger.info(
+                        "Snapshot: stamped game_version_fingerprint=%s", fp)
+                else:
+                    logger.warning(
+                        "Snapshot: detect_game_version returned no "
+                        "fingerprint; not stamping (game-updated check may "
+                        "re-prompt). Game dir: %s", self._game_dir)
+            except Exception as _e_fp:
+                # Logged, not swallowed silently — a stamp failure here is
+                # the #163 loop trigger and must be diagnosable.
+                logger.warning("Snapshot: fingerprint stamp failed: %s", _e_fp)
+
             self._thread_db.connection.commit()
         except Exception:
             # Rollback the open transaction so the snapshot table
