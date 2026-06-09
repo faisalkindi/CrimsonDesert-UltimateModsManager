@@ -37,31 +37,11 @@ from qfluentwidgets import (
 )
 
 from cdumm.i18n import tr
-from cdumm.platform import IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
 # Module-level lock: only one tool can run at a time
 _active_tool = None
-
-
-def _bisect_windows_only_message(is_windows: bool) -> str | None:
-    """User-facing reason the Find-Culprit bisection is unavailable on
-    this platform, or None when it can run.
-
-    The bisection (FindCulpritPage -> _AutoBisectWorker ->
-    game_monitor.launch_and_test) classifies each round as crash-vs-
-    stable from the CrimsonDesert.exe process table and the Pearl Abyss
-    crashpad ``.dmp`` files, both Windows-only. On Linux / macOS
-    ``find_game_process()`` always returns None, so ``launch_and_test``
-    waits the full launch timeout and then reports "process not found,
-    treating as crash" EVERY round, fingering an innocent mod. Disable
-    the feature there, like the ASI plugins section. GitHub #195
-    (RoGreat).
-    """
-    if is_windows:
-        return None
-    return tr("tools.culprit.windows_only")
 
 
 # ======================================================================
@@ -1071,20 +1051,6 @@ class FindCulpritPage(ToolPageBase):
         self._action_row.addWidget(self._stop_btn)
         self._action_row.addWidget(self._pause_btn)
 
-        # GitHub #195 (RoGreat): the bisection is Windows-only (crash
-        # detection needs the CrimsonDesert.exe process table + Pearl
-        # Abyss crashpad .dmp files). On Linux/macOS it would report a
-        # false crash every round, so disable Start and explain why,
-        # mirroring how the ASI plugins page handles unsupported hosts.
-        unsupported = _bisect_windows_only_message(IS_WINDOWS)
-        if unsupported is not None:
-            self._run_btn.setEnabled(False)
-            self._set_status(unsupported, "#E65100")
-            # The Press Play pitch only makes sense for live bisection
-            # runs, which can't happen here — hide it to avoid confusion.
-            self._pp_note.hide()
-            self._press_play_card.hide()
-
     def set_managers(self, **kwargs) -> None:
         super().set_managers(**kwargs)
         self._refresh_stats()
@@ -1260,13 +1226,6 @@ class FindCulpritPage(ToolPageBase):
             self._set_status(tr("tools.culprit.paused"), "#EBCB8B")
 
     def _on_run_clicked(self) -> None:
-        # GitHub #195: hard guard so the Windows-only bisection can never
-        # start on Linux/macOS, even if a state-reset path re-enabled the
-        # button. Checked before _can_run so it short-circuits cleanly.
-        unsupported = _bisect_windows_only_message(IS_WINDOWS)
-        if unsupported is not None:
-            self._set_status(unsupported, "#E65100")
-            return
         if not self._can_run():
             return
         if self._auto_running:
