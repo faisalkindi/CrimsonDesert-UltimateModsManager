@@ -1,0 +1,15 @@
+CDUMM v3.3.19
+
+Item mods work again on the current game version. Mods that edit item data (stack sizes, durability, cooldowns, buffs, sockets and similar) were importing with zero changes on recent game versions, because the game updates changed the item table layout in four places and CDUMM was still reading the old one. The reader now matches the current game, verified byte for byte against the full item table, and a 1,820-change stack mod applies completely in testing. Thanks to IliyaBrook (#182) and falobos76 (#191).
+
+Store mods that add items to a shop now apply. Mods using the stock_data_list field, like adding pets to the Hernand pet store, were rejected because CDUMM could not write the store table's stock records. CDUMM now reads and rebuilds store stock lists natively, keeps existing store entries byte-identical, and refuses cleanly instead of guessing when a mod uses a part of the format that is not mapped yet. Thanks to pinapana (#183).
+
+Character Creator's equipment modules import now. The Female Rapier and Shield module, and anything else editing equip slot hash lists, was rejected because CDUMM had no layout for the equip slot table. CDUMM now reads and rewrites those hash lists natively, leaving every other byte of the table untouched. Thanks to woowoots and lurkser (#190).
+
+VAXIS Water Physics Overhaul and similar material mods work on the current game again. The latest game update moved those material files and started storing them encrypted. CDUMM already followed the move, but it was writing the mod's plain text where the game now expects encrypted data, so the materials silently failed to load. CDUMM now detects encrypted slots even when the file is not compressed and encrypts the replacement to match. Thanks to lupo1190 (#199).
+
+A third launch option for Steam installs that refuse to start the game. On some machines Steam answers both of CDUMM's launch methods with "Game configuration unavailable" even though pressing Play inside Steam works. Settings now offers Game exe (skip Steam), which starts CrimsonDesert.exe directly while Steam runs in the background. The default behavior is unchanged. Thanks to lupo1190 (#186).
+
+Available updates no longer vanish from the mods list. A check could find updates and show the red Click To Update pills, then a second check moments later made them disappear and report everything up to date. The second check skipped mods it had just verified, by design, to save API calls, but the result handling threw away what the first check had found about them. Each check now keeps the known state of mods it skipped, so updates stay visible until you actually install them. Thanks to GabrielNunesIT (#194).
+
+A mod you just updated no longer keeps asking to be updated. After updating a mod through CDUMM, closing and reopening the app would flag the same mod as needing an update again, every time. The update was applied correctly, but the stored version number was left at the old value, so the next update check thought you were still on the old file. The version is now recorded with the update, so once a mod is current it stays current.
