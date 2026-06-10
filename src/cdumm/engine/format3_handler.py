@@ -613,6 +613,15 @@ LIST_WRITERS: dict[tuple[str, str], str] = {
     # Per-record dropset writer (CDUMM native parser).
     ("dropsetinfo", "drops"):
         "dropset_writer.build_drops_replacement_change",
+    # Storeinfo whole-table writer (GitHub #183): rebuilds a store's
+    # stock list (which can grow) plus the companion .pabgh in one
+    # pass. Dispatched via the whole-table branch in format3_apply;
+    # registered here so validation accepts the field instead of
+    # rejecting it as schema-less.
+    ("storeinfo", "stock_data_list"):
+        "storeinfo_writer.build_storeinfo_changes",
+    ("storeinfo", "_exchangeItemInfoListForSell"):
+        "storeinfo_writer.build_storeinfo_changes",
     # Iteminfo whole-table writer (CDUMM native parser).
     # The full list of iteminfo list-of-dict fields the writer
     # accepts is in `iteminfo_writer.SUPPORTED_FIELDS`. We mirror the
