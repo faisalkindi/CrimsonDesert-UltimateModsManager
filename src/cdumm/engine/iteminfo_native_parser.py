@@ -655,9 +655,18 @@ def _read_ItemInfoSharpnessData(r: _Reader, dsi_type: int = 15) -> dict:
     My_ItemBuffs_Mod on item 1001250 / thief gloves). The 13 bytes
     are now read by _read_DefaultSubItem when type_id < 14.
 
-    The dsi_type parameter is retained for backward compatibility but
-    no longer affects sharpness parsing.
+    CD 1.09 (GitHub #182): when default_sub_item is POPULATED
+    (type_id < 14) one extra u8 precedes the W-header. Located by
+    correlation — under the 1.09 base schema exactly the records with
+    dsi.type_id == 0 misparsed (349/349) while every type_id == 15
+    record parsed exact, and consuming one byte here realigns all of
+    them (6314/6314 on the 1.09 fixture). The byte is stored as
+    ``pre_unk_109`` only when present, so the writer can stay
+    symmetric without re-deriving the dsi condition.
     """
+    out_pre = None
+    if dsi_type < 14:
+        out_pre = r.u8()
     # W-header: 13 bytes (u8 unk_a + u16 max_sharpness + u32 craft_tool_info
     # + 6 trailing bytes; trailing bytes empirically zero, treated as opaque)
     w_unk_a = r.u8()
@@ -673,7 +682,7 @@ def _read_ItemInfoSharpnessData(r: _Reader, dsi_type: int = 15) -> dict:
     # 3-byte tail (always zero in fixture; opaque)
     tail = bytes(r.data[r.pos:r.pos + 3])
     r.pos += 3
-    return {
+    out = {
         "shape": "W",
         "p_prefix": None,
         "w_unk_a": w_unk_a,
@@ -683,6 +692,9 @@ def _read_ItemInfoSharpnessData(r: _Reader, dsi_type: int = 15) -> dict:
         "stat_list": stat_list,
         "tail": tail,
     }
+    if out_pre is not None:
+        out["pre_unk_109"] = out_pre
+    return out
 
 
 def _write_ItemInfoSharpnessData(w: _Writer, v: dict) -> None:
@@ -691,6 +703,12 @@ def _write_ItemInfoSharpnessData(w: _Writer, v: dict) -> None:
     # whose data still carries a populated p_prefix, write it through
     # default_sub_item.unk_a/b/c instead. Raw write here would
     # double-count the 13 bytes.
+    #
+    # CD 1.09 conditional lead byte (see _read_ItemInfoSharpnessData):
+    # present iff the reader stored it, so write-by-key-presence keeps
+    # the round-trip symmetric without re-deriving the dsi condition.
+    if "pre_unk_109" in v:
+        w.u8(v["pre_unk_109"])
     w.u8(v.get("w_unk_a", 0))
     w.u16(v.get("max_sharpness", 0))
     w.u32(v.get("craft_tool_info", 0))
@@ -715,10 +733,16 @@ def _write_ItemBundleData(w: _Writer, v: dict) -> None:
 
 
 def _read_UnitData(r: _Reader) -> dict:
+    # CD 1.10 added a second u32 hash right after icon_path. Verified
+    # on record 1's Copper/Silver money units: 1.09 goes icon_path ->
+    # localizables directly, 1.10 carries one extra non-constant u32
+    # (0xa953c324 on Copper, 0xc52007c6 on Silver) in between.
+    # GitHub #182.
     return {
         "ui_component": r.cstring(),
         "minimum": r.u32(),
         "icon_path": r.u32(),
+        "icon_path_b_110": r.u32(),
         "item_name": r.localizable(),
         "item_desc": r.localizable(),
     }
@@ -728,6 +752,7 @@ def _write_UnitData(w: _Writer, v: dict) -> None:
     w.cstring(v["ui_component"])
     w.u32(v["minimum"])
     w.u32(v["icon_path"])
+    w.u32(v.get("icon_path_b_110", 0))
     w.localizable(v["item_name"])
     w.localizable(v["item_desc"])
 
@@ -1706,7 +1731,10 @@ _ITEM_FIELDS = [
     ("use_map_icon_alert", "u8"),
     ("item_type", "u8"),
     ("material_key", "u32"),
-    ("material_match_info", "u32"),
+    # CD 1.10 removed the duplicate material_match_info u32 that used
+    # to follow material_key (verified on record 10044, the one item
+    # where material_key != material_match_info in 1.09: the
+    # material_match value is gone from the 1.10 bytes). GitHub #182.
     ("item_desc", "localizable"),
     ("item_desc2", "localizable"),
     ("equipable_level", "u32"),
@@ -1719,8 +1747,11 @@ _ITEM_FIELDS = [
     ("use_immediately", "u8"),
     ("apply_max_stack_cap", "u8"),
     ("extract_multi_change_info", "u32"),
-    # Post-1.0.4.1 additions, observed in live binary:
-    ("extract_additional_drop_set_info", "u32"),
+    # CD 1.09 removed extract_additional_drop_set_info (the post-
+    # 1.0.4.1 u32 that used to sit here): in 1.09+ the u16
+    # minimum_extract_enchant_level (0xffff sentinel) follows the
+    # extract u32 directly. Verified by byte-diff of record 2200
+    # across 1.05/1.09/1.10. GitHub #182.
     ("minimum_extract_enchant_level", "u16"),
     ("item_memo", "cstring"),
     ("filter_type", "cstring"),
@@ -1755,6 +1786,12 @@ _ITEM_FIELDS = [
     ("is_destroy_when_broken", "u8"),
     # Post-1.0.4.1 addition observed in live binary.
     ("is_housing_only", "u8"),
+    # CD 1.09 added one u8 here (zero in every sampled record).
+    # Located by byte-shift analysis of record 2200: after the
+    # extract-block removal the streams realign one byte apart
+    # starting exactly between is_housing_only and quick_slot_index.
+    # GitHub #182.
+    ("unk_flag_109", "u8"),
     ("quick_slot_index", "u8"),
     ("reserve_slot_target_data_list", "carray", _read_ReserveSlotTargetData,
      _write_ReserveSlotTargetData),
