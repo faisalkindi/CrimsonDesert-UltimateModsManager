@@ -655,6 +655,19 @@ def _intents_to_v2_changes(
         out: list[dict] = []
         # Whole-table writer dispatch for the list-routable batch.
         if list_routable:
+            # Carry the raw intents on the change so the apply loop
+            # can REBUILD the whole-table bytes against the actual
+            # buffer when the prebuilt original mismatches. A
+            # whole-table change's `original` is the full table, so a
+            # single stale byte anywhere (contaminated vanilla backup,
+            # composition with another mod) used to skip the entire
+            # batch (falobos76's v3.3.19 retest on #191).
+            def _portable_intents(items):
+                return [
+                    {"entry": i.entry, "key": i.key, "field": i.field,
+                     "op": i.op, "new": i.new, "old": i.old}
+                    for i in items
+                ]
             if table_name == "iteminfo":
                 from cdumm.engine.iteminfo_writer import (
                     build_iteminfo_intent_change,
@@ -662,6 +675,10 @@ def _intents_to_v2_changes(
                 change = build_iteminfo_intent_change(
                     vanilla_body, list(list_routable))
                 if change is not None:
+                    change["_f3_rebuild"] = {
+                        "table": "iteminfo",
+                        "intents": _portable_intents(list_routable),
+                    }
                     out.append(change)
             elif table_name == "skill":
                 from cdumm.engine.skill_writer import (
@@ -670,6 +687,11 @@ def _intents_to_v2_changes(
                 change = build_skill_intent_change(
                     vanilla_body, vanilla_header, list(list_routable))
                 if change is not None:
+                    change["_f3_rebuild"] = {
+                        "table": "skill",
+                        "intents": _portable_intents(list_routable),
+                        "header": vanilla_header.hex(),
+                    }
                     out.append(change)
         # Per-record field_schema dispatch for primitive intents on
         # no-PABGB-schema tables. Mirrors the standard primitive path

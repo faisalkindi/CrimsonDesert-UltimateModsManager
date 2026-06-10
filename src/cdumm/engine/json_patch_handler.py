@@ -801,6 +801,55 @@ def filter_changes_by_tainted_mods(
     return clean
 
 
+def _rebuild_f3_whole_table(change: dict, current: bytes) -> bytes | None:
+    """Re-run a whole-table Format 3 writer against the bytes actually
+    in the apply buffer.
+
+    The prebuilt change was generated from vanilla; when the buffer
+    diverges from vanilla (contaminated backup, other mods' edits) the
+    strict original-bytes compare fails for the FULL table even though
+    the intents themselves would apply cleanly. The change carries its
+    raw intents under ``_f3_rebuild`` so the writer can rebuild on top
+    of whatever is really there. Returns the new table bytes, or None
+    when the rebuild is not possible (parse failure, unknown table) so
+    the caller falls back to the normal mismatch handling.
+    """
+    info = change.get("_f3_rebuild") or {}
+    table = info.get("table")
+    raw_intents = info.get("intents") or []
+    if not table or not raw_intents:
+        return None
+    try:
+        from cdumm.engine.format3_handler import Format3Intent
+        intents = [
+            Format3Intent(entry=r.get("entry", ""), key=r.get("key"),
+                          field=r.get("field"), op=r.get("op", "set"),
+                          new=r.get("new"), old=r.get("old"))
+            for r in raw_intents
+        ]
+        if table == "iteminfo":
+            from cdumm.engine.iteminfo_writer import (
+                build_iteminfo_intent_change,
+            )
+            rebuilt = build_iteminfo_intent_change(current, intents)
+        elif table == "skill":
+            from cdumm.engine.skill_writer import build_skill_intent_change
+            header_hex = info.get("header") or ""
+            rebuilt = build_skill_intent_change(
+                current, bytes.fromhex(header_hex), intents)
+        else:
+            return None
+        if not rebuilt:
+            return None
+        patched_hex = rebuilt.get("patched") or ""
+        return bytes.fromhex(patched_hex) if patched_hex else None
+    except Exception as e:
+        logger.warning(
+            "whole-table %s rebuild against live buffer failed: %s",
+            table, e)
+        return None
+
+
 def _apply_byte_patches(data: bytearray, changes: list[dict],
                         signature: str | None = None,
                         vanilla_data: bytes | None = None,
@@ -1111,6 +1160,46 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                              original_offset + len(patched_bytes)))
                         applied += 1
                         continue
+
+                    # Whole-table Format 3 rebuild. The change's
+                    # `original` is the full table built from vanilla,
+                    # so a single divergent byte anywhere in the
+                    # buffer (contaminated vanilla backup, or another
+                    # mod's edits already applied) failed the strict
+                    # compare and skipped the ENTIRE batched change,
+                    # dropping every Format 3 mod on the table at once
+                    # (falobos76's v3.3.19 retest, #191). The change
+                    # carries its raw intents, so re-run the writer
+                    # against the bytes actually in the buffer: the
+                    # rebuilt table preserves whatever else is there
+                    # and layers the intents on top.
+                    if "_f3_rebuild" in change:
+                        rebuilt = _rebuild_f3_whole_table(
+                            change, bytes(data[offset:offset
+                                               + len(original_bytes)]))
+                        if rebuilt is not None:
+                            new_delta = (len(rebuilt)
+                                         - len(original_bytes))
+                            data[offset:offset
+                                 + len(original_bytes)] = rebuilt
+                            writes.append((original_offset, new_delta))
+                            written_ranges.append(
+                                (original_offset,
+                                 original_offset + len(rebuilt)))
+                            applied += 1
+                            logger.info(
+                                "Whole-table %s change rebuilt against "
+                                "the live buffer (prebuilt original "
+                                "mismatched; buffer diverges from "
+                                "vanilla)",
+                                change.get("_f3_rebuild", {}).get(
+                                    "table", "?"))
+                            continue
+                        logger.warning(
+                            "Whole-table rebuild failed for %s; "
+                            "falling through to the standard "
+                            "mismatch handling",
+                            change.get("label", "?"))
 
                     # Vanilla-remnant check. The mod's 'original' bytes
                     # appear in vanilla — either at original_offset or at

@@ -1902,10 +1902,21 @@ class ApplyWorker(QObject):
                     # warning signal which on_apply_done renders in
                     # the post-apply InfoBar.
                     if patch_skips:
+                        # Whole-table changes carry the FULL file as
+                        # expected/actual hex (5+ MB); interpolating
+                        # them raw turned the post-apply warning into
+                        # an unreadable hex wall (falobos76, #191
+                        # retest). Show a short prefix + total size.
+                        def _short_hex(h: str) -> str:
+                            h = h or ""
+                            if len(h) <= 32:
+                                return h
+                            return f"{h[:32]}... ({len(h) // 2:,} bytes)"
                         skip_lines = [
                             f"  - {s.get('label') or '(unnamed)'}"
-                            f" (expected {s.get('expected')}, "
-                            f"got {s.get('actual')}, {s.get('reason')})"
+                            f" (expected {_short_hex(s.get('expected'))}, "
+                            f"got {_short_hex(s.get('actual'))}, "
+                            f"{s.get('reason')})"
                             for s in patch_skips[:15]
                         ]
                         more = max(0, len(patch_skips) - 15)
