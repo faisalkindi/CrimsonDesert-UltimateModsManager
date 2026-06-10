@@ -15,10 +15,16 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
-    "<b>Mixing item mods no longer silently drops the JSON ones.</b> When the combined item-table change was checked at apply time, a single stale byte anywhere (an old contaminated backup, or another mod already touching the table) failed the whole comparison and every JSON item mod was skipped at once, with a warning that printed megabytes of raw data. The change now rebuilds itself against the bytes actually present, so it layers cleanly on top, and the warning shows a short summary instead of the data dump. Thanks to falobos76 on GitHub (#191).",
 ]
 
 CHANGELOG = [
+    {
+        "version": "3.3.20",
+        "date": "2026-06-10",
+        "notes": [
+            "<b>Mixing item mods no longer silently drops the JSON ones.</b> When the combined item-table change was checked at apply time, a single stale byte anywhere (an old contaminated backup, or another mod already touching the table) failed the whole comparison and every JSON item mod was skipped at once, with a warning that printed megabytes of raw data. The change now rebuilds itself against the bytes actually present, so it layers cleanly on top, and the warning shows a short summary instead of the data dump. Thanks to falobos76 on GitHub (#191).",
+        ],
+    },
     {
         "version": "3.3.19",
         "date": "2026-06-10",
