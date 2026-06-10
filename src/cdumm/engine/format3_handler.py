@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -525,8 +526,13 @@ def validate_intents(
         fs_entries = load_field_schema(table_name)
 
         def _routable(i: Format3Intent) -> bool:
+            # Indexed list paths ('entries[0].etl_hashes') normalize to
+            # a wildcard key ('entries[].etl_hashes') so one LIST_WRITERS
+            # registration covers every index (#190 equipslotinfo).
+            normalized = re.sub(r"\[\d+\]", "[]", i.field or "")
             return (
                 (table_name, i.field) in LIST_WRITERS
+                or (table_name, normalized) in LIST_WRITERS
                 or i.field in fs_entries
                 or i.old is not None
             )
@@ -622,6 +628,12 @@ LIST_WRITERS: dict[tuple[str, str], str] = {
         "storeinfo_writer.build_storeinfo_changes",
     ("storeinfo", "_exchangeItemInfoListForSell"):
         "storeinfo_writer.build_storeinfo_changes",
+    # Equipslotinfo whole-table writer (GitHub #190): rewrites a
+    # record's etl_hashes list + the companion .pabgh. The wildcard
+    # key matches 'entries[N].etl_hashes' for any N via the indexed-
+    # path normalization in validate_intents.
+    ("equipslotinfo", "entries[].etl_hashes"):
+        "equipslotinfo_writer.build_equipslotinfo_changes",
     # Iteminfo whole-table writer (CDUMM native parser).
     # The full list of iteminfo list-of-dict fields the writer
     # accepts is in `iteminfo_writer.SUPPORTED_FIELDS`. We mirror the

@@ -122,9 +122,12 @@ def expand_format3_into_aggregated(
     # multichangeinfo: its writer rebuilds the entry's record list
     # (which can grow) and the companion storeinfo.pabgh offsets in
     # one pass (GitHub #183 stock_data_list).
+    # equipslotinfo.pabgb (GitHub #190): records grow when a mod
+    # appends etl hashes, so the writer rebuilds entry + .pabgh
+    # offsets in one pass, same contract as storeinfo.
     _WHOLE_TABLE_TARGETS = {
         "iteminfo.pabgb", "skill.pabgb", "multichangeinfo.pabgb",
-        "storeinfo.pabgb"}
+        "storeinfo.pabgb", "equipslotinfo.pabgb"}
     whole_table_intents: dict[str, list] = {}
     whole_table_mod_names: dict[str, list[str]] = {}
     # Track contributing mod ids per whole-table target so the
@@ -382,43 +385,52 @@ def expand_format3_into_aggregated(
                 if pabgh_change is not None else "")
             continue
 
-        # storeinfo.pabgb (GitHub #183): same two-file contract as
-        # multichangeinfo — the writer rebuilds the targeted store's
-        # stock list (which grows when a mod adds items) plus the
-        # companion .pabgh offsets in one pass.
-        if target == "storeinfo.pabgb":
-            from cdumm.engine.storeinfo_writer import (
-                StoreinfoWriteRefused, build_storeinfo_changes,
-            )
+        # storeinfo.pabgb (GitHub #183) and equipslotinfo.pabgb
+        # (GitHub #190): same two-file contract as multichangeinfo —
+        # the writer rebuilds the targeted entry's record list (which
+        # grows when a mod adds items/hashes) plus the companion
+        # .pabgh offsets in one pass.
+        if target in ("storeinfo.pabgb", "equipslotinfo.pabgb"):
+            if target == "equipslotinfo.pabgb":
+                from cdumm.engine.equipslotinfo_writer import (
+                    EquipslotWriteRefused as StoreinfoWriteRefused,
+                    build_equipslotinfo_changes as build_storeinfo_changes,
+                )
+            else:
+                from cdumm.engine.storeinfo_writer import (
+                    StoreinfoWriteRefused, build_storeinfo_changes,
+                )
+            _companion = target.replace(".pabgb", ".pabgh")
             try:
                 pabgb_changes, pabgh_change = build_storeinfo_changes(
                     vanilla_body, vanilla_header, batched)
             except StoreinfoWriteRefused as e:
                 logger.warning(
-                    "Format 3 storeinfo writer refused %d intent(s): %s",
-                    len(batched), e)
+                    "Format 3 %s writer refused %d intent(s): %s",
+                    target, len(batched), e)
                 if warnings_out is not None:
                     warnings_out.append(
                         f"Format 3 mod(s) "
                         f"{', '.join(repr(n) for n in contributing_mods)} "
-                        f"could not apply to 'storeinfo.pabgb': {e}")
+                        f"could not apply to '{target}': {e}")
                 continue
             except Exception as e:
                 logger.error(
-                    "Format 3 storeinfo writer crashed on %d "
-                    "intent(s): %s", len(batched), e, exc_info=True)
+                    "Format 3 %s writer crashed on %d "
+                    "intent(s): %s", target, len(batched), e,
+                    exc_info=True)
                 pabgb_changes, pabgh_change = [], None
             if not pabgb_changes:
                 logger.warning(
-                    "Format 3 storeinfo: %d intent(s) from %d mod(s) "
-                    "produced 0 changes", len(batched),
+                    "Format 3 %s: %d intent(s) from %d mod(s) "
+                    "produced 0 changes", target, len(batched),
                     len(contributing_mods))
                 if warnings_out is not None:
                     warnings_out.append(
                         f"Format 3 mod(s) "
                         f"{', '.join(repr(n) for n in contributing_mods)} "
-                        f"produced 0 byte changes for 'storeinfo.pabgb'. "
-                        f"The targeted store may not exist in this game "
+                        f"produced 0 byte changes for '{target}'. "
+                        f"The targeted entry may not exist in this game "
                         f"version.")
                 continue
             contrib_ids = list(whole_table_mod_ids.get(target, []))
@@ -428,20 +440,21 @@ def expand_format3_into_aggregated(
                     c["_source_mod_ids"] = list(contrib_ids)
             aggregated.setdefault(target, []).extend(pabgb_changes)
             if pabgh_change is not None:
-                pabgh_change["_target_file"] = "storeinfo.pabgh"
+                pabgh_change["_target_file"] = _companion
                 if contrib_ids:
                     pabgh_change["_source_mod_ids"] = list(contrib_ids)
                 aggregated.setdefault(
-                    "storeinfo.pabgh", []).append(pabgh_change)
+                    _companion, []).append(pabgh_change)
             if participating_mod_ids is not None:
                 for mid in contrib_ids:
                     participating_mod_ids.add(mid)
             for c in pabgb_changes:
                 n_bytes_changed += len(c.get("patched", "")) // 2
             logger.info(
-                "Format 3 storeinfo writer: applied %d intent(s) "
+                "Format 3 %s writer: applied %d intent(s) "
                 "across %d mod(s), %d change(s)%s",
-                len(batched), len(contributing_mods), len(pabgb_changes),
+                target, len(batched), len(contributing_mods),
+                len(pabgb_changes),
                 ", + pabgh offset rebuild"
                 if pabgh_change is not None else "")
             continue
