@@ -40,6 +40,8 @@ _UNRELEASED_NOTES: list[str] = [
     "Mod load-order priority is respected again when two JSON mods edit the same bytes (the merge order was inverted).",
     "Directories with more than 255 archives no longer resolve files to the wrong archive (a numeric field was read one byte short in three places).",
     "Many smaller fixes from a full code audit: stale-drive launch hangs, secure connections for Nexus login, update-banner version comparisons, batch import cleanup, HTML patches applying to every match, and more.",
+    "<b>Mods editing different files inside the same small archive no longer fight each other.</b> Entry-level composition previously only ran for archives over 10 MB, so two mods touching the same small config archive (the materials/renderpass one both VAXIS mods use) were winner-takes-all even with zero file overlap. Found via RoGreat's report on GitHub (#199).",
+    "Encrypted-but-uncompressed files (the technique/.material class from #199) now import correctly through entry-level composition too; they used to be stored scrambled and the game read garbage.",
 ]
 
 CHANGELOG = [

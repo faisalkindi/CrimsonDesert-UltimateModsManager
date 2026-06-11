@@ -1377,6 +1377,49 @@ def _try_paz_entry_import(
                     lz4_decompress(raw, van_entry.orig_size)
                 except Exception:
                     encrypted = True
+            elif not encrypted and not van_entry.compressed:
+                # Encrypted-but-UNCOMPRESSED slots (the GitHub #199
+                # class: .material files under technique/). The
+                # extension heuristic does not know these extensions
+                # and the lz4 probe above only runs for compressed
+                # entries, so the entry's ciphertext used to be stored
+                # as plaintext content with flags=0 and the game read
+                # garbage. Same plaintext-signature probe the CB
+                # repack path got in v3.3.19.
+                try:
+                    from cdumm.engine.crimson_browser_handler import (
+                        _uncompressed_entry_is_encrypted_text,
+                    )
+                    if _uncompressed_entry_is_encrypted_text(
+                            Path(vanilla_paz_path), van_entry):
+                        encrypted = True
+                except Exception as _enc_e:
+                    logger.debug(
+                        "uncompressed-encryption probe failed for %s: %s",
+                        entry_path, _enc_e)
+            if encrypted:
+                # The extracted contents must be PLAINTEXT before the
+                # compare and the delta save (the overlay re-encrypts
+                # at build time). When the extraction above missed the
+                # encryption (heuristic gap), decrypt here, keyed on
+                # the basename like the game does.
+                from cdumm.archive.paz_crypto import decrypt as _dec
+                _basename = van_entry.path.rsplit("/", 1)[-1]
+                def _ensure_plain(buf: bytes) -> bytes:
+                    if buf[:3] == b"\xef\xbb\xbf" or buf[:1] == b"<":
+                        return buf
+                    try:
+                        plain = _dec(buf, _basename)
+                    except Exception:
+                        return buf
+                    if plain[:3] == b"\xef\xbb\xbf" or plain[:1] == b"<":
+                        return plain
+                    return buf
+                van_content = _ensure_plain(van_content)
+                mod_content = _ensure_plain(mod_content)
+                if van_content == mod_content:
+                    _entr_counters["skipped_identical"] += 1
+                    continue
             _entr_timings["encryption_detect"] += time.perf_counter() - _t
 
             metadata = {
@@ -5084,7 +5127,21 @@ def _process_extracted_files(
             # Instead of storing byte-level diffs of the entire PAZ, decompose
             # into ENTR deltas per PAMT entry. This way two mods modifying
             # different entries in the same PAZ compose correctly.
-            if rel_path.endswith(".paz") and mod_size > 10 * 1024 * 1024:
+            #
+            # ALL .paz files take this path, not just large ones. The
+            # original v1.8.0 gate (mod_size > 10 MB) was a perf
+            # heuristic from when the decomposer was new; it routed
+            # every SMALL shared PAZ (0003's materials/renderpass
+            # configs are 760 KB) to vanilla-anchored raw byte diffs,
+            # which cannot compose, so two mods editing DIFFERENT
+            # files in the same small PAZ were winner-takes-all.
+            # GitHub #199 follow-up (RoGreat, 2026-06-11): VAXIS Water
+            # Physics + Enhanced Internal Graphics both edit 0003 with
+            # zero file overlap and Internal Graphics was dropped
+            # wholesale. Decomposition of a small PAZ is cheap, and
+            # the byte-level fallback below still exists for files
+            # the decomposer cannot handle.
+            if rel_path.endswith(".paz"):
                 _iter_branch = "paz_entr_import"
                 entr_ok = _try_paz_entry_import(
                     extracted_path, vanilla_source, rel_path,
