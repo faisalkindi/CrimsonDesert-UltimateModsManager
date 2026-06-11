@@ -15,6 +15,7 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
+    "<b>Mods skipped by the API-saving optimization now show their real up-to-date state.</b> Mods confirmed current within the past week are not re-checked against Nexus (by design, to save API calls), but they showed up grey as if never checked. They now show green from their cached state, and a cached state can never hide a known pending update. Thanks to Faisal for the report.",
 ]
 
 CHANGELOG = [

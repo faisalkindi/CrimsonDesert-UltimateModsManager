@@ -562,9 +562,22 @@ def _merge_nexus_updates(prev: dict, new: dict) -> dict:
     cycles (auth error / rate limit / transport, ``new`` is empty)
     leave the previous state untouched. Returns a new dict; neither
     input is mutated.
+
+    Cached entries (``from_cache=True``, emitted by the feed-skip
+    optimization since 2026-06-11 so skipped-but-known-current mods
+    render green instead of unknown-grey) never overwrite a known
+    has_update=True state: an update older than the 1-week feed
+    window would otherwise flip a red pill green. Only a LIVE fetch
+    (from_cache absent/False) may clear an outdated flag.
     """
     merged = dict(prev or {})
-    merged.update(new or {})
+    for key, status in (new or {}).items():
+        existing = merged.get(key)
+        if (existing is not None
+                and getattr(existing, "has_update", False)
+                and getattr(status, "from_cache", False)):
+            continue
+        merged[key] = status
     return merged
 
 

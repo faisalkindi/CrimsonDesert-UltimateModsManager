@@ -89,6 +89,13 @@ class ModUpdateStatus:
     # from outdated (there's no replacement to point at). UI can
     # render a "deprecated" badge. Round-3 systematic-debugging fix.
     file_archived_on_nexus: bool = False
+    # True when this status comes from the feed-skip optimization
+    # (confirmed current within the past week, nothing fetched this
+    # cycle) rather than a live file-list fetch. The GUI merge must
+    # never let a cached entry overwrite a known has_update=True
+    # state: an update older than the 1-week feed window would
+    # otherwise flip a red pill green (Faisal, 2026-06-11).
+    from_cache: bool = False
 
 
 class NexusPremiumRequired(Exception):
@@ -701,6 +708,26 @@ def check_mod_updates(
     # NEXT update check can use the reliable file_updates chain walk
     # instead of fragile name matching.
     backfill_file_ids: dict[int, int] = {}
+    def _cached_current_status(mod: dict, nexus_id: int) -> ModUpdateStatus:
+        """Status for a mod the optimization SKIPPED: it was confirmed
+        current within the past week and the feed says nothing changed
+        since, so "no update" is known state, not an unknown. Without
+        this, skipped mods were simply absent from the results, and
+        since the UI's grey-state fix (v3.3.21) absence renders as
+        "never checked" grey pills, which read as mods not being
+        checked at all (Faisal, 2026-06-11). The old UI masked this by
+        wrongly painting every linked mod green."""
+        ver = str(mod.get("version") or "")
+        return ModUpdateStatus(
+            mod_id=nexus_id,
+            local_name=str(mod.get("name") or ""),
+            local_version=ver,
+            latest_version=ver,
+            has_update=False,
+            mod_url=f"https://www.nexusmods.com/crimsondesert/mods/{nexus_id}",
+            from_cache=True,
+        )
+
     for mod, nexus_id in nexus_mods:
         last_checked = int(mod.get("nexus_last_checked_at") or 0)
         in_feed = feed_trustworthy and nexus_id in updated_ids
@@ -708,7 +735,10 @@ def check_mod_updates(
                 and not in_feed
                 and (now - last_checked) < WEEK_SECONDS):
             # Feed skipped this mod AND we confirmed it was current
-            # within the past week — safe to trust "no update".
+            # within the past week — safe to trust "no update". Emit
+            # the cached-current status so the UI keeps its green
+            # state instead of regressing to unknown-grey.
+            results.append(_cached_current_status(mod, nexus_id))
             continue
         # When the feed call itself failed we can't trust "not in
         # feed = not updated", but the per-mod TTL is still valid:
@@ -720,6 +750,7 @@ def check_mod_updates(
         if (not feed_trustworthy
                 and last_checked > 0
                 and (now - last_checked) < WEEK_SECONDS):
+            results.append(_cached_current_status(mod, nexus_id))
             continue
 
         result = get_mod_files(nexus_id, api_key)

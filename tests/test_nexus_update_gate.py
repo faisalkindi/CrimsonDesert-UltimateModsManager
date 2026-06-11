@@ -74,6 +74,11 @@ def test_mod_not_in_feed_but_stale_last_checked_is_fetched(_stub_api):
 
 
 def test_mod_not_in_feed_and_recently_checked_is_skipped(_stub_api):
+    """The gate's purpose: no API call for a recently-confirmed mod
+    absent from the feed. Since 2026-06-11 the skip emits a
+    cached-current status (from_cache=True) instead of NOTHING, so
+    the UI renders the known state instead of never-checked grey
+    (Faisal's v3.3.21 report)."""
     _stub_api["updated_ids"] = set()
     _stub_api["files"] = {500: _fake_files("2.0")}
 
@@ -83,7 +88,10 @@ def test_mod_not_in_feed_and_recently_checked_is_skipped(_stub_api):
     results, _ids, _now, _bf = nexus_api.check_mod_updates(mods, "key")
 
     assert _stub_api["get_mod_files_calls"] == []
-    assert results == []
+    assert len(results) == 1
+    assert results[0].from_cache is True
+    assert results[0].has_update is False
+    assert _ids == [], "cached entries must not refresh timestamps"
 
 
 def test_mod_with_never_checked_fetches_regardless_of_feed(_stub_api):
