@@ -112,13 +112,44 @@ def _insert(conn, **kw):
     conn.commit()
 
 
-def test_find_groups_finds_only_multi_row_names(db):
+def test_find_groups_finds_only_true_duplicates(db):
     _insert(db.connection, name="Solo", mod_type="paz", enabled=1, priority=1)
     _insert(db.connection, name="Dup", mod_type="paz", enabled=1, priority=2)
     _insert(db.connection, name="Dup", mod_type="paz", enabled=0, priority=3)
     groups = find_duplicate_groups(db.connection)
-    assert list(groups.keys()) == ["Dup"]
-    assert len(groups["Dup"]) == 2
+    assert len(groups) == 1
+    (key, rows), = groups.items()
+    assert key.startswith("Dup")
+    assert len(rows) == 2
+
+
+def test_same_name_different_version_is_not_a_duplicate(db):
+    """prettify_mod_name collapses 'Trust Me 2x' and 'Trust Me 5x' to
+    the same display name; name-only dedup used to destroy one of the
+    two variants (audit finding, 2026-06-10)."""
+    _insert(db.connection, name="Trust Me", mod_type="paz", enabled=1,
+            priority=1, version="2x")
+    _insert(db.connection, name="Trust Me", mod_type="paz", enabled=1,
+            priority=2, version="5x")
+    assert find_duplicate_groups(db.connection) == {}
+    assert plan_cleanup(db.connection) == []
+
+
+def test_same_name_version_but_different_deltas_is_not_a_duplicate(db):
+    _insert(db.connection, name="M", mod_type="paz", enabled=1,
+            priority=1, version="1.0")
+    _insert(db.connection, name="M", mod_type="paz", enabled=1,
+            priority=2, version="1.0")
+    ids = [r[0] for r in db.connection.execute(
+        "SELECT id FROM mods ORDER BY id").fetchall()]
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path) "
+        "VALUES (?, '0008/0.paz', 'a.delta')", (ids[0],))
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path) "
+        "VALUES (?, '0010/0.paz', 'b.delta')", (ids[1],))
+    db.connection.commit()
+    assert find_duplicate_groups(db.connection) == {}
 
 
 def test_plan_cleanup_uses_canonical_then_merge(db):
@@ -128,21 +159,20 @@ def test_plan_cleanup_uses_canonical_then_merge(db):
              nexus_mod_id=618, import_date="2026-04-23 10:00:00")
     _insert(db.connection,
              name="X", mod_type="paz", enabled=0, applied=0, priority=40,
-             version="1.5", drop_name="X-618-1-5-1776942172",
+             version=None, drop_name="X-618-1-5-1776942172",
              nexus_real_file_id=None, nexus_mod_id=618,
              import_date="2026-04-25 05:00:00")
     plan = plan_cleanup(db.connection)
     assert len(plan) == 1
     canon, deleted, update = plan[0]
     # Canonical wins on applied=1 even though the new row has more
-    # version-string metadata + higher priority.
+    # metadata + higher priority.
     assert canon.applied == 1
     assert canon.priority == 5
     assert len(deleted) == 1
     assert deleted[0].priority == 40
     # Missing fields on canonical are filled from sibling.
     assert update == {
-        "version": "1.5",
         "drop_name": "X-618-1-5-1776942172",
     }
 
@@ -164,7 +194,7 @@ def test_apply_cleanup_persists_merge_and_removes_duplicates(tmp_path):
              import_date="2026-04-23 10:00:00")
     _insert(db.connection,
              name="X", mod_type="paz", enabled=0, applied=0, priority=40,
-             version="1.5", drop_name="X-618-1-5-1776942172",
+             version=None, drop_name="X-618-1-5-1776942172",
              nexus_real_file_id=None, import_date="2026-04-25 05:00:00")
 
     mgr = ModManager(db, deltas_dir)
@@ -178,7 +208,6 @@ def test_apply_cleanup_persists_merge_and_removes_duplicates(tmp_path):
     row = db.connection.execute(
         "SELECT version, drop_name, nexus_real_file_id "
         "FROM mods WHERE id = ?", (kept_id,)).fetchone()
-    assert row[0] == "1.5"
     assert row[1] == "X-618-1-5-1776942172"
     # The kept row's pre-existing nexus_real_file_id is preserved.
     assert row[2] == 5733

@@ -128,10 +128,18 @@ def try_acquire_gui_lock(app_data: Path) -> tuple[bool, str]:
         except OSError:
             stale = False  # treat read failure as conservative
 
+    # Open in append mode for the lock attempt: "w" would TRUNCATE the
+    # live instance's PID out of the file before we know whether the
+    # lock is even free, corrupting the stale-detection of every later
+    # launch. The file is only truncated (and the new PID written)
+    # AFTER the lock is acquired.
     try:
         if IS_WINDOWS:
             import msvcrt
-            _lock_fh = open(lock_path, "w", encoding="utf-8")
+            _lock_fh = open(lock_path, "a", encoding="utf-8")
+            # Lock byte 0, the same region every instance locks. Append
+            # mode positions at EOF, so seek explicitly first.
+            _lock_fh.seek(0)
             try:
                 msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError:
@@ -140,18 +148,22 @@ def try_acquire_gui_lock(app_data: Path) -> tuple[bool, str]:
                 _lock_fh.close()
                 _lock_fh = None
                 return (False, "another_running" if not stale else "io_error")
+            _lock_fh.seek(0)
+            _lock_fh.truncate()
             _lock_fh.write(str(os.getpid()))
             _lock_fh.flush()
             atexit.register(lambda: _lock_fh.close() if _lock_fh else None)
         else:
             import fcntl
-            _lock_fh = open(lock_path, "w", encoding="utf-8")
+            _lock_fh = open(lock_path, "a", encoding="utf-8")
             try:
                 fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 _lock_fh.close()
                 _lock_fh = None
                 return (False, "another_running" if not stale else "io_error")
+            _lock_fh.seek(0)
+            _lock_fh.truncate()
             _lock_fh.write(str(os.getpid()))
             _lock_fh.flush()
             atexit.register(lambda: _lock_fh.close() if _lock_fh else None)

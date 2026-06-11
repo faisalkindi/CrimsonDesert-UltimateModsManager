@@ -36,11 +36,13 @@ class _LinkCard(CardWidget):
     visible for discoverability and continues to work as before.
     """
 
-    def __init__(self, icon: FluentIcon, title: str, description: str,
+    def __init__(self, icon: FluentIcon, title_key: str, desc_key: str,
                  url: str, parent=None):
         super().__init__(parent)
 
         self._url = url
+        self._title_key = title_key
+        self._desc_key = desc_key
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QHBoxLayout(self)
@@ -51,10 +53,12 @@ class _LinkCard(CardWidget):
         text_layout = QVBoxLayout()
         text_layout.setSpacing(2)
         text_layout.setContentsMargins(0, 0, 0, 0)
-        title_label = StrongBodyLabel(title, self)
+        title_label = StrongBodyLabel(tr(title_key), self)
+        self._title_label = title_label
         text_layout.addWidget(title_label)
-        desc_label = CaptionLabel(description, self)
+        desc_label = CaptionLabel(tr(desc_key), self)
         desc_label.setWordWrap(True)
+        self._desc_label = desc_label
         text_layout.addWidget(desc_label)
         layout.addLayout(text_layout, stretch=1)
 
@@ -71,9 +75,14 @@ class _LinkCard(CardWidget):
         super().mousePressEvent(event)
 
     def retranslate_open(self) -> None:
-        """Update the 'Open' button text after a language change."""
+        """Update title, description, and 'Open' button text after a
+        language change."""
         if hasattr(self, "_link_btn"):
             self._link_btn.setText(tr("about.link_open"))
+        if hasattr(self, "_title_label"):
+            self._title_label.setText(tr(self._title_key))
+        if hasattr(self, "_desc_label"):
+            self._desc_label.setText(tr(self._desc_key))
 
 
 class AboutPage(SmoothScrollArea):
@@ -110,6 +119,9 @@ class AboutPage(SmoothScrollArea):
         info_layout.addWidget(self._version_label)
 
         # Update status — shows "Up to date" by default, changes when update found
+        # ``_update_tag`` tracks which state the label is in so a
+        # language switch can re-render the right text (None = up to date).
+        self._update_tag: str | None = None
         from PySide6.QtGui import QFont as _QF
         self._update_status = StrongBodyLabel(tr("about.up_to_date"), header_card)
         usf = self._update_status.font()
@@ -125,6 +137,7 @@ class AboutPage(SmoothScrollArea):
             header_card,
         )
         tagline.setWordWrap(True)
+        self._tagline = tagline
         info_layout.addWidget(tagline)
         header_layout.addLayout(info_layout, stretch=1)
 
@@ -142,24 +155,24 @@ class AboutPage(SmoothScrollArea):
 
         self._layout.addWidget(_LinkCard(
             FluentIcon.GITHUB,
-            tr("about.github_title"),
-            tr("about.github_desc"),
+            "about.github_title",
+            "about.github_desc",
             "https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager",
             self._container,
         ))
 
         self._layout.addWidget(_LinkCard(
             FluentIcon.GLOBE,
-            tr("about.nexus_title"),
-            tr("about.nexus_desc"),
+            "about.nexus_title",
+            "about.nexus_desc",
             "https://www.nexusmods.com/crimsondesert/mods/207",
             self._container,
         ))
 
         self._layout.addWidget(_LinkCard(
             FluentIcon.FEEDBACK,
-            tr("about.bug_title"),
-            tr("about.bug_desc"),
+            "about.bug_title",
+            "about.bug_desc",
             "https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/new/choose",
             self._container,
         ))
@@ -177,12 +190,14 @@ class AboutPage(SmoothScrollArea):
         lic_label = BodyLabel(
             tr("about.license_name"), license_card
         )
+        self._license_name = lic_label
         lic_layout.addWidget(lic_label)
         lic_desc = CaptionLabel(
             tr("about.license_desc"),
             license_card,
         )
         lic_desc.setWordWrap(True)
+        self._license_desc = lic_desc
         lic_layout.addWidget(lic_desc)
         self._layout.addWidget(license_card)
 
@@ -241,6 +256,7 @@ class AboutPage(SmoothScrollArea):
         tf.setPixelSize(15)
         tf.setWeight(QFont.Weight.Bold)
         title.setFont(tf)
+        self._kofi_title = title
         text_col.addWidget(title)
 
         desc = CaptionLabel(tr("about.enjoying_desc"), card)
@@ -276,6 +292,7 @@ class AboutPage(SmoothScrollArea):
             "PrimaryPushButton:pressed { background: #E03E3C; }")
         kofi_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl("https://ko-fi.com/kindiboy")))
+        self._kofi_btn = kofi_btn
         layout.addWidget(kofi_btn)
 
         self._layout.addWidget(card)
@@ -292,14 +309,28 @@ class AboutPage(SmoothScrollArea):
         """Update text with current translations."""
         self._app_title.setText(tr("about.app_title"))
         self._version_label.setText(tr("about.version", version=__version__))
+        self._tagline.setText(tr("about.tagline"))
+        # Update status is state-aware: re-render the same state in the
+        # new language instead of resetting to "up to date".
+        if self._update_tag:
+            self._update_status.setText(
+                tr("about.update_available", tag=self._update_tag))
+        else:
+            self._update_status.setText(tr("about.up_to_date"))
         self._links_title.setText(tr("about.links"))
         self._license_title.setText(tr("about.license"))
+        self._license_name.setText(tr("about.license_name"))
+        self._license_desc.setText(tr("about.license_desc"))
         self._credits_title.setText(tr("about.credits"))
         self._credits_dev.setText(tr("about.credits_dev"))
         self._credits_detail.setText(tr("about.credits_detail"))
+        if hasattr(self, "_kofi_title"):
+            self._kofi_title.setText(tr("about.enjoying"))
+        if hasattr(self, "_kofi_btn"):
+            self._kofi_btn.setText(tr("about.support_kofi"))
         if hasattr(self, "_enjoying_desc"):
             self._enjoying_desc.setText(tr("about.enjoying_desc"))
-        # Refresh all LinkCard "Open" buttons
+        # Refresh all LinkCard titles, descriptions, and "Open" buttons
         for card in self._container.findChildren(_LinkCard):
             card.retranslate_open()
 
@@ -307,6 +338,7 @@ class AboutPage(SmoothScrollArea):
         """Update the about page to show an available update."""
         from qfluentwidgets import setCustomStyleSheet, HyperlinkButton
 
+        self._update_tag = tag
         self._update_status.setText(tr("about.update_available", tag=tag))
         setCustomStyleSheet(self._update_status,
             "StrongBodyLabel{color:#EBCB8B;}", "StrongBodyLabel{color:#EBCB8B;}")

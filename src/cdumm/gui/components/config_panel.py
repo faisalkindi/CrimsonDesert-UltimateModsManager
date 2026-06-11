@@ -326,6 +326,14 @@ from qfluentwidgets import (
 
 from cdumm.i18n import tr
 
+# Stable internal sentinel persisted to the config DB for the "manual
+# per-checkbox control" preset radio. MUST stay "Custom" forever: the
+# value is stored under ``mod_<id>_preset`` and compared on load, so
+# existing user DBs already contain it. The DISPLAY text of the radio
+# is translated separately (``config_panel.preset_custom``); the radio
+# carries this sentinel in a ``preset_tag`` Qt property.
+CUSTOM_PRESET_TAG = "Custom"
+
 
 # ── Colour helpers ────────────────────────────────────────────────────
 
@@ -724,14 +732,16 @@ class ConfigPanel(QWidget):
 
         # Header
         self._title_label.setText(name)
-        self._author_label.setText(f"by {author}" if author else "")
+        self._author_label.setText(
+            tr("config_panel.by_author", author=author) if author else "")
 
         # Badges
         self._clear_badges()
         self._badge_row.insertWidget(0, _make_badge(status))
         self._badge_row.insertWidget(1, _make_badge(f"v{version}", "#444C5C"))
         self._badge_row.insertWidget(
-            2, _make_badge(f"{file_count} files", "#444C5C"),
+            2, _make_badge(
+                tr("config_panel.n_files", count=file_count), "#444C5C"),
         )
 
         # Rebuild body
@@ -1017,12 +1027,23 @@ class ConfigPanel(QWidget):
         match_tag = current_preset if current_preset in groups else None
         for tag in groups.keys():
             rb = RadioButton(tag)
+            # Stable lookup/persist value, independent of display text.
+            rb.setProperty("preset_tag", tag)
             if match_tag is not None and tag == match_tag:
                 rb.setChecked(True)
             button_group.addButton(rb)
             flow.addWidget(rb)
 
-        custom_rb = RadioButton("Custom")
+        # Display text is translated; the persisted sentinel stays the
+        # stable CUSTOM_PRESET_TAG constant (see its definition above).
+        # Same graceful fallback preset_picker uses: when translations
+        # aren't loaded (bare unit tests), show the sentinel itself
+        # instead of the raw i18n key.
+        _custom_label = tr("config_panel.preset_custom")
+        if _custom_label == "config_panel.preset_custom":
+            _custom_label = CUSTOM_PRESET_TAG
+        custom_rb = RadioButton(_custom_label)
+        custom_rb.setProperty("preset_tag", CUSTOM_PRESET_TAG)
         # Custom is the default fallback when no current_preset matches
         # a known tag — i.e. on a fresh open before Task 1.4 lands the
         # restore-from-DB hook.
@@ -1046,9 +1067,11 @@ class ConfigPanel(QWidget):
         config DB so the next ``show_mod`` for the same mod restores
         the same radio. No-op when no DB has been wired in.
         """
-        tag = button.text()
+        # Read the stable tag from the Qt property, not the (possibly
+        # translated) display text. Falls back to text() for safety.
+        tag = button.property("preset_tag") or button.text()
         self._save_preset_selection(tag)
-        if tag == "Custom":
+        if tag == CUSTOM_PRESET_TAG:
             return
         if not self._preset_groups:
             return
@@ -1097,14 +1120,14 @@ class ConfigPanel(QWidget):
             getattr(self, "_preset_always_on_indices", []),
             target=True)
 
-        sel_btn = PushButton("Select all")
+        sel_btn = PushButton(tr("config_panel.select_all"))
         sel_btn.setFixedHeight(26)
         sel_btn.clicked.connect(
             lambda _checked=False, idxs=target_indices:
                 self._bulk_set_toggles(idxs, True))
         bar.addWidget(sel_btn)
 
-        des_btn = PushButton("Deselect all")
+        des_btn = PushButton(tr("config_panel.deselect_all"))
         des_btn.setFixedHeight(26)
         des_btn.clicked.connect(
             lambda _checked=False, idxs=target_indices:
@@ -1218,7 +1241,8 @@ class ConfigPanel(QWidget):
         # Validate min <= max
         if val_min > val_max:
             val_min, val_max = val_max, val_min
-        range_lbl = CaptionLabel(f"Range: {val_min} – {val_max}")
+        range_lbl = CaptionLabel(
+            tr("config_panel.value_range", min=val_min, max=val_max))
         rf = range_lbl.font()
         rf.setPixelSize(10)
         range_lbl.setFont(rf)
@@ -1405,7 +1429,8 @@ class ConfigPanel(QWidget):
             logger.debug("Could not seed variant label prev: %s", _e)
 
         self._title_label.setText(name)
-        self._author_label.setText(f"by {author}" if author else "")
+        self._author_label.setText(
+            tr("config_panel.by_author", author=author) if author else "")
 
         self._clear_badges()
         self._badge_row.insertWidget(0, _make_badge(status))
@@ -1429,11 +1454,21 @@ class ConfigPanel(QWidget):
                 (v for v in self._variants_meta if v.get("enabled")), None)
             if _active:
                 _short = _strip_category_prefix(_active.get("label", ""))
-                _badge_text = f"Active: {_short}"
+                _badge_text = tr("config_panel.active_loadout", name=_short)
+                if _badge_text == "config_panel.active_loadout":
+                    _badge_text = f"Active: {_short}"
             else:
-                _badge_text = f"{len(self._variants_meta)} loadouts"
+                _badge_text = tr("config_panel.n_loadouts",
+                                 count=len(self._variants_meta))
+                if _badge_text == "config_panel.n_loadouts":
+                    _badge_text = f"{len(self._variants_meta)} loadouts"
         else:
-            _badge_text = f"{n_enabled}/{len(self._variants_meta)} variants"
+            _badge_text = tr("config_panel.n_of_total_variants",
+                             enabled=n_enabled,
+                             total=len(self._variants_meta))
+            if _badge_text == "config_panel.n_of_total_variants":
+                _badge_text = (
+                    f"{n_enabled}/{len(self._variants_meta)} variants")
         self._badge_row.insertWidget(
             2, _make_badge(_badge_text, "#444C5C"),
         )
@@ -1661,7 +1696,8 @@ class ConfigPanel(QWidget):
         if variant.get("version"):
             meta_bits.append(f"v{variant['version']}")
         if variant.get("author"):
-            meta_bits.append(f"by {variant['author']}")
+            meta_bits.append(
+                tr("config_panel.by_author", author=variant["author"]))
         if meta_bits:
             meta_lbl = CaptionLabel(" · ".join(meta_bits))
             meta_lbl.setWordWrap(True)
@@ -1713,7 +1749,7 @@ class ConfigPanel(QWidget):
         cfg_btn_widget = None
         if variant.get("_has_labels") and variant.get("_json_path"):
             from qfluentwidgets import PushButton
-            cfg_btn = PushButton("Configure options...")
+            cfg_btn = PushButton(tr("config_panel.configure_options"))
             cfg_btn.setFixedHeight(28)
             jp_path = variant["_json_path"]
             v_fn = variant.get("filename", "")

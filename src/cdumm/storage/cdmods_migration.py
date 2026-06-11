@@ -18,8 +18,9 @@ Safety guarantees:
      migration``).
   3. SHA-256 every source file BEFORE copying, copy with shutil.
      copy2 (preserves mtime), then SHA-256 the destination and
-     compare. Any mismatch raises ``MigrationError`` with the source
-     left untouched — caller can retry or roll back the partial dst.
+     compare. Any copy or verify failure raises ``MigrationError``
+     with the source left untouched, and the partial destination
+     tree (marker included) is removed so a retry can proceed.
   4. Only after every file is copied + verified do we delete the
      source tree. Marker is cleared last.
 
@@ -102,6 +103,48 @@ def _enumerate_files(src: Path) -> list[Path]:
     return found
 
 
+def _cleanup_partial_destination(dst: Path, marker: Path) -> None:
+    """Remove the partially-copied destination tree after a failed copy.
+
+    The source is still intact at this point (src is only deleted
+    AFTER every file is copied and verified), so everything under
+    ``dst`` is a replaceable partial copy. Without this cleanup, a
+    retry of the same migration hits the "destination already exists
+    and is not empty" guard and the user is wedged until they
+    manually delete the partial tree.
+
+    Only proceeds when our migration marker is present in ``dst``:
+    the marker is the very first write into a destination that the
+    empty-dir guard verified was empty, so its presence proves every
+    item in ``dst`` belongs to this migration attempt.
+    """
+    if not marker.exists():
+        return
+    removed: list[str] = []
+    try:
+        for child in dst.iterdir():
+            if child == marker:
+                continue
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                removed.append(child.name)
+            except OSError as e:
+                logger.warning(
+                    "cdmods migration: cleanup could not remove %s: %s",
+                    child, e)
+        marker.unlink()
+        logger.info(
+            "cdmods migration: copy failed; removed %d partial item(s) "
+            "from %s (%s) plus the marker so a retry can proceed",
+            len(removed), dst, ", ".join(removed) or "none")
+    except OSError as e:
+        logger.warning(
+            "cdmods migration: partial-destination cleanup failed: %s", e)
+
+
 def migrate_cdmods(
     src: Path,
     dst: Path,
@@ -113,9 +156,13 @@ def migrate_cdmods(
     See module docstring for the safety contract. Raises
     ``MigrationError`` on any verification or I/O failure; on raise
     ``src`` is left intact (we delete src LAST, after every file is
-    verified) and ``dst`` is left in whatever partial state the
-    failure produced — caller handles cleanup, or the next launch
-    can pick up the marker via :func:`detect_partial_migration`.
+    verified). A copy/verify failure also cleans up the partially-
+    copied destination tree (marker included) so the user can retry
+    into the same folder without hitting the non-empty guard. Only
+    the post-copy "source tree refused to delete" failure leaves the
+    marker in place, because at that point the verified data lives
+    in ``dst`` and must not be removed; the next launch picks that
+    up via :func:`detect_partial_migration`.
     """
     src = Path(src)
     dst = Path(dst)
@@ -150,30 +197,37 @@ def migrate_cdmods(
     logger.info(
         "cdmods migration: %d files from %s -> %s", total, src, dst)
 
-    for idx, src_file in enumerate(files, start=1):
-        rel = src_file.relative_to(src)
-        dst_file = dst / rel
-        if progress_callback is not None:
+    try:
+        for idx, src_file in enumerate(files, start=1):
+            rel = src_file.relative_to(src)
+            dst_file = dst / rel
+            if progress_callback is not None:
+                try:
+                    progress_callback(idx, total, str(rel))
+                except Exception as cb_err:
+                    # A buggy callback must not abort a real migration.
+                    logger.debug(
+                        "cdmods migration: progress callback raised: %s",
+                        cb_err)
+
             try:
-                progress_callback(idx, total, str(rel))
-            except Exception as cb_err:
-                # A buggy callback must not abort a real migration.
-                logger.debug(
-                    "cdmods migration: progress callback raised: %s", cb_err)
+                src_hash = _sha256_file(src_file)
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+                dst_hash = _sha256_file(dst_file)
+            except OSError as e:
+                raise MigrationError(
+                    f"copy failed for {src_file}: {e}") from e
 
-        try:
-            src_hash = _sha256_file(src_file)
-            dst_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, dst_file)
-            dst_hash = _sha256_file(dst_file)
-        except OSError as e:
-            raise MigrationError(
-                f"copy failed for {src_file}: {e}") from e
-
-        if src_hash != dst_hash:
-            raise MigrationError(
-                f"checksum mismatch after copy: {src_file} "
-                f"(src {src_hash[:12]} vs dst {dst_hash[:12]})")
+            if src_hash != dst_hash:
+                raise MigrationError(
+                    f"checksum mismatch after copy: {src_file} "
+                    f"(src {src_hash[:12]} vs dst {dst_hash[:12]})")
+    except MigrationError:
+        # Source is untouched; clear the half-copied destination so
+        # the user can retry without tripping the non-empty guard.
+        _cleanup_partial_destination(dst, marker)
+        raise
 
     # Every file copied + verified. Now delete the source tree.
     try:

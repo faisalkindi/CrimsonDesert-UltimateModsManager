@@ -32,17 +32,18 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import has_vanilla110, load_vanilla110
+
 _BASE = Path(__file__).resolve().parents[1] / "issue_repro" / "182"
-_V110 = _BASE / "vanilla110" / "iteminfo.pabgb"
 _V109 = _BASE / "versions" / "iteminfo - 1.09.pabgb"
 
 
-@pytest.mark.skipif(not _V110.exists(),
+@pytest.mark.skipif(not has_vanilla110("iteminfo.pabgb"),
                     reason="extracted CD 1.10 iteminfo fixture not present")
 def test_cd110_full_file_round_trips_byte_exact():
     from cdumm.engine.iteminfo_native_parser import (
         parse_iteminfo_from_bytes, serialize_iteminfo)
-    body = _V110.read_bytes()
+    body = load_vanilla110("iteminfo.pabgb")
     items = parse_iteminfo_from_bytes(body)
     assert len(items) > 6000
     assert serialize_iteminfo(items) == body, (
@@ -50,13 +51,32 @@ def test_cd110_full_file_round_trips_byte_exact():
         "iteminfo mods corrupt the file")
 
 
-@pytest.mark.skipif(not _V110.exists(),
+@pytest.mark.skipif(not has_vanilla110("iteminfo.pabgb"),
+                    reason="extracted CD 1.10 iteminfo fixture not present")
+def test_cd110_full_file_round_trips_with_index_framing():
+    """Index-framed parse (what the writer uses): must see every
+    index entry as its own record, including the large-key record the
+    sniff walk swallows (Delesyian_Flag, audit M12), and still
+    round-trip byte-exactly."""
+    from cdumm.engine.iteminfo_native_parser import (
+        parse_iteminfo_from_bytes, serialize_iteminfo)
+    from cdumm.semantic.parser import parse_pabgh_index
+    body = load_vanilla110("iteminfo.pabgb")
+    header = load_vanilla110("iteminfo.pabgh")
+    _, offsets = parse_pabgh_index(header, "iteminfo")
+    items = parse_iteminfo_from_bytes(
+        body, record_offsets=list(offsets.values()))
+    assert len(items) == len(offsets)
+    assert serialize_iteminfo(items) == body
+
+
+@pytest.mark.skipif(not has_vanilla110("iteminfo.pabgb"),
                     reason="extracted CD 1.10 iteminfo fixture not present")
 def test_cd110_first_record_size_matches_pabgh_index():
     from cdumm.engine.iteminfo_native_parser import parse_first_record_size
     from cdumm.semantic.parser import parse_pabgh_index
-    body = _V110.read_bytes()
-    header = (_V110.parent / "iteminfo.pabgh").read_bytes()
+    body = load_vanilla110("iteminfo.pabgb")
+    header = load_vanilla110("iteminfo.pabgh")
     _, offsets = parse_pabgh_index(header, "iteminfo")
     sorted_offs = sorted(offsets.items(), key=lambda kv: kv[1])
     expected = sorted_offs[1][1] - sorted_offs[0][1]

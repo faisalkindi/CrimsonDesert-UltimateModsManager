@@ -225,6 +225,21 @@ class BugReportPage(SmoothScrollArea):
         self._copy_btn.setText(tr("bug.copy"))
         self._save_btn.setText(tr("bug.save"))
         self._preview_label.setText(tr("bug.preview"))
+        # Re-fill the severity combo with translated items, preserving
+        # the user's current selection by index.
+        sev_idx = self._severity.currentIndex()
+        self._severity.blockSignals(True)
+        self._severity.clear()
+        self._severity.addItems([
+            tr("bug.crash"), tr("bug.wrong"),
+            tr("bug.visual"), tr("bug.other"),
+        ])
+        if 0 <= sev_idx < self._severity.count():
+            self._severity.setCurrentIndex(sev_idx)
+        self._severity.blockSignals(False)
+        # The composed report header embeds the severity text; refresh
+        # the preview so it reflects the new language immediately.
+        self._refresh_preview()
 
     # ------------------------------------------------------------------
     # Report generation

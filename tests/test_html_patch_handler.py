@@ -259,6 +259,49 @@ def test_handles_utf8_bom(tmp_path: Path):
     assert b'data-x="hit"' in out
 
 
+# ── Multi-match structural ops ──────────────────────────────────────
+# Audit finding 9: structural ops (replace / remove / append / ...)
+# used to `break` after editing only the FIRST match (highest offset),
+# leaving the other N-1 matches untouched. Reverse-document-order
+# iteration keeps earlier offsets valid, so all matches get patched.
+
+
+def test_replace_patches_all_matches(tmp_path: Path):
+    html = (b'<ul><li class="x">1</li><li class="x">2</li>'
+            b'<li class="x">3</li></ul>')
+    patch = tmp_path / "mod.html.patch"
+    patch.write_text(
+        '<replace at=".x"><li class="y">z</li></replace>',
+        encoding="utf-8")
+    out, _log = apply_patches(html, [("Mod", patch)])
+    out_str = out.decode("utf-8")
+    assert out_str.count('<li class="y">z</li>') == 3, (
+        f"structural replace must hit every selector match, got: "
+        f"{out_str}")
+    assert 'class="x"' not in out_str
+
+
+def test_remove_patches_all_matches(tmp_path: Path):
+    html = (b'<div><span class="ad">a</span><p>keep</p>'
+            b'<span class="ad">b</span></div>')
+    patch = tmp_path / "mod.html.patch"
+    patch.write_text('<remove at=".ad" />', encoding="utf-8")
+    out, _log = apply_patches(html, [("Mod", patch)])
+    out_str = out.decode("utf-8")
+    assert "ad" not in out_str
+    assert "<p>keep</p>" in out_str
+
+
+def test_append_patches_all_matches(tmp_path: Path):
+    html = (b'<ul class="menu"><li>a</li></ul>'
+            b'<ul class="menu"><li>b</li></ul>')
+    patch = tmp_path / "mod.html.patch"
+    patch.write_text(
+        '<append at=".menu"><li>new</li></append>', encoding="utf-8")
+    out, _log = apply_patches(html, [("Mod", patch)])
+    assert out.decode("utf-8").count("<li>new</li>") == 2
+
+
 # ── Multi-mod ordering ──────────────────────────────────────────────
 
 

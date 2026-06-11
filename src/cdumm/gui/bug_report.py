@@ -945,15 +945,9 @@ class BugReportDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.titleLabel)
 
         if is_crash:
-            desc = BodyLabel(
-                "The app didn't close normally last time. Please describe what "
-                "you were doing when it happened, then copy or save this report."
-            )
+            desc = BodyLabel(tr("bug.crash_desc"))
         else:
-            desc = BodyLabel(
-                "Describe the problem below, then copy or save the report.\n"
-                "Attach it to your Nexus Mods bug report page."
-            )
+            desc = BodyLabel(tr("bug.normal_desc"))
         desc.setWordWrap(True)
         self.viewLayout.addWidget(desc)
 
@@ -1050,7 +1044,7 @@ class BugReportDialog(MessageBoxBase):
             f"cdumm_bug_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
         default_path = default_export_dir(getattr(self, "_db", None)) / default_name
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Bug Report",
+            self, tr("bug_page.save_dialog_title"),
             str(default_path),
             "Text Files (*.txt)",
         )

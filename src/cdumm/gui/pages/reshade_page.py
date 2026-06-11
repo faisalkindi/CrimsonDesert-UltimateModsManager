@@ -84,7 +84,7 @@ class ReshadePage(SmoothScrollArea):
         self._focus_refresh_timer.setSingleShot(True)
         self._focus_refresh_timer.timeout.connect(self.refresh)
 
-        # Game-running poll — only runs while page is visible.
+        # Game-running poll, only runs while page is visible.
         self._game_poll_timer = QTimer(self)
         self._game_poll_timer.setInterval(_GAME_POLL_MS)
         self._game_poll_timer.timeout.connect(self._poll_game_running)
@@ -117,6 +117,7 @@ class ReshadePage(SmoothScrollArea):
         tf.setPixelSize(28)
         tf.setWeight(QFont.Weight.Bold)
         title.setFont(tf)
+        self._title_label = title
         header.addWidget(title)
         header.addStretch()
 
@@ -145,7 +146,7 @@ class ReshadePage(SmoothScrollArea):
         self.setWidget(self._container)
 
     def set_managers(self, **kwargs) -> None:
-        """Wire the page's managers. Detection does NOT run synchronously —
+        """Wire the page's managers. Detection does NOT run synchronously , 
         it would block the main window during startup (the scan reads every
         preset file to classify it). Instead, we queue the first refresh
         behind a 0ms timer so the window paints first, THEN we scan. On Qt,
@@ -168,6 +169,18 @@ class ReshadePage(SmoothScrollArea):
             return
         self._last_detect = detect_reshade_install(self._game_dir)
         self._rebuild_body(self._last_detect)
+
+    def retranslate_ui(self) -> None:
+        """Update header text after a language change. The body is
+        rebuilt from tr() on every refresh, so re-running refresh
+        covers the dynamic part when a detection result exists."""
+        self._title_label.setText(tr("reshade.title"))
+        if self._revert_btn is not None:
+            self._revert_btn.setText(tr("reshade.revert_btn"))
+            self._revert_btn.setToolTip(tr("reshade.revert_tooltip"))
+        self._refresh_btn.setText(tr("reshade.refresh"))
+        if self._last_detect is not None:
+            self._rebuild_body(self._last_detect)
 
     def _rebuild_body(self, install: ReshadeInstall) -> None:
         _clear_layout(self._body_layout)
@@ -257,7 +270,7 @@ class ReshadePage(SmoothScrollArea):
         self._body_layout.addWidget(self._running_banner)
 
         # Apply the hidden-list filter for the display. The active preset
-        # always stays visible — hiding the active one would be confusing.
+        # always stays visible, hiding the active one would be confusing.
         hidden = self._get_hidden_presets()
         active = self._compute_active_preset(install)
         from cdumm.engine.reshade_preset_ops import filter_visible_presets
@@ -276,7 +289,7 @@ class ReshadePage(SmoothScrollArea):
         slay.setContentsMargins(32, 20, 32, 20)
         slay.setSpacing(6)
 
-        # Title varies based on whether add-ons are present — "ReShade" vs
+        # Title varies based on whether add-ons are present, "ReShade" vs
         # "ReShade + Add-on Support". The distinction matters for users who
         # want RenoDX / Ultra Limiter / etc. to work.
         title_key = ("reshade.installed_title_with_addons"
@@ -415,6 +428,10 @@ class ReshadePage(SmoothScrollArea):
             else tr("reshade.already_active_btn"),
             row)
         btn.setEnabled(not is_active)  # disabled if already active
+        # State flag so _apply_running_state never compares display
+        # text against tr(), a mid-session language switch would
+        # otherwise break the comparison and re-enable this button.
+        btn.setProperty("_cdumm_active_row", is_active)
         btn.clicked.connect(lambda _=False, p=preset_path: self._on_activate(p))
         row_lay.addWidget(btn)
 
@@ -452,18 +469,18 @@ class ReshadePage(SmoothScrollArea):
         try:
             return read_active_preset(
                 install.ini_path, install.base_path, bin64)
-        except Exception as e:  # noqa: BLE001 — best-effort for display
+        except Exception as e:  # noqa: BLE001, best-effort for display
             logger.debug("compute_active_preset: %s", e)
             return None
 
     # ── Game-running poll ----------------------------------------------
 
-    def showEvent(self, event):  # noqa: N802 — Qt API
+    def showEvent(self, event):  # noqa: N802, Qt API
         super().showEvent(event)
         self._poll_game_running()
         self._game_poll_timer.start()
 
-    def hideEvent(self, event):  # noqa: N802 — Qt API
+    def hideEvent(self, event):  # noqa: N802, Qt API
         super().hideEvent(event)
         self._game_poll_timer.stop()
 
@@ -483,9 +500,8 @@ class ReshadePage(SmoothScrollArea):
         for _, btn in self._preset_rows:
             # Skip buttons that should stay permanently disabled regardless:
             # the already-active Activate button, and the delete button on
-            # the active row.
-            if btn.text() == tr("reshade.already_active_btn"):
-                continue
+            # the active row. State carried via a Qt property, comparing
+            # btn.text() against tr() broke after a language switch.
             if btn.property("_cdumm_active_row"):
                 continue
             btn.setEnabled(not self._game_running)
@@ -504,7 +520,7 @@ class ReshadePage(SmoothScrollArea):
                  if self._last_detect.dll_path else (self._game_dir / "bin64"))
         base = self._last_detect.base_path
         # Write a relative path when the preset lives underneath base/bin64,
-        # absolute otherwise — matches ReShade's own writing convention.
+        # absolute otherwise, matches ReShade's own writing convention.
         preset_value = self._format_preset_value(preset_path, base or bin64)
 
         try:
@@ -760,7 +776,7 @@ class ReshadePage(SmoothScrollArea):
         try:
             from cdumm.storage.config import Config
             val = Config(self._db).get(_RESHADE_LAST_PRESET_KEY)
-            return val  # may be "" — that's still a meaningful previous state
+            return val  # may be "", that's still a meaningful previous state
         except Exception as e:  # noqa: BLE001
             logger.debug("get_last_preset failed: %s", e)
             return None
@@ -841,7 +857,7 @@ class ReshadePage(SmoothScrollArea):
 
     # ── Focus-triggered refresh ---------------------------------------
 
-    def focusInEvent(self, event):  # noqa: N802 — Qt API
+    def focusInEvent(self, event):  # noqa: N802, Qt API
         super().focusInEvent(event)
         self._focus_refresh_timer.start()
 
@@ -852,7 +868,7 @@ def _run_modal(dialog) -> bool:
     """Show a QDialog modally and return True if the user accepted.
 
     Wrapper exists so callers don't write literal `.exec()` (keeps security
-    linters happy — they sometimes false-positive on the shell exec).
+    linters happy, they sometimes false-positive on the shell exec).
     """
     method = getattr(dialog, "exec")
     return bool(method())

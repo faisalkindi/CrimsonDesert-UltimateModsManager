@@ -270,7 +270,7 @@ class SettingsPage(SmoothScrollArea):
         self._nexus_check_btn.setIcon(FluentIcon.SYNC)
         self._nexus_check_btn.setMinimumWidth(200)
         self._nexus_check_btn.clicked.connect(self._on_check_nexus_updates)
-        self._nexus_card.addGroup(
+        self._nexus_check_group = self._nexus_card.addGroup(
             FluentIcon.SYNC,
             tr("settings.nexus_check_row_title"),
             tr("settings.nexus_check_row_desc"),
@@ -296,6 +296,7 @@ class SettingsPage(SmoothScrollArea):
         save_key_btn.setMinimumWidth(84)
         save_key_btn.clicked.connect(self._on_save_nexus_key)
         key_row.addWidget(save_key_btn)
+        self._nexus_save_key_btn = save_key_btn
         self._nexus_advanced_group = self._nexus_card.addGroup(
             FluentIcon.VPN,
             tr("settings.nexus_key_row_title"),
@@ -338,7 +339,7 @@ class SettingsPage(SmoothScrollArea):
         self._sso_label = BodyLabel("")
         self._sso_label.setWordWrap(True)
         sso_layout.addWidget(self._sso_label, 1)
-        self._sso_login_btn = PushButton("Login with Nexus")
+        self._sso_login_btn = PushButton(tr("settings.sso_login"))
         self._sso_login_btn.setMinimumWidth(160)
         self._sso_login_btn.clicked.connect(self._on_sso_button_clicked)
         sso_layout.addWidget(self._sso_login_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -361,14 +362,11 @@ class SettingsPage(SmoothScrollArea):
             nxm_layout = QHBoxLayout(nxm_row)
             nxm_layout.setContentsMargins(6, 4, 6, 4)
             nxm_layout.setSpacing(8)
-            nxm_label = BodyLabel(
-                "Handle nxm:// links — when you click 'Mod Manager "
-                "Download' on a Nexus mod page, the file is sent to CDUMM "
-                "automatically (premium users download directly; free "
-                "users still route through the website's button).")
+            nxm_label = BodyLabel(tr("settings.nxm_row_desc"))
             nxm_label.setWordWrap(True)
             nxm_layout.addWidget(nxm_label, 1)
-            self._nxm_toggle_btn = PushButton("Register")
+            self._nxm_label = nxm_label
+            self._nxm_toggle_btn = PushButton(tr("settings.nxm_register"))
             self._nxm_toggle_btn.setMinimumWidth(160)
             self._nxm_toggle_btn.clicked.connect(self._on_nxm_toggle)
             nxm_layout.addWidget(
@@ -378,6 +376,7 @@ class SettingsPage(SmoothScrollArea):
             self._refresh_nxm_button()
         else:
             self._nxm_toggle_btn = None  # for the refresh helper below
+            self._nxm_label = None
 
         # ── Advanced toggle row (last) ─────────────────────────────
         # Hyperlink-style toggle that reveals/hides the manual API
@@ -390,7 +389,7 @@ class SettingsPage(SmoothScrollArea):
         advanced_layout.setContentsMargins(6, 0, 6, 0)
         advanced_layout.setSpacing(6)
         self._nexus_advanced_toggle = HyperlinkButton(
-            "", "Show manual API key field")
+            "", tr("settings.nexus_advanced_show"))
         self._nexus_advanced_toggle.setIcon(FluentIcon.SETTING)
 
         def _toggle_advanced_key_row() -> None:
@@ -399,8 +398,8 @@ class SettingsPage(SmoothScrollArea):
             new_visible = not self._nexus_advanced_group.isVisible()
             self._nexus_advanced_group.setVisible(new_visible)
             self._nexus_advanced_toggle.setText(
-                "Hide manual API key field" if new_visible
-                else "Show manual API key field")
+                tr("settings.nexus_advanced_hide") if new_visible
+                else tr("settings.nexus_advanced_show"))
 
         self._nexus_advanced_toggle.clicked.connect(_toggle_advanced_key_row)
         advanced_layout.addWidget(self._nexus_advanced_toggle)
@@ -422,7 +421,7 @@ class SettingsPage(SmoothScrollArea):
         self._privatebin_instance_input.setPlaceholderText("https://privatebin.net")
         self._privatebin_instance_input.setMinimumWidth(320)
         self._privatebin_instance_input.setClearButtonEnabled(True)
-        self._privatebin_card.addGroup(
+        self._privatebin_instance_group = self._privatebin_card.addGroup(
             FluentIcon.LINK,
             tr("settings.privatebin_instance_row_title"),
             tr("settings.privatebin_instance_row_desc"),
@@ -435,9 +434,11 @@ class SettingsPage(SmoothScrollArea):
         exp_row.setContentsMargins(0, 0, 0, 0)
         exp_row.setSpacing(8)
         self._privatebin_expire_combo = ComboBox()
-        self._privatebin_expire_combo.addItems([
-            "10 minutes", "1 hour", "1 day", "1 week", "1 month", "1 year",
-        ])
+        # Display labels are translated; the protocol codes sent to the
+        # PrivateBin API live in ``_privatebin_expire_codes`` (matched
+        # by index), so translating the labels is safe.
+        self._privatebin_expire_combo.addItems(
+            self._privatebin_expire_labels())
         self._privatebin_expire_combo.setFixedWidth(160)
         self._privatebin_expire_codes = ["10min", "1hour", "1day", "1week", "1month", "1year"]
         exp_row.addWidget(self._privatebin_expire_combo)
@@ -445,7 +446,8 @@ class SettingsPage(SmoothScrollArea):
         pb_save.setMinimumWidth(84)
         pb_save.clicked.connect(self._on_save_privatebin_settings)
         exp_row.addWidget(pb_save)
-        self._privatebin_card.addGroup(
+        self._privatebin_save_btn = pb_save
+        self._privatebin_expire_group = self._privatebin_card.addGroup(
             FluentIcon.HISTORY,
             tr("settings.privatebin_expire_row_title"),
             tr("settings.privatebin_expire_row_desc"),
@@ -459,6 +461,7 @@ class SettingsPage(SmoothScrollArea):
         hint.setWordWrap(True)
         hint.setContentsMargins(6, 0, 6, 0)
         self._layout.addWidget(hint)
+        self._privatebin_hint = hint
 
         # ── Mod storage location (cdmods_path override) ──────────
         # Lets users redirect CDMods/ (sources, vanilla snapshots,
@@ -484,7 +487,7 @@ class SettingsPage(SmoothScrollArea):
         self._cdmods_change_btn.setMinimumWidth(140)
         self._cdmods_change_btn.clicked.connect(self._on_change_cdmods_path)
         cdmods_row.addWidget(self._cdmods_change_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._cdmods_path_card.addGroup(
+        self._cdmods_path_group = self._cdmods_path_card.addGroup(
             FluentIcon.FOLDER,
             tr("settings.cdmods_path_row_title"),
             tr("settings.cdmods_path_row_desc"),
@@ -592,6 +595,100 @@ class SettingsPage(SmoothScrollArea):
         self._import_list_card.setTitle(tr("settings.import_list"))
         self._import_list_card.setContent(tr("settings.import_list_desc"))
         self._import_list_card.button.setText(tr("settings.import"))
+        # Steam launch method card + combo (labels only; persisted value
+        # is the index-mapped code, so re-filling by index is safe)
+        self._steam_launch_method_card.setTitle(
+            tr("settings.steam_launch_method"))
+        self._steam_launch_method_card.setContent(
+            tr("settings.steam_launch_method_desc"))
+        self._steam_launch_method_combo.blockSignals(True)
+        idx = self._steam_launch_method_combo.currentIndex()
+        self._steam_launch_method_combo.clear()
+        self._steam_launch_method_combo.addItems([
+            tr("settings.steam_launch_method_uri"),
+            tr("settings.steam_launch_method_applaunch"),
+            tr("settings.steam_launch_method_exe"),
+        ])
+        if 0 <= idx < self._steam_launch_method_combo.count():
+            self._steam_launch_method_combo.setCurrentIndex(idx)
+        self._steam_launch_method_combo.blockSignals(False)
+        # NexusMods card rows
+        self._nexus_card.setTitle(tr("settings.nexus_title"))
+        self._nexus_check_btn.setText(tr("settings.nexus_check"))
+        if self._nexus_check_group is not None:
+            self._nexus_check_group.setTitle(
+                tr("settings.nexus_check_row_title"))
+            self._nexus_check_group.setContent(
+                tr("settings.nexus_check_row_desc"))
+        if self._nexus_advanced_group is not None:
+            self._nexus_advanced_group.setTitle(
+                tr("settings.nexus_key_row_title"))
+            self._nexus_advanced_group.setContent(
+                tr("settings.nexus_key_row_desc"))
+            self._nexus_advanced_toggle.setText(
+                tr("settings.nexus_advanced_hide")
+                if self._nexus_advanced_group.isVisible()
+                else tr("settings.nexus_advanced_show"))
+        self._nexus_key_input.setPlaceholderText(
+            tr("settings.nexus_key_placeholder"))
+        self._nexus_save_key_btn.setText(tr("settings.nexus_save"))
+        self._nexus_get_key_link.setText(tr("settings.nexus_get_key"))
+        # SSO + nxm:// rows are state-aware; the refresh helpers
+        # already pull every label/tooltip through tr().
+        self._refresh_sso_button()
+        self._refresh_nxm_button()
+        if getattr(self, "_nxm_label", None) is not None:
+            self._nxm_label.setText(tr("settings.nxm_row_desc"))
+        # PrivateBin card
+        self._privatebin_card.setTitle(tr("settings.privatebin_title"))
+        if self._privatebin_instance_group is not None:
+            self._privatebin_instance_group.setTitle(
+                tr("settings.privatebin_instance_row_title"))
+            self._privatebin_instance_group.setContent(
+                tr("settings.privatebin_instance_row_desc"))
+        if self._privatebin_expire_group is not None:
+            self._privatebin_expire_group.setTitle(
+                tr("settings.privatebin_expire_row_title"))
+            self._privatebin_expire_group.setContent(
+                tr("settings.privatebin_expire_row_desc"))
+        self._privatebin_save_btn.setText(tr("settings.nexus_save"))
+        self._privatebin_hint.setText(tr("settings.privatebin_hint"))
+        self._privatebin_expire_combo.blockSignals(True)
+        idx = self._privatebin_expire_combo.currentIndex()
+        self._privatebin_expire_combo.clear()
+        self._privatebin_expire_combo.addItems(
+            self._privatebin_expire_labels())
+        if 0 <= idx < self._privatebin_expire_combo.count():
+            self._privatebin_expire_combo.setCurrentIndex(idx)
+        self._privatebin_expire_combo.blockSignals(False)
+        # CDMods storage location card
+        self._cdmods_path_card.setTitle(tr("settings.cdmods_path_section"))
+        if self._cdmods_path_group is not None:
+            self._cdmods_path_group.setTitle(
+                tr("settings.cdmods_path_row_title"))
+            self._cdmods_path_group.setContent(
+                tr("settings.cdmods_path_row_desc"))
+        self._cdmods_change_btn.setText(tr("settings.cdmods_path_change"))
+        self._refresh_cdmods_path_label()
+        # About / patch notes card
+        from cdumm import __version__ as _cdumm_version
+        self._about_card.setTitle(
+            tr("settings.about_title", version=_cdumm_version))
+        self._about_card.setContent(tr("settings.about_desc"))
+        self._about_card.button.setText(tr("settings.view_patch_notes"))
+
+    @staticmethod
+    def _privatebin_expire_labels() -> list[str]:
+        """Translated display labels for the PrivateBin expiry combo.
+        Index-aligned with ``_privatebin_expire_codes``."""
+        return [
+            tr("settings.privatebin_expire_10min"),
+            tr("settings.privatebin_expire_1hour"),
+            tr("settings.privatebin_expire_1day"),
+            tr("settings.privatebin_expire_1week"),
+            tr("settings.privatebin_expire_1month"),
+            tr("settings.privatebin_expire_1year"),
+        ]
 
     # ------------------------------------------------------------------
     # Internals
@@ -782,7 +879,7 @@ class SettingsPage(SmoothScrollArea):
         """Open a folder browser to change the game directory."""
         current = str(self._game_dir) if self._game_dir else ""
         new_dir = QFileDialog.getExistingDirectory(
-            self.window(), "Select Crimson Desert Game Directory", current)
+            self.window(), tr("settings.game_dir_picker_title"), current)
         if not new_dir:
             return
 
@@ -844,9 +941,9 @@ class SettingsPage(SmoothScrollArea):
             return  # row hidden on macOS / Linux
         from cdumm.engine.nxm_handler import is_handler_registered
         if is_handler_registered():
-            self._nxm_toggle_btn.setText("Unregister")
+            self._nxm_toggle_btn.setText(tr("settings.nxm_unregister"))
         else:
-            self._nxm_toggle_btn.setText("Register")
+            self._nxm_toggle_btn.setText(tr("settings.nxm_register"))
 
     def _on_nxm_toggle(self) -> None:
         """Register/unregister CDUMM as the nxm:// protocol handler.
@@ -866,8 +963,7 @@ class SettingsPage(SmoothScrollArea):
         from cdumm.platform import IS_LINUX, IS_WINDOWS
         if not (IS_WINDOWS or IS_LINUX):
             self._set_nexus_status(
-                "nxm:// handler registration isn't supported on this "
-                "platform yet.",
+                tr("settings.nxm_unsupported_platform"),
                 InfoLevel.INFOAMTION)
             return
         from cdumm.engine.nxm_handler import (
@@ -876,8 +972,8 @@ class SettingsPage(SmoothScrollArea):
         )
         if is_handler_registered():
             ok = unregister_handler()
-            msg = ("nxm:// handler unregistered." if ok
-                   else "Could not fully unregister nxm:// handler — check the log.")
+            msg = (tr("settings.nxm_unregistered") if ok
+                   else tr("settings.nxm_unregister_failed"))
             self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
             self._refresh_nxm_button()
             return
@@ -886,7 +982,7 @@ class SettingsPage(SmoothScrollArea):
         ok = register_handler(force=False)
         if ok:
             self._set_nexus_status(
-                "CDUMM is now the nxm:// handler for your user account.",
+                tr("settings.nxm_registered"),
                 InfoLevel.SUCCESS)
             self._refresh_nxm_button()
             return
@@ -896,31 +992,24 @@ class SettingsPage(SmoothScrollArea):
         from PySide6.QtWidgets import QMessageBox
         box = QMessageBox(self.window())
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Another nxm:// handler is registered")
-        box.setText(
-            "Another application is currently registered as the "
-            "nxm:// handler — usually Vortex or Mod Organizer 2.")
+        box.setWindowTitle(tr("settings.nxm_other_handler_title"))
+        box.setText(tr("settings.nxm_other_handler_text"))
         box.setInformativeText(
-            f"Current handler:\n{existing_cmd}\n\n"
-            "If you replace it, 'Mod Manager Download' clicks on "
-            "Nexus will route to CDUMM instead. You can switch back "
-            "by running the other manager's setup again.")
+            tr("settings.nxm_other_handler_info", handler=existing_cmd))
         box.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         choice = box.exec_() if hasattr(box, "exec_") else box.exec()
         if choice != QMessageBox.StandardButton.Yes:
             self._set_nexus_status(
-                "nxm:// registration cancelled — existing handler kept.",
+                tr("settings.nxm_register_cancelled"),
                 InfoLevel.INFOAMTION)
             self._refresh_nxm_button()
             return
 
         ok = register_handler(force=True)
-        msg = ("CDUMM is now the nxm:// handler for your user "
-               "account." if ok else "Registration failed — CDUMM "
-               "must be running from a stable install path (packaged "
-               "build or editable install) to register as a handler.")
+        msg = (tr("settings.nxm_registered") if ok
+               else tr("settings.nxm_register_failed"))
         self._set_nexus_status(msg, InfoLevel.SUCCESS if ok else InfoLevel.ERROR)
         self._refresh_nxm_button()
 
@@ -939,30 +1028,21 @@ class SettingsPage(SmoothScrollArea):
         sso_ready = not slug_placeholder()
         saved_key = (Config(self._db).get("nexus_api_key") or "").strip()
         if saved_key:
-            self._sso_label.setText(
-                "Signed in to Nexus. Click 'Sign out' to clear the "
-                "saved API key.")
-            self._sso_login_btn.setText("Sign out")
+            self._sso_label.setText(tr("settings.sso_signed_in_label"))
+            self._sso_login_btn.setText(tr("settings.sso_signout"))
             self._sso_login_btn.setEnabled(True)
             self._sso_login_btn.setToolTip(
-                "Removes the saved API key. You'll need to sign in "
-                "again to check for mod updates.")
+                tr("settings.sso_signout_tooltip"))
         else:
-            self._sso_label.setText(
-                "Login with Nexus — opens your browser to sign in, "
-                "no manual key paste. CDUMM's application slug is "
-                "approved by Nexus; this is the recommended flow.")
-            self._sso_login_btn.setText("Login with Nexus")
+            self._sso_label.setText(tr("settings.sso_login_label"))
+            self._sso_login_btn.setText(tr("settings.sso_login"))
             self._sso_login_btn.setEnabled(sso_ready)
             if sso_ready:
                 self._sso_login_btn.setToolTip(
-                    "Opens your browser to sign in with your Nexus "
-                    "Mods account. CDUMM never sees your password.")
+                    tr("settings.sso_login_tooltip"))
             else:
                 self._sso_login_btn.setToolTip(
-                    "Pending Nexus approval of CDUMM's application "
-                    "slug. Until approved, paste your personal API "
-                    "key via the Advanced toggle below.")
+                    tr("settings.sso_pending_tooltip"))
 
     def _on_sso_button_clicked(self) -> None:
         """Dispatch the dual-purpose SSO/Sign-out button."""
@@ -1013,7 +1093,7 @@ class SettingsPage(SmoothScrollArea):
         except Exception as _e:
             logger.debug("post-logout pill clear failed: %s", _e)
         self._set_nexus_status(
-            "Signed out. Sign in again to check for mod updates.",
+            tr("settings.sso_signed_out_status"),
             InfoLevel.INFOAMTION)
         self._refresh_sso_button()
 
@@ -1023,7 +1103,7 @@ class SettingsPage(SmoothScrollArea):
         from cdumm.engine.nexus_sso import start_sso_flow
         self._sso_login_btn.setEnabled(False)
         self._set_nexus_status(
-            "Opening browser for Nexus login…", InfoLevel.INFOAMTION)
+            tr("settings.sso_opening_browser"), InfoLevel.INFOAMTION)
 
         def _on_key(api_key: str) -> None:
             # Called from the websocket thread — marshal to GUI thread
@@ -1059,8 +1139,7 @@ class SettingsPage(SmoothScrollArea):
         except Exception as _e:
             logger.debug("auth banner clear (SSO) failed: %s", _e)
         self._set_nexus_status(
-            "Signed in via Nexus SSO. API key saved. Checking for "
-            "mod updates...", InfoLevel.SUCCESS)
+            tr("settings.sso_signed_in_status"), InfoLevel.SUCCESS)
         # Flip the dual-purpose button to "Sign out" mode now that
         # a key is saved.
         self._refresh_sso_button()
@@ -1072,8 +1151,10 @@ class SettingsPage(SmoothScrollArea):
 
     @Slot()
     def _sso_finished_err(self) -> None:
-        msg = getattr(self, "_pending_sso_err", "Unknown SSO error")
-        self._set_nexus_status(f"SSO failed: {msg}", InfoLevel.ERROR)
+        msg = (getattr(self, "_pending_sso_err", "")
+               or tr("settings.sso_unknown_error"))
+        self._set_nexus_status(
+            tr("settings.sso_failed", error=msg), InfoLevel.ERROR)
         # Re-enable so the user can retry. Only disabled when the slug
         # itself is not yet approved.
         from cdumm.engine.nexus_sso import slug_placeholder
@@ -1277,8 +1358,7 @@ class SettingsPage(SmoothScrollArea):
             return
         if kind == "rate_limited":
             self._set_nexus_status(
-                "Nexus rate limit reached — try again after the "
-                "hourly window resets.", InfoLevel.WARNING)
+                tr("settings.nexus_rate_limited"), InfoLevel.WARNING)
             return
         if kind == "generic":
             self._set_nexus_status(
@@ -1302,7 +1382,7 @@ class SettingsPage(SmoothScrollArea):
         from PySide6.QtWidgets import QMessageBox
         msg = QMessageBox(self.window())
         msg.setWindowTitle(tr("settings.nexus_updates_title", count=len(outdated)))
-        msg.setText("Newer versions on NexusMods:\n\n" + "\n".join(lines))
+        msg.setText(tr("settings.nexus_newer_versions") + "\n\n" + "\n".join(lines))
         # Qt 6 deprecated exec_ in favour of exec; both still work on the
         # PySide6 versions we ship. Must stay MODAL — msg.show() (the old
         # fallback) was modeless, which Codex flagged as P2.

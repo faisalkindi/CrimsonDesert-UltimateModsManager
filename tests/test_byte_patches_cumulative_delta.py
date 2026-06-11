@@ -113,11 +113,17 @@ def test_pattern_scan_relocation_uses_original_offset_for_shift_tracker():
         {"offset": 0x200, "original": "bbbb", "patched": "3333"},
     ]
     applied, mm, relocated = _apply_byte_patches(data, changes)
-    # Both apply; patch 1 lands where pattern_scan found it (0x120),
-    # patch 2 lands at 0x200 where its bytes actually live.
+    # Both apply; patch 1 lands where pattern_scan found it (0x120).
+    # Since 2026-06-10 the relocated write replaces the ORIGINAL's
+    # length, so the 2 -> 4 byte grow shifts everything after 0x120
+    # by +2: patch 2's bytes physically move to 0x202 and the shift
+    # tracker (recording at the original sort-key primary) finds them
+    # there. Before that fix the grow clobbered 2 bytes in place and
+    # patch 2 only landed via relocation recovery.
     assert applied == 2, f"both must apply, got {applied} mm={mm}"
+    assert len(data) == 0x300 + 2, "relocated grow must extend the buffer"
     assert data[0x120:0x124] == b"\x11\x11\x22\x22"
-    assert data[0x200:0x202] == b"\x33\x33"
+    assert data[0x202:0x204] == b"\x33\x33"
 
 
 def test_fallback_bounds_clamp_uses_cumulative_delta():

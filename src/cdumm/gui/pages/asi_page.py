@@ -164,6 +164,11 @@ class AsiCard(CardWidget):
     ):
         super().__init__(parent)
         self._plugin = plugin
+        # Raw on-disk plugin name (file stem). The label shows a
+        # prettified version of it; rename plumbing must operate on
+        # THIS string or the page-side lookup by plugin.name never
+        # matches and the rename silently fails to persist.
+        self._raw_name = plugin.name
         self._selected = False
         self._drag_started = False
 
@@ -223,7 +228,8 @@ class AsiCard(CardWidget):
 
         # Author line — show hook count if any, otherwise empty
         if plugin.hook_targets:
-            author_text = f"{len(plugin.hook_targets)} hook target(s)"
+            author_text = tr("asi.hook_targets",
+                             count=len(plugin.hook_targets))
         else:
             author_text = ""
         self._author_label = CaptionLabel(author_text)
@@ -328,7 +334,10 @@ class AsiCard(CardWidget):
 
     def start_rename(self) -> None:
         """Switch to inline edit mode for the name."""
-        self._name_edit.setText(self._name_label.text())
+        # Seed with the RAW plugin name (the actual file stem), not
+        # the prettified label, so the rename operates on real file
+        # names.
+        self._name_edit.setText(self._raw_name)
         self._name_label.setVisible(False)
         self._name_edit.setVisible(True)
         self._name_edit.setFocus()
@@ -339,10 +348,14 @@ class AsiCard(CardWidget):
         if not self._name_edit.isVisible():
             return
         new_name = self._name_edit.text().strip()
-        old_name = self._name_label.text()
+        # Emit the RAW plugin name as old_name. The page handler looks
+        # the plugin up by its raw name; emitting the prettified label
+        # text never matched, so renames silently failed to persist.
+        old_name = self._raw_name
         self._name_edit.setVisible(False)
         self._name_label.setVisible(True)
         if new_name and new_name != old_name:
+            self._raw_name = new_name
             self._name_label.setText(new_name)
             self.renamed.emit(old_name, new_name)
 
@@ -484,7 +497,14 @@ class AsiCard(CardWidget):
 
     def retranslate_version(self) -> None:
         """Re-render the version pill in the current locale (H3 fix)."""
-        if getattr(self, "_has_update", False):
+        has_update = getattr(self, "_has_update", None)
+        if has_update is None:
+            # No update check has run for this card. Repaint the
+            # neutral grey pill instead of the green "up to date"
+            # state for an unknown status.
+            self._apply_version_style()
+            return
+        if has_update:
             self.set_update_available(
                 True, getattr(self, "_nexus_url", "") or "",
                 nexus_mod_id=getattr(self, "_nexus_mod_id", 0),
@@ -1447,8 +1467,9 @@ class AsiPluginsPage(QWidget):
                     # already populated.
                     card.fill_missing_version(getattr(u, "latest_version", ""))
                     card.set_update_available(False)
-            elif nexus_id:
-                card.set_update_available(False)
+            # No entry in `updates` means the plugin was NOT checked
+            # this cycle. Leave the pill grey (unknown) instead of
+            # painting the green "up to date" state.
         # Refresh the summary bar's Outdated count.
         self._update_stats()
 
@@ -1646,7 +1667,8 @@ class AsiPluginsPage(QWidget):
             ))
             menu.addSeparator()
             menu.addAction(Action(
-                FluentIcon.DELETE, f"Uninstall {len(selected_names)} plugins",
+                FluentIcon.DELETE,
+                tr("asi.uninstall_n_plugins", count=len(selected_names)),
                 triggered=lambda: self._ctx_batch_uninstall(selected_names),
             ))
         else:
@@ -1687,16 +1709,16 @@ class AsiPluginsPage(QWidget):
             nexus_id = self._get_plugin_nexus_id(plugin_name)
             if nexus_id:
                 menu.addAction(Action(
-                    FluentIcon.LINK, "Open on NexusMods",
+                    FluentIcon.LINK, tr("mod_context.open_nexus"),
                     triggered=lambda: self._ctx_open_nexus(nexus_id),
                 ))
                 menu.addAction(Action(
-                    FluentIcon.EDIT, "Change NexusMods Link",
+                    FluentIcon.EDIT, tr("mod_context.change_nexus_link"),
                     triggered=lambda: self._ctx_link_nexus(plugin_name),
                 ))
             else:
                 menu.addAction(Action(
-                    FluentIcon.LINK, "Link to NexusMods",
+                    FluentIcon.LINK, tr("mod_context.link_nexus"),
                     triggered=lambda: self._ctx_link_nexus(plugin_name),
                 ))
 
@@ -1726,7 +1748,7 @@ class AsiPluginsPage(QWidget):
 
             # Uninstall
             menu.addAction(Action(
-                FluentIcon.DELETE, "Uninstall",
+                FluentIcon.DELETE, tr("mod_context.uninstall"),
                 triggered=lambda: self._ctx_uninstall(plugin_name),
             ))
 
@@ -1752,8 +1774,8 @@ class AsiPluginsPage(QWidget):
         from PySide6.QtWidgets import QInputDialog
         from qfluentwidgets import InfoBar, InfoBarPosition
         url, ok = QInputDialog.getText(
-            self, "Link to NexusMods",
-            "Paste the NexusMods mod URL:\n(e.g. nexusmods.com/crimsondesert/mods/125)")
+            self, tr("mod_context.link_nexus"),
+            tr("nexus.link_prompt"))
         if not ok or not url:
             return
         import re
@@ -1831,6 +1853,13 @@ class AsiPluginsPage(QWidget):
         plugin = self._find_plugin(old_name)
         if not plugin:
             return
+        # Capture the INI path BEFORE renaming the .asi. The new INI
+        # name is derived from the ini's CURRENT stem so suffix-style
+        # companions (Foo_settings.ini for Foo.asi) keep their suffix
+        # instead of being flattened to user display text.
+        old_ini = None
+        if plugin.ini_path and plugin.ini_path.exists():
+            old_ini = plugin.ini_path
         ext = ".asi" if plugin.enabled else ".asi.disabled"
         new_path = plugin.path.parent / (new_name + ext)
         try:
@@ -1839,12 +1868,16 @@ class AsiPluginsPage(QWidget):
             logger.warning("Failed to rename plugin: %s", e)
             self.refresh()
             return
-        try:
-            if plugin.ini_path and plugin.ini_path.exists():
-                new_ini = plugin.path.parent / (new_name + ".ini")
-                plugin.ini_path.rename(new_ini)
-        except OSError as e:
-            logger.warning("Failed to rename plugin INI: %s", e)
+        if old_ini is not None:
+            old_stem = old_ini.stem
+            if old_stem.lower().startswith(old_name.lower()):
+                new_stem = new_name + old_stem[len(old_name):]
+            else:
+                new_stem = new_name
+            try:
+                old_ini.rename(old_ini.with_name(new_stem + ".ini"))
+            except OSError as e:
+                logger.warning("Failed to rename plugin INI: %s", e)
         # Update DB state to track the new name
         if self._db:
             try:
@@ -1869,7 +1902,7 @@ class AsiPluginsPage(QWidget):
 
         box = MessageBox(
             tr("asi.uninstall_plugin"),
-            f'Remove "{plugin.name}"? This cannot be undone.',
+            tr("asi.uninstall_confirm_one", name=plugin.name),
             self.window(),
         )
         if box.exec():

@@ -25,6 +25,19 @@ import pytest
 from cdumm.storage import game_finder
 
 
+def _symlink_or_skip(link: Path, target: Path, *,
+                     target_is_directory: bool = False) -> None:
+    """Create a symlink, or skip the test when the OS refuses.
+
+    Windows needs admin rights (or Developer Mode) to create symlinks;
+    plain accounts raise WinError 1314 as an OSError.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError:
+        pytest.skip("symlinks require admin on Windows")
+
+
 # ── fixtures ─────────────────────────────────────────────────────────
 
 
@@ -134,8 +147,8 @@ class TestFindLinuxSteamLibraries:
 
         symlink_a = tmp_path / "dot-steam-steam"
         symlink_b = tmp_path / "dot-steam-root"
-        symlink_a.symlink_to(real_root, target_is_directory=True)
-        symlink_b.symlink_to(real_root, target_is_directory=True)
+        _symlink_or_skip(symlink_a, real_root, target_is_directory=True)
+        _symlink_or_skip(symlink_b, real_root, target_is_directory=True)
 
         monkeypatch.setattr(
             game_finder, "STEAM_DEFAULT_PATHS_LINUX",
@@ -151,8 +164,8 @@ class TestFindLinuxSteamLibraries:
         crash the scan. Pre-bcachefs-migration Steam Deck and
         post-distro-reinstall systems can both leave these around."""
         broken = tmp_path / "broken-symlink"
-        broken.symlink_to(tmp_path / "target-deleted",
-                          target_is_directory=True)
+        _symlink_or_skip(broken, tmp_path / "target-deleted",
+                         target_is_directory=True)
 
         real_root = tmp_path / "real-Steam"
         real_root.mkdir()

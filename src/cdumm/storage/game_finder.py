@@ -178,24 +178,21 @@ def _find_xbox_game_pass() -> list[Path]:
     Xbox Game Pass games can be installed at:
     - {drive}:/XboxGames/<GameName>/Content/
     - {drive}:/XboxGames/<GameName>/Content/packages/ (Tunsi82 workaround)
-    - Custom paths set in Xbox app (detected via .GamingRoot files)
     - C:/Program Files/ModifiableWindowsApps/<GameName>/
+
+    The drive scan covers every live drive letter (custom Xbox-app
+    install drives included), so no separate .GamingRoot detection
+    is needed.
     """
     candidates: list[Path] = []
 
-    # Find drives with .GamingRoot (Xbox app marks these)
-    gaming_drives: list[str] = []
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        root = Path(f"{letter}:/")
-        try:
-            if (root / ".GamingRoot").exists():
-                gaming_drives.append(letter)
-        except OSError:
-            continue
-
-    # Search gaming drives and all drives for XboxGames folder
-    search_letters = set(gaming_drives) | set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    for letter in search_letters:
+    # Search every live drive for an XboxGames folder. Same
+    # stale-network-drive defence as the Steam scan: a full A-Z
+    # sweep can block ~30 s per disconnected drive letter, so only
+    # probe the letters GetLogicalDrives reports as mounted (the
+    # previous .GamingRoot pre-pass was unioned with A-Z anyway,
+    # which made it a no-op).
+    for letter in _drive_letters_for_scan():
         for name in XBOX_GAME_NAMES:
             # Check multiple candidate subpaths — Xbox layout differs per
             # title (some use /Content, some /Content/packages where the
@@ -258,13 +255,12 @@ def _find_epic_games() -> list[Path]:
         except Exception:
             pass
 
-    # Fallback paths
+    # Fallback path. (A previous revision also globbed *.item inside
+    # C:/ProgramData/Epic/UnrealEngineLauncher/, but that directory
+    # only ever holds LauncherInstalled.dat, never .item manifests,
+    # so the extra entry was dead code.)
     manifest_dirs.append(
         Path("C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests"))
-    local_app = Path.home() / "AppData" / "Local" / "EpicGamesLauncher" / "Saved" / "Config"
-    # Also check the common programdata path variant
-    manifest_dirs.append(
-        Path("C:/ProgramData/Epic/UnrealEngineLauncher/LauncherInstalled.dat").parent)
 
     for manifest_dir in manifest_dirs:
         if not manifest_dir.exists():
@@ -287,8 +283,10 @@ def _find_epic_games() -> list[Path]:
         except Exception:
             continue
 
-    # Fallback: check common Epic install locations
-    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    # Fallback: check common Epic install locations. Live drives
+    # only (see _drive_letters_for_scan) so stale network letters
+    # cannot block the scan for ~30 s each.
+    for letter in _drive_letters_for_scan():
         for folder in ["Epic Games", "EpicGames"]:
             for name in ["CrimsonDesert", "Crimson Desert"]:
                 epic_path = Path(f"{letter}:/{folder}/{name}")

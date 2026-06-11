@@ -58,6 +58,11 @@ STEP_CANCELLED = "cancelled"
 
 _POLL_INTERVAL_MS = 500
 DEFAULT_STEP_TIMEOUT_S = 360.0
+# How many polls _check_apply_done waits for _on_apply to actually
+# set _active_worker before concluding a guard inside _on_apply
+# (busy / stale snapshot / game running) early-returned without
+# launching anything.
+_APPLY_START_GRACE_POLLS = 6
 
 
 _STEP_LABELS = {
@@ -94,6 +99,7 @@ class RecoveryFlow(QObject):
         self._current_step: str = STEP_AWAITING_STEAM_VERIFY
         self._skipped_mods: list[dict[str, Any]] = []
         self._reimportable_ids: list[int] = []
+        self._apply_worker_seen: bool = False
 
         self._poll_timer: QTimer | None = None
         self._elapsed_polls: int = 0
@@ -182,17 +188,26 @@ class RecoveryFlow(QObject):
                 "Activity log for details.")
         return True
 
+    def _disconnect_rescan_signal(self) -> None:
+        """Detach from fix_page.rescan_requested. Safe to call when
+        never connected or already disconnected. Non-success exits
+        (error / cancelled) must also run this, otherwise the stale
+        connection survives into the next RecoveryFlow run and fires
+        a second orchestrator."""
+        fix_page = getattr(self._main_window, "fix_everything_page", None)
+        if fix_page is None:
+            return
+        try:
+            fix_page.rescan_requested.disconnect(
+                self._on_fix_emitted_rescan_requested)
+        except (TypeError, RuntimeError):
+            pass
+
     @Slot(bool)
     def _on_fix_emitted_rescan_requested(self, _skip_verify_prompt: bool) -> None:
         self._stop_poll()
         self._emit_step(STEP_RESCAN)
-        fix_page = getattr(self._main_window, "fix_everything_page", None)
-        if fix_page is not None:
-            try:
-                fix_page.rescan_requested.disconnect(
-                    self._on_fix_emitted_rescan_requested)
-            except (TypeError, RuntimeError):
-                pass
+        self._disconnect_rescan_signal()
         QTimer.singleShot(
             _POLL_INTERVAL_MS,
             lambda: self._start_poll(self._check_rescan_done))
@@ -287,6 +302,12 @@ class RecoveryFlow(QObject):
 
     def _begin_apply(self) -> None:
         self._emit_step(STEP_APPLY)
+        # Track whether the apply worker was ever observed. _on_apply
+        # has several silent early-return guards (busy, stale
+        # snapshot, game running); if none of them let the worker
+        # launch, "_active_worker is None" does NOT mean the apply
+        # completed, it means it never started.
+        self._apply_worker_seen = False
         try:
             self._main_window._on_apply()
         except Exception as e:
@@ -295,8 +316,22 @@ class RecoveryFlow(QObject):
         self._start_poll(self._check_apply_done)
 
     def _check_apply_done(self) -> bool:
-        if self._main_window_active_worker() is None:
+        worker = self._main_window_active_worker()
+        if worker is not None:
+            self._apply_worker_seen = True
+            return False
+        if self._apply_worker_seen:
             self._enter_done()
+            return True
+        if self._elapsed_polls >= _APPLY_START_GRACE_POLLS:
+            # The worker never appeared: one of _on_apply's guards
+            # early-returned. Declaring "Recovery complete" here
+            # would report success with zero mods applied.
+            self._enter_error(
+                "Apply could not start. CDUMM was likely busy, the "
+                "game was running, or the vanilla snapshot is stale "
+                "(rescan required). Resolve the blocker shown in the "
+                "main window, then run Recovery again.")
             return True
         return False
 
@@ -339,6 +374,7 @@ class RecoveryFlow(QObject):
 
     def _enter_error(self, reason: str) -> None:
         self._stop_poll()
+        self._disconnect_rescan_signal()
         self._thaw_main_window()
         self._close_progress_bar()
         logger.warning("RecoveryFlow error: %s", reason)
@@ -358,6 +394,7 @@ class RecoveryFlow(QObject):
 
     def _enter_cancelled(self) -> None:
         self._stop_poll()
+        self._disconnect_rescan_signal()
         self._thaw_main_window()
         self._close_progress_bar()
         self._emit_step(STEP_CANCELLED)
@@ -490,6 +527,33 @@ class RecoveryFlow(QObject):
     def _main_window_active_worker(self) -> Any:
         return getattr(self._main_window, "_active_worker", None)
 
+    def _worker_still_running(self) -> bool:
+        """True when an underlying worker process is alive.
+
+        Checks both the main window's ``_active_worker`` (reimport /
+        apply QProcess) and Fix Everything's ``_fix_proc``. A live
+        QProcess in any state other than NotRunning counts as
+        running; non-QProcess workers (thread-based) count as running
+        while the slot is non-None because we cannot probe them."""
+        from PySide6.QtCore import QProcess
+
+        candidates = [self._main_window_active_worker()]
+        fix_page = getattr(self._main_window, "fix_everything_page", None)
+        if fix_page is not None:
+            candidates.append(getattr(fix_page, "_fix_proc", None))
+        for worker in candidates:
+            if worker is None:
+                continue
+            if isinstance(worker, QProcess):
+                try:
+                    if worker.state() != QProcess.ProcessState.NotRunning:
+                        return True
+                except RuntimeError:
+                    continue  # C++ object already deleted
+                continue
+            return True
+        return False
+
     def _count_enabled_paz_mods(self) -> int:
         # Returns -1 on DB error so callers can distinguish "no mods
         # enabled" from "couldn't read the DB". Earlier the bare
@@ -560,6 +624,21 @@ class RecoveryFlow(QObject):
                 self._stop_poll()
                 return
             if self._elapsed_polls >= max_polls:
+                if self._worker_still_running():
+                    # The underlying worker process is alive and
+                    # working (huge mod sets legitimately exceed the
+                    # step budget). Killing the chain here would show
+                    # "Recovery failed" while the worker keeps
+                    # mutating game files in the background. Extend
+                    # the window and keep waiting; the timeout only
+                    # trips when no live worker exists.
+                    logger.info(
+                        "RecoveryFlow: step '%s' exceeded %.0fs but "
+                        "the worker process is still running -- "
+                        "extending the timeout window.",
+                        self._current_step, self._step_timeout_s)
+                    self._elapsed_polls = 0
+                    return
                 self._stop_poll()
                 self._enter_error(
                     f"Step '{self._current_step}' exceeded "

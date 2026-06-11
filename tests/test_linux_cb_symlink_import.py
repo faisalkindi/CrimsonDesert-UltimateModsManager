@@ -22,7 +22,22 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 from cdumm.engine.crimson_browser_handler import _rglob_follow, convert_to_paz_mod
+
+
+def _symlink_or_skip(link: Path, target: Path, *,
+                     target_is_directory: bool = False) -> None:
+    """Create a symlink, or skip the test when the OS refuses.
+
+    Windows needs admin rights (or Developer Mode) to create symlinks;
+    plain accounts raise WinError 1314 as an OSError.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError:
+        pytest.skip("symlinks require admin on Windows")
 
 
 def _make_files_with_symlinked_dir(base: Path) -> Path:
@@ -33,7 +48,7 @@ def _make_files_with_symlinked_dir(base: Path) -> Path:
     real = base / "realdata" / "0008"
     real.mkdir(parents=True)
     (real / "texture.paz").write_bytes(b"PAZ")
-    (files_dir / "0008").symlink_to(real, target_is_directory=True)
+    _symlink_or_skip(files_dir / "0008", real, target_is_directory=True)
     return files_dir
 
 
@@ -84,7 +99,7 @@ class TestSymlinkEscapeGuardStillHolds:
         files_dir.mkdir(parents=True)
         outside = tmp_path / "outside_secret.paz"
         outside.write_bytes(b"SECRET")
-        (files_dir / "evil.paz").symlink_to(outside)
+        _symlink_or_skip(files_dir / "evil.paz", outside)
 
         files_root = tmp_path / "files"
         files_root_resolved = files_root.resolve()
@@ -107,7 +122,7 @@ class TestSymlinkEscapeGuardStillHolds:
         files_dir = tmp_path / "files" / "0008"
         files_dir.mkdir(parents=True)
         (files_dir / "real.paz").write_bytes(b"x")
-        (files_dir / "alias.paz").symlink_to(files_dir / "real.paz")
+        _symlink_or_skip(files_dir / "alias.paz", files_dir / "real.paz")
 
         files_root = tmp_path / "files"
         files_root_resolved = files_root.resolve()
@@ -149,7 +164,7 @@ class TestTrustSymlinksParameter:
         outside = base / "elsewhere" / "stash.dds"
         outside.parent.mkdir(parents=True)
         outside.write_bytes(b"STASH")
-        (files_dir / "linked.dds").symlink_to(outside)
+        _symlink_or_skip(files_dir / "linked.dds", outside)
         manifest = {
             "id": "test_mod",
             "files_dir": "files",

@@ -713,7 +713,16 @@ class ModCard(CardWidget):
         immediately replaces "Click To Update" with the translated
         label, without waiting for the next nexus update check (H3).
         """
-        if getattr(self, "_has_update", False):
+        has_update = getattr(self, "_has_update", None)
+        if has_update is None:
+            # No update check has run for this card. Repaint the
+            # neutral grey pill (same style the constructor applies)
+            # instead of calling set_update_available(False), which
+            # would paint the green "up to date" state for a mod whose
+            # status is unknown.
+            self._apply_version_style()
+            return
+        if has_update:
             self.set_update_available(
                 True, getattr(self, "_nexus_url", "") or "",
                 nexus_mod_id=getattr(self, "_nexus_mod_id", 0),

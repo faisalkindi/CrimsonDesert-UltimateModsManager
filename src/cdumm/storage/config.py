@@ -6,6 +6,21 @@ from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
+# Config keys whose values must never reach the log file. cdumm.log
+# is written at DEBUG and routinely attached to public bug reports;
+# v3.3.20 and earlier wrote the raw Nexus API key into it on every
+# save (audit finding C1, 2026-06-10).
+_SENSITIVE_KEYS = frozenset({
+    "nexus_api_key",
+    "connection_token",
+})
+
+
+def _redact(key: str, value: str) -> str:
+    if key in _SENSITIVE_KEYS or "key" in key or "token" in key:
+        return f"<redacted, {len(value)} chars>" if value else "<empty>"
+    return value
+
 
 class Config:
     def __init__(self, db: Database) -> None:
@@ -25,7 +40,7 @@ class Config:
             (key, value),
         )
         self._db.connection.commit()
-        logger.debug("Config set: %s = %s", key, value)
+        logger.debug("Config set: %s = %s", key, _redact(key, value))
 
 
 def default_export_dir(db: Optional[Database] = None) -> Path:

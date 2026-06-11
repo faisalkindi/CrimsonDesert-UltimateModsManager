@@ -1018,9 +1018,7 @@ class FindCulpritPage(ToolPageBase):
         # Note about Press Play (colored to stand out)
         from qfluentwidgets import setCustomStyleSheet
         self._pp_note = BodyLabel(
-            "Want to go fully hands-free? Install the Press Play mod — "
-            "it skips the title screen automatically so each test round "
-            "starts on its own.", self._container)
+            tr("tools.culprit.press_play_note"), self._container)
         self._pp_note.setWordWrap(True)
         nf = self._pp_note.font()
         nf.setPixelSize(16)
@@ -1340,8 +1338,13 @@ class FindCulpritPage(ToolPageBase):
         self._set_status(
             tr("tools.culprit.starting_bisection", mods=n, rounds=estimated))
 
-        # Log card for live updates
-        self._log_card = self._add_result_card(tr("tools.culprit.progress_log"), "")
+        # Log card for live updates. The detail must be non-empty:
+        # _ResultCard only creates its CaptionLabel when a detail
+        # string is given, and the poll loop updates the log via
+        # findChildren(CaptionLabel); with "" the label never exists
+        # and the progress log stays blank forever.
+        self._log_card = self._add_result_card(
+            tr("tools.culprit.progress_log"), "…")
         self._log_lines = []
 
         # Thread-safe queue for worker → UI communication
@@ -1632,7 +1635,7 @@ class InspectModPage(ToolPageBase):
         def _flush_section():
             if not current_section and not current_lines:
                 return
-            title = current_section or "Analysis"
+            title = current_section or tr("tools.inspect.analysis_section")
             detail = "\n".join(current_lines).strip()
             if not detail:
                 return
@@ -1665,7 +1668,7 @@ class InspectModPage(ToolPageBase):
                 continue  # already shown in error card
             elif stripped.startswith("Mod:") or stripped.startswith("Type:") or stripped.startswith("Size:"):
                 _flush_section()
-                current_section = "Mod Info"
+                current_section = tr("tools.inspect.mod_info_section")
                 current_lines.append(stripped)
             else:
                 current_lines.append(stripped)
@@ -1673,7 +1676,8 @@ class InspectModPage(ToolPageBase):
         _flush_section()
 
         # Copy full report button as its own card
-        copy_card = _ResultCard("Full Report", "Click 'Copy Report' to share with the mod author.",
+        copy_card = _ResultCard(tr("tools.inspect.full_report"),
+                                tr("tools.inspect.copy_report_hint"),
                                 color="#5E81AC", parent=self._container)
         from PySide6.QtWidgets import QApplication as _QA
         copy_btn = PushButton(tr("tool.copy_report"), copy_card)
@@ -1741,7 +1745,7 @@ class InspectModPage(ToolPageBase):
     def _on_export_report(self) -> None:
         if not hasattr(self, "_inspect_result"):
             return
-        from cdumm.engine.test_mod_checker import generate_compatibility_report
+        from cdumm.engine.mod_compat_check import generate_compatibility_report
         report_text = generate_compatibility_report(self._inspect_result)
 
         from cdumm.storage.config import default_export_dir

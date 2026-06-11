@@ -21,12 +21,20 @@ LEVEL_COLORS = {
     "semantic": QColor("#FF9800"),    # orange — priority decides winner
 }
 
-LEVEL_LABELS = {
-    "papgt": "Auto-rebuilt (metadata)",
-    "paz": "Both apply (different parts)",
-    "byte_range": "Load order decides winner",
-    "semantic": "Field-level merge",
+_LEVEL_LABEL_KEYS = {
+    "papgt": "conflicts.level_papgt",
+    "paz": "conflicts.level_paz",
+    "byte_range": "conflicts.level_byte_range",
+    "semantic": "conflicts.level_semantic",
 }
+
+
+def level_label(level: str) -> str:
+    """Translated display label for a conflict level. Looked up at call
+    time (not import time) so a runtime language switch is honoured on
+    the next tree rebuild. Unknown levels fall back to the raw value."""
+    key = _LEVEL_LABEL_KEYS.get(level)
+    return tr(key) if key else level
 
 # Levels where load-order / priority actually changes the outcome.
 # Used by the conflicts dialog to split "needs attention" from "auto".
@@ -300,7 +308,7 @@ class ConflictView(QWidget):
             pair_item.setForeground(LEVEL_COLORS.get(worst, QColor("#999")))
             pair_item.setData(first.mod_a_id, MOD_A_ID_ROLE)
             pair_item.setData(first.mod_b_id, MOD_B_ID_ROLE)
-            level_item = QStandardItem(LEVEL_LABELS.get(worst, worst))
+            level_item = QStandardItem(level_label(worst))
             level_item.setForeground(body_color)
 
             # Show winner in the detail column for byte_range conflicts.
@@ -329,7 +337,7 @@ class ConflictView(QWidget):
                 file_item.setData(c.mod_a_id, MOD_A_ID_ROLE)
                 file_item.setData(c.mod_b_id, MOD_B_ID_ROLE)
                 file_item.setData(c.winner_id, WINNER_ID_ROLE)
-                file_level = QStandardItem(LEVEL_LABELS.get(c.level, c.level))
+                file_level = QStandardItem(level_label(c.level))
                 file_level.setForeground(LEVEL_COLORS.get(c.level, body_color))
                 file_detail = QStandardItem(c.explanation)
                 file_detail.setForeground(body_color)

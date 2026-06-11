@@ -65,14 +65,19 @@ def _emit(obj: dict) -> None:
 # ── Import ────────────────────────────────────────────────────────────
 
 def _run_import(mod_path: str, game_dir: str, db_path: str,
-                deltas_dir: str, existing_mod_id: str | None = None) -> None:
+                deltas_dir: str, existing_mod_id: str | None = None,
+                allow_scripts: bool = False) -> None:
     from cdumm.storage.database import Database
     from cdumm.engine.snapshot_manager import SnapshotManager
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
         import_from_json_patch, import_from_bsdiff, import_from_script,
         import_from_rar, import_from_natt_format_3, set_import_progress_cb,
+        set_allow_scripts,
     )
+    # Script-execution consent (audit C1/import): only the GUI's
+    # explicit confirm dialog sets this for the re-dispatched import.
+    set_allow_scripts(bool(allow_scripts))
 
     mod_path = Path(mod_path)
     game_dir = Path(game_dir)
@@ -149,7 +154,14 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
     db.close()
 
     if result and result.error:
-        _emit({"type": "error", "msg": result.error})
+        err = {"type": "error", "msg": result.error}
+        # Script-consent refusal (audit C1/import): carry the script
+        # name so the GUI can show a confirm prompt and re-dispatch
+        # the same import with --allow-scripts.
+        if getattr(result, "needs_script_consent", None):
+            err["needs_script_consent"] = result.needs_script_consent
+            err["mod_path"] = str(mod_path)
+        _emit(err)
     elif result:
         _emit({"type": "done", "name": result.name, "mod_id": result.mod_id,
                "mod_type": result.mod_type, "error": None,
@@ -242,6 +254,15 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
                 result = handler(mod_path, game_dir, db, snapshot, deltas_dir)
             handler_ms = (_time.perf_counter() - t_handler_start) * 1000
         except Exception as e:
+            # Discard any uncommitted rows the failed import left on the
+            # shared connection. Without this, the NEXT mod's commit()
+            # flushed the previous mod's partial mods/mod_deltas rows,
+            # leaving orphan half-imported mods in the database.
+            try:
+                db.connection.rollback()
+            except Exception as rb_err:
+                print(f"[BATCH] rollback after crash failed: {rb_err}",
+                      file=_sys.stderr, flush=True)
             _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
                    "error": str(e)})
             continue
@@ -255,8 +276,24 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
             f"(detect={detect_ms:.0f}ms handler={handler_ms:.0f}ms)")
 
         if result and result.error:
-            _emit({"type": "batch_item", "index": idx, "name": mod_path.name,
-                   "error": result.error})
+            # Same orphan-row protection as the except branch above:
+            # an errored import may have returned with its transaction
+            # still open (e.g. _process_extracted_files per-file error).
+            try:
+                db.connection.rollback()
+            except Exception as rb_err:
+                print(f"[BATCH] rollback after import error failed: {rb_err}",
+                      file=_sys.stderr, flush=True)
+            _b_err = {"type": "batch_item", "index": idx,
+                      "name": mod_path.name, "error": result.error}
+            # Script-consent refusal marker, same as the single-import
+            # path: lets the GUI offer the consent prompt for a script
+            # mod inside a batch instead of a dead-end refusal
+            # (release-review minor, 2026-06-11).
+            if getattr(result, "needs_script_consent", None):
+                _b_err["needs_script_consent"] = result.needs_script_consent
+                _b_err["mod_path"] = str(mod_path)
+            _emit(_b_err)
         elif result:
             # Check if this mod is configurable (has labeled JSON changes)
             if result.mod_id:
@@ -740,8 +777,8 @@ def _run_inspect(mod_path: str, game_dir: str, db_path: str) -> None:
     set_import_progress_cb(lambda pct, msg: _emit({"type": "progress", "pct": pct, "msg": msg}))
     _emit({"type": "progress", "pct": 0, "msg": f"Analyzing {mod_path.name}..."})
 
-    from cdumm.engine.test_mod_checker import test_mod
-    result = test_mod(mod_path, game_dir, db, snapshot)
+    from cdumm.engine.mod_compat_check import analyze_mod
+    result = analyze_mod(mod_path, game_dir, db, snapshot)
 
     # Always run diagnostics — provides file structure analysis,
     # PAMT lookups, and actionable info for the mod author
@@ -832,9 +869,13 @@ def worker_main(args: list[str]) -> None:
     cmd = args[0]
     try:
         if cmd == "import":
-            # import <mod_path> <game_dir> <db_path> <deltas_dir> [existing_mod_id]
+            # import <mod_path> <game_dir> <db_path> <deltas_dir>
+            #        [existing_mod_id] [--allow-scripts]
+            _allow = "--allow-scripts" in args
+            _pos = [a for a in args[5:] if not a.startswith("--")]
             _run_import(args[1], args[2], args[3], args[4],
-                        args[5] if len(args) > 5 else None)
+                        _pos[0] if _pos else None,
+                        allow_scripts=_allow)
         elif cmd == "import_batch":
             # import_batch <paths_file> <game_dir> <db_path> <deltas_dir>
             _run_batch_import(args[1], args[2], args[3], args[4])

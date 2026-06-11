@@ -162,3 +162,21 @@ def test_scan_empty_dir(tmp_path: Path) -> None:
 def test_scan_nonexistent_dir(tmp_path: Path) -> None:
     mgr = AsiManager(tmp_path / "nonexistent")
     assert mgr.scan() == []
+
+
+def test_parse_hook_targets_handles_utf8_bom(tmp_path: Path) -> None:
+    """Plugin INIs shipped with a UTF-8 BOM (SuperAxiomForce.ini in
+    falobos76's #191 report) raised MissingSectionHeaderError under
+    plain utf-8: the BOM stays glued to the first section header.
+    utf-8-sig must parse them and still yield hook targets.
+    """
+    bin64 = _setup_bin64(tmp_path)
+    (bin64 / "SuperAxiomForce.asi").write_bytes(b"DLL")
+    (bin64 / "SuperAxiomForce.ini").write_bytes(
+        b"\xef\xbb\xbf[AxiomForce]\nTargetDLL=xinput1_3.dll\n")
+
+    mgr = AsiManager(bin64)
+    plugins = mgr.scan()
+    target = next(p for p in plugins if p.name == "SuperAxiomForce")
+    assert target.hook_targets, "BOM INI produced no hook targets"
+    assert any("xinput1_3.dll" in t for t in target.hook_targets)

@@ -1,4 +1,4 @@
-"""CDUMM v3 main window — FluentWindow with sidebar navigation."""
+"""CDUMM v3 main window, FluentWindow with sidebar navigation."""
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 from cdumm.engine.nexus_filename import parse_nexus_filename as _parse_nexus_filename
 # Promoted to module-level: the lazy import inside _launch_import_worker
 # was crashing the frozen exe with `zlib.error: Error -3 while decompressing
-# data: incorrect header check` on PyInstaller 6.x — the bootloader's
+# data: incorrect header check` on PyInstaller 6.x, the bootloader's
 # lazy-archive-extract path occasionally fails on submodules. Importing
 # at module load time bypasses that path entirely.
 from cdumm.gui.import_context import snapshot_and_clear_import_context
@@ -112,7 +112,7 @@ def _quiet_qprocess(proc) -> None:
     itself with ``--worker``.
 
     This helper sets ``QProcess.setCreateProcessArgumentsModifier`` to
-    OR the flag in. No-op on non-Windows platforms — that codepath is
+    OR the flag in. No-op on non-Windows platforms, that codepath is
     never reached on Linux/macOS QProcess.
     """
     if not IS_WINDOWS:
@@ -212,7 +212,7 @@ def _archive_likely_needs_dialog(path: Path) -> bool:
     Avoids full extraction during batch pre-scan. Returns True if the archive
     appears to contain either:
       - Multiple real preset .json files at the root (NexusMods variants like
-        ``friendly_gain_x2.json`` / ``_x5.json``) — not manifest/modinfo metadata
+        ``friendly_gain_x2.json`` / ``_x5.json``), not manifest/modinfo metadata
       - Multiple top-level folders each containing game content (variant picker case)
     """
     import re
@@ -228,7 +228,7 @@ def _archive_likely_needs_dialog(path: Path) -> bool:
             with py7zr.SevenZipFile(path, 'r') as zf:
                 names = zf.getnames()
         elif suffix == ".rar":
-            # 7-Zip CLI listing — zero extraction cost. First "Path = " line is
+            # 7-Zip CLI listing, zero extraction cost. First "Path = " line is
             # the archive itself; skip entries that don't look like relative paths.
             import subprocess
             _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -296,7 +296,7 @@ def _archive_likely_needs_dialog(path: Path) -> bool:
 def _has_game_content(path: Path) -> bool:
     """Check if a ZIP/archive contains game mod content (PAZ, PAMT, JSON patches, etc.).
 
-    Fast check — reads ZIP directory only, no extraction. Used to distinguish
+    Fast check, reads ZIP directory only, no extraction. Used to distinguish
     pure ASI mods from mixed ZIP mods (ASI + PAZ in one archive).
     """
     import zipfile
@@ -339,7 +339,7 @@ def _has_game_content(path: Path) -> bool:
                     )
                 return has_game
         except Exception:
-            return True  # can't read — assume mixed
+            return True  # can't read, assume mixed
     if path.suffix.lower() == ".rar":
         return True  # rar can't be cheaply scanned
     try:
@@ -357,7 +357,7 @@ def _has_game_content(path: Path) -> bool:
                 if re.match(r"^\d{4}/", n):
                     return True
     except Exception:
-        return True  # can't read ZIP — let worker handle it
+        return True  # can't read ZIP, let worker handle it
     return False
 
 
@@ -389,7 +389,7 @@ _NXM_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB hard cap
 
 def _assert_https_download_url(url: str) -> None:
     """Bug #27: refuse to download from any non-HTTPS URL. Nexus CDN
-    answers only over HTTPS — an ``http://`` URL is either a
+    answers only over HTTPS, an ``http://`` URL is either a
     misconfig or a MITM, and we're about to install the bytes into
     the user's game folder. Bail before the request.
     """
@@ -508,7 +508,7 @@ def _restore_selected_labels(
 def _clear_pending_post_import_state(win, path) -> None:
     """Zero the post-import scratch attributes the pre-check stages
     accumulate. Safe to call regardless of whether the worker ran to
-    completion or failed — prevents stale values from bleeding into
+    completion or failed, prevents stale values from bleeding into
     the next import (Bug #14).
     """
     for attr in (
@@ -519,6 +519,8 @@ def _clear_pending_post_import_state(win, path) -> None:
         "_original_drop_path",
         "_pending_selected_labels",
         "_last_existing_mod_id",
+        "_pending_update_remove_mid",
+        "_pending_update_old_name",
     ):
         setattr(win, attr, None)
     nrf = getattr(win, "_nexus_real_file_id_map", None)
@@ -566,6 +568,29 @@ def _merge_nexus_updates(prev: dict, new: dict) -> dict:
     return merged
 
 
+def _batch_result_for_index(batch_results: list, idx: int,
+                            path_stem: str = ""):
+    """Find the batch_item result for source-list index ``idx``.
+
+    The batch worker emits each result with the key ``index`` (the
+    position of the source path in the submitted list). Failed items
+    never reach the success list, so positional matching (zip) shifts
+    every result after the first failure onto the wrong path; keying
+    by ``index`` keeps the pairing correct. Falls back to name
+    similarity when no index matches (older workers / renamed drops).
+    Returns the matching result dict or None.
+    """
+    for r in batch_results:
+        if r.get("index") == idx:
+            return r
+    if path_stem:
+        for r in batch_results:
+            rname = r.get("name", "")
+            if rname and (path_stem in rname or rname in path_stem):
+                return r
+    return None
+
+
 def _resolve_post_import_target_id(
     result_mod_id: int | None,
     existing_mod_id: int | None,
@@ -581,7 +606,7 @@ def _resolve_post_import_target_id(
     works for fresh inserts but breaks for the nxm:// update-in-place
     flow: the update lands on row 1333, while MAX(id) might be 1361.
 
-    Returning None means "we don't know which row — write nothing"
+    Returning None means "we don't know which row, write nothing"
     rather than silently targeting the wrong row.
     """
     if result_mod_id:
@@ -647,7 +672,7 @@ def _resolve_steam_exe(game_dir, find_steam_root):
     A Steam-installed game is always at
     ``<steam_root>/steamapps/common/<game>``, so the steam root is
     ``game_dir.parents[2]`` and ``steam.exe`` sits there. Derive it from
-    the game we already know about FIRST (authoritative — it can't pick
+    the game we already know about FIRST (authoritative, it can't pick
     the wrong Steam client on a multi-Steam machine), then fall back to
     ``find_steam_root`` only if the derived path has no ``steam.exe``.
 
@@ -695,7 +720,7 @@ class _MainThreadDispatcher(QObject):
 
 
 # ---------------------------------------------------------------------------
-# Custom logo widget — scales with sidebar compact/expanded state
+# Custom logo widget, scales with sidebar compact/expanded state
 # ---------------------------------------------------------------------------
 
 class CdummLogoWidget(NavigationWidget):
@@ -793,7 +818,7 @@ class CdummLogoWidget(NavigationWidget):
 
 
 # ---------------------------------------------------------------------------
-# Stub pages — minimal placeholders until real pages are built
+# Stub pages, minimal placeholders until real pages are built
 # ---------------------------------------------------------------------------
 
 class _StubPage(SmoothScrollArea):
@@ -828,7 +853,7 @@ from cdumm.gui.pages.reshade_page import ReshadePage  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# CdummWindow — the v3 main window
+# CdummWindow, the v3 main window
 # ---------------------------------------------------------------------------
 
 class CdummWindow(FluentWindow):
@@ -862,7 +887,7 @@ class CdummWindow(FluentWindow):
 
         # Hide the small icon in title bar, center title across full window width
         self.titleBar.iconLabel.hide()
-        # Remove titleLabel from layout — we'll position it manually in resizeEvent
+        # Remove titleLabel from layout, we'll position it manually in resizeEvent
         self.titleBar.hBoxLayout.removeWidget(self.titleBar.titleLabel)
         self.titleBar.titleLabel.setParent(self)  # parent to main window, not title bar
         self.titleBar.titleLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -973,7 +998,7 @@ class CdummWindow(FluentWindow):
         # a palette change). SystemThemeListener is a thread that
         # watches the system and calls setTheme(AUTO) on change, which
         # cascades into qconfig.themeChanged. Without it, CDUMM's
-        # content stays white-on-white after Windows flips — the
+        # content stays white-on-white after Windows flips, the
         # ZAIAC001 bug.
         try:
             from qfluentwidgets import SystemThemeListener
@@ -1166,7 +1191,7 @@ class CdummWindow(FluentWindow):
         # Sidebar: compact by default, hamburger opens MENU overlay (like Fluent Gallery)
         self.navigationInterface.setExpandWidth(220)
         self.navigationInterface.setMinimumExpandWidth(1400)
-        # Acrylic disabled — saves ~40 MB (scipy/numpy dependency)
+        # Acrylic disabled, saves ~40 MB (scipy/numpy dependency)
         self.navigationInterface.setAcrylicEnabled(False)
         self.navigationInterface.setReturnButtonVisible(False)
 
@@ -1176,7 +1201,7 @@ class CdummWindow(FluentWindow):
         panel.expandAni.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         # Make acrylic effect more visible in light mode
-        # Default light tint is QColor(255,255,255,180) — nearly opaque white, barely shows blur
+        # Default light tint is QColor(255,255,255,180), nearly opaque white, barely shows blur
         # Override _updateAcrylicColor since it's called on every paint
         from PySide6.QtGui import QColor as _QColor
         from qfluentwidgets import isDarkTheme as _isDark
@@ -1191,12 +1216,12 @@ class CdummWindow(FluentWindow):
                 panel.acrylicBrush.luminosityColor = _QColor(255, 255, 255, 0)
         panel._updateAcrylicColor = _custom_acrylic_color
 
-        # Top navigation — pages
+        # Top navigation, pages
         self.addSubInterface(self.paz_mods_page, FluentIcon.FOLDER, tr("nav.paz_mods"))
         # ASI plugins are a Windows-only mod format (winmm.dll proxy
         # injecting into CrimsonDesert.exe). The tab stays visible on
         # macOS / Linux but the page renders a placeholder explaining
-        # why ASI doesn't work on that platform — vanishing UI is more
+        # why ASI doesn't work on that platform, vanishing UI is more
         # confusing than a clear "not supported" message (PR #64
         # review item #3).
         self.addSubInterface(
@@ -1206,7 +1231,7 @@ class CdummWindow(FluentWindow):
         # Separator before tools
         self.navigationInterface.addSeparator()
 
-        # Diagnostic tools — each is a full sub-interface page
+        # Diagnostic tools, each is a full sub-interface page
         self.addSubInterface(
             self.verify_state_page, FluentIcon.CHECKBOX, tr("nav.verify_state"),
             position=NavigationItemPosition.SCROLL,
@@ -1288,23 +1313,23 @@ class CdummWindow(FluentWindow):
             return
         # Bug 45: honour the rate-limit back-off. If Nexus returned
         # 429 on a prior cycle and we haven't reached the reset
-        # epoch, skip — another check against 429 burns more quota
+        # epoch, skip, another check against 429 burns more quota
         # and can't succeed.
         import time as _time
         if _is_nexus_rate_limited(self, now=int(_time.time())):
             logger.debug(
-                "NexusMods update check skipped — rate limit active "
+                "NexusMods update check skipped, rate limit active "
                 "until %d", int(getattr(self, "_nexus_rate_limited_until", 0)))
             return
         from cdumm.storage.config import Config
         api_key = Config(self._db).get("nexus_api_key")
         if not api_key:
-            return  # No API key configured — skip silently
+            return  # No API key configured, skip silently
 
         # Read both PAZ mods and ASI plugins on main thread (SQLite thread safety).
         # Both tables share a single NexusMods update-check pass so the API quota
         # is spent once per cycle. nexus_last_checked_at lets the 1-week feed
-        # act as an optimization rather than a blanket gate — see plan 4.2.
+        # act as an optimization rather than a blanket gate, see plan 4.2.
         try:
             cursor = self._db.connection.execute(
                 "SELECT id, name, version, nexus_mod_id, nexus_last_checked_at, "
@@ -1417,13 +1442,13 @@ class CdummWindow(FluentWindow):
                 except Exception as _e:
                     logger.debug("rate-limit InfoBar failed: %s", _e)
         else:
-            # Successful / non-rate-limited cycle — clear the
+            # Successful / non-rate-limited cycle, clear the
             # throttle so the next timer tick isn't suppressed.
             self._nexus_rate_limited_until = 0
         # Bug #12 / #18 fix: surface auth failures to the user, and
         # reset the "already shown" flag on successful cycles so a
         # LATER failure re-shows the banner. The old one-shot gate
-        # was sticky forever — a user who fixed their key and then
+        # was sticky forever, a user who fixed their key and then
         # had it fail again never saw a second warning.
         had_auth_error = bool(
             getattr(self, "_pending_nexus_auth_error", False))
@@ -1446,7 +1471,7 @@ class CdummWindow(FluentWindow):
             except Exception as e:
                 logger.debug("auth-rejected InfoBar failed: %s", e)
                 self._nexus_auth_banner = None
-        # Persist the last-checked timestamps on the GUI thread — the
+        # Persist the last-checked timestamps on the GUI thread, the
         # worker hit SQLite's "connection bound to originating thread"
         # constraint. Only row ids that returned a valid file list are
         # in checked_ids; transient failures are NOT persisted so they
@@ -1468,7 +1493,7 @@ class CdummWindow(FluentWindow):
         # the name-match path this cycle. Once populated, the next
         # check walks the file_updates chain for these rows instead
         # of guessing by name. Self-correction also routes through
-        # this path — when an earlier backfill latched onto the
+        # this path, when an earlier backfill latched onto the
         # wrong file_id, the engine emits a corrected value here and
         # the helper overwrites the wrong value freely. Engine-level
         # dedup ensures we never queue a same-value rewrite, so the
@@ -1515,7 +1540,7 @@ class CdummWindow(FluentWindow):
         # Window title
         self.setWindowTitle(tr("app.name_short") + " v" + __version__)
 
-        # Navigation items — update text via the navigation interface panel
+        # Navigation items, update text via the navigation interface panel
         _nav_texts = {
             "ModsPage": tr("nav.paz_mods"),
             "AsiPluginsPage": tr("nav.asi_mods"),
@@ -1559,7 +1584,7 @@ class CdummWindow(FluentWindow):
     def _migrate_from_appdata(self) -> None:
         """One-time migration: move vanilla/deltas from old AppData to CDMods on game drive.
 
-        Only runs on Windows — the old per-user-AppData layout never
+        Only runs on Windows, the old per-user-AppData layout never
         existed on macOS or Linux so there's nothing to migrate.
         """
         if not IS_WINDOWS:
@@ -1732,7 +1757,7 @@ class CdummWindow(FluentWindow):
                     # the same Recovery button instead of two
                     # different MessageBoxes.
                     self._offer_recovery_flow(
-                        title="Game files changed — recovery available",
+                        title="Game files changed, recovery available",
                         body=(
                             "Your game files have changed since the "
                             "last snapshot (likely a Steam patch or "
@@ -1904,7 +1929,7 @@ class CdummWindow(FluentWindow):
         url = info.get("url", "")
         logger.info("Update available: %s", tag)
 
-        # Honour the user's per-version dismissal — if they previously
+        # Honour the user's per-version dismissal, if they previously
         # closed the banner for this exact tag we skip the banner this
         # launch. A NEWER tag clears the skip and shows fresh. Without
         # this, users who dismissed the banner kept getting it back on
@@ -1921,7 +1946,7 @@ class CdummWindow(FluentWindow):
             # 1. Show persistent update banner on all pages (except about)
             self._show_update_banner(tag, url)
 
-        # 2. Add badge to About nav item in sidebar (always — it's small)
+        # 2. Add badge to About nav item in sidebar (always, it's small)
         try:
             self.navigationInterface.widget("AboutPage").setShowBadge(True)
         except Exception:
@@ -1933,7 +1958,7 @@ class CdummWindow(FluentWindow):
 
     def _on_dismiss_update_banner(self) -> None:
         """Hide the update banner this session AND remember which tag
-        the user dismissed so it doesn't reappear next launch — but a
+        the user dismissed so it doesn't reappear next launch, but a
         newer tag will show fresh. The About-page badge stays so the
         user can still find the update if they want it later."""
         tag = getattr(self, "_update_banner_tag", None)
@@ -1954,7 +1979,7 @@ class CdummWindow(FluentWindow):
         the user can drag-replace their old exe / mount the dmg.
 
         Falls back to opening ``release_url`` (the GitHub release page)
-        if the request fails for any reason — same as the legacy
+        if the request fails for any reason, same as the legacy
         behaviour, just with a Toast explaining what happened.
         """
         from pathlib import Path
@@ -1963,7 +1988,7 @@ class CdummWindow(FluentWindow):
         from cdumm.engine.update_checker import (
             UpdateDownloadWorker, _release_asset_url)
 
-        # Refuse to start a second download if one's already running —
+        # Refuse to start a second download if one's already running , 
         # avoids spawning duplicate workers when the user hammers the
         # banner button (each click would write to the same file).
         existing = getattr(self, "_update_dl_thread", None)
@@ -1972,7 +1997,7 @@ class CdummWindow(FluentWindow):
                 if existing.isRunning():
                     return
             except RuntimeError:
-                # C++ side already gone — clear the stale handle.
+                # C++ side already gone, clear the stale handle.
                 self._update_dl_thread = None
 
         downloads = Path.home() / "Downloads"
@@ -2091,7 +2116,7 @@ class CdummWindow(FluentWindow):
         # attempt at this added Qt.QueuedConnection on the same three
         # connect calls. That was the right diagnosis (slot must run on
         # main thread for InfoBar.success to parent without crashing)
-        # but the wrong mechanism — jikulopo's instrumented run on
+        # but the wrong mechanism, jikulopo's instrumented run on
         # 2026-05-31 proved the slot STILL ran on the worker thread
         # after the v3.3.15 build. Verified empirically: PySide6 6.x
         # QueuedConnection to a free Python callable routes the call to
@@ -2190,7 +2215,7 @@ class CdummWindow(FluentWindow):
         # download it directly into the user's Downloads folder, then
         # reveal it in the file manager. scottykyzer on Nexus reported
         # being dropped on the GitHub releases page and getting confused
-        # by .dmg + source-zip clutter — non-developer users can't
+        # by .dmg + source-zip clutter, non-developer users can't
         # always find the right file. On unsupported platforms (Linux),
         # fall back to opening the GitHub release page (legacy behaviour).
         from cdumm.engine.update_checker import asset_for_current_platform
@@ -2209,7 +2234,7 @@ class CdummWindow(FluentWindow):
                 lambda: QDesktopServices.openUrl(QUrl(url)))
         layout.addWidget(btn)
 
-        # Secondary "Release notes" link — keeps the GitHub page one
+        # Secondary "Release notes" link, keeps the GitHub page one
         # click away for users who do want the changelog / source
         # tarball / older builds. HyperlinkButton renders as plain
         # underlined text, so it doesn't compete visually with the
@@ -2222,7 +2247,7 @@ class CdummWindow(FluentWindow):
             notes_btn.setFixedHeight(26)
             layout.addWidget(notes_btn)
 
-        # Close (X) button — dismisses the banner this session AND
+        # Close (X) button, dismisses the banner this session AND
         # remembers the tag so it won't reappear next launch (until
         # a newer tag arrives). Fixes DeathZxZ's "non-closable" report.
         close_btn = TransparentToolButton(FluentIcon.CLOSE, banner)
@@ -2321,7 +2346,7 @@ class CdummWindow(FluentWindow):
 
     def _on_db_debounced_refresh(self) -> None:
         """Refresh UI after external DB change (debounced).
-        Skip if a worker is active — it's our own writes, not external.
+        Skip if a worker is active, it's our own writes, not external.
         """
         if self._active_worker:
             return
@@ -2383,7 +2408,7 @@ class CdummWindow(FluentWindow):
         Each line in ``pending_nxm.txt`` is one URL. For each: parse,
         look up the API key, call ``download_link.json`` (with the
         ``key`` + ``expires`` query params that came from the URL when
-        present — that's what lets free-tier downloads succeed), fetch
+        present, that's what lets free-tier downloads succeed), fetch
         the file to a temp path, and dispatch through the existing drop
         handler so import follows the same path as a dragged file.
         """
@@ -2457,7 +2482,7 @@ class CdummWindow(FluentWindow):
 
         Synthesises an ``nxm://`` URL without ``key``/``expires`` query
         params (those are only required for free tier). The standard
-        :meth:`_handle_nxm_url` worker handles the rest — it'll get
+        :meth:`_handle_nxm_url` worker handles the rest, it'll get
         a ``download_link.json`` response for premium users and fall
         back to the browser via :class:`NexusPremiumRequired` for free
         users, which opens ``fallback_url`` (the mod's Files tab).
@@ -2513,7 +2538,7 @@ class CdummWindow(FluentWindow):
         except NxmUrlError as e:
             # Bug 38: give the user a specific message rather than
             # letting the generic handler say "Could not handle".
-            logger.warning("Malformed nxm:// URL: %s — %s", url, e)
+            logger.warning("Malformed nxm:// URL: %s, %s", url, e)
             InfoBar.error(
                 title="Malformed NXM URL",
                 content=f"Could not parse {url!r}: {e}",
@@ -2531,11 +2556,11 @@ class CdummWindow(FluentWindow):
         # was a no-op while the CDN warms up. Bug #17: sticky until
         # the download actually finishes (closed in
         # _finish_nxm_download). Fixed 15s was too short for slow
-        # networks / large mods — the toast disappeared before
+        # networks / large mods, the toast disappeared before
         # completion and users thought nothing was happening.
         #
         # Bug 39: close any prior banner before overwriting the
-        # attribute — rapid NXM clicks otherwise pile up orphaned
+        # attribute, rapid NXM clicks otherwise pile up orphaned
         # InfoBars that linger until window destruction.
         prior = getattr(self, "_nxm_download_banner", None)
         if prior is not None:
@@ -2684,14 +2709,14 @@ class CdummWindow(FluentWindow):
                 except Exception:
                     body = ""
                 logger.error(
-                    "nxm: CDN download failed — HTTP %d: %s | URL: %s",
+                    "nxm: CDN download failed, HTTP %d: %s | URL: %s",
                     e.code, body, getattr(e, "url", "?"))
                 error = ("http", f"HTTP {e.code}: {body or str(e)}")
             except Exception as e:
                 logger.error("nxm: CDN download failed: %s", e, exc_info=True)
                 error = ("other", str(e))
             finally:
-                # Push (result, error, nexus_mod_id, nexus_file_id) —
+                # Push (result, error, nexus_mod_id, nexus_file_id) , 
                 # queue is thread-safe. mod_id binds to an existing
                 # local row; file_id gets stored on that row so the
                 # next update check can walk the file_updates chain
@@ -2712,7 +2737,7 @@ class CdummWindow(FluentWindow):
         """Main-thread completion slot for :meth:`_handle_nxm_url`.
 
         Drains every ``(result, error)`` record queued by a worker. The
-        queue is the synchronization point — if two downloads finished
+        queue is the synchronization point, if two downloads finished
         back-to-back, both are processed even if QueuedConnection
         coalesced the slot invocations.
         """
@@ -2758,7 +2783,7 @@ class CdummWindow(FluentWindow):
                     import webbrowser
                     webbrowser.open(detail)
                     InfoBar.info(
-                        title="Free-tier download — click 'Mod Manager Download' on Nexus",
+                        title="Free-tier download, click 'Mod Manager Download' on Nexus",
                         content=(
                             "Opened the mod's Files tab in your browser. "
                             "Click 'Mod Manager Download' there and the "
@@ -2768,7 +2793,7 @@ class CdummWindow(FluentWindow):
                 elif kind == "auth":
                     # Bug #21: route through the same flag the auto-
                     # check uses so the user sees a single coherent
-                    # "API key rejected — re-enter in Settings"
+                    # "API key rejected, re-enter in Settings"
                     # banner. _apply_nexus_update_colors reads this
                     # flag + _decide_auth_banner to avoid spamming.
                     self._pending_nexus_auth_error = True
@@ -2814,7 +2839,7 @@ class CdummWindow(FluentWindow):
                 existing_id = None
                 # Explicit-intent fast path: when the user clicked
                 # "Click To Update" on a specific local mod card, the
-                # binding target is unambiguous — skip both the multi-
+                # binding target is unambiguous, skip both the multi-
                 # row ambiguity warning AND the heuristic. Bug from
                 # Faisal 2026-04-27: clicking Update on Horse X (row
                 # 1424) was creating a duplicate "Legendary Horse Body
@@ -2833,14 +2858,14 @@ class CdummWindow(FluentWindow):
                     if existing_id is not None:
                         logger.info(
                             "nxm: explicit-intent bind to mod_id=%d "
-                            "(skipping heuristic — user clicked Update "
+                            "(skipping heuristic, user clicked Update "
                             "on this specific row)", existing_id)
                 # Heuristic path: only runs when explicit intent
                 # WASN'T provided. If intended_mod_id was set but
                 # rejected by should_bind_to_existing_row (deleted
-                # row or nexus_mod_id mismatch — see iterations 5/6),
+                # row or nexus_mod_id mismatch, see iterations 5/6),
                 # we deliberately do NOT fall back to the heuristic
-                # — that could bind to a sibling row sharing
+                #, that could bind to a sibling row sharing
                 # nexus_mod_id and replace the wrong mod. User intent
                 # was specific; missing/inconsistent → import as new.
                 if (existing_id is None and not intended_mod_id
@@ -2865,7 +2890,7 @@ class CdummWindow(FluentWindow):
                     if len(rows) > 1:
                         names = ", ".join(r[1] for r in rows)
                         logger.warning(
-                            "nxm: %d mod rows share nexus_mod_id=%d (%s) — "
+                            "nxm: %d mod rows share nexus_mod_id=%d (%s), "
                             "importing as new to avoid wrong-target replace",
                             len(rows), nexus_mod_id, names)
                         InfoBar.warning(
@@ -2896,7 +2921,7 @@ class CdummWindow(FluentWindow):
                         else:
                             logger.info(
                                 "nxm: row %d has same nexus_mod_id=%d but "
-                                "different file/name — importing as new mod "
+                                "different file/name, importing as new mod "
                                 "to avoid wrong-target replace",
                                 rows[0][0], nexus_mod_id)
                 # Fallback: when no row matches by nexus_mod_id (because
@@ -2910,7 +2935,7 @@ class CdummWindow(FluentWindow):
                 #
                 # Iteration 11 systematic-debugging: if intended_mod_id
                 # was set but rejected, also skip this name-match
-                # fallback — it could bind to a similarly-named sibling
+                # fallback, it could bind to a similarly-named sibling
                 # and cause the same wrong-target replace this whole
                 # branch was added to prevent.
                 if existing_id is None and not intended_mod_id and self._db:
@@ -2929,16 +2954,16 @@ class CdummWindow(FluentWindow):
                     nexus_real_file_id=nexus_file_id)
 
     # ------------------------------------------------------------------
-    # Theme change — reapply custom styles on all components
+    # Theme change, reapply custom styles on all components
     # ------------------------------------------------------------------
 
     def _on_theme_changed_global(self, theme) -> None:
-        """Called by qconfig.themeChanged — reapply ALL custom styles everywhere.
+        """Called by qconfig.themeChanged, reapply ALL custom styles everywhere.
 
         Triggered by either in-app setTheme() or by SystemThemeListener
         picking up a Windows theme flip (wallpaper slideshow, system
         dark-mode toggle). The ZAIAC001 bug was caused by the listener
-        never running — without it, Windows-flip events never reached
+        never running, without it, Windows-flip events never reached
         this handler and the content stayed white-on-white.
         """
         # Switch sidebar logo between light/dark variant
@@ -2989,10 +3014,10 @@ class CdummWindow(FluentWindow):
             self._drop_overlay._apply_theme()
             self._drop_overlay.update()
 
-        # Tool pages — reapply stat card/result card/button themes
+        # Tool pages, reapply stat card/result card/button themes
         tool_pages = [
-            'verify_page', 'check_page', 'culprit_page',
-            'inspect_page', 'fix_page', 'rescan_page',
+            'verify_state_page', 'check_mods_page', 'find_culprit_page',
+            'inspect_mod_page', 'fix_everything_page', 'rescan_page',
         ]
         for name in tool_pages:
             page = getattr(self, name, None)
@@ -3021,16 +3046,13 @@ class CdummWindow(FluentWindow):
                 page._update_divider(page._header_divider)
             if hasattr(page, '_results_divider'):
                 page._update_divider(page._results_divider)
-            # Re-apply font sizes via QFont (survives theme changes)
-            if hasattr(page, '_apply_theme'):
-                page._apply_theme() if hasattr(page, '_stats_row') else None
 
         # Settings page combo centering
         settings = getattr(self, 'settings_page', None)
         if settings and hasattr(settings, '_reapply_custom_styles'):
             settings._reapply_custom_styles()
 
-        logger.debug("Theme changed to %s — refreshed all pages", theme)
+        logger.debug("Theme changed to %s, refreshed all pages", theme)
 
     # ------------------------------------------------------------------
     # Refresh all pages
@@ -3080,7 +3102,7 @@ class CdummWindow(FluentWindow):
                 import platform
                 from cdumm import __version__
                 lines = [
-                    f"CDUMM v{__version__} — Import Error Report",
+                    f"CDUMM v{__version__}, Import Error Report",
                     f"OS: {platform.platform()}",
                     f"Date: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
                     "",
@@ -3198,7 +3220,7 @@ class CdummWindow(FluentWindow):
             if diagnostic:
                 self.inspect_mod_page._add_diagnostic_card(diagnostic, errors[0].split(":")[0] if errors else "")
 
-            self.inspect_mod_page._set_status("Import failed — diagnostic report below", "#BF616A")
+            self.inspect_mod_page._set_status("Import failed, diagnostic report below", "#BF616A")
         else:
             # Fallback: just show InfoBar
             error_text = "; ".join(e.split(": ", 1)[-1][:60] for e in errors[:3])
@@ -3302,7 +3324,7 @@ class CdummWindow(FluentWindow):
         _DiagDialog(mod_name, report, self).exec()
 
     def _on_import_dropped(self, path) -> None:
-        """Handle file dropped on the mods page — queues for sequential import."""
+        """Handle file dropped on the mods page, queues for sequential import."""
         if not self._db or not self._game_dir:
             InfoBar.error(
                 title=tr("main.not_ready"), content=tr("main.not_ready_msg"),
@@ -3375,7 +3397,7 @@ class CdummWindow(FluentWindow):
         # Files with a prebound existing_mod_id (nxm:// downloads that
         # need to REPLACE an existing mod, not import as new) also get
         # forced through the single-import path so the binding survives
-        # — the batch worker doesn't accept per-file mod_ids.
+        #, the batch worker doesn't accept per-file mod_ids.
         if len(self._import_queue) > 1:
             from cdumm.gui.preset_picker import (
                 find_json_presets, find_folder_variants,
@@ -3387,7 +3409,7 @@ class CdummWindow(FluentWindow):
             for p in self._import_queue:
                 needs_dialog = False
                 if str(p) in prebound:
-                    # Skip batch — force single import to preserve mod_id binding
+                    # Skip batch, force single import to preserve mod_id binding
                     needs_dialog = True
                 elif p.is_dir():
                     presets = find_json_presets(p)
@@ -3429,7 +3451,7 @@ class CdummWindow(FluentWindow):
                 else:
                     batch.append(p)
             self._import_queue.clear()
-            # Re-queue deferred mods — they'll be processed one-by-one after batch
+            # Re-queue deferred mods, they'll be processed one-by-one after batch
             self._import_queue.extend(deferred)
             if batch:
                 self._launch_batch_import(batch)
@@ -3494,7 +3516,7 @@ class CdummWindow(FluentWindow):
             if not paths:
                 return
 
-        # Separate ASI mods from PAZ mods — ASI installs are instant (file copy)
+        # Separate ASI mods from PAZ mods, ASI installs are instant (file copy)
         from cdumm.asi.asi_manager import AsiManager
         import tempfile as _tmpmod
         import shutil as _shmod
@@ -3581,6 +3603,10 @@ class CdummWindow(FluentWindow):
         _buf = [""]
         _batch_results = []
         _batch_errors = []
+        # Guard so the finished cleanup can only run once, the
+        # FailedToStart path below invokes it manually because Qt
+        # never emits finished() after FailedToStart.
+        _finished_ran = [False]
 
         def _on_stdout():
             raw = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
@@ -3628,6 +3654,9 @@ class CdummWindow(FluentWindow):
                     pass  # handled in _on_finished
 
         def _on_finished(exit_code, exit_status):
+            if _finished_ran[0]:
+                return
+            _finished_ran[0] = True
             from PySide6.QtCore import QProcess as _QProcess
             crashed = exit_status == _QProcess.CrashExit
             if crashed:
@@ -3661,7 +3690,13 @@ class CdummWindow(FluentWindow):
                 from cdumm.asi.asi_manager import AsiManager
                 _asi_mgr = AsiManager(self._game_dir / "bin64")
                 from pathlib import Path as _P
-                for item, bp in zip(_batch_results, self._batch_paths):
+                # Pair results to source paths by the worker-emitted
+                # "index" key; zip() misaligns as soon as one item
+                # fails (failures are excluded from _batch_results).
+                for _idx, bp in enumerate(self._batch_paths):
+                    item = _batch_result_for_index(_batch_results, _idx)
+                    if item is None:
+                        continue
                     asi_staged = item.get("asi_staged", [])
                     if not asi_staged:
                         continue
@@ -3690,21 +3725,13 @@ class CdummWindow(FluentWindow):
             try:
                 from cdumm.engine.json_patch_handler import detect_json_patch
                 from cdumm.gui.preset_picker import has_labeled_changes
-                # Match results to paths by index (same order)
+                # Match results to paths by the worker-emitted "index"
+                # key (the old code looked up "_batch_idx", which the
+                # worker never emits, so it always fell through to the
+                # name-similarity fallback).
                 for idx, bp in enumerate(self._batch_paths):
-                    # Find the result with matching index
-                    item = None
-                    for r in _batch_results:
-                        if r.get("_batch_idx") == idx:
-                            item = r
-                            break
-                    # Fallback: match by name similarity
-                    if not item:
-                        for r in _batch_results:
-                            rname = r.get("name", "")
-                            if bp.stem in rname or rname in bp.stem:
-                                item = r
-                                break
+                    item = _batch_result_for_index(
+                        _batch_results, idx, bp.stem)
                     if not item or not item.get("mod_id"):
                         continue
                     mod_id = item["mod_id"]
@@ -3787,9 +3814,26 @@ class CdummWindow(FluentWindow):
             if raw.strip():
                 logger.info("Batch import worker stderr: %s", raw.strip()[:500])
 
+        def _on_proc_error(err):
+            # Qt never emits finished() after FailedToStart, so route
+            # the failure through the normal finished cleanup manually
+            # (otherwise _active_worker never clears and the app
+            # stays Busy until restart. Every other ProcessError is
+            # followed by finished() and needs no handling here.
+            if err != QProcess.ProcessError.FailedToStart:
+                return
+            if _finished_ran[0]:
+                return
+            logger.error("Batch import worker failed to start: %s", exe)
+            _batch_errors.append(
+                f"Batch import worker process failed to start ({exe}). "
+                "Antivirus may be blocking it, or the file is missing.")
+            _on_finished(-1, QProcess.ExitStatus.NormalExit)
+
         proc.readyReadStandardOutput.connect(_on_stdout)
         proc.readyReadStandardError.connect(_on_stderr)
         proc.finished.connect(_on_finished)
+        proc.errorOccurred.connect(_on_proc_error)
         proc.start(exe, args)
         logger.info("Batch import QProcess started: PID %s", proc.processId())
 
@@ -3797,7 +3841,7 @@ class CdummWindow(FluentWindow):
         """Run pre-import checks (main thread, blocking), then launch ImportWorker."""
         # Safety: never start a new import while one is running
         if self._active_worker:
-            logger.warning("Import blocked — worker still active, re-queuing %s", path.name)
+            logger.warning("Import blocked, worker still active, re-queuing %s", path.name)
             if not hasattr(self, '_import_queue'):
                 self._import_queue = []
             self._import_queue.insert(0, path)  # put it back at front
@@ -3817,11 +3861,11 @@ class CdummWindow(FluentWindow):
         from cdumm.asi.asi_manager import AsiManager
         asi_mgr = AsiManager(self._game_dir / "bin64")
         if asi_mgr.contains_asi(path) and not _has_game_content(path):
-            # Pure ASI mod — install directly (no PAZ content)
+            # Pure ASI mod, install directly (no PAZ content)
             self._install_asi_mod(path, asi_mgr)
             self._process_next_import()
             return
-        # Mixed ZIPs (ASI + PAZ) go through worker — ASI files are staged
+        # Mixed ZIPs (ASI + PAZ) go through worker, ASI files are staged
         # and installed from the result handler after worker completes
 
         # ── 2. Snapshot check ─────────────────────────────────────────
@@ -3853,7 +3897,7 @@ class CdummWindow(FluentWindow):
                     near_box.yesButton.setText(tr("import.update_existing"))
                     near_box.cancelButton.setText(tr("import.import_as_new"))
                     if not near_box.exec():
-                        # 'Import as new' — bypass the dup flow entirely
+                        # 'Import as new', bypass the dup flow entirely
                         treat_as_dup = False
                 if treat_as_dup:
                     # Get installed mod's version
@@ -3868,7 +3912,7 @@ class CdummWindow(FluentWindow):
 
                     # Compare versions
                     if installed_version and drop_version and installed_version == drop_version:
-                        # Same version — skip silently with toast
+                        # Same version, skip silently with toast
                         InfoBar.info(
                             title=tr("infobar.skipped"),
                             content=tr("infobar.skipped_msg", name=mname, version=drop_version),
@@ -3877,7 +3921,7 @@ class CdummWindow(FluentWindow):
                         # If the user clicked the red 'Click To Update'
                         # pill and the download turned out to be the same
                         # version they already have, the pill should
-                        # still flip GREEN — they ARE on the latest. The
+                        # still flip GREEN, they ARE on the latest. The
                         # update-check verdict was based on a stale
                         # local_file_id (filename-vs-API version drift
                         # is the usual cause). Clear in-memory so the
@@ -3913,7 +3957,7 @@ class CdummWindow(FluentWindow):
                         self._process_next_import()
                         return
 
-                    # Different version — determine if update or downgrade
+                    # Different version, determine if update or downgrade
                     if installed_version and drop_version and drop_version < installed_version:
                         # Downgrade
                         box = MessageBox(
@@ -3939,14 +3983,31 @@ class CdummWindow(FluentWindow):
                                 self._update_enabled = m.get("enabled")
                                 break
                         # Bug 34: snapshot the configurable mod's
-                        # selected_labels BEFORE remove_mod cascades the
-                        # mod_config row. _restore_selected_labels replays
-                        # them onto the new row in the post-import hook
-                        # so users don't lose preset picks on click-to-
-                        # update.
+                        # selected_labels BEFORE the old row goes away.
+                        # _restore_selected_labels replays them onto the
+                        # new row in the post-import hook so users don't
+                        # lose preset picks on click-to-update.
                         self._pending_selected_labels = (
                             _snapshot_selected_labels(self._db, mid))
-                        self._mod_manager.remove_mod(mid)
+                        # Audit C8 (2026-06-10): do NOT remove the old
+                        # mod before the import runs. A failed import
+                        # (corrupt archive, watchdog kill, crash) used
+                        # to leave the user with NOTHING: old mod
+                        # deltas + sources already deleted, new mod
+                        # absent. Park the old row under a temp name so
+                        # the importer's same-name duplicate check
+                        # can't match it, then remove it only in the
+                        # post-import SUCCESS path; the error path
+                        # restores the name.
+                        self._pending_update_remove_mid = mid
+                        self._pending_update_old_name = mname
+                        try:
+                            self._mod_manager.rename_mod(
+                                mid, f"{mname} (updating)")
+                        except Exception as _e:
+                            logger.warning(
+                                "update-flow: temp rename of old mod "
+                                "%d failed: %s", mid, _e)
                     else:
                         self._process_next_import()
                         return
@@ -4100,7 +4161,7 @@ class CdummWindow(FluentWindow):
                     # Duration radios + 3 always-on toggles inside one
                     # JSON). Without this, the user only sees the
                     # mutex/checkbox UI later via Configure options on
-                    # the side panel — Faisal's UX feedback 2026-05-10.
+                    # the side panel, Faisal's UX feedback 2026-05-10.
                     try:
                         from cdumm.gui.preset_picker import (
                             TogglePickerDialog,
@@ -4118,7 +4179,7 @@ class CdummWindow(FluentWindow):
                         # variants (Ride Duration 30/60/120 min). Skip
                         # mods that just happen to have many labeled
                         # changes (mod 356 Region Dismount Removal has
-                        # 456 plain region toggles — flooding the user
+                        # 456 plain region toggles, flooding the user
                         # with 456 checkboxes at import is the opposite
                         # of helpful; let those surface via the cog).
                         return (_detect_preset_groups(d) is not None
@@ -4146,8 +4207,8 @@ class CdummWindow(FluentWindow):
                         return
                     selected = refined
                     # Propagate refined data into the parent `presets`
-                    # list so import_multi_variant — which receives the
-                    # FULL preset list, not just `selected` — sees the
+                    # list so import_multi_variant, which receives the
+                    # FULL preset list, not just `selected`, sees the
                     # user's per-patch picks for the ticked variants.
                     refined_by_path = {fp: d for fp, d in refined}
                     presets = [
@@ -4333,7 +4394,7 @@ class CdummWindow(FluentWindow):
 
             if scan_dir is not None:
                 # Archive-wide mutex check: if EVERY folder's JSONs
-                # target overlapping shop slots (GildsGear pattern —
+                # target overlapping shop slots (GildsGear pattern , 
                 # 10 category folders × N alt JSONs, all fighting for
                 # the same 93 slots), skip the folder picker entirely
                 # and bundle all JSONs into one variant mod. The cog
@@ -4352,7 +4413,7 @@ class CdummWindow(FluentWindow):
                 if archive_mutex:
                     logger.info(
                         "Archive-wide mutex detected: %d JSONs across "
-                        "all folders — bundling into one variant mod",
+                        "all folders, bundling into one variant mod",
                         len(archive_mutex))
                     try:
                         # Rewrite each JSON's name field to the folder-
@@ -4379,7 +4440,7 @@ class CdummWindow(FluentWindow):
                             dest = staging / f"{safe}.json"
                             _sh.copy2(src_path, dest)
                             # Tag the data so the cog label reads
-                            # "Abyss Gears / AbyssGear_1" — name takes
+                            # "Abyss Gears / AbyssGear_1", name takes
                             # precedence over filename in the variant
                             # label builder.
                             d2 = dict(data)
@@ -4475,7 +4536,7 @@ class CdummWindow(FluentWindow):
                     if len(folder_vars) < 2:
                         # Format 3 variant pack (e.g. CrimsonWings
                         # ships 5 .field.json levels in one ZIP). Same
-                        # picker shape — surface the materialised
+                        # picker shape, surface the materialised
                         # variant dirs so the user picks one level.
                         from cdumm.engine.import_handler import (
                             find_format3_variants,
@@ -4484,7 +4545,7 @@ class CdummWindow(FluentWindow):
                         if len(_f3) >= 2:
                             folder_vars = [c["_base_dir"] for c in _f3]
                     if len(folder_vars) < 2:
-                        break  # leaf — no more variant choices to offer
+                        break  # leaf, no more variant choices to offer
 
                     fv_dialog = FolderVariantDialog(folder_vars, self)
                     result = fv_dialog.exec()
@@ -4544,7 +4605,7 @@ class CdummWindow(FluentWindow):
                     if _asi_files:
                         self._pending_asi_from_variant = _asi_files
                         logger.info(
-                            "Variant archive bundles %d ASI file(s) — "
+                            "Variant archive bundles %d ASI file(s), "
                             "will install after main import: %s",
                             len(_asi_files),
                             [a.name for a in _asi_files])
@@ -4552,7 +4613,7 @@ class CdummWindow(FluentWindow):
                     # mod 837 ships FemaleAnimations.json alongside the
                     # 6 body-type subfolders). Without queuing these as
                     # separate imports, picking a body type drops the
-                    # JSON sibling on the floor — Democles85 #81 follow-
+                    # JSON sibling on the floor, Democles85 #81 follow-
                     # up. Only scan the wrapper level (parent of the
                     # picked variant) so we don't pick up unrelated
                     # JSONs from inside the body-type subfolders.
@@ -4655,13 +4716,13 @@ class CdummWindow(FluentWindow):
                         mutex_presets = None
                     if mutex_presets:
                         logger.info(
-                            "Mutex-JSON folder detected at %s — routing "
+                            "Mutex-JSON folder detected at %s, routing "
                             "to import_multi_variant (%d alternatives)",
                             _current.name, len(mutex_presets))
                         try:
                             mods_dir = self._cdmods_dir / "mods"
                             # Default: first JSON enabled, rest disabled
-                            # (they're mutex — enabling more makes no
+                            # (they're mutex, enabling more makes no
                             # sense). User can swap via cog later.
                             initial = {mutex_presets[0][0]}
                             source_for_name = (
@@ -4723,7 +4784,7 @@ class CdummWindow(FluentWindow):
                         return
                 elif _tmp_extract_for_picker is not None:
                     # No variant picker fired. The pre-extract was a scan-
-                    # only operation — throw it away and let the worker
+                    # only operation, throw it away and let the worker
                     # re-extract from the original archive. Reusing the
                     # temp path would leak the folder AND cause the mod to
                     # be named after the temp dir (cdumm_variant_XXXX)
@@ -4749,7 +4810,7 @@ class CdummWindow(FluentWindow):
                 # AFTER import, not via a single drop-time dialog that
                 # arbitrarily picked one of them). Only show the toggle
                 # picker at drop time when the archive has exactly ONE
-                # configurable JSON — otherwise skip it and let each
+                # configurable JSON, otherwise skip it and let each
                 # imported mod's cog surface the toggles per-mod.
                 all_json = detect_json_patches_all(path)
                 if len(all_json) == 1:
@@ -4787,7 +4848,7 @@ class CdummWindow(FluentWindow):
     def _launch_import_worker(self, path: Path, existing_mod_id: int | None = None) -> None:
         """Launch import in a SEPARATE PROCESS via QProcess.
 
-        Using QProcess instead of QThread completely eliminates GIL contention —
+        Using QProcess instead of QThread completely eliminates GIL contention , 
         the subprocess has its own GIL so the GUI thread is never starved.
         Progress is streamed as JSON lines on stdout.
         """
@@ -4815,7 +4876,7 @@ class CdummWindow(FluentWindow):
         # closure-captured proc in _on_finished, so each proc's handler
         # sees the context that belonged to ITS import.
         # NOTE: snapshot_and_clear_import_context is imported at module
-        # top — see comment near the top-level import for why.
+        # top, see comment near the top-level import for why.
         proc._cdumm_ctx = snapshot_and_clear_import_context(self)
 
         # Build command: the exe calls itself with --worker (frozen
@@ -4827,6 +4888,14 @@ class CdummWindow(FluentWindow):
         ]
         if existing_mod_id is not None:
             _import_args.append(str(existing_mod_id))
+        # Script-consent re-dispatch (audit C1/import): only set after
+        # the user explicitly confirmed the "run this script?" prompt
+        # for THIS path. One-shot: consumed at launch.
+        if str(path) in getattr(self, "_consented_script_paths", set()):
+            self._consented_script_paths.discard(str(path))
+            _import_args.append("--allow-scripts")
+            logger.info("Import re-dispatched with script consent: %s",
+                        path.name)
         exe, args = worker_command(_import_args)
 
         # Buffer for partial JSON lines
@@ -4836,6 +4905,10 @@ class CdummWindow(FluentWindow):
         # outcome; if it didn't and the process still exited non-zero or
         # crashed, that's a silent failure to surface.
         _got_result = [False]
+        # Guard so the finished cleanup can only run once, the
+        # FailedToStart path below invokes it manually because Qt
+        # never emits finished() after FailedToStart.
+        _finished_ran = [False]
 
         def _on_stdout():
             data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
@@ -4859,7 +4932,7 @@ class CdummWindow(FluentWindow):
                     self._import_result_name = msg.get("name", path.stem)
                     self._import_result_error = None
                     self._import_result_asi_staged = msg.get("asi_staged", [])
-                    # Non-fatal info banner — set by importers when a
+                    # Non-fatal info banner, set by importers when a
                     # mod imported successfully but with notable
                     # caveats (e.g., multi-file partial-skip with N
                     # files dropped due to byte mismatch). Surfaced
@@ -4878,8 +4951,17 @@ class CdummWindow(FluentWindow):
                     self._import_result_name = path.stem
                     self._import_result_error = msg.get("msg", "Unknown error")
                     self._import_result_mod_id = None
+                    # Script-consent refusal (audit C1/import): the
+                    # worker refused to execute a dropped script.
+                    # Capture the marker so _on_finished can show the
+                    # confirm prompt and re-dispatch with consent.
+                    self._import_script_consent = msg.get(
+                        "needs_script_consent")
 
         def _on_finished(exit_code, exit_status):
+            if _finished_ran[0]:
+                return
+            _finished_ran[0] = True
             tip.setContent(tr("progress.completed"))
             tip.setState(True)
             proc.deleteLater()
@@ -4907,6 +4989,39 @@ class CdummWindow(FluentWindow):
             name = getattr(self, '_import_result_name', path.stem)
 
             if err:
+                # Script-consent refusal (audit C1/import): the worker
+                # refused to execute a script inside this drop. Ask the
+                # user explicitly; on confirm, re-dispatch the SAME
+                # import with the one-shot --allow-scripts flag.
+                _script = getattr(self, '_import_script_consent', None)
+                self._import_script_consent = None
+                if _script:
+                    box = MessageBox(
+                        tr("import.script_consent_title"),
+                        tr("import.script_consent_body").format(
+                            script=_script, mod=path.name),
+                        self)
+                    if box.exec():
+                        if not hasattr(self, '_consented_script_paths'):
+                            self._consented_script_paths = set()
+                        self._consented_script_paths.add(str(path))
+                        # Replay the per-import context that the first
+                        # launch snapshot-and-CLEARED, so the consented
+                        # relaunch keeps priority/enabled restore and
+                        # variant context; also re-pass existing_mod_id
+                        # so a script-mod update swaps deltas instead
+                        # of creating a duplicate row (release-review
+                        # finding 2, 2026-06-11).
+                        for _k, _v in (getattr(proc, "_cdumm_ctx", None)
+                                       or {}).items():
+                            setattr(self, f"_{_k}", _v)
+                        QTimer.singleShot(
+                            100,
+                            lambda p=path, e=existing_mod_id:
+                                self._launch_import_worker(p, e))
+                        return
+                    # Declined: fall through to the normal error path
+                    # (the refusal message explains what happened).
                 if not hasattr(self, '_import_errors'):
                     self._import_errors = []
                 self._import_errors.append(f"{path.name}: {err}")
@@ -4914,11 +5029,47 @@ class CdummWindow(FluentWindow):
                 if not hasattr(self, '_failed_mod_paths'):
                     self._failed_mod_paths = {}
                 self._failed_mod_paths[path.name] = (path, err)
+                # Audit C8: the update flow parked the old mod under a
+                # temp name instead of deleting it. The import failed,
+                # so give the old mod its name back; the user keeps
+                # their working install.
+                _upd_mid = getattr(self, '_pending_update_remove_mid', None)
+                if _upd_mid is not None:
+                    try:
+                        self._mod_manager.rename_mod(
+                            _upd_mid,
+                            getattr(self, '_pending_update_old_name', None)
+                            or "Restored Mod")
+                        logger.info(
+                            "update-flow: import failed, restored old "
+                            "mod %d", _upd_mid)
+                    except Exception as _e:
+                        logger.warning(
+                            "update-flow: could not restore old mod "
+                            "%d after failed import: %s", _upd_mid, _e)
+                    self._pending_update_remove_mid = None
+                    self._pending_update_old_name = None
                 QTimer.singleShot(100, self._process_next_import)
                 return
 
             # ── Post-import actions (main thread, main DB connection) ──
             self._sync_db()
+
+            # Audit C8: the new version imported successfully, NOW the
+            # old parked row (deltas + sources) can go.
+            _upd_mid = getattr(self, '_pending_update_remove_mid', None)
+            if _upd_mid is not None:
+                try:
+                    self._mod_manager.remove_mod(_upd_mid)
+                    logger.info(
+                        "update-flow: removed old mod %d after "
+                        "successful update import", _upd_mid)
+                except Exception as _e:
+                    logger.warning(
+                        "update-flow: removing old mod %d failed: %s",
+                        _upd_mid, _e)
+                self._pending_update_remove_mid = None
+                self._pending_update_old_name = None
 
             # Clean temp dirs from pre-checks
             tmp = getattr(self, '_pending_tmp_cleanup', None)
@@ -4948,7 +5099,7 @@ class CdummWindow(FluentWindow):
 
             def _primary_id():
                 """Resolve the post-import target row via the shared
-                _resolve_post_import_target_id helper — same prefer-
+                _resolve_post_import_target_id helper, same prefer-
                 list-over-MAX(id) logic the nxm:// flow needs."""
                 max_row_id = None
                 try:
@@ -4964,11 +5115,17 @@ class CdummWindow(FluentWindow):
                     max_row_id=max_row_id,
                 )
 
+            # Resolve the target row ONCE, up front. Previously _pid
+            # was only assigned inside conditional try blocks below,
+            # so the pill-clear fallback (rename-and-drop update with
+            # no nexus id in the filename) could hit an unbound _pid
+            # NameError that a bare except swallowed.
+            _pid = _primary_id()
+
             # Post-import: game version stamp
             try:
                 from cdumm.engine.version_detector import detect_game_version
                 ver = detect_game_version(self._game_dir)
-                _pid = _primary_id()
                 if ver and _pid is not None:
                     self._db.connection.execute(
                         "UPDATE mods SET game_version_hash = ? WHERE id = ?",
@@ -4984,7 +5141,7 @@ class CdummWindow(FluentWindow):
 
             # Post-import: NexusMods mod ID from filename. Nested-variant
             # mods land at a leaf like 'Human' which never carries the
-            # Nexus id — parse from the ORIGINAL dropped archive
+            # Nexus id, parse from the ORIGINAL dropped archive
             # (Character Creator-837-4-2-1776536785.zip) when available.
             _orig_for_nexus = _ctx.get("original_drop_path")
             if _orig_for_nexus is not None:
@@ -4996,7 +5153,6 @@ class CdummWindow(FluentWindow):
             nexus_id, nexus_file_ver = _parse_nexus_filename(_nexus_stem)
             if nexus_id:
                 try:
-                    _pid = _primary_id()
                     if _pid is not None:
                         # Also refresh mods.version to the file we just
                         # installed. Without this, an in-app update moved
@@ -5034,7 +5190,6 @@ class CdummWindow(FluentWindow):
                     str(path), None)
             if real_file_id:
                 try:
-                    _pid = _primary_id()
                     if _pid is not None:
                         self._db.connection.execute(
                             "UPDATE mods SET nexus_real_file_id = ? "
@@ -5064,19 +5219,21 @@ class CdummWindow(FluentWindow):
             if hasattr(self, "_nexus_updates") and self._nexus_updates:
                 effective_nid = nexus_id
                 try:
-                    if not effective_nid:
+                    if not effective_nid and _pid is not None:
                         row = self._db.connection.execute(
                             "SELECT nexus_mod_id FROM mods WHERE id = ?",
                             (_pid,)).fetchone()
                         if row and row[0]:
                             effective_nid = int(row[0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "pill-clear: nexus_mod_id lookup for row %s "
+                        "failed: %s", _pid, e)
                 if effective_nid:
                     try:
                         from cdumm.engine.nexus_api import clear_outdated_after_update
                         # clear_outdated_after_update(updates, nexus_mod_id, new_version)
-                        # — pass the just-imported version (parsed from the
+                        #, pass the just-imported version (parsed from the
                         # Nexus filename, falls back to whatever local row
                         # has) so the GREEN pill carries an accurate
                         # version label.
@@ -5201,7 +5358,7 @@ class CdummWindow(FluentWindow):
                             # saved custom_values on this mod_config row
                             # survive. INSERT OR REPLACE here would
                             # delete and recreate the row with only
-                            # selected_labels — wiping custom_values.
+                            # selected_labels, wiping custom_values.
                             from cdumm.engine.variant_handler import (
                                 _persist_selected_labels)
                             _persist_selected_labels(
@@ -5396,6 +5553,30 @@ class CdummWindow(FluentWindow):
         # Stop watchdog when proc finishes
         proc.finished.connect(lambda *_: watchdog.stop())
 
+        def _on_proc_error(err):
+            # Qt never emits finished() after FailedToStart, so route
+            # the failure through the normal finished cleanup manually
+            # (otherwise _active_worker never clears and the app
+            # stays Busy until restart. Every other ProcessError is
+            # followed by finished() and needs no handling here.
+            from PySide6.QtCore import QProcess as _QProcess
+            if err != _QProcess.ProcessError.FailedToStart:
+                return
+            if _finished_ran[0]:
+                return
+            logger.error("Import worker failed to start: %s", exe)
+            watchdog.stop()
+            _got_result[0] = True
+            self._import_result_name = path.stem
+            self._import_result_error = (
+                f"Import worker process failed to start ({exe}). "
+                "Antivirus may be blocking it, or the file is "
+                "missing.")
+            self._import_result_mod_id = None
+            _on_finished(-1, _QProcess.ExitStatus.NormalExit)
+
+        proc.errorOccurred.connect(_on_proc_error)
+
         _probe_console_state("before proc.start(exe, args)")
         proc.start(exe, args)
         _probe_console_state("after proc.start(exe, args)")
@@ -5531,7 +5712,7 @@ class CdummWindow(FluentWindow):
 
                 # Author-renamed-asi cleanup: when the new file is named
                 # differently from the prior version (e.g. the author
-                # baked the version into the filename — EnhancedFlight.asi
+                # baked the version into the filename, EnhancedFlight.asi
                 # -> EnhancedFlightv31.asi), the old .asi is still in
                 # bin64/ AND its asi_plugin_state row still says
                 # outdated. Game would load BOTH at startup. Delete the
@@ -5546,7 +5727,7 @@ class CdummWindow(FluentWindow):
                             bin64_dir = self._game_dir / "bin64"
                             # Sweep every variant the old plugin could
                             # have on disk: enabled (.asi), disabled
-                            # (.asi.disabled — from the right-click
+                            # (.asi.disabled, from the right-click
                             # Disable action), companion .ini, and
                             # companion .ini.disabled. Without this
                             # the page's scan() picks up the .disabled
@@ -5736,7 +5917,7 @@ class CdummWindow(FluentWindow):
 
     def _match_existing_by_name(self, downloaded_path: str | Path) -> int | None:
         """Return ``mods.id`` of an existing row whose name matches the
-        download stem (exact, prettified) — used by the nxm:// flow when
+        download stem (exact, prettified), used by the nxm:// flow when
         the nexus_mod_id lookup misses because the existing row was
         imported as a local zip with no Nexus metadata.
 
@@ -5826,7 +6007,7 @@ class CdummWindow(FluentWindow):
         ``CrimsonDesert.exe``; on the native macOS build the executable
         inside the .app bundle is ``CrimsonDesert`` (lives at
         ``Crimson Desert.app/Contents/MacOS/CrimsonDesert``). Match
-        either name regardless of host platform — psutil reports the
+        either name regardless of host platform, psutil reports the
         leaf basename, no extension matching needed.
 
         Falls open: any error during the scan returns True so the user
@@ -5871,7 +6052,7 @@ class CdummWindow(FluentWindow):
 
         # D1: refuse to apply while a detected game update is
         # outstanding. Applying on a stale snapshot is the root
-        # cause of most "stuck at 2%" reports — patches land on
+        # cause of most "stuck at 2%" reports, patches land on
         # the wrong bytes because our vanilla baseline no longer
         # matches the live game.
         from cdumm.gui.apply_watchdog import (
@@ -6088,7 +6269,7 @@ class CdummWindow(FluentWindow):
     def _post_apply_verify(self) -> None:
         """Deep verification after Apply -- checks PAPGT/PAMT integrity.
 
-        Runs on the GUI thread — keep it fast or skip heavy checks.
+        Runs on the GUI thread, keep it fast or skip heavy checks.
         """
         if not self._game_dir or not self._db:
             return
@@ -6148,14 +6329,14 @@ class CdummWindow(FluentWindow):
                 modded_dirs.add(parts[0])
             mod_by_file.setdefault(fp, []).append(mod_name)
 
-        # 3. PAMT bounds checking skipped — runs on GUI thread and is too slow
+        # 3. PAMT bounds checking skipped, runs on GUI thread and is too slow
         #    for large installations. The apply engine already ensures correct
         #    offsets/sizes during PAZ composition.
 
         # F3: the version-hash comparison used to live here and
         # append "may be outdated" to every mod that was imported on
         # a prior game version. That's speculation, not verification
-        # — after every Steam patch it drowned out real PAPGT/PAMT
+        #, after every Steam patch it drowned out real PAPGT/PAMT
         # failures with 20+ false-positive lines. The real signal for
         # "this mod might crash" is patch byte mismatches during
         # apply (already loudly logged by json_patch_handler and
@@ -6275,7 +6456,7 @@ class CdummWindow(FluentWindow):
 
         Windows: prefer the Steam URI (so the overlay attaches), then
         the Xbox app deep-link, then a direct ``CrimsonDesert.exe``
-        spawn. macOS: ``open`` the ``Crimson Desert.app`` bundle —
+        spawn. macOS: ``open`` the ``Crimson Desert.app`` bundle , 
         macOS handles the rest, including Steam overlay attachment if
         the user launched the .app from Steam's perspective.
 
@@ -6295,7 +6476,7 @@ class CdummWindow(FluentWindow):
                 if app_bundle is not None:
                     subprocess.Popen(["open", str(app_bundle)])
                 else:
-                    # Steam URI works on macOS via the Steam client —
+                    # Steam URI works on macOS via the Steam client , 
                     # falls back to the App ID lookup below.
                     from cdumm.engine.game_monitor import get_steam_app_id
                     app_id = get_steam_app_id(self._game_dir)
@@ -6495,7 +6676,7 @@ class CdummWindow(FluentWindow):
     # ------------------------------------------------------------------
 
     def _on_game_dir_changed(self, new_path: Path) -> None:
-        """Handle game directory change — reinitialize DB, managers, and pages."""
+        """Handle game directory change, reinitialize DB, managers, and pages."""
         # Block if a worker is active
         if self._active_worker:
             InfoBar.warning(
@@ -6555,7 +6736,7 @@ class CdummWindow(FluentWindow):
         if hasattr(self, '_db_poll_timer'):
             self._db_poll_timer.start(2000)
 
-        logger.info("Game directory changed to %s — managers reinitialized", new_path)
+        logger.info("Game directory changed to %s, managers reinitialized", new_path)
 
     def _on_cdmods_path_change_requested(
             self, old_path: Path, new_path: Path) -> None:
@@ -6773,14 +6954,14 @@ class CdummWindow(FluentWindow):
         """Create a StateToolTip centered horizontally in the window.
 
         The default StateToolTip spins a SYNC icon at 20 fps via a 50ms timer
-        and composites through QGraphicsOpacityEffect — both extremely expensive.
+        and composites through QGraphicsOpacityEffect, both extremely expensive.
         We disable the spinner and remove the opacity effect to keep the GUI
         smooth while workers are running.
         """
         tip = StateToolTip(title, "Starting...", self)
-        # Kill the 50ms spinner animation — 20 repaints/sec with compositing
+        # Kill the 50ms spinner animation, 20 repaints/sec with compositing
         tip.rotateTimer.stop()
-        # Remove QGraphicsOpacityEffect — forces offscreen render every repaint
+        # Remove QGraphicsOpacityEffect, forces offscreen render every repaint
         tip.setGraphicsEffect(None)
         # Widen and center horizontally
         tip.setFixedWidth(420)
@@ -6841,7 +7022,7 @@ class CdummWindow(FluentWindow):
         _buf = [""]
         _msgs = []
 
-        # A1 watchdog state — reset on every progress message; checked
+        # A1 watchdog state, reset on every progress message; checked
         # by a QTimer every 10s. If the gap exceeds the threshold,
         # kill the QProcess and surface a clear error.
         _wd = {
@@ -6909,6 +7090,11 @@ class CdummWindow(FluentWindow):
         watchdog.timeout.connect(_on_watchdog_tick)
 
         def _on_finished(exit_code, exit_status):
+            if _wd.get("failed_to_start"):
+                # _on_proc_error already ran the full cleanup. Qt does
+                # not emit finished after FailedToStart, but guard
+                # anyway so cleanup can never run twice.
+                return
             watchdog.stop()
             if _wd["killed_by_watchdog"]:
                 # Error was already shown by the watchdog. Still
@@ -6948,7 +7134,7 @@ class CdummWindow(FluentWindow):
             # Guard against the case where the user closed the main
             # window while apply was still running. By the time this
             # finished-handler fires, Qt may have already deleted the
-            # tooltip's underlying C++ object — calling setContent
+            # tooltip's underlying C++ object, calling setContent
             # then crashes with "Internal C++ object already deleted."
             try:
                 tip.setContent(tr("progress.completed"))
@@ -6972,9 +7158,53 @@ class CdummWindow(FluentWindow):
             if data.strip():
                 logger.debug("Worker stderr: %s", data.strip()[:500])
 
+        def _on_proc_error(err):
+            # Only FailedToStart needs handling here: for every other
+            # ProcessError Qt still emits finished(), which runs the
+            # normal cleanup. After FailedToStart, finished never
+            # fires, so without this the app stayed Busy forever
+            # (_active_worker never cleared).
+            if err != QProcess.ProcessError.FailedToStart:
+                return
+            if _wd.get("failed_to_start"):
+                return
+            _wd["failed_to_start"] = True
+            watchdog.stop()
+            logger.error("Worker [%s] failed to start: %s",
+                         worker_args[0], exe)
+            try:
+                tip.setContent(f"{worker_args[0]} failed to start")
+                tip.setState(True)
+            except RuntimeError:
+                pass
+            try:
+                proc.deleteLater()
+            except RuntimeError:
+                pass
+            self._active_worker = None
+            self._active_progress = None
+            self._resume_timers()
+            InfoBar.error(
+                title=f"{worker_args[0].capitalize()} failed to start",
+                content=(
+                    f"Could not launch the worker process ({exe}). "
+                    "Antivirus may be blocking it, or the file is "
+                    "missing. Check cdumm.log for details."),
+                duration=-1, position=InfoBarPosition.TOP, parent=self)
+            # Feed a synthetic error so on_done branches that expect
+            # an error list see the failure too.
+            _msgs.append({
+                "type": "error",
+                "msg": f"Worker process failed to start: {exe}"})
+            try:
+                on_done(_msgs)
+            except RuntimeError:
+                pass
+
         proc.readyReadStandardOutput.connect(_on_stdout)
         proc.readyReadStandardError.connect(_on_stderr)
         proc.finished.connect(_on_finished)
+        proc.errorOccurred.connect(_on_proc_error)
         proc.start(exe, args)
         watchdog.start()
         logger.info("QProcess started [%s]: PID %s", worker_args[0], proc.processId())
@@ -6986,11 +7216,11 @@ class CdummWindow(FluentWindow):
         self._active_progress = progress
         self._last_progress_time = 0.0
 
-        # Disable AUTOMATIC GC — mandatory to prevent crash.
+        # Disable AUTOMATIC GC, mandatory to prevent crash.
         # PySide6/shiboken crashes when GC runs on the worker thread and
         # finalizes Qt objects (confirmed by crash_trace.txt: "Garbage-collecting"
         # on QThread → access violation in summary_bar.paintEvent).
-        # NO periodic gc.collect() during workers — profiling showed even
+        # NO periodic gc.collect() during workers, profiling showed even
         # gen-0 collection takes 300-660ms when objects have accumulated,
         # causing the worst UI stalls. Single full collect after worker ends.
         import gc
@@ -7006,7 +7236,7 @@ class CdummWindow(FluentWindow):
 
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        # CRITICAL: Route progress through dispatcher — lambdas in PySide6
+        # CRITICAL: Route progress through dispatcher, lambdas in PySide6
         # execute on the emitter's thread, not the receiver's. Calling
         # StateToolTip.setContent() from a worker thread segfaults silently.
         worker.progress_updated.connect(
@@ -7023,7 +7253,7 @@ class CdummWindow(FluentWindow):
         thread.start()
 
     def _update_progress_tip(self, pct: int, msg: str) -> None:
-        """Update StateToolTip from main thread — throttled to max ~7 fps."""
+        """Update StateToolTip from main thread, throttled to max ~7 fps."""
         import time
         now = time.monotonic()
         # Always show 0% (start) and 100% (end); throttle the rest to 150ms
@@ -7051,7 +7281,7 @@ class CdummWindow(FluentWindow):
     def _worker_done(self, thread, progress: StateToolTip, callback, *args) -> None:
         progress.setContent(tr("progress.completed"))
         progress.setState(True)
-        # Disconnect all signals BEFORE quit — prevents lambda closures
+        # Disconnect all signals BEFORE quit, prevents lambda closures
         # (which capture Qt objects) from lingering on the worker thread
         # where GC could finalize them on the wrong thread.
         worker = self._active_worker
@@ -7070,7 +7300,7 @@ class CdummWindow(FluentWindow):
         self._worker_thread = None
         import gc
         gc.enable()
-        # DON'T call gc.collect() here — profiling showed it takes 1-1.5s
+        # DON'T call gc.collect() here, profiling showed it takes 1-1.5s
         # after gc.disable(). Let automatic GC handle it incrementally.
         self._resume_timers()
         try:
@@ -7199,7 +7429,7 @@ class CdummWindow(FluentWindow):
 
         The pre-v3.2 batch-import path skipped the dedup gate, so users
         who dragged a folder of all their mods back into CDUMM ended up
-        with two rows for every re-imported mod — old enabled+applied
+        with two rows for every re-imported mod, old enabled+applied
         rows still active in the engine, plus new disabled rows the
         user thought were the only ones. This method runs at startup,
         finds the dupes, and pops a banner with a "Clean up" button.
@@ -7277,10 +7507,10 @@ class CdummWindow(FluentWindow):
 
         Two trigger paths feed this same banner:
 
-        1. ``startup_context["game_updated"]`` — set in main.py when
+        1. ``startup_context["game_updated"]``, set in main.py when
            Steam buildid + exe-hash fingerprint changed since last
            launch. Catches Steam patches.
-        2. Snapshot drift — `detect_snapshot_drift` reads the
+        2. Snapshot drift, `detect_snapshot_drift` reads the
            snapshots table and compares live PAZ file sizes against
            what CDUMM expects. Catches manual file edits, antivirus
            rewrites, and partial Steam Verify runs that didn't bump
@@ -7307,7 +7537,7 @@ class CdummWindow(FluentWindow):
                         f"the snapshot ({sample}{extra}). Click Start "
                         "Recovery to re-sync.")
                     logger.info(
-                        "Snapshot drift detected — %d file(s): %s",
+                        "Snapshot drift detected, %d file(s): %s",
                         len(mismatches),
                         ", ".join(mismatches[:10]))
             except Exception as e:
@@ -7335,7 +7565,7 @@ class CdummWindow(FluentWindow):
         Called from both :meth:`_check_game_updated` (startup
         ``game_updated`` flag) and from the deferred-startup
         fingerprint-mismatch branch. Single UX for both paths
-        (Codex review finding 10 — unified recovery trigger).
+        (Codex review finding 10, unified recovery trigger).
         """
         # Guard against duplicate InfoBars when called twice.
         prior = getattr(self, "_recovery_infobar", None)
@@ -7498,7 +7728,7 @@ class CdummWindow(FluentWindow):
             from cdumm.storage.config import Config
             config = Config(self._db)
 
-            # Sticky per-session banner — fires EVERY launch while
+            # Sticky per-session banner, fires EVERY launch while
             # the game is still in Program Files.
             InfoBar.warning(
                 title="Game location warning",
@@ -7589,7 +7819,7 @@ class CdummWindow(FluentWindow):
         launch.
 
         Skipped on a true fresh install (``last_seen_version`` is
-        unset) — a brand-new user has no reason to see "what's new in
+        unset), a brand-new user has no reason to see "what's new in
         v3.2" for a version they just installed for the first time.
         """
         from cdumm import __version__
@@ -7601,7 +7831,7 @@ class CdummWindow(FluentWindow):
             return
         config.set("last_seen_version", __version__)
         if not last_ver:
-            # Fresh install — stamp the version, don't pop the dialog.
+            # Fresh install, stamp the version, don't pop the dialog.
             return
         try:
             from cdumm.gui.changelog import PatchNotesDialog
@@ -7636,7 +7866,7 @@ class CdummWindow(FluentWindow):
                     self._game_dir, self._vanilla_dir)
             except Exception as e:
                 logger.warning(
-                    "Rescan guard check failed (%s) — proceeding", e)
+                    "Rescan guard check failed (%s), proceeding", e)
                 is_clean, problem_files = True, []
             if not is_clean:
                 shown = problem_files[:5]
@@ -7645,7 +7875,7 @@ class CdummWindow(FluentWindow):
                 if more > 0:
                     block += f"\n  - ...and {more} more"
                 MessageBox(
-                    "Rescan Blocked — Disk Looks Modded",
+                    "Rescan Blocked, Disk Looks Modded",
                     "CDUMM detected live game files that don't match "
                     "the vanilla backups it has on disk. Rescanning "
                     "now would capture modded bytes as vanilla and "
@@ -7722,14 +7952,14 @@ class CdummWindow(FluentWindow):
         # and swallowed the error, leaving a stale fingerprint that
         # re-triggered recovery on every launch. Do not reintroduce it.
 
-        # D1: rescan succeeded — clear the stale-snapshot flag so
+        # D1: rescan succeeded, clear the stale-snapshot flag so
         # Apply unlocks without requiring a restart.
         if self._startup_context.get("game_updated"):
             self._startup_context["game_updated"] = False
             logger.info(
                 "Cleared game_updated flag after rescan; Apply unlocked")
 
-        # Refresh vanilla backups — ensure they match clean game state
+        # Refresh vanilla backups, ensure they match clean game state
         self._refresh_vanilla_backups()
 
         self._refresh_all()
@@ -7744,7 +7974,7 @@ class CdummWindow(FluentWindow):
 
         Small files (<10MB) always copy synchronously. Large PAZ files are
         normally backed up lazily during Apply via _ensure_backups, EXCEPT
-        for archives that enabled JSON mods patch — those must have a
+        for archives that enabled JSON mods patch, those must have a
         clean vanilla copy on disk so mount-time extraction can produce a
         correct overlay. Without this, JSON mods targeting 0008/0.paz
         (inventory/stamina/skill) silently no-op.
@@ -7753,7 +7983,7 @@ class CdummWindow(FluentWindow):
             return
         import shutil, os
         from cdumm.engine.json_target_scanner import enabled_json_target_archives
-        MAX_SYNC_SIZE = 10 * 1024 * 1024  # 10MB — PAMT/PAPGT/PATHC are all <14MB
+        MAX_SYNC_SIZE = 10 * 1024 * 1024  # 10MB, PAMT/PAPGT/PATHC are all <14MB
         try:
             critical = enabled_json_target_archives(self._db)
             rows = self._db.connection.execute(
@@ -7828,7 +8058,7 @@ class CdummWindow(FluentWindow):
         # Kill any active worker QProcess so it doesn't outlive the GUI
         # and continue writing to the DB. Earlier closeEvent only
         # stopped QThreads, leaving QProcess children running until
-        # they finished naturally — orphan processes could collide
+        # they finished naturally, orphan processes could collide
         # with the next instance's worker. Round 4 GUI/worker audit.
         active_worker = getattr(self, "_active_worker", None)
         if active_worker is not None:
@@ -7840,7 +8070,7 @@ class CdummWindow(FluentWindow):
                         active_worker.waitForFinished(3000)
             except (RuntimeError, Exception) as _e:
                 logger.debug("Active worker kill failed: %s", _e)
-        # Stop the SystemThemeListener FIRST — it's a background thread
+        # Stop the SystemThemeListener FIRST, it's a background thread
         # that can hold references during Qt teardown if left running.
         listener = getattr(self, "_theme_listener", None)
         if listener is not None:
@@ -7859,7 +8089,7 @@ class CdummWindow(FluentWindow):
                 tray.hide()
             except RuntimeError:
                 pass
-        # Stop timers (guard against already-deleted C++ objects — Qt may
+        # Stop timers (guard against already-deleted C++ objects, Qt may
         # have reaped children by the time closeEvent fires)
         for timer_name in (
             "_update_timer",
@@ -7891,7 +8121,7 @@ class CdummWindow(FluentWindow):
             except RuntimeError:
                 pass
         # Persist window geometry so the next launch opens at the same size/position.
-        # Must happen BEFORE db.close(). Ignore errors — this is best-effort.
+        # Must happen BEFORE db.close(). Ignore errors, this is best-effort.
         if self._db:
             try:
                 from cdumm.storage.config import Config

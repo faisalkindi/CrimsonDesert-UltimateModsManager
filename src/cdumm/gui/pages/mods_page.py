@@ -30,7 +30,6 @@ from qfluentwidgets import (
 
 from cdumm.engine.swap_cache import cache_root_for, resolve_cfg_src
 from cdumm.gui.components.config_panel import ConfigPanel
-from cdumm.gui.components.conflict_card import ConflictCard
 from cdumm.gui.components.mod_card import FolderGroup, ModCard
 from cdumm.gui.components.summary_bar import SummaryBar
 from cdumm.i18n import tr
@@ -274,7 +273,6 @@ class ModsPage(QWidget):
 
         # Card tracking
         self._mod_cards: list[ModCard] = []
-        self._conflict_cards: list[ConflictCard] = []
         self._folder_groups: dict[int | None, FolderGroup] = {}  # group_id -> FolderGroup
         self._last_clicked_index: int | None = None  # for Shift+Click range select
         self._initial_load_done = False  # staggered animation only on first load
@@ -574,8 +572,11 @@ class ModsPage(QWidget):
                     # untouched.
                     card.fill_missing_version(getattr(u, "latest_version", ""))
                     card.set_update_available(False)
-            elif nexus_id:
-                card.set_update_available(False)
+            # No entry in `updates` means the mod was NOT checked this
+            # cycle (check_mod_updates emits has_update=False entries
+            # for confirmed-current mods, so absence really is
+            # "unknown"). Leave the pill grey instead of painting the
+            # green "up to date" state for an unchecked mod.
         # Refresh the summary bar so the Outdated counter reflects the
         # new update set. Without this the count would stay stale until
         # the next refresh().
@@ -612,7 +613,6 @@ class ModsPage(QWidget):
         _dbg(f"REFRESH: _applied_state has {len(self._applied_state)} entries, "
              f"{sum(1 for v in self._applied_state.values() if v)} applied")
         self._build_mod_cards()
-        self._build_conflict_cards()
         self._update_stats()
         # Sync select-all to match actual card state
         all_checked = bool(self._mod_cards) and all(c._checkbox.isChecked() for c in self._mod_cards)
@@ -988,20 +988,14 @@ class ModsPage(QWidget):
             self._build_mod_cards()
             return
         target_group.add_mod_card(card)
-        target_group.set_count(target_group.count() + 1 if hasattr(
-            target_group, "count") else len(self._mod_cards))
+        # FolderGroup has no count() method; the previous hasattr-guarded
+        # fallback always wrote the GLOBAL card count into the group
+        # label. Count the group's own cards instead.
+        target_group.set_count(len(target_group.get_mod_ids()))
 
         # Hide the empty-state hero since we have at least one card now
         if hasattr(self, "_empty_hero"):
             self._empty_hero.hide()
-
-    # ------------------------------------------------------------------
-    # Conflict cards
-    # ------------------------------------------------------------------
-
-    def _build_conflict_cards(self) -> None:
-        """No-op — conflicts are handled automatically and not shown to users."""
-        pass
 
     # ------------------------------------------------------------------
     # Stats
@@ -1246,6 +1240,16 @@ class ModsPage(QWidget):
         if not mod:
             return
 
+        # Reset variant-picker state from any previously opened cog.
+        # The DB-variants branch below returns early without touching
+        # these, so a stale folder-variant selection from another mod
+        # used to poison the next apply ("flat folder-variant apply:
+        # no leaf picked/matches" with zero changes written). Every
+        # open now starts clean.
+        self._preset_paths = []
+        self._folder_variant_paths = []
+        self._folder_variant_is_grid = False
+
         # Fast status from DB
         status = "active" if mod["enabled"] else "disabled"
 
@@ -1389,11 +1393,11 @@ class ModsPage(QWidget):
                                               level: int) -> str:
                                 if any("male" in v.lower() or "female" in v.lower()
                                        for v in values):
-                                    return "Gender"
+                                    return tr("mods.variant_axis_gender")
                                 if any(v.lower() in ("human", "orc", "goblin", "elf")
                                        for v in values):
-                                    return "Race"
-                                return f"Variant {level + 1}"
+                                    return tr("mods.variant_axis_race")
+                                return tr("mods.variant_axis_n", n=level + 1)
                             self._folder_variant_axes = axes
                             self._folder_variant_is_grid = True
                             variants_meta: list[dict] = []
@@ -1452,7 +1456,7 @@ class ModsPage(QWidget):
                                 "label": rel.replace("/", " > ").replace(
                                     "_", " "),
                                 "filename": rel,
-                                "description": "folder variant",
+                                "description": tr("mods.folder_variant"),
                                 "enabled": i == active_i,
                                 # Same positive group => single radio
                                 # set with mutually-exclusive picks.
@@ -1508,7 +1512,11 @@ class ModsPage(QWidget):
                                 label += f" — {desc[:50]}"
                             patches.append({
                                 "label": label,
-                                "description": f"{change_count} changes" + (" (active)" if is_active else ""),
+                                "description": (
+                                    tr("preset.n_changes_active",
+                                       count=change_count) if is_active
+                                    else tr("preset.n_changes",
+                                            count=change_count)),
                                 "enabled": is_active,
                             })
                 except Exception as e:
@@ -2304,8 +2312,8 @@ class ModsPage(QWidget):
     def _ctx_link_nexus(self, mod_id: int) -> None:
         from PySide6.QtWidgets import QInputDialog
         url, ok = QInputDialog.getText(
-            self, "Link to NexusMods",
-            "Paste the NexusMods mod URL:\n(e.g. nexusmods.com/crimsondesert/mods/207)")
+            self, tr("mod_context.link_nexus"),
+            tr("nexus.link_prompt"))
         if not ok or not url:
             return
         import re
@@ -2393,8 +2401,8 @@ class ModsPage(QWidget):
             return
         if not getattr(window, "_game_dir", None) or not getattr(window, "_db", None):
             InfoBar.error(
-                title="Not ready",
-                content="Game directory not set.",
+                title=tr("reimport.not_ready_title"),
+                content=tr("reimport.not_ready_body"),
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             return
 
@@ -2445,18 +2453,13 @@ class ModsPage(QWidget):
         if not entries:
             if not skip_confirm:
                 MessageBox(
-                    "Reimport",
-                    "None of the selected mods have a stored source. "
-                    "Reimport needs the original zip/folder to regenerate "
-                    "patches. Drop the original file back in to fix those.",
+                    tr("reimport.no_source_title"),
+                    tr("reimport.no_source_body"),
                     window).exec()
             return
 
         if not skip_confirm:
-            msg = (f"Reimport {len(entries)} mod(s) from their stored "
-                   "sources?\n\n"
-                   "This regenerates patches against the current vanilla. "
-                   "Use this after a game update when mods stop working.")
+            msg = tr("reimport.confirm_body", count=len(entries))
             if missing:
                 # Show the actual names so users know which mods need
                 # manual drag-drop. Cap the inline list so a huge
@@ -2465,14 +2468,12 @@ class ModsPage(QWidget):
                 more = len(missing) - len(shown)
                 names_block = "\n".join(f"  - {n}" for n in shown)
                 if more > 0:
-                    names_block += f"\n  - ... and {more} more"
-                msg += (f"\n\n{len(missing)} mod(s) can't be reimported "
-                        "automatically (no stored source) and will be "
-                        "skipped:\n\n"
-                        f"{names_block}\n\n"
-                        "Drop their original files back in to fix those "
-                        "manually.")
-            if not MessageBox("Reimport from source", msg, window).exec():
+                    names_block += "\n  - " + tr(
+                        "conflicts.and_n_more", count=more)
+                msg += "\n\n" + tr("reimport.skipped_block",
+                                   count=len(missing), names=names_block)
+            if not MessageBox(
+                    tr("reimport.confirm_title"), msg, window).exec():
                 return
 
         # Write mod_id\tsource_path lines to a temp file for the
@@ -2484,7 +2485,8 @@ class ModsPage(QWidget):
         tmp.close()
 
         total = len(entries)
-        tip = window._make_state_tooltip(f"Reimporting {total} mod(s)...")
+        tip = window._make_state_tooltip(
+            tr("reimport.in_progress", count=total))
         window._active_progress = tip
 
         proc = QProcess(window)
@@ -2542,7 +2544,8 @@ class ModsPage(QWidget):
                 _succeeded, len(_errors))
             try:
                 tip.setContent(
-                    f"Reimported {_succeeded}/{total} mod(s)")
+                    tr("reimport.finished_tip",
+                       done=_succeeded, total=total))
                 tip.setState(True)
             except RuntimeError:
                 pass
@@ -2561,17 +2564,17 @@ class ModsPage(QWidget):
                     logger.warning("Reimport _resume_timers failed: %s", _e)
             if _errors:
                 InfoBar.warning(
-                    title="Reimport finished with issues",
-                    content=(f"{_succeeded} reimported, "
-                             f"{len(_errors)} failed:\n\n"
-                             + "\n".join(_errors[:10])),
+                    title=tr("reimport.issues_title"),
+                    content=tr("reimport.issues_body",
+                               done=_succeeded, failed=len(_errors),
+                               errors="\n".join(_errors[:10])),
                     duration=-1, position=InfoBarPosition.TOP,
                     parent=window)
             else:
                 InfoBar.success(
-                    title="Reimport complete",
-                    content=(f"{_succeeded} mod(s) reimported. Click "
-                             "Apply to use the refreshed patches."),
+                    title=tr("reimport.complete_title"),
+                    content=tr("reimport.complete_body",
+                               count=_succeeded),
                     duration=5000, position=InfoBarPosition.TOP,
                     parent=window)
             if hasattr(window, "_refresh_all"):
@@ -2734,7 +2737,8 @@ class ModsPage(QWidget):
     def _ctx_update(self, mod_id: int) -> None:
         """Update mod placeholder."""
         from qfluentwidgets import InfoBar, InfoBarPosition
-        InfoBar.info("Update", "Drag a new version onto the window to update this mod.",
+        InfoBar.info(tr("mods.update_info_title"),
+                     tr("mods.update_info_body"),
                      parent=self.window(), duration=3000, position=InfoBarPosition.TOP)
 
     def _ctx_uninstall(self, mod_id: int) -> None:
@@ -2750,9 +2754,8 @@ class ModsPage(QWidget):
             return
 
         box = MessageBox(
-            "Uninstall Mod",
-            f'Remove "{mod["name"]}"?\n\n'
-            "This will revert its changes from game files and remove it from the database.",
+            tr("mods.uninstall_one_title"),
+            tr("mods.uninstall_one_body", name=mod["name"]),
             self.window(),
         )
         if not box.exec():
@@ -2910,7 +2913,7 @@ class ModsPage(QWidget):
 
         menu.addAction(Action(FluentIcon.EDIT, tr("mods.rename_folder"), triggered=lambda: self._rename_folder(group_id, group_name)))
         menu.addSeparator()
-        menu.addAction(Action(FluentIcon.DELETE, "Delete Folder", triggered=lambda: self._delete_folder(group_id)))
+        menu.addAction(Action(FluentIcon.DELETE, tr("mods.delete_folder"), triggered=lambda: self._delete_folder(group_id)))
 
         menu.exec(global_pos)
 
@@ -2950,8 +2953,8 @@ class ModsPage(QWidget):
         from qfluentwidgets import MessageBox
 
         box = MessageBox(
-            "Delete Folder",
-            "Delete this folder? All mods in it will be moved to Ungrouped.",
+            tr("mods.delete_folder"),
+            tr("mods.delete_folder_confirm"),
             self.window(),
         )
         if box.exec():

@@ -102,9 +102,26 @@ def _live_db_has_data(path: Path) -> bool:
 
 def _restore_from(src: Path, dst: Path) -> None:
     """Replace ``dst`` with ``src``'s bytes. ``copy2`` so mtimes
-    propagate (helps the next bootstrap's diagnostics)."""
+    propagate (helps the next bootstrap's diagnostics).
+
+    Also removes stale ``-wal`` / ``-shm`` sidecars left over from
+    the torn live DB: the database runs in WAL mode, and SQLite
+    would replay a leftover WAL belonging to the OLD (corrupt) file
+    on top of the freshly restored one.
+    """
     if dst.exists():
         dst.unlink()
+    for sidecar_suffix in ("-wal", "-shm"):
+        sidecar = Path(str(dst) + sidecar_suffix)
+        try:
+            if sidecar.exists():
+                sidecar.unlink()
+                logger.info(
+                    "Removed stale SQLite sidecar %s before restore",
+                    sidecar.name)
+        except OSError as e:
+            logger.warning(
+                "Could not remove stale sidecar %s: %s", sidecar, e)
     shutil.copy2(src, dst)
 
 

@@ -63,6 +63,89 @@ def test_rate_limited_exception_carries_reset_timestamp(monkeypatch):
     assert int(raised.reset_at) == 1775960000
 
 
+def _force_429_with_reset(monkeypatch, reset_value: str):
+    """Like _force_429 but with a caller-chosen X-RL-Hourly-Reset."""
+    import urllib.request
+
+    def _urlopen_429(req, timeout=None, context=None):
+        headers = {
+            "X-RL-Hourly-Remaining": "0",
+            "X-RL-Hourly-Reset": reset_value,
+        }
+
+        class _H(dict):
+            def get(self, k, default=None):
+                return super().get(k) or super().get(k.lower(), default)
+        raise HTTPError(
+            url=str(req), code=429, msg="Too Many Requests",
+            hdrs=_H(headers), fp=BytesIO(b""))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_429)
+
+
+def test_429_with_datetime_reset_header_parses_to_epoch(monkeypatch):
+    """Nexus has shipped X-RL-Hourly-Reset as a datetime string in
+    some API eras. int(raw) raised ValueError on those, the except
+    swallowed it, and the cooldown silently degraded to the 5-minute
+    fallback forever. Both forms must now parse."""
+    from datetime import datetime, timezone
+    from cdumm.engine import nexus_api
+
+    expected = int(datetime(2099, 6, 11, 12, 0, 0,
+                            tzinfo=timezone.utc).timestamp())
+    nexus_api._rate_limited_until = 0.0
+    _force_429_with_reset(monkeypatch, "2099-06-11 12:00:00 +0000")
+    try:
+        with pytest.raises(nexus_api.NexusRateLimited) as exc_info:
+            nexus_api._api_request("/users/validate.json", api_key="x")
+        assert exc_info.value.reset_at == expected, (
+            "datetime-form reset header must convert to the epoch, "
+            "not degrade to the conservative fallback")
+    finally:
+        # The future reset arms the in-process cooldown; clear it so
+        # later tests are not poisoned.
+        nexus_api._rate_limited_until = 0.0
+
+
+def test_parse_reset_epoch_int_form():
+    from cdumm.engine.nexus_api import _parse_reset_epoch
+    assert _parse_reset_epoch("1775960000") == 1775960000
+
+
+def test_parse_reset_epoch_rfc1123_form():
+    from datetime import datetime, timezone
+    from cdumm.engine.nexus_api import _parse_reset_epoch
+    expected = int(datetime(2099, 6, 11, 12, 0, 0,
+                            tzinfo=timezone.utc).timestamp())
+    assert _parse_reset_epoch("Thu, 11 Jun 2099 12:00:00 GMT") == expected
+
+
+def test_parse_reset_epoch_iso_form():
+    from datetime import datetime, timezone
+    from cdumm.engine.nexus_api import _parse_reset_epoch
+    expected = int(datetime(2099, 6, 11, 12, 0, 0,
+                            tzinfo=timezone.utc).timestamp())
+    assert _parse_reset_epoch("2099-06-11T12:00:00+00:00") == expected
+    # Space before the offset (the shape Nexus docs show).
+    assert _parse_reset_epoch("2099-06-11 12:00:00 +0000") == expected
+
+
+def test_parse_reset_epoch_garbage_returns_zero_and_warns_once(caplog):
+    import logging
+    from cdumm.engine import nexus_api
+
+    nexus_api._warned_reset_header_form = False
+    with caplog.at_level(logging.WARNING, logger="cdumm.engine.nexus_api"):
+        assert nexus_api._parse_reset_epoch("not-a-date") == 0
+        assert nexus_api._parse_reset_epoch("still-not-a-date") == 0
+    warnings = [r for r in caplog.records
+                if "X-RL-Hourly-Reset" in r.getMessage()]
+    assert len(warnings) == 1, (
+        "the raw header must be logged at WARNING exactly once so a "
+        "bug report reveals the live format without log spam")
+    assert "not-a-date" in warnings[0].getMessage()
+    nexus_api._warned_reset_header_form = False
+
+
 def test_rate_limit_snapshot_accessible_via_get_helper():
     """``get_rate_limit_snapshot`` is no longer dead code — the bug
     report uses it. Pin the function's existence + shape."""

@@ -471,11 +471,7 @@ class PresetPickerDialog(MessageBoxBase):
             if (tr("preset.override_allow_multi")
                     == "preset.override_allow_multi"):
                 self._override_btn.setText("Allow multi-select")
-            self._override_btn.setToolTip(
-                "Auto-detect says some of these presets conflict "
-                "(they edit the same bytes). Click to force multi-"
-                "select anyway — only use this if the mod's author "
-                "says independent picks are allowed.")
+            self._override_btn.setToolTip(tr("preset.override_tooltip"))
             self._override_btn.setCheckable(True)
             self._override_btn.clicked.connect(self._on_override_toggled)
             self.viewLayout.addWidget(self._override_btn)
@@ -571,7 +567,8 @@ class PresetPickerDialog(MessageBoxBase):
                 label = name
                 if desc:
                     label += f"\n{desc[:80]}"
-                label += f"\n{new_count} changes (customised)"
+                label += "\n" + tr("preset.n_changes_customised",
+                                   count=new_count)
                 self._widgets[idx].setText(label)
 
     def _on_accept(self) -> None:
@@ -640,7 +637,7 @@ class PresetPickerDialog(MessageBoxBase):
             label = name
             if desc:
                 label += f"\n{desc[:80]}"
-            label += f"\n{patch_count} changes"
+            label += "\n" + tr("preset.n_changes", count=patch_count)
 
             gid = effective_groups[i] if i < len(effective_groups) else -1
             if gid >= 0:
@@ -992,7 +989,8 @@ class TogglePickerDialog(MessageBoxBase):
             self.viewLayout.addWidget(desc_label)
 
         if self._previous:
-            prev_hint = CaptionLabel(f"Previously selected: {len(self._previous)} items")
+            prev_hint = CaptionLabel(
+                tr("preset.previously_selected", count=len(self._previous)))
             self.viewLayout.addWidget(prev_hint)
 
         # Detect which mode to use
@@ -1142,7 +1140,8 @@ class TogglePickerDialog(MessageBoxBase):
 
         # Render mutex groups first so they're visually at the top
         for group in self._mutex_groups:
-            header_text = group["group_label"] + "  (pick one)"
+            header_text = (group["group_label"] + "  "
+                           + tr("preset.pick_one_suffix"))
             header = BodyLabel(header_text)
             header.setProperty("class", "mutexHeader")
             hfont = header.font()
@@ -1207,7 +1206,8 @@ class TogglePickerDialog(MessageBoxBase):
             desel_all.setVisible(False)
 
         total = len(self._checkboxes) + len(self._toggle_radio_groups)
-        self._count_label = CaptionLabel(f"{total} configurable item(s)")
+        self._count_label = CaptionLabel(
+            tr("preset.configurable_items", count=total))
         self.viewLayout.addWidget(self._count_label)
         for cb, _ in self._checkboxes:
             cb.toggled.connect(self._update_count)
@@ -1231,7 +1231,8 @@ class TogglePickerDialog(MessageBoxBase):
             getattr(self, "_toggle_radio_groups", []))
         picked = cb_count + len(
             getattr(self, "_toggle_radio_groups", []))
-        self._count_label.setText(f"{picked} of {total} items selected")
+        self._count_label.setText(
+            tr("preset.items_selected", picked=picked, total=total))
 
     def _on_accept(self):
         import copy as _copy

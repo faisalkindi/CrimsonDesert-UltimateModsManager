@@ -356,16 +356,38 @@ class AsiManager:
                 except OSError:
                     pass
         else:
-            # Legacy path: pre-sidecar install. Delete the .asi and
-            # any .ini whose stem starts with the plugin name.
+            # Legacy path: pre-sidecar install. Delete the .asi plus
+            # the INI that belongs to THIS plugin only. The old
+            # prefix heuristic (stem startswith plugin name) deleted
+            # every sibling whose name shared the prefix, so
+            # uninstalling "CD" also nuked CDNoHelm.ini etc.
             if plugin.path.exists():
                 plugin.path.unlink()
                 deleted.append(plugin.path.name)
             stem = plugin.name.lower()
+            resolved_ini = plugin.ini_path
             for f in self._bin64.iterdir():
-                if f.suffix.lower() == ".ini" and f.stem.lower().startswith(stem):
+                if f.suffix.lower() != ".ini":
+                    continue
+                same_stem = f.stem.lower() == stem
+                is_resolved = (resolved_ini is not None
+                               and f.name.lower() == resolved_ini.name.lower())
+                if not (same_stem or is_resolved):
+                    continue
+                if is_resolved and not same_stem:
+                    # ini_path can come from _find_ini's forward-prefix
+                    # fallback, which has no ownership guard. Skip the
+                    # delete when another plugin with the INI's exact
+                    # stem still lives in bin64 (it owns this INI).
+                    sibling_asi = self._bin64 / (f.stem + ASI_SUFFIX)
+                    sibling_disabled = self._bin64 / (f.stem + DISABLED_SUFFIX)
+                    if sibling_asi.exists() or sibling_disabled.exists():
+                        continue
+                try:
                     f.unlink()
                     deleted.append(f.name)
+                except OSError as e:
+                    logger.warning("Could not delete %s: %s", f, e)
 
         if deleted:
             logger.info("Uninstalled ASI: %s (%s)", plugin.name, deleted)
@@ -376,9 +398,28 @@ class AsiManager:
 
         Accepts a single .asi file, or a folder (searches recursively).
         Copies .asi and all companion .ini files. Returns list of updated file names.
+
+        Any INI that already exists in bin64 is backed up to
+        ``<name>.ini.bak`` before the overwrite so user-tuned config
+        survives the update (one .bak generation; a stale .bak is
+        overwritten). Fresh installs (``install()``) are unaffected.
         """
         updated: list[str] = []
         self._bin64.mkdir(parents=True, exist_ok=True)
+
+        def _backup_existing_ini(target: Path) -> None:
+            if not target.exists():
+                return
+            bak = target.with_name(target.name + ".bak")
+            try:
+                shutil.copy2(target, bak)
+                logger.info(
+                    "Backed up existing INI before update: %s -> %s",
+                    target.name, bak.name)
+            except OSError as e:
+                logger.warning(
+                    "Could not back up %s before update: %s",
+                    target.name, e)
 
         # Clean any opposite-state sibling on disk so we don't end up
         # with both `<stem>.asi` and `<stem>.asi.disabled` after the
@@ -408,7 +449,9 @@ class AsiManager:
             updated.append(dest.name)
             # Copy all .ini files from the same directory
             for ini in source.parent.glob("*.ini"):
-                shutil.copy2(ini, self._bin64 / ini.name)
+                target = self._bin64 / ini.name
+                _backup_existing_ini(target)
+                shutil.copy2(ini, target)
                 updated.append(ini.name)
         elif source.is_dir():
             for f in source.rglob("*"):
@@ -421,7 +464,9 @@ class AsiManager:
                     shutil.copy2(f, dest)
                     updated.append(dest.name)
                 elif f.suffix.lower() == ".ini":
-                    shutil.copy2(f, self._bin64 / f.name)
+                    target = self._bin64 / f.name
+                    _backup_existing_ini(target)
+                    shutil.copy2(f, target)
                     updated.append(f.name)
 
         if updated:
@@ -533,7 +578,11 @@ class AsiManager:
         targets: list[str] = []
         try:
             config = configparser.ConfigParser(strict=False)
-            config.read(str(ini_path), encoding="utf-8")
+            # utf-8-sig: some plugin INIs ship with a UTF-8 BOM
+            # (SuperAxiomForce.ini); plain utf-8 leaves the BOM glued
+            # to the first section header and configparser raises
+            # MissingSectionHeaderError, dropping all hook targets.
+            config.read(str(ini_path), encoding="utf-8-sig")
 
             for section in config.sections():
                 for key in config[section]:

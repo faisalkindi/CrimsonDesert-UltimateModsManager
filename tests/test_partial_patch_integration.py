@@ -159,6 +159,78 @@ def test_xml_patch_still_works_after_extension(
     assert rows[0][0] == "xml_merge"
 
 
+# ── Patch-only archives import through every archive shape ──────────
+# Audit finding 6: _register_xml_patches / _scan_xml_patches were only
+# invoked from _import_from_extracted (the 7z/rar path). import_from_zip
+# and import_from_folder never called them, so *.css.patch /
+# *.html.patch / *.xml.patch mods shipped as ZIPs or dropped as folders
+# were rejected as "no recognized format".
+
+
+def _import_env(tmp_path: Path):
+    from cdumm.engine.snapshot_manager import SnapshotManager
+    game_dir = tmp_path / "game"
+    game_dir.mkdir()
+    deltas_dir = tmp_path / "deltas"
+    deltas_dir.mkdir()
+    database = Database(tmp_path / "import.db")
+    database.initialize()
+    snapshot = SnapshotManager(database)
+    return game_dir, deltas_dir, database, snapshot
+
+
+def test_patch_only_zip_imports_through_import_from_zip(tmp_path: Path):
+    import zipfile
+    from cdumm.engine.import_handler import import_from_zip
+
+    game_dir, deltas_dir, database, snapshot = _import_env(tmp_path)
+    zip_path = tmp_path / "DarkUI.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("ui/menu.css.patch", ".btn { color: red; }")
+        zf.writestr("ui/menu.html.patch", '<remove at=".ad" />')
+
+    result = import_from_zip(
+        zip_path=zip_path, game_dir=game_dir, db=database,
+        snapshot=snapshot, deltas_dir=deltas_dir)
+
+    assert result.error is None, (
+        f"patch-only ZIP rejected: {result.error}")
+    assert result.mod_id is not None
+    rows = database.connection.execute(
+        "SELECT kind, file_path FROM mod_deltas WHERE mod_id = ? "
+        "ORDER BY kind", (result.mod_id,)).fetchall()
+    kinds = {r[0] for r in rows}
+    assert kinds == {"css_patch", "html_patch"}
+    targets = {r[1] for r in rows}
+    assert targets == {"ui/menu.css", "ui/menu.html"}
+    database.close()
+
+
+def test_patch_only_folder_imports_through_import_from_folder(
+        tmp_path: Path):
+    from cdumm.engine.import_handler import import_from_folder
+
+    game_dir, deltas_dir, database, snapshot = _import_env(tmp_path)
+    mod_dir = tmp_path / "DarkUIFolder"
+    (mod_dir / "ui").mkdir(parents=True)
+    (mod_dir / "ui" / "menu.xml.patch").write_text(
+        '{"operations": []}', encoding="utf-8")
+
+    result = import_from_folder(
+        folder_path=mod_dir, game_dir=game_dir, db=database,
+        snapshot=snapshot, deltas_dir=deltas_dir)
+
+    assert result.error is None, (
+        f"patch-only folder rejected: {result.error}")
+    assert result.mod_id is not None
+    rows = database.connection.execute(
+        "SELECT kind, file_path FROM mod_deltas WHERE mod_id = ?",
+        (result.mod_id,)).fetchall()
+    assert rows[0][0] == "xml_patch"
+    assert rows[0][1] == "ui/menu.xml"
+    database.close()
+
+
 def test_register_mixed_mod_with_all_three_kinds(
         db: Database, tmp_path: Path):
     """A single mod containing CSS + HTML + XML patches in the same
