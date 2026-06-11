@@ -869,15 +869,21 @@ def collect_paz_dir_overrides(
         # Stored deltas land on disk as ``0036_0.pamt.newfile`` /
         # ``0036_0.paz.newfile`` — parse_pamt derives the PAZ number
         # from the filename stem (expects plain ``0.pamt``). Stage
-        # both into a temp workspace with the canonical names first.
-        import tempfile as _tempfile
-        stage_root = Path(
-            _tempfile.mkdtemp(prefix=f"cdumm_xlayer_{pamt_dir}_"))
+        # both into a tracked temp workspace with the canonical names
+        # first. make_temp_dir registers atexit cleanup, the prefix is
+        # in temp_workspace.CDUMM_PREFIXES so sweep_stale reclaims
+        # leftovers from crashed runs, and ApplyWorker releases these
+        # at the end of the apply (the staged copies are consumed
+        # during the run).
+        import shutil as _shutil
+        from cdumm.engine.temp_workspace import (
+            make_temp_dir, release_temp_dir)
+        stage_root = make_temp_dir(f"cdumm_xlayer_{pamt_dir}_")
         canonical_pamt = stage_root / "0.pamt"
         canonical_paz = stage_root / "0.paz"
         try:
-            canonical_pamt.write_bytes(Path(pamt_delta_path).read_bytes())
-            canonical_paz.write_bytes(Path(paz_delta_path).read_bytes())
+            _shutil.copyfile(pamt_delta_path, str(canonical_pamt))
+            _shutil.copyfile(paz_delta_path, str(canonical_paz))
             entries = parse_pamt(
                 str(canonical_pamt), paz_dir=str(stage_root))
         except Exception as e:
@@ -894,8 +900,7 @@ def collect_paz_dir_overrides(
                     f"(pamt parse failed: {e}) and was skipped. "
                     "Re-import it from the original zip.")
                 warned_mod_ids.add(mod_id)
-            import shutil as _shutil
-            _shutil.rmtree(stage_root, ignore_errors=True)
+            release_temp_dir(stage_root)
             continue
 
         for entry in entries:
@@ -1649,6 +1654,11 @@ class ApplyWorker(QObject):
         staging_dir.mkdir(exist_ok=True)
         txn = TransactionalIO(self._game_dir, staging_dir)
         modified_pamts: dict[str, bytes] = {}
+        # Destructive deletions collected during the run and executed
+        # ONLY after txn.commit() succeeds; a failed commit rolls back
+        # to PAMTs/PAPGT that still reference them (audit C1).
+        deferred_file_deletions: list[Path] = []
+        deferred_dir_deletions: list[Path] = []
 
         # #145 cross-layer merge: build the PAZ-dir override map once
         # upfront so Phase 1 knows which `NNNN/0.paz` file_paths to
@@ -1866,10 +1876,15 @@ class ApplyWorker(QObject):
                 if synth_data.get("patches"):
                     # Write synth JSON to a temp file so
                     # process_json_patches_for_overlay (which reads
-                    # json_source from disk) can consume it.
-                    import tempfile as _tempfile
-                    synth_temp = Path(
-                        _tempfile.mkdtemp(prefix="cdumm_agg_"))
+                    # json_source from disk) can consume it. Tracked
+                    # via temp_workspace (cdumm_agg_ is in
+                    # CDUMM_PREFIXES) and released in the apply's
+                    # finally block; the JSON is consumed within this
+                    # run.
+                    from cdumm.engine.temp_workspace import (
+                        make_temp_dir as _make_temp_dir)
+                    synth_temp = _make_temp_dir("cdumm_agg_")
+                    self._synth_temp = synth_temp
                     synth_path = synth_temp / "aggregated.json"
                     synth_path.write_text(
                         _json.dumps(synth_data), encoding="utf-8")
@@ -2369,16 +2384,13 @@ class ApplyWorker(QObject):
                 _yield_gil()
 
                 if file_path in new_files_to_delete:
+                    # Deletion DEFERRED until after txn.commit():
+                    # deleting before commit meant a failed commit
+                    # rolled back to PAMTs that referenced already
+                    # deleted files (audit finding C1, 2026-06-10).
                     game_path = self._game_dir / file_path.replace("/", os.sep)
                     if game_path.exists():
-                        game_path.unlink()
-                        logger.info("Deleted new file from disabled mod: %s", file_path)
-                    parent = game_path.parent
-                    if parent != self._game_dir and parent.exists():
-                        remaining = list(parent.iterdir())
-                        if not remaining:
-                            parent.rmdir()
-                            logger.info("Removed empty mod directory: %s", parent.name)
+                        deferred_file_deletions.append(game_path)
                     continue
 
                 game_path = self._game_dir / file_path.replace("/", os.sep)
@@ -2577,12 +2589,20 @@ class ApplyWorker(QObject):
                 # it is a stale CDUMM overlay and is safe to delete.
                 marker_path = d / "_cdumm_overlay.marker"
                 if marker_path.exists():
-                    import shutil
-                    shutil.rmtree(d, ignore_errors=True)
+                    # Deletion DEFERRED until after txn.commit(); the
+                    # PAPGT rebuild below excludes these via
+                    # exclude_dirs so the new index never references
+                    # them, while a failed commit rolls back to the
+                    # OLD PAPGT with the dirs still on disk (audit
+                    # finding C1, 2026-06-10: pre-commit rmtree made
+                    # rollback restore an index pointing at deleted
+                    # dirs, which crashes the game at boot).
+                    deferred_dir_deletions.append(d)
                     logger.info(
-                        "Cleaned up stale CDUMM overlay dir %s "
-                        "(carried _cdumm_overlay.marker, not current "
-                        "overlay)", d.name)
+                        "Stale CDUMM overlay dir %s queued for "
+                        "post-commit deletion (carried "
+                        "_cdumm_overlay.marker, not current overlay)",
+                        d.name)
                     continue
                 # Externally-managed dirs carry a .pamt + .paz pair on
                 # disk. Originally the check was only ``0.pamt`` which
@@ -2618,12 +2638,11 @@ class ApplyWorker(QObject):
                     (d.name + "/%",),
                 ).fetchone()[0]
                 if snap_check == 0:
-                    import shutil
-                    shutil.rmtree(d, ignore_errors=True)
+                    deferred_dir_deletions.append(d)
                     logger.info(
-                        "Cleaned up orphan directory during apply: %s "
-                        "(not in snapshot, no PAZ artifacts present)",
-                        d.name)
+                        "Orphan directory queued for post-commit "
+                        "deletion: %s (not in snapshot, no PAZ "
+                        "artifacts present)", d.name)
                 else:
                     logger.info(
                         "Orphan-cleanup: %s is in vanilla snapshot, keep",
@@ -2631,7 +2650,9 @@ class ApplyWorker(QObject):
 
             papgt_mgr = PapgtManager(self._game_dir, self._vanilla_dir)
             try:
-                papgt_bytes = papgt_mgr.rebuild(modified_pamts)
+                papgt_bytes = papgt_mgr.rebuild(
+                    modified_pamts,
+                    exclude_dirs={d.name for d in deferred_dir_deletions})
                 txn.stage_file("meta/0.papgt", papgt_bytes)
             except FileNotFoundError:
                 logger.warning("PAPGT not found, skipping rebuild")
@@ -2639,6 +2660,31 @@ class ApplyWorker(QObject):
             _phase("Phase 5: Committing changes")
             self.progress_updated.emit(95, "Committing changes...")
             txn.commit()
+
+            # Destructive deletions run ONLY after the commit landed:
+            # a failed commit rolls back to the old PAMTs/PAPGT, which
+            # still reference these files/dirs, so they must still be
+            # on disk at that point (audit finding C1, 2026-06-10).
+            import shutil as _shutil
+            for fp in deferred_file_deletions:
+                try:
+                    fp.unlink()
+                    logger.info(
+                        "Deleted new file from disabled mod: %s", fp)
+                    parent = fp.parent
+                    if parent != self._game_dir and parent.exists():
+                        if not any(parent.iterdir()):
+                            parent.rmdir()
+                            logger.info(
+                                "Removed empty mod directory: %s",
+                                parent.name)
+                except OSError as _e:
+                    logger.warning(
+                        "Post-commit file deletion failed for %s: %s",
+                        fp, _e)
+            for d in deferred_dir_deletions:
+                _shutil.rmtree(d, ignore_errors=True)
+                logger.info("Post-commit cleanup removed %s", d.name)
 
             # Save fingerprint so next Apply can skip if nothing changed
             try:
@@ -2660,6 +2706,39 @@ class ApplyWorker(QObject):
             raise
         finally:
             txn.cleanup_staging()
+            # End-of-run temp reclamation: the cross-layer stage roots
+            # and the aggregated-JSON dir were consumed during this
+            # apply; delete them now instead of leaking one dir per run
+            # into %TEMP% (audit finding, 2026-06-11).
+            self._cleanup_apply_temp_dirs()
+
+    def _cleanup_apply_temp_dirs(self) -> None:
+        """Delete temp dirs created for this apply run.
+
+        Covers the ``cdumm_xlayer_*`` stage roots referenced by
+        ``self._paz_dir_overrides`` (their canonical 0.pamt/0.paz copies
+        feed Phase 1a extraction and are not needed once the run ends)
+        and the ``cdumm_agg_*`` aggregated-JSON dir. Also drops the
+        override map so any later resolver build re-collects instead of
+        pointing at deleted paths. Safe to call more than once.
+        """
+        from cdumm.engine.temp_workspace import release_temp_dir
+        overrides = getattr(self, "_paz_dir_overrides", None) or {}
+        released: set = set()
+        for ov in overrides.values():
+            root = ov.get("stage_root")
+            if root is not None and root not in released:
+                released.add(root)
+                release_temp_dir(root)
+        if hasattr(self, "_paz_dir_overrides"):
+            try:
+                del self._paz_dir_overrides
+            except AttributeError:
+                pass
+        synth = getattr(self, "_synth_temp", None)
+        if synth is not None:
+            release_temp_dir(synth)
+            self._synth_temp = None
 
     def _ensure_backups(self, file_deltas: dict, revert_files: list[str]) -> list[str]:
         """Create vanilla backups for all files about to be modified.
@@ -2787,10 +2866,17 @@ class ApplyWorker(QObject):
                                     logger.info(
                                         "Refreshed contaminated backup: %s", file_path)
                                 else:
+                                    # Both the backup and the live game
+                                    # file diverge from the snapshot, so
+                                    # the restore chain is poisoned.
+                                    # Report it so the caller aborts
+                                    # with the Steam-verify guidance
+                                    # instead of silently proceeding.
                                     logger.warning(
-                                        "Backup for %s is contaminated and game file is modded. "
-                                        "Proceeding with existing backup (may cause issues on revert).",
+                                        "Backup for %s is contaminated and game file "
+                                        "is modded; cannot safely back up.",
                                         file_path)
+                                    unbacked_files.append(file_path)
                         except OSError:
                             pass
                 else:
@@ -2801,12 +2887,20 @@ class ApplyWorker(QObject):
                             _backup_copy(game_path, full_path)
                             logger.info("Full vanilla backup: %s", file_path)
                         else:
-                            # Game file is modded, no backup exists — warn but proceed
-                            # (blocking here is what caused the v2.5 "mods not applying" reports)
+                            # Game file is modded and no vanilla backup
+                            # exists: composing from this base would bake
+                            # foreign bytes into the result and revert
+                            # could never restore. Report it so the
+                            # caller's abort path fires with actionable
+                            # advice (Steam verify + Fix Everything).
+                            # This list was previously never appended to,
+                            # which left the caller's abort path dead and
+                            # silently proceeded without any backup.
                             logger.warning(
-                                "No vanilla backup for %s and game file is modded. "
-                                "Proceeding without backup (revert may not fully restore).",
+                                "No vanilla backup for %s and game file is modded; "
+                                "cannot safely back up.",
                                 file_path)
+                            unbacked_files.append(file_path)
             else:
                 # Byte-range backup — only the positions mods touch
                 ranges = self._get_all_byte_ranges(file_path)
@@ -3019,11 +3113,17 @@ class ApplyWorker(QObject):
                 full_replace,
                 key=lambda d: d.get("priority", 0))
             winner = full_replace_sorted[0]
-            current = apply_delta_from_file(
-                current, Path(winner["delta_path"]))
-            logger.info(
-                "Applied full-replace delta for %s from %s",
-                file_path, winner.get("mod_name", "?"))
+            try:
+                current = apply_delta_from_file(
+                    current, Path(winner["delta_path"]))
+                logger.info(
+                    "Applied full-replace delta for %s from %s",
+                    file_path, winner.get("mod_name", "?"))
+            except ValueError as e:
+                # Truncated "BSDI" header that is not a full BSDIFF40
+                # magic: skip the winner instead of replacing the file
+                # with the raw delta bytes.
+                self._warn_corrupt_delta(winner, e)
             if len(full_replace_sorted) > 1:
                 skipped = [
                     d.get("mod_name", "?")
@@ -3069,7 +3169,14 @@ class ApplyWorker(QObject):
 
         # Step 2: Apply SPRS deltas that shift file size
         for d in sprs_shifted:
-            current = apply_delta_from_file(current, Path(d["delta_path"]))
+            try:
+                current = apply_delta_from_file(
+                    current, Path(d["delta_path"]))
+            except ValueError as e:
+                # Corrupt/unrecognized delta: skip this one mod's delta
+                # instead of replacing the game file with garbage or
+                # aborting the whole apply.
+                self._warn_corrupt_delta(d, e)
 
         if not size_preserving:
             return current
@@ -3095,8 +3202,35 @@ class ApplyWorker(QObject):
                 return bytes(result)
 
         for d in size_preserving:
-            current = apply_delta_from_file(current, Path(d["delta_path"]))
+            try:
+                current = apply_delta_from_file(
+                    current, Path(d["delta_path"]))
+            except ValueError as e:
+                self._warn_corrupt_delta(d, e)
         return current
+
+    def _warn_corrupt_delta(self, d: dict, exc: Exception) -> None:
+        """Surface a per-delta corruption skip (unknown delta magic).
+
+        apply_delta no longer falls back to raw replacement for
+        unrecognized magics (a truncated delta would silently replace a
+        game file with garbage); callers downgrade the raised ValueError
+        to a per-file skip through here.
+        """
+        mod_name = d.get("mod_name") or "(unknown mod)"
+        msg = (
+            f"Mod '{mod_name}' has a corrupt stored delta and was "
+            f"skipped for this file. Re-import the mod to regenerate "
+            f"it. Affected file: {d.get('delta_path', '?')}. "
+            f"Error: {exc}"
+        )
+        logger.warning(msg)
+        if hasattr(self, "_soft_warnings"):
+            self._soft_warnings.append(msg)
+        try:
+            self.warning.emit(msg)
+        except Exception:
+            pass
 
     def _try_semantic_merge(self, file_path: str,
                            entry_deltas: list[dict]) -> list[dict]:
@@ -3766,7 +3900,13 @@ class ApplyWorker(QObject):
                                game_file, e)
                 continue
 
-            # Apply all patches: lowest priority first, highest last (wins)
+            # Apply all patches: lowest precedence first, highest last
+            # (wins). _get_file_deltas orders by m.priority DESC and
+            # CDUMM's convention is "lower priority number wins", so
+            # the list already arrives losers-first / winner-last.
+            # Iterating in list order makes the winner write last and
+            # own any overlapping bytes. (A reversed() here previously
+            # inverted that and let the lowest-precedence mod win.)
             # Detect the mod's offset convention from its first few
             # string offsets: if any contain a-f, treat ALL string
             # offsets for this mod as hex (Kliff Wears Damiane convention).
@@ -3778,7 +3918,7 @@ class ApplyWorker(QObject):
             import re as _re
             _HEX_ONLY = _re.compile(r"^[0-9a-fA-F]+$")
             _HAS_AF = _re.compile(r"[a-fA-F]")
-            for d, patch_info in reversed(mod_patches):
+            for d, patch_info in mod_patches:
                 mod_is_bare_hex = False
                 try:
                     for ch in patch_info.get("changes", []):
@@ -3857,8 +3997,10 @@ class ApplyWorker(QObject):
             merged = bytearray(vanilla_content)
             mod_names = []
 
-            # Apply lowest priority first (reversed — deltas are sorted high-pri first)
-            for d in reversed(group_deltas):
+            # Apply lowest precedence first. _get_file_deltas orders by
+            # m.priority DESC (lower number wins), so the list is already
+            # losers-first: iterating in order lets the winner write last.
+            for d in group_deltas:
                 try:
                     mod_paz = apply_delta_from_file(
                         vanilla_paz, Path(d["delta_path"]))
@@ -4146,7 +4288,13 @@ class ApplyWorker(QObject):
         if byte_deltas:
             current = bytes(buf)
             for d in byte_deltas:
-                current = apply_delta_from_file(current, Path(d["delta_path"]))
+                try:
+                    current = apply_delta_from_file(
+                        current, Path(d["delta_path"]))
+                except ValueError as e:
+                    # Corrupt delta: skip this mod's PAMT delta rather
+                    # than writing garbage over the index.
+                    self._warn_corrupt_delta(d, e)
             buf = bytearray(current)
 
         # Recompute PAMT hash
@@ -4619,7 +4767,7 @@ class ApplyWorker(QObject):
         cursor = self._db.connection.execute(
             "SELECT DISTINCT md.file_path, md.delta_path, m.name, "
             "md.is_new, md.entry_path, md.json_patches, m.force_inplace, "
-            "m.game_version_hash, md.byte_end, m.json_source "
+            "m.game_version_hash, md.byte_end, m.json_source, m.priority "
             "FROM mod_deltas md "
             "JOIN mods m ON md.mod_id = m.id "
             "WHERE m.enabled = 1 AND m.mod_type = 'paz' "
@@ -4630,7 +4778,7 @@ class ApplyWorker(QObject):
         file_deltas: dict[str, list[dict]] = {}
         seen_deltas: set[str] = set()
 
-        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end, json_source in cursor.fetchall():
+        for file_path, delta_path, mod_name, is_new, entry_path, json_patches, force_inplace, game_ver_hash, byte_end, json_source, m_priority in cursor.fetchall():
             # #145 Option Y originally hard-skipped ENTR deltas from
             # mods with json_source, assuming the Phase 1a aggregator
             # would always cover them. That silently dropped a mod
@@ -4658,6 +4806,13 @@ class ApplyWorker(QObject):
                 "delta_path": delta_path,
                 "mod_name": mod_name,
                 "is_new": bool(is_new),
+                # Carried so downstream winner-selection (e.g. the
+                # full-replace branch in _compose_file, which sorts
+                # ascending and picks [0] because the lower priority
+                # number wins) has a real key to sort on. Without it,
+                # every delta sorted as 0 and the winner was whatever
+                # order the SQL produced.
+                "priority": m_priority if m_priority is not None else 0,
             }
             if entry_path:
                 d["entry_path"] = entry_path
@@ -4883,6 +5038,11 @@ class RevertWorker(QObject):
                     s.strip() for s in _raw.split(",") if s.strip()}
             except Exception:
                 _user_protected = set()
+            # Deletions are DEFERRED until after txn.commit(); the
+            # vanilla PAPGT restored below has no entries for mod dirs
+            # anyway, and a failed commit rolls back to the pre-revert
+            # PAPGT which may still reference them (audit finding C1).
+            revert_dir_deletions: list[Path] = []
             for d in sorted(self._game_dir.iterdir()):
                 if not d.is_dir() or not d.name.isdigit() or len(d.name) != 4:
                     continue
@@ -4898,11 +5058,10 @@ class RevertWorker(QObject):
                 # Everything since the user's intent is "revert to
                 # vanilla".
                 if (d / "_cdumm_overlay.marker").exists():
-                    import shutil
-                    shutil.rmtree(d, ignore_errors=True)
+                    revert_dir_deletions.append(d)
                     logger.info(
-                        "Fix Everything: removed stale CDUMM overlay "
-                        "dir %s", d.name)
+                        "Fix Everything: queued stale CDUMM overlay "
+                        "dir %s for post-commit deletion", d.name)
                     continue
                 # Same widened check as the apply path (#83): any
                 # .pamt or .paz artifact in the dir means an external
@@ -4928,10 +5087,11 @@ class RevertWorker(QObject):
                     (d.name + "/%",),
                 ).fetchone()[0]
                 if snap_check == 0:
-                    # Not in snapshot — orphan from mods, remove it
-                    import shutil
-                    shutil.rmtree(d, ignore_errors=True)
-                    logger.info("Removed orphan mod directory: %s", d.name)
+                    # Not in snapshot: orphan from mods, queue removal
+                    revert_dir_deletions.append(d)
+                    logger.info(
+                        "Queued orphan mod directory for post-commit "
+                        "deletion: %s", d.name)
 
             # Restore vanilla PAPGT.
             # Always rebuild from scratch during revert to ensure only vanilla
@@ -4967,8 +5127,14 @@ class RevertWorker(QObject):
                     if pamt_bytes:
                         vanilla_pamts[d.name] = pamt_bytes
                 try:
+                    # exclude_dirs: the queued-for-deletion dirs are
+                    # still on disk at this point (deletion deferred
+                    # until post-commit), so without the exclusion the
+                    # disk scan would re-add them to the index.
                     papgt_bytes = papgt_mgr.rebuild(
-                        modified_pamts=vanilla_pamts if vanilla_pamts else None)
+                        modified_pamts=vanilla_pamts if vanilla_pamts else None,
+                        exclude_dirs={
+                            d.name for d in revert_dir_deletions})
                     txn.stage_file("meta/0.papgt", papgt_bytes)
                     logger.info("Rebuilt vanilla PAPGT for revert (%d dirs)",
                                 len(vanilla_pamts))
@@ -4977,6 +5143,13 @@ class RevertWorker(QObject):
 
             self.progress_updated.emit(95, "Committing revert...")
             txn.commit()
+
+            # Deferred destructive deletions, post-commit only (C1).
+            import shutil as _shutil
+            for d in revert_dir_deletions:
+                _shutil.rmtree(d, ignore_errors=True)
+                logger.info(
+                    "Post-commit revert cleanup removed %s", d.name)
 
             if failed_files:
                 self.warning.emit(

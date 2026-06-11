@@ -677,6 +677,14 @@ def _resolve_files_to_directories(
         pamt = d / "0.pamt"
         if not pamt.exists():
             continue
+        # Never anchor CB resolution against CDUMM's own apply overlay.
+        # Overlay dirs are transient (rebuilt or deleted on every apply)
+        # and their PAMT slot sizes describe MOD content, not vanilla,
+        # so resolving against them bakes stale offsets into the import.
+        if (d / "_cdumm_overlay.marker").exists():
+            logger.info(
+                "CB resolve: skipping %s (CDUMM overlay dir)", d.name)
+            continue
         try:
             entries = parse_pamt(str(pamt), paz_dir=str(d))
             for e in entries:
@@ -689,15 +697,31 @@ def _resolve_files_to_directories(
             continue
         time.sleep(0)  # yield GIL between PAMT parses
 
-    # For each basename, pick the highest-numbered directory
+    # For each basename, pick the best directory. Vanilla game data
+    # lives in 0000-0035; anything above that is a mod-installed dir
+    # (standalone mods, texture overlays). When the same file resolves
+    # in both a vanilla dir and a mod dir, prefer the vanilla one:
+    # the vanilla slot sizes are what the CB conversion must target.
+    # Within the vanilla range, prefer the highest-numbered dir (game
+    # updates add new dirs with correct slot sizes for the latest
+    # version). A 0036+ dir is only chosen when NO vanilla dir has the
+    # file, and that choice gets logged for diagnosability.
+    _MAX_VANILLA_DIR = 35
     for bname, candidates in all_matches.items():
-        # Sort by directory number descending, pick highest
-        candidates.sort(key=lambda x: int(x[0]), reverse=True)
-        best_dir = candidates[0][0]
-        for dir_name, inner_path, source in candidates:
+        vanilla_candidates = [
+            c for c in candidates if int(c[0]) <= _MAX_VANILLA_DIR]
+        pool = vanilla_candidates or candidates
+        pool.sort(key=lambda x: int(x[0]), reverse=True)
+        best_dir = pool[0][0]
+        if int(best_dir) > _MAX_VANILLA_DIR:
+            logger.warning(
+                "CB resolve: %s only matched mod-installed dir %s "
+                "(no vanilla 0000-0035 dir has it); resolving against "
+                "mod data", bname, best_dir)
+        for dir_name, inner_path, source in pool:
             if dir_name == best_dir:
                 result.setdefault(dir_name, []).append((inner_path, source))
-                logger.info("CB resolved %s -> dir %s (preferred highest of %s)",
+                logger.info("CB resolved %s -> dir %s (candidates: %s)",
                             inner_path, dir_name,
                             sorted(set(c[0] for c in candidates)))
         del by_basename[bname]

@@ -153,9 +153,21 @@ def build_storeinfo_changes(
         return [], None
     sorted_offs = sorted(offsets.values()) + [len(vanilla_body)]
 
+    # Format 3 dialect contract: "lookup by entry name first, key as
+    # fallback". Key-omitted intents arrive with the sentinel key=0;
+    # resolve through the entry name parsed from the table when the
+    # numeric key misses (mirrors the multichangeinfo writer).
+    name_to_key: dict[str, int] = {}
+    for k, off in offsets.items():
+        _eid, ename, _payload = _parse_entry_header(
+            vanilla_body, off, key_size)
+        if ename:
+            name_to_key.setdefault(ename, k)
+
     # One rebuild per entry key; later intents on the same key win
     # (matching 'set' semantics).
     per_key: dict[int, list] = {}
+    name_resolved = 0
     for it in intents:
         field = (getattr(it, "field", "") or "").strip()
         if field not in ("stock_data_list", "_exchangeItemInfoListForSell"):
@@ -175,12 +187,26 @@ def build_storeinfo_changes(
                 key)
             continue
         if key not in offsets:
-            logger.warning(
-                "storeinfo writer: store key %d not in table, skipping",
-                key)
-            continue
+            entry_name = getattr(it, "entry", "") or ""
+            resolved = name_to_key.get(entry_name)
+            if resolved is not None:
+                logger.debug(
+                    "storeinfo writer: intent key %r missed, resolved "
+                    "by entry name %r (key=%d)",
+                    key, entry_name, resolved)
+                key = resolved
+                name_resolved += 1
+            else:
+                logger.warning(
+                    "storeinfo writer: store key %d / entry %r not in "
+                    "table, skipping", key, entry_name)
+                continue
         per_key[key] = new
 
+    if name_resolved:
+        logger.info(
+            "storeinfo writer: %d intent(s) resolved by entry name "
+            "(key missing or not in table)", name_resolved)
     if not per_key:
         return [], None
 
@@ -198,6 +224,17 @@ def build_storeinfo_changes(
             raise StoreinfoWriteRefused(
                 f"store entry {key}: vanilla stock list does not match "
                 f"the verified layout ({e}); refusing to rewrite it")
+        # Round-trip identity (audit 2026-06-11, the iteminfo/skill
+        # writers gate on an explicit identity serialize): no separate
+        # pre-flight is needed here because parse_stock_list and
+        # serialize_stock_list are structurally inverse. Every field
+        # the reader consumes (typed head, opaque vgap blob, optional
+        # sub_data, the always-zero effect_list count) is written back
+        # verbatim by write_stock_record, and any byte pattern outside
+        # the verified disc-0 shape raises StoreinfoParseError above
+        # (caught as a refusal) instead of parsing lossily. Matched
+        # vanilla records therefore reproduce their bytes exactly;
+        # tests/test_storeinfo_writer.py pins this on the real table.
         if list_end > entry_end:
             raise StoreinfoWriteRefused(
                 f"store entry {key}: parsed list overruns the entry "

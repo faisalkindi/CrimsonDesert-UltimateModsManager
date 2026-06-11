@@ -632,6 +632,46 @@ def build_overlay(
             _added_pabgh.add(_ep.lower())
     total_entries = len(entries)
 
+    def _auto_include_pabgh(dir_path: str, filename: str,
+                            entry_path: str, pamt_dir: str) -> None:
+        """Append the companion .pabgh for a .pabgb entry.
+
+        The game needs the index file to read the data file; without
+        it, the game falls back to the vanilla .pabgh whose offsets
+        are stale exactly when the .pabgb structure changed. MUST run
+        for cache-hit entries too: the incremental rebuild's cache-hit
+        branch used to `continue` past this, so Apply 2 with the same
+        structure-changing mod shipped an overlay with NO .pabgh and
+        the mod silently broke after the first apply (audit finding
+        C6, 2026-06-10).
+        """
+        if not (filename.endswith(".pabgb") and game_dir):
+            return
+        pabgh_name = filename.replace(".pabgb", ".pabgh")
+        companion_entry_path = entry_path.rsplit(".", 1)[0] + ".pabgh"
+        pabgh_dedupe_key = companion_entry_path.lower()
+        if pabgh_dedupe_key in _added_pabgh:
+            return
+        pabgh_data = _get_vanilla_pabgh(pamt_dir, entry_path, game_dir)
+        if not pabgh_data:
+            return
+        _added_pabgh.add(pabgh_dedupe_key)
+        pabgh_offset = len(paz_buf)
+        paz_buf.extend(pabgh_data)
+        pad = PAZ_ALIGNMENT - (len(paz_buf) % PAZ_ALIGNMENT)
+        if pad < PAZ_ALIGNMENT:
+            paz_buf.extend(b'\x00' * pad)
+        overlay_entries.append(OverlayEntry(
+            dir_path=dir_path, filename=pabgh_name,
+            paz_offset=pabgh_offset,
+            comp_size=len(pabgh_data),
+            decomp_size=len(pabgh_data),
+            flags=0,  # uncompressed, matching DMM
+        ))
+        logger.info(
+            "Overlay entry (auto PABGH): %s/%s (%d bytes, uncompressed)",
+            dir_path, pabgh_name, len(pabgh_data))
+
     for entry_idx, (content, metadata) in enumerate(entries):
         if progress_cb and total_entries > 0:
             ename = metadata.get("entry_path", "").rsplit("/", 1)[-1] if metadata.get("entry_path") else ""
@@ -759,6 +799,12 @@ def build_overlay(
                     "delta_hash": delta_hash,
                 }
                 cache_hits += 1
+                # The companion index must ride along on cache hits
+                # too (audit finding C6: skipping it here shipped an
+                # overlay with no .pabgh on every apply after the
+                # first).
+                _auto_include_pabgh(
+                    dir_path, filename, entry_path, pamt_dir)
                 continue
 
         built_m_values: Optional[tuple[int, int, int, int]] = None
@@ -853,35 +899,9 @@ def build_overlay(
         logger.info("Overlay entry: %s/%s (comp=%d, decomp=%d, type=%d)",
                      dir_path, filename, comp_size, decomp_size, comp_type)
 
-        # Auto-include matching PABGH alongside PABGB entries.
-        # The game needs the index file to read the data file. Without it,
-        # the game uses the vanilla PABGH which has stale offsets if the
-        # PABGB structure changed.
-        if filename.endswith(".pabgb") and game_dir:
-            pabgh_name = filename.replace(".pabgb", ".pabgh")
-            # Dedupe key matches the pre-seed above (entry_path, lowercase)
-            # so an explicit .pabgh in `entries` wins over the vanilla copy.
-            companion_entry_path = entry_path.rsplit(".", 1)[0] + ".pabgh"
-            pabgh_dedupe_key = companion_entry_path.lower()
-            if pabgh_dedupe_key not in _added_pabgh:
-                pabgh_data = _get_vanilla_pabgh(pamt_dir, entry_path, game_dir)
-                if pabgh_data:
-                    _added_pabgh.add(pabgh_dedupe_key)
-                    pabgh_offset = len(paz_buf)
-                    paz_buf.extend(pabgh_data)
-                    # Align
-                    pad = PAZ_ALIGNMENT - (len(paz_buf) % PAZ_ALIGNMENT)
-                    if pad < PAZ_ALIGNMENT:
-                        paz_buf.extend(b'\x00' * pad)
-                    overlay_entries.append(OverlayEntry(
-                        dir_path=dir_path, filename=pabgh_name,
-                        paz_offset=pabgh_offset,
-                        comp_size=len(pabgh_data),
-                        decomp_size=len(pabgh_data),
-                        flags=0,  # uncompressed, matching DMM
-                    ))
-                    logger.info("Overlay entry (auto PABGH): %s/%s (%d bytes, uncompressed)",
-                                 dir_path, pabgh_name, len(pabgh_data))
+        # Auto-include matching PABGH alongside PABGB entries (shared
+        # helper; also called from the cache-hit branch above).
+        _auto_include_pabgh(dir_path, filename, entry_path, pamt_dir)
 
     if cache_hits > 0:
         logger.info("Overlay cache: %d/%d entries reused (skipped recompression)",

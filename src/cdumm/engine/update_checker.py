@@ -78,13 +78,23 @@ def check_for_update(current_version: str) -> dict | None:
 
 
 def _version_newer(remote: str, local: str) -> bool:
-    """Compare version strings like '0.8.1' > '0.7.9'."""
+    """Compare version strings like '0.8.1' > '0.7.9'.
+
+    Reuses ``nexus_api._version_to_tuple`` (semver-aware: handles
+    ``v`` prefixes, pre-release tags, trailing-zero normalization)
+    instead of a bare int-split. The int-split raised ValueError on
+    tags like ``v3.3.1-hotfix``, which silently suppressed the
+    update banner for every user until the next plain tag.
+    """
+    from cdumm.engine.nexus_api import _version_to_tuple
     try:
-        r = tuple(int(x) for x in remote.split("."))
-        l = tuple(int(x) for x in local.split("."))
-        return r > l
+        r = _version_to_tuple(remote)
+        l = _version_to_tuple(local)
     except (ValueError, AttributeError):
         return False
+    if r is None or l is None:
+        return False
+    return r > l
 
 
 class UpdateCheckWorker(QObject):

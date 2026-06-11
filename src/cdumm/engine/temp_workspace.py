@@ -37,6 +37,11 @@ CDUMM_PREFIXES: tuple[str, ...] = (
     "cdumm_batch_asi_",
     "cdumm_mod_",
     "cdumm_extract_",
+    # Apply-time workspaces: cross-layer PAZ-dir staging copies and the
+    # aggregated-JSON synth dir (apply_engine.py). Listed here so
+    # sweep_stale reclaims leftovers from crashed/killed apply runs.
+    "cdumm_xlayer_",
+    "cdumm_agg_",
 )
 
 _active: set[Path] = set()

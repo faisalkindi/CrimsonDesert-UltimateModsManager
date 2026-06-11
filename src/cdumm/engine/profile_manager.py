@@ -16,16 +16,45 @@ class ProfileManager:
         return [{"id": r[0], "name": r[1], "created_at": r[2]} for r in cursor.fetchall()]
 
     def save_profile(self, name: str) -> int:
-        """Snapshot current mod enabled/priority state. Returns profile id."""
-        cursor = self._db.connection.execute(
-            "INSERT INTO profiles (name) VALUES (?)", (name,))
-        profile_id = cursor.lastrowid
-        self._db.connection.execute(
-            "INSERT INTO profile_mods (profile_id, mod_id, enabled, priority) "
-            "SELECT ?, id, enabled, priority FROM mods",
-            (profile_id,))
-        self._db.connection.commit()
-        logger.info("Saved profile '%s' (id=%d)", name, profile_id)
+        """Snapshot current mod enabled/priority state. Returns profile id.
+
+        Saving under an existing profile name REPLACES that profile.
+        The ``profiles.name`` column is UNIQUE; before this contract
+        existed, a duplicate name raised an uncaught
+        ``sqlite3.IntegrityError`` straight through the GUI's save
+        handler (which treats the name as the profile's identity and
+        ignores the returned id). All statements run in one
+        transaction: a failure rolls everything back so a previously
+        saved profile is never half-deleted.
+        """
+        conn = self._db.connection
+        try:
+            row = conn.execute(
+                "SELECT id FROM profiles WHERE name = ?", (name,)).fetchone()
+            replaced = row is not None
+            if replaced:
+                # Explicit child delete first: ON DELETE CASCADE covers
+                # this when foreign_keys is ON, but don't rely on the
+                # pragma being set on every connection.
+                conn.execute(
+                    "DELETE FROM profile_mods WHERE profile_id = ?",
+                    (row[0],))
+                conn.execute(
+                    "DELETE FROM profiles WHERE id = ?", (row[0],))
+            cursor = conn.execute(
+                "INSERT INTO profiles (name) VALUES (?)", (name,))
+            profile_id = cursor.lastrowid
+            conn.execute(
+                "INSERT INTO profile_mods (profile_id, mod_id, enabled, priority) "
+                "SELECT ?, id, enabled, priority FROM mods",
+                (profile_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        logger.info("Saved profile '%s' (id=%d)%s", name, profile_id,
+                    " replacing previous profile with same name"
+                    if replaced else "")
         return profile_id
 
     def load_profile(self, profile_id: int) -> int:

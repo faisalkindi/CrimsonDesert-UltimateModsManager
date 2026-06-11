@@ -5,7 +5,7 @@ CDUMM's existing v2 mount-time apply path runs through
 That function builds an ``aggregated[game_file] -> list[change]``
 dict from every enabled v2 mod's stored JSON. Format 3 mods don't
 have ``patches`` keys, so they contribute nothing through that
-path — even though Phase 1-3's writer can resolve their intents
+path, even though Phase 1-3's writer can resolve their intents
 into the same shape of byte changes.
 
 This module bridges the gap. ``expand_format3_into_aggregated()``
@@ -17,13 +17,13 @@ results to the same ``aggregated`` dict.
 
 Design invariants:
 
-  * Existing v2 entries in ``aggregated`` are never modified —
+  * Existing v2 entries in ``aggregated`` are never modified , 
     only appended to.
   * Mods with no resolvable intents do NOT create empty
     ``aggregated[game_file] = []`` entries.
   * Vanilla extraction failures, malformed JSON, and unsupported
     PABGH key_sizes log at warning and skip that mod, never
-    raising — the apply pipeline must always complete.
+    raising, the apply pipeline must always complete.
   * key_size guard mirrors apply_intents_to_pabgb_bytes (only 2
     or 4 are supported; anything else means a malformed header
     or a table layout we don't know).
@@ -87,7 +87,7 @@ def expand_format3_into_aggregated(
     messages for cases the user needs to see (zero supported intents,
     vanilla extraction failure). The apply_engine wire-up routes
     these through the existing ``warning`` signal so on_apply_done
-    renders them in the post-apply InfoBar — same surfacing the
+    renders them in the post-apply InfoBar, same surfacing the
     JMM-parity skipped-patches feature uses.
     """
     rows = db.connection.execute(
@@ -98,7 +98,7 @@ def expand_format3_into_aggregated(
     ).fetchall()
 
     # Counters for the apply-time summary log line. INFO-level so
-    # bug reports include it automatically — addresses the DX
+    # bug reports include it automatically, addresses the DX
     # review's "no measurement" finding.
     n_mods_processed = 0
     n_mods_changed = 0
@@ -130,6 +130,10 @@ def expand_format3_into_aggregated(
         "storeinfo.pabgb", "equipslotinfo.pabgb"}
     whole_table_intents: dict[str, list] = {}
     whole_table_mod_names: dict[str, list[str]] = {}
+    # Per-INTENT mod attribution, index-aligned with
+    # whole_table_intents[target]. Lets the per-intent refusal
+    # degradation below name which mod contributed a dropped intent.
+    whole_table_intent_mods: dict[str, list[str]] = {}
     # Track contributing mod ids per whole-table target so the
     # participating_mod_ids set picks them up on a successful
     # batch dispatch , H2 fix for Format 3 mods that go through
@@ -149,135 +153,154 @@ def expand_format3_into_aggregated(
             target_pairs = parse_format3_mod_targets(jp)
         except (ValueError, OSError):
             # Either not Format 3 (v2 path already handled it), or
-            # the file is malformed. Either way, skip silently —
+            # the file is malformed. Either way, skip silently , 
             # the v2 aggregator already logged its own parse errors
             # for the same file.
             continue
 
-        # Confirmed Format 3 mod from here on — count it once per mod,
+        # Confirmed Format 3 mod from here on, count it once per mod,
         # not per target.
         n_mods_processed += 1
 
         for target, intents in target_pairs:
-            # Validate intents against the schema + community field_schema
-            validation = validate_intents(target, intents)
-            if not validation.supported:
-                n_mods_skipped += 1
-                logger.warning(
-                    "Format 3 mod '%s' (id=%d): no supported intents "
-                    "for %s, %d skipped. Mod produced 0 byte changes.",
-                    mod_name, mod_id, target,
-                    len(validation.skipped))
-                if warnings_out is not None:
-                    warnings_out.append(
-                        f"Format 3 mod '{mod_name}' produced 0 byte "
-                        f"changes targeting '{target}': all "
-                        f"{len(validation.skipped)} intent(s) skipped. "
-                        f"Most likely the field_schema for this table "
-                        f"doesn't yet have entries for the intent fields. "
-                        f"Add a field_schema/<table>.json file with "
-                        f"matching tid or rel_offset entries, or use the "
-                        f"mod's offset-based JSON variant if available."
-                    )
-                continue
+            try:
+                # Validate intents against the schema + community field_schema
+                validation = validate_intents(target, intents)
+                if not validation.supported:
+                    n_mods_skipped += 1
+                    logger.warning(
+                        "Format 3 mod '%s' (id=%d): no supported intents "
+                        "for %s, %d skipped. Mod produced 0 byte changes.",
+                        mod_name, mod_id, target,
+                        len(validation.skipped))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod '{mod_name}' produced 0 byte "
+                            f"changes targeting '{target}': all "
+                            f"{len(validation.skipped)} intent(s) skipped. "
+                            f"Most likely the field_schema for this table "
+                            f"doesn't yet have entries for the intent fields. "
+                            f"Add a field_schema/<table>.json file with "
+                            f"matching tid or rel_offset entries, or use the "
+                            f"mod's offset-based JSON variant if available."
+                        )
+                    continue
 
-            # Extract vanilla bytes for the target file
-            vanilla = vanilla_extractor(target)
-            if vanilla is None:
-                n_mods_skipped += 1
-                logger.warning(
-                    "Format 3 mod '%s' (id=%d): vanilla extraction "
-                    "failed for %s; skipping.",
-                    mod_name, mod_id, target)
-                if warnings_out is not None:
-                    warnings_out.append(
-                        f"Format 3 mod '{mod_name}' produced 0 byte "
-                        f"changes: vanilla bytes for '{target}' are "
-                        f"unavailable. Most common cause: the live "
-                        f"PAZ has been modded by another tool and "
-                        f"the vanilla backup is missing. Revert to "
-                        f"vanilla first (Settings -> Fix Everything), "
-                        f"then re-apply. If the file is genuinely "
-                        f"missing from your install, check the "
-                        f"target name spelling or run Steam Verify."
-                    )
-                continue
-            vanilla_body, vanilla_header = vanilla
+                # Extract vanilla bytes for the target file
+                vanilla = vanilla_extractor(target)
+                if vanilla is None:
+                    n_mods_skipped += 1
+                    logger.warning(
+                        "Format 3 mod '%s' (id=%d): vanilla extraction "
+                        "failed for %s; skipping.",
+                        mod_name, mod_id, target)
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod '{mod_name}' produced 0 byte "
+                            f"changes: vanilla bytes for '{target}' are "
+                            f"unavailable. Most common cause: the live "
+                            f"PAZ has been modded by another tool and "
+                            f"the vanilla backup is missing. Revert to "
+                            f"vanilla first (Settings -> Fix Everything), "
+                            f"then re-apply. If the file is genuinely "
+                            f"missing from your install, check the "
+                            f"target name spelling or run Steam Verify."
+                        )
+                    continue
+                vanilla_body, vanilla_header = vanilla
 
-            # Whole-table writer targets: defer dispatch to the
-            # post-loop phase so all mods' intents land in a single
-            # parse+serialize.
-            if target in _WHOLE_TABLE_TARGETS:
-                whole_table_intents.setdefault(target, []).extend(
-                    validation.supported)
-                whole_table_mod_names.setdefault(target, []).append(mod_name)
-                whole_table_mod_ids.setdefault(target, []).append(mod_id)
-                n_mods_changed += 1  # provisional; recounted below if no bytes
+                # Whole-table writer targets: defer dispatch to the
+                # post-loop phase so all mods' intents land in a single
+                # parse+serialize.
+                if target in _WHOLE_TABLE_TARGETS:
+                    whole_table_intents.setdefault(target, []).extend(
+                        validation.supported)
+                    whole_table_intent_mods.setdefault(target, []).extend(
+                        [mod_name] * len(validation.supported))
+                    whole_table_mod_names.setdefault(target, []).append(mod_name)
+                    whole_table_mod_ids.setdefault(target, []).append(mod_id)
+                    n_mods_changed += 1  # provisional; recounted below if no bytes
+                    files_touched.add(target)
+                    # Instrumentation for GitHub #105: macOS bundle showed
+                    # Buffed Axiom Bracelet (iteminfo Format 3) produce
+                    # zero changes with no iteminfo whole-table-writer log
+                    # anywhere. This INFO line proves whether the intent
+                    # reached this branch on this platform, and exactly
+                    # which intents got batched.
+                    logger.info(
+                        "Format 3 batched %d supported intent(s) from mod "
+                        "'%s' (id=%d) into whole-table writer queue for %s "
+                        "(queue depth now %d)",
+                        len(validation.supported), mod_name, mod_id,
+                        target, len(whole_table_intents[target]))
+                    continue
+
+                # Convert each supported intent into a v2-style change dict
+                changes = _intents_to_v2_changes(
+                    target, vanilla_body, vanilla_header, validation.supported)
+                if not changes:
+                    n_mods_skipped += 1
+                    # Don't pollute aggregated with empty lists.
+                    logger.debug(
+                        "Format 3 mod '%s' (id=%d): all %d supported intents "
+                        "resolved to zero changes (probably TID-not-found "
+                        "or value out of range).",
+                        mod_name, mod_id, len(validation.supported))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod '{mod_name}' produced 0 byte "
+                            f"changes targeting '{target}': all "
+                            f"{len(validation.supported)} intents resolved "
+                            f"to write-failures. Possible causes: the byte "
+                            f"walker bailed on a variable-length field "
+                            f"(e.g. a tagged-variant entry whose "
+                            f"discriminator value isn't yet decoded, common "
+                            f"for stageinfo's _sequencerDesc), TID not found "
+                            f"in target entries, or value out of range for "
+                            f"the field width. Check the CDUMM log for "
+                            f"per-intent debug lines."
+                        )
+                    continue
+
+                # Tag each change with the contributing mod's id so the apply
+                # pipeline's _record_skip can attribute byte-mismatch failures
+                # back to this mod and persist_skip_summary writes a row that
+                # lights up the yellow SKIPPED badge.
+                for c in changes:
+                    c["_source_mod_id"] = mod_id
+                    c["_target_file"] = target
+                aggregated.setdefault(target, []).extend(changes)
+                # Report this mod as a participant so persist_skip_summary
+                # resets its last_apply_skipped_count on a clean re-apply.
+                if participating_mod_ids is not None:
+                    participating_mod_ids.add(mod_id)
+                # Update summary counters for the apply-time log line.
+                n_mods_changed += 1
                 files_touched.add(target)
-                # Instrumentation for GitHub #105: macOS bundle showed
-                # Buffed Axiom Bracelet (iteminfo Format 3) produce
-                # zero changes with no iteminfo whole-table-writer log
-                # anywhere. This INFO line proves whether the intent
-                # reached this branch on this platform, and exactly
-                # which intents got batched.
-                logger.info(
-                    "Format 3 batched %d supported intent(s) from mod "
-                    "'%s' (id=%d) into whole-table writer queue for %s "
-                    "(queue depth now %d)",
-                    len(validation.supported), mod_name, mod_id,
-                    target, len(whole_table_intents[target]))
-                continue
-
-            # Convert each supported intent into a v2-style change dict
-            changes = _intents_to_v2_changes(
-                target, vanilla_body, vanilla_header, validation.supported)
-            if not changes:
-                n_mods_skipped += 1
-                # Don't pollute aggregated with empty lists.
+                for c in changes:
+                    patched_hex = c.get("patched", "")
+                    n_bytes_changed += len(patched_hex) // 2
                 logger.debug(
-                    "Format 3 mod '%s' (id=%d): all %d supported intents "
-                    "resolved to zero changes (probably TID-not-found "
-                    "or value out of range).",
-                    mod_name, mod_id, len(validation.supported))
+                    "Format 3 mod '%s' (id=%d): expanded %d intents into "
+                    "%d changes on %s",
+                    mod_name, mod_id, len(validation.supported),
+                    len(changes), target)
+            except Exception as e:
+                # EXPAND NEVER RAISES contract (docstring): an
+                # unguarded struct.unpack_from on corrupt table bytes
+                # must not abort the whole apply. Log, surface a
+                # warning naming the mod + target, continue with the
+                # next target.
+                logger.error(
+                    "Format 3 mod '%s' (id=%d): processing target %s "
+                    "crashed: %s", mod_name, mod_id, target, e,
+                    exc_info=True)
                 if warnings_out is not None:
                     warnings_out.append(
-                        f"Format 3 mod '{mod_name}' produced 0 byte "
-                        f"changes targeting '{target}': all "
-                        f"{len(validation.supported)} intents resolved "
-                        f"to write-failures. Possible causes: the byte "
-                        f"walker bailed on a variable-length field "
-                        f"(e.g. a tagged-variant entry whose "
-                        f"discriminator value isn't yet decoded — common "
-                        f"for stageinfo's _sequencerDesc), TID not found "
-                        f"in target entries, or value out of range for "
-                        f"the field width. Check the CDUMM log for "
-                        f"per-intent debug lines."
-                    )
+                        f"Format 3 mod '{mod_name}' could not apply: "
+                        f"processing '{target}' failed ({e}). The rest "
+                        f"of the apply continued.")
                 continue
-
-            # Tag each change with the contributing mod's id so the apply
-            # pipeline's _record_skip can attribute byte-mismatch failures
-            # back to this mod and persist_skip_summary writes a row that
-            # lights up the yellow SKIPPED badge.
-            for c in changes:
-                c["_source_mod_id"] = mod_id
-                c["_target_file"] = target
-            aggregated.setdefault(target, []).extend(changes)
-            # Report this mod as a participant so persist_skip_summary
-            # resets its last_apply_skipped_count on a clean re-apply.
-            if participating_mod_ids is not None:
-                participating_mod_ids.add(mod_id)
-            # Update summary counters for the apply-time log line.
-            n_mods_changed += 1
-            files_touched.add(target)
-            for c in changes:
-                patched_hex = c.get("patched", "")
-                n_bytes_changed += len(patched_hex) // 2
-            logger.debug(
-                "Format 3 mod '%s' (id=%d): expanded %d intents into "
-                "%d changes on %s",
-                mod_name, mod_id, len(validation.supported),
-                len(changes), target)
 
     # Whole-table writer dispatch: parse vanilla once, apply ALL
     # collected intents from every contributing mod, serialize once,
@@ -294,293 +317,348 @@ def expand_format3_into_aggregated(
             "intent(s) batched",
             _wtt, len(whole_table_intents.get(_wtt, [])))
     for target, batched in whole_table_intents.items():
-        if not batched:
-            logger.info(
-                "Format 3 whole-table writer for %s: queue empty, "
-                "nothing to dispatch (no mod contributed any supported "
-                "intents this run)", target)
-            continue
-        contributing_mods = whole_table_mod_names.get(target, [])
-        vanilla = vanilla_extractor(target)
-        if vanilla is None:
-            logger.warning(
-                "Format 3 whole-table writer: vanilla extraction "
-                "failed for %s, skipping %d intent(s) from %d mod(s)",
-                target, len(batched), len(contributing_mods))
-            if warnings_out is not None:
-                warnings_out.append(
-                    f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
-                    f"could not apply: vanilla bytes for '{target}' "
-                    f"are unavailable. Most common cause: the live "
-                    f"PAZ has been modded by another tool and the "
-                    f"vanilla backup is missing. Revert to vanilla "
-                    f"first (Settings -> Fix Everything), then "
-                    f"re-apply. If the file is genuinely missing "
-                    f"from your install, run Steam Verify."
-                )
-            continue
-        vanilla_body, vanilla_header = vanilla
-
-        # multichangeinfo.pabgb (GitHub #125): its writer produces one
-        # per-record change for the .pabgb plus a rebuilt companion
-        # .pabgh. The .pabgh change is injected under its own
-        # aggregated key so the mount-time pipeline emits it as a
-        # second overlay entry. Handled here, before the generic
-        # _intents_to_v2_changes path, because that path emits changes
-        # for a single target only.
-        if target == "multichangeinfo.pabgb":
-            from cdumm.engine.multichangeinfo_writer import (
-                build_multichangeinfo_changes,
-            )
-            mci_intents = [
-                (i.entry, i.key, i.field, i.new) for i in batched
-            ]
-            try:
-                pabgb_changes, pabgh_change = build_multichangeinfo_changes(
-                    vanilla_body, vanilla_header, mci_intents)
-            except Exception as e:
-                logger.error(
-                    "Format 3 multichangeinfo writer crashed on %d "
-                    "intent(s): %s", len(batched), e, exc_info=True)
-                pabgb_changes, pabgh_change = [], None
-            if not pabgb_changes:
+        try:
+            if not batched:
+                logger.info(
+                    "Format 3 whole-table writer for %s: queue empty, "
+                    "nothing to dispatch (no mod contributed any supported "
+                    "intents this run)", target)
+                continue
+            contributing_mods = whole_table_mod_names.get(target, [])
+            vanilla = vanilla_extractor(target)
+            if vanilla is None:
                 logger.warning(
-                    "Format 3 multichangeinfo: %d intent(s) from %d "
-                    "mod(s) produced 0 record changes",
-                    len(batched), len(contributing_mods))
+                    "Format 3 whole-table writer: vanilla extraction "
+                    "failed for %s, skipping %d intent(s) from %d mod(s)",
+                    target, len(batched), len(contributing_mods))
                 if warnings_out is not None:
                     warnings_out.append(
-                        f"Format 3 mod(s) "
-                        f"{', '.join(repr(n) for n in contributing_mods)} "
-                        f"produced 0 byte changes for "
-                        f"'multichangeinfo.pabgb'. The targeted "
-                        f"refinement recipes may not exist in this game "
-                        f"version, or every targeted material slot sits "
-                        f"in a record whose material list CDUMM cannot "
-                        f"locate yet."
+                        f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
+                        f"could not apply: vanilla bytes for '{target}' "
+                        f"are unavailable. Most common cause: the live "
+                        f"PAZ has been modded by another tool and the "
+                        f"vanilla backup is missing. Revert to vanilla "
+                        f"first (Settings -> Fix Everything), then "
+                        f"re-apply. If the file is genuinely missing "
+                        f"from your install, run Steam Verify."
                     )
                 continue
-            contrib_ids = list(whole_table_mod_ids.get(target, []))
-            for c in pabgb_changes:
-                c["_target_file"] = target
-                if contrib_ids:
-                    c["_source_mod_ids"] = list(contrib_ids)
-            aggregated.setdefault(target, []).extend(pabgb_changes)
-            if pabgh_change is not None:
-                pabgh_change["_target_file"] = "multichangeinfo.pabgh"
-                if contrib_ids:
-                    pabgh_change["_source_mod_ids"] = list(contrib_ids)
-                aggregated.setdefault(
-                    "multichangeinfo.pabgh", []).append(pabgh_change)
-            if participating_mod_ids is not None:
-                for mid in contrib_ids:
-                    participating_mod_ids.add(mid)
-            for c in pabgb_changes:
-                n_bytes_changed += len(c.get("patched", "")) // 2
-            logger.info(
-                "Format 3 multichangeinfo writer: applied %d intent(s) "
-                "across %d mod(s), %d record change(s)%s",
-                len(batched), len(contributing_mods), len(pabgb_changes),
-                ", + pabgh offset rebuild"
-                if pabgh_change is not None else "")
-            continue
+            vanilla_body, vanilla_header = vanilla
 
-        # storeinfo.pabgb (GitHub #183) and equipslotinfo.pabgb
-        # (GitHub #190): same two-file contract as multichangeinfo,
-        # the writer rebuilds the targeted entry's record list (which
-        # grows when a mod adds items/hashes) plus the companion
-        # .pabgh offsets in one pass.
-        #
-        # Only the writer-supported list fields divert here; every
-        # other intent on these targets falls through to the standard
-        # path below (storeinfo has a PABGB schema for its scalar
-        # fields, and equipslotinfo intents carrying `old` hex use the
-        # raw-replacement branch). Without the partition, a mod mixing
-        # stock_data_list with scalar storeinfo edits silently lost
-        # the scalars (release-review finding, 2026-06-10). The list
-        # replaces and the scalar changes cannot overlap: scalars live
-        # in the entry head before the record list, and the apply
-        # pipeline's cumulative shift covers offsets after a grown
-        # entry, same as multichangeinfo's per-record growth.
-        if target in ("storeinfo.pabgb", "equipslotinfo.pabgb"):
-            if target == "equipslotinfo.pabgb":
-                from cdumm.engine.equipslotinfo_writer import (
-                    EquipslotWriteRefused as StoreinfoWriteRefused,
-                    build_equipslotinfo_changes as build_storeinfo_changes,
+            # multichangeinfo.pabgb (GitHub #125): its writer produces one
+            # per-record change for the .pabgb plus a rebuilt companion
+            # .pabgh. The .pabgh change is injected under its own
+            # aggregated key so the mount-time pipeline emits it as a
+            # second overlay entry. Handled here, before the generic
+            # _intents_to_v2_changes path, because that path emits changes
+            # for a single target only.
+            if target == "multichangeinfo.pabgb":
+                from cdumm.engine.multichangeinfo_writer import (
+                    build_multichangeinfo_changes,
                 )
-                import re as _re
-                def _writer_supported(i):
-                    return _re.match(
-                        r"^entries\[\d+\]\.etl_hashes$",
-                        (getattr(i, "field", "") or "")) is not None
-            else:
-                from cdumm.engine.storeinfo_writer import (
-                    StoreinfoWriteRefused, build_storeinfo_changes,
-                )
-                def _writer_supported(i):
-                    return (getattr(i, "field", "") or "").strip() in (
-                        "stock_data_list", "_exchangeItemInfoListForSell")
-            _companion = target.replace(".pabgb", ".pabgh")
-            writer_batch = [i for i in batched if _writer_supported(i)]
-            passthrough = [i for i in batched if not _writer_supported(i)]
-            if passthrough:
-                extra = _intents_to_v2_changes(
-                    target, vanilla_body, vanilla_header, passthrough)
-                if extra:
-                    contrib_ids_pt = list(
-                        whole_table_mod_ids.get(target, []))
-                    for c in extra:
-                        c["_target_file"] = target
-                        if contrib_ids_pt:
-                            c["_source_mod_ids"] = list(contrib_ids_pt)
-                    aggregated.setdefault(target, []).extend(extra)
-                    for c in extra:
-                        n_bytes_changed += len(c.get("patched", "")) // 2
-                    if participating_mod_ids is not None:
-                        for mid in whole_table_mod_ids.get(target, []):
-                            participating_mod_ids.add(mid)
-                    logger.info(
-                        "Format 3 %s: %d non-list intent(s) handled by "
-                        "the standard path (%d change(s))",
-                        target, len(passthrough), len(extra))
-            if not writer_batch:
+                mci_intents = [
+                    (i.entry, i.key, i.field, i.new) for i in batched
+                ]
+                try:
+                    pabgb_changes, pabgh_change = build_multichangeinfo_changes(
+                        vanilla_body, vanilla_header, mci_intents)
+                except Exception as e:
+                    logger.error(
+                        "Format 3 multichangeinfo writer crashed on %d "
+                        "intent(s): %s", len(batched), e, exc_info=True)
+                    pabgb_changes, pabgh_change = [], None
+                if not pabgb_changes:
+                    logger.warning(
+                        "Format 3 multichangeinfo: %d intent(s) from %d "
+                        "mod(s) produced 0 record changes",
+                        len(batched), len(contributing_mods))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod(s) "
+                            f"{', '.join(repr(n) for n in contributing_mods)} "
+                            f"produced 0 byte changes for "
+                            f"'multichangeinfo.pabgb'. The targeted "
+                            f"refinement recipes may not exist in this game "
+                            f"version, or every targeted material slot sits "
+                            f"in a record whose material list CDUMM cannot "
+                            f"locate yet."
+                        )
+                    continue
+                contrib_ids = list(whole_table_mod_ids.get(target, []))
+                for c in pabgb_changes:
+                    c["_target_file"] = target
+                    if contrib_ids:
+                        c["_source_mod_ids"] = list(contrib_ids)
+                aggregated.setdefault(target, []).extend(pabgb_changes)
+                if pabgh_change is not None:
+                    pabgh_change["_target_file"] = "multichangeinfo.pabgh"
+                    if contrib_ids:
+                        pabgh_change["_source_mod_ids"] = list(contrib_ids)
+                    aggregated.setdefault(
+                        "multichangeinfo.pabgh", []).append(pabgh_change)
+                if participating_mod_ids is not None:
+                    for mid in contrib_ids:
+                        participating_mod_ids.add(mid)
+                for c in pabgb_changes:
+                    n_bytes_changed += len(c.get("patched", "")) // 2
+                logger.info(
+                    "Format 3 multichangeinfo writer: applied %d intent(s) "
+                    "across %d mod(s), %d record change(s)%s",
+                    len(batched), len(contributing_mods), len(pabgb_changes),
+                    ", + pabgh offset rebuild"
+                    if pabgh_change is not None else "")
                 continue
-            batched = writer_batch
-            try:
-                pabgb_changes, pabgh_change = build_storeinfo_changes(
-                    vanilla_body, vanilla_header, batched)
-            except StoreinfoWriteRefused as e:
-                logger.warning(
-                    "Format 3 %s writer refused %d intent(s): %s",
-                    target, len(batched), e)
+
+            # storeinfo.pabgb (GitHub #183) and equipslotinfo.pabgb
+            # (GitHub #190): same two-file contract as multichangeinfo,
+            # the writer rebuilds the targeted entry's record list (which
+            # grows when a mod adds items/hashes) plus the companion
+            # .pabgh offsets in one pass.
+            #
+            # Only the writer-supported list fields divert here; every
+            # other intent on these targets falls through to the standard
+            # path below (storeinfo has a PABGB schema for its scalar
+            # fields, and equipslotinfo intents carrying `old` hex use the
+            # raw-replacement branch). Without the partition, a mod mixing
+            # stock_data_list with scalar storeinfo edits silently lost
+            # the scalars (release-review finding, 2026-06-10). The list
+            # replaces and the scalar changes cannot overlap: scalars live
+            # in the entry head before the record list, and the apply
+            # pipeline's cumulative shift covers offsets after a grown
+            # entry, same as multichangeinfo's per-record growth.
+            if target in ("storeinfo.pabgb", "equipslotinfo.pabgb"):
+                if target == "equipslotinfo.pabgb":
+                    from cdumm.engine.equipslotinfo_writer import (
+                        EquipslotWriteRefused as StoreinfoWriteRefused,
+                        build_equipslotinfo_changes as build_storeinfo_changes,
+                    )
+                    import re as _re
+                    def _writer_supported(i):
+                        return _re.match(
+                            r"^entries\[\d+\]\.etl_hashes$",
+                            (getattr(i, "field", "") or "")) is not None
+                else:
+                    from cdumm.engine.storeinfo_writer import (
+                        StoreinfoWriteRefused, build_storeinfo_changes,
+                    )
+                    def _writer_supported(i):
+                        return (getattr(i, "field", "") or "").strip() in (
+                            "stock_data_list", "_exchangeItemInfoListForSell")
+                _companion = target.replace(".pabgb", ".pabgh")
+                # Per-intent mod attribution (index-aligned with the
+                # original batched list, built BEFORE any filtering).
+                _intent_mods = whole_table_intent_mods.get(target, [])
+                _mod_by_intent: dict[int, str] = {}
+                if len(_intent_mods) == len(batched):
+                    for _i_obj, _m_name in zip(batched, _intent_mods):
+                        _mod_by_intent[id(_i_obj)] = _m_name
+                writer_batch = [i for i in batched if _writer_supported(i)]
+                passthrough = [i for i in batched if not _writer_supported(i)]
+                if passthrough:
+                    extra = _intents_to_v2_changes(
+                        target, vanilla_body, vanilla_header, passthrough)
+                    if extra:
+                        contrib_ids_pt = list(
+                            whole_table_mod_ids.get(target, []))
+                        for c in extra:
+                            c["_target_file"] = target
+                            if contrib_ids_pt:
+                                c["_source_mod_ids"] = list(contrib_ids_pt)
+                        aggregated.setdefault(target, []).extend(extra)
+                        for c in extra:
+                            n_bytes_changed += len(c.get("patched", "")) // 2
+                        if participating_mod_ids is not None:
+                            for mid in whole_table_mod_ids.get(target, []):
+                                participating_mod_ids.add(mid)
+                        logger.info(
+                            "Format 3 %s: %d non-list intent(s) handled by "
+                            "the standard path (%d change(s))",
+                            target, len(passthrough), len(extra))
+                if not writer_batch:
+                    continue
+                batched = writer_batch
+                # Per-intent refusal degradation (audit 2026-06-11): a
+                # single refused/malformed intent used to abort the whole
+                # multi-mod batch for this table. Probe-and-rebuild keeps
+                # every intent the writer accepts and drops only the
+                # refused ones, with a warning naming intents + mods.
+                try:
+                    pabgb_changes, pabgh_change, _dropped = (
+                        _build_with_per_intent_refusals(
+                            build_storeinfo_changes, StoreinfoWriteRefused,
+                            vanilla_body, vanilla_header, batched))
+                except Exception as e:
+                    logger.error(
+                        "Format 3 %s writer crashed on %d "
+                        "intent(s): %s", target, len(batched), e,
+                        exc_info=True)
+                    pabgb_changes, pabgh_change, _dropped = [], None, []
+                if _dropped:
+                    kept_n = len(batched) - len(_dropped)
+                    drop_lines = []
+                    for _it, _reason in _dropped[:5]:
+                        _label = (getattr(_it, "entry", "")
+                                  or f"key={getattr(_it, 'key', '?')}")
+                        drop_lines.append(
+                            f"{_label}.{getattr(_it, 'field', '?')} "
+                            f"(mod '{_mod_by_intent.get(id(_it), '?')}'): "
+                            f"{_reason}")
+                    more_n = len(_dropped) - len(drop_lines)
+                    more_sfx = (f"; and {more_n} more (see log)"
+                                if more_n > 0 else "")
+                    logger.warning(
+                        "Format 3 %s writer refused %d of %d intent(s); "
+                        "the remaining %d applied. Dropped: %s",
+                        target, len(_dropped), len(batched), kept_n,
+                        "; ".join(
+                            f"{(getattr(i, 'entry', '') or getattr(i, 'key', '?'))}"
+                            f".{getattr(i, 'field', '?')} "
+                            f"('{_mod_by_intent.get(id(i), '?')}': {r})"
+                            for i, r in _dropped))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3: {len(_dropped)} intent(s) on "
+                            f"'{target}' could not be applied and were "
+                            f"skipped: " + "; ".join(drop_lines) + more_sfx
+                            + (f". The other {kept_n} intent(s) on this "
+                               f"table still applied." if kept_n else ""))
+                if not pabgb_changes:
+                    logger.warning(
+                        "Format 3 %s: %d intent(s) from %d mod(s) "
+                        "produced 0 changes", target, len(batched),
+                        len(contributing_mods))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod(s) "
+                            f"{', '.join(repr(n) for n in contributing_mods)} "
+                            f"produced 0 byte changes for '{target}'. "
+                            f"The targeted entry may not exist in this game "
+                            f"version.")
+                    continue
+                contrib_ids = list(whole_table_mod_ids.get(target, []))
+                for c in pabgb_changes:
+                    c["_target_file"] = target
+                    if contrib_ids:
+                        c["_source_mod_ids"] = list(contrib_ids)
+                aggregated.setdefault(target, []).extend(pabgb_changes)
+                if pabgh_change is not None:
+                    pabgh_change["_target_file"] = _companion
+                    if contrib_ids:
+                        pabgh_change["_source_mod_ids"] = list(contrib_ids)
+                    aggregated.setdefault(
+                        _companion, []).append(pabgh_change)
+                if participating_mod_ids is not None:
+                    for mid in contrib_ids:
+                        participating_mod_ids.add(mid)
+                for c in pabgb_changes:
+                    n_bytes_changed += len(c.get("patched", "")) // 2
+                logger.info(
+                    "Format 3 %s writer: applied %d intent(s) "
+                    "across %d mod(s), %d change(s)%s",
+                    target, len(batched) - len(_dropped),
+                    len(contributing_mods),
+                    len(pabgb_changes),
+                    ", + pabgh offset rebuild"
+                    if pabgh_change is not None else "")
+                continue
+
+            changes = _intents_to_v2_changes(
+                target, vanilla_body, vanilla_header, batched)
+            if not changes:
+                logger.debug(
+                    "Format 3 whole-table writer for %s: %d intent(s) "
+                    "produced 0 changes", target, len(batched))
                 if warnings_out is not None:
                     warnings_out.append(
-                        f"Format 3 mod(s) "
-                        f"{', '.join(repr(n) for n in contributing_mods)} "
-                        f"could not apply to '{target}': {e}")
-                continue
-            except Exception as e:
-                logger.error(
-                    "Format 3 %s writer crashed on %d "
-                    "intent(s): %s", target, len(batched), e,
-                    exc_info=True)
-                pabgb_changes, pabgh_change = [], None
-            if not pabgb_changes:
-                logger.warning(
-                    "Format 3 %s: %d intent(s) from %d mod(s) "
-                    "produced 0 changes", target, len(batched),
-                    len(contributing_mods))
-                if warnings_out is not None:
-                    warnings_out.append(
-                        f"Format 3 mod(s) "
-                        f"{', '.join(repr(n) for n in contributing_mods)} "
+                        f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
                         f"produced 0 byte changes for '{target}'. "
-                        f"The targeted entry may not exist in this game "
-                        f"version.")
+                        f"Possible causes: all target item/skill keys in "
+                        f"the mod are missing from this game version's "
+                        f"table, or every intent set the field to its "
+                        f"current value (no-op)."
+                    )
                 continue
+            # Stamp _target_file plus the full list of contributing mod
+            # ids on the merged change. A single int can't represent N
+            # mods' shared intent, so we use _source_mod_ids (plural list)
+            # , persist_skip_summary fans out one row per id when the
+            # change byte-mismatches. H3 fix.
+            #
+            # Respect a pre-stamped _target_file: the iteminfo/skill
+            # whole-table flush emits .pabgh companion changes that must
+            # route to the index file, not the table (audit finding A).
             contrib_ids = list(whole_table_mod_ids.get(target, []))
-            for c in pabgb_changes:
-                c["_target_file"] = target
+            for c in changes:
+                c.setdefault("_target_file", target)
                 if contrib_ids:
                     c["_source_mod_ids"] = list(contrib_ids)
-            aggregated.setdefault(target, []).extend(pabgb_changes)
-            if pabgh_change is not None:
-                pabgh_change["_target_file"] = _companion
-                if contrib_ids:
-                    pabgh_change["_source_mod_ids"] = list(contrib_ids)
-                aggregated.setdefault(
-                    _companion, []).append(pabgh_change)
+                aggregated.setdefault(c["_target_file"], []).append(c)
+            # Whole-table dispatch produced bytes for this target , credit
+            # every contributing mod as a participant so persist_skip_summary
+            # resets their skip rows on a clean apply (H2 fix).
             if participating_mod_ids is not None:
-                for mid in contrib_ids:
+                for mid in whole_table_mod_ids.get(target, []):
                     participating_mod_ids.add(mid)
-            for c in pabgb_changes:
+            for c in changes:
                 n_bytes_changed += len(c.get("patched", "")) // 2
+            # #105 pitonpp macOS diagnostic: the writer reports applying
+            # N intents and produces a single byte-level change covering
+            # the whole table. If 'original' (vanilla bytes hex) and
+            # 'patched' (modified bytes hex) compare equal, the writer
+            # effectively produced vanilla, which mount-time will see as
+            # zero byte diff. On Windows this never happens for the same
+            # mods; on macOS pitonpp hits this every time. Comparing the
+            # two strings here surfaces the exact failure point.
+            for c in changes:
+                orig_hex = c.get("original", "")
+                patched_hex = c.get("patched", "")
+                if len(orig_hex) == len(patched_hex) and orig_hex == patched_hex:
+                    logger.warning(
+                        "Format 3 whole-table writer for %s: produced a "
+                        "change at offset %d where original==patched "
+                        "(%d bytes). The writer effectively output vanilla "
+                        "bytes despite %d batched intent(s). This points to "
+                        "the writer failing to mutate the in-memory record "
+                        "list before serialise. macOS-specific symptom in "
+                        "GitHub #105 pitonpp.",
+                        target, c.get("offset", 0), len(orig_hex) // 2,
+                        len(batched))
+                else:
+                    # Find the first byte position where original differs
+                    # from patched, so the bundle shows the writer DID
+                    # mutate something.
+                    first_diff = -1
+                    for i in range(min(len(orig_hex), len(patched_hex))):
+                        if orig_hex[i] != patched_hex[i]:
+                            first_diff = i // 2
+                            break
+                    logger.info(
+                        "Format 3 whole-table writer for %s: first byte "
+                        "differs at offset %d, original len=%d patched len=%d",
+                        target, first_diff,
+                        len(orig_hex) // 2, len(patched_hex) // 2)
             logger.info(
-                "Format 3 %s writer: applied %d intent(s) "
-                "across %d mod(s), %d change(s)%s",
-                target, len(batched), len(contributing_mods),
-                len(pabgb_changes),
-                ", + pabgh offset rebuild"
-                if pabgh_change is not None else "")
-            continue
-
-        changes = _intents_to_v2_changes(
-            target, vanilla_body, vanilla_header, batched)
-        if not changes:
-            logger.debug(
-                "Format 3 whole-table writer for %s: %d intent(s) "
-                "produced 0 changes", target, len(batched))
+                "Format 3 whole-table writer for %s: applied %d intents "
+                "across %d mod(s) in one pass",
+                target, len(batched), len(contributing_mods))
+        except Exception as e:
+            # EXPAND NEVER RAISES contract (docstring): corrupt or
+            # unmodeled table bytes can blow an unguarded
+            # struct.unpack_from out of the expansion helpers; one
+            # bad table must not abort the whole apply. Log, warn
+            # with the target + contributing mods, move on.
+            logger.error(
+                "Format 3 whole-table dispatch for %s crashed: %s",
+                target, e, exc_info=True)
             if warnings_out is not None:
                 warnings_out.append(
-                    f"Format 3 mod(s) {', '.join(repr(n) for n in contributing_mods)} "
-                    f"produced 0 byte changes for '{target}'. "
-                    f"Possible causes: all target item/skill keys in "
-                    f"the mod are missing from this game version's "
-                    f"table, or every intent set the field to its "
-                    f"current value (no-op)."
-                )
+                    f"Format 3 mod(s) "
+                    f"{', '.join(repr(n) for n in whole_table_mod_names.get(target, []))} "
+                    f"could not apply: processing '{target}' failed "
+                    f"({e}). The rest of the apply continued.")
             continue
-        # Stamp _target_file plus the full list of contributing mod
-        # ids on the merged change. A single int can't represent N
-        # mods' shared intent, so we use _source_mod_ids (plural list)
-        # , persist_skip_summary fans out one row per id when the
-        # change byte-mismatches. H3 fix.
-        contrib_ids = list(whole_table_mod_ids.get(target, []))
-        for c in changes:
-            c["_target_file"] = target
-            if contrib_ids:
-                c["_source_mod_ids"] = list(contrib_ids)
-        aggregated.setdefault(target, []).extend(changes)
-        # Whole-table dispatch produced bytes for this target , credit
-        # every contributing mod as a participant so persist_skip_summary
-        # resets their skip rows on a clean apply (H2 fix).
-        if participating_mod_ids is not None:
-            for mid in whole_table_mod_ids.get(target, []):
-                participating_mod_ids.add(mid)
-        for c in changes:
-            n_bytes_changed += len(c.get("patched", "")) // 2
-        # #105 pitonpp macOS diagnostic: the writer reports applying
-        # N intents and produces a single byte-level change covering
-        # the whole table. If 'original' (vanilla bytes hex) and
-        # 'patched' (modified bytes hex) compare equal, the writer
-        # effectively produced vanilla, which mount-time will see as
-        # zero byte diff. On Windows this never happens for the same
-        # mods; on macOS pitonpp hits this every time. Comparing the
-        # two strings here surfaces the exact failure point.
-        for c in changes:
-            orig_hex = c.get("original", "")
-            patched_hex = c.get("patched", "")
-            if len(orig_hex) == len(patched_hex) and orig_hex == patched_hex:
-                logger.warning(
-                    "Format 3 whole-table writer for %s: produced a "
-                    "change at offset %d where original==patched "
-                    "(%d bytes). The writer effectively output vanilla "
-                    "bytes despite %d batched intent(s). This points to "
-                    "the writer failing to mutate the in-memory record "
-                    "list before serialise. macOS-specific symptom in "
-                    "GitHub #105 pitonpp.",
-                    target, c.get("offset", 0), len(orig_hex) // 2,
-                    len(batched))
-            else:
-                # Find the first byte position where original differs
-                # from patched, so the bundle shows the writer DID
-                # mutate something.
-                first_diff = -1
-                for i in range(min(len(orig_hex), len(patched_hex))):
-                    if orig_hex[i] != patched_hex[i]:
-                        first_diff = i // 2
-                        break
-                logger.info(
-                    "Format 3 whole-table writer for %s: first byte "
-                    "differs at offset %d, original len=%d patched len=%d",
-                    target, first_diff,
-                    len(orig_hex) // 2, len(patched_hex) // 2)
-        logger.info(
-            "Format 3 whole-table writer for %s: applied %d intents "
-            "across %d mod(s) in one pass",
-            target, len(batched), len(contributing_mods))
 
-    # Summary line — INFO level so bug reports auto-include it.
+    # Summary line, INFO level so bug reports auto-include it.
     # The single line summarizes "did the feature do anything?" so
     # users + maintainers can answer that question from the log
     # without digging into per-mod debug entries.
@@ -592,6 +670,59 @@ def expand_format3_into_aggregated(
     )
 
 
+def _build_with_per_intent_refusals(
+    build_fn, refused_exc, vanilla_body: bytes, vanilla_header: bytes,
+    batched: list,
+) -> "tuple[list[dict], dict | None, list[tuple]]":
+    """Run a ``(pabgb_changes, pabgh_change)`` writer, degrading
+    refusals to per-intent drops instead of aborting the whole
+    multi-mod batch (audit finding, 2026-06-11).
+
+    Strategy: try the full batch first (the common case costs one
+    build). On a refusal, probe each intent individually to find the
+    refused ones, then rebuild once with the survivors. Bounded at
+    ``len(batched) + 2`` builds total. Returns
+    ``(pabgb_changes, pabgh_change, dropped)`` where ``dropped`` is a
+    list of ``(intent, reason)`` pairs.
+
+    Non-refusal exceptions from the first full-batch build propagate
+    to the caller (existing crash handling); during per-intent probing
+    they just mark that one intent dropped.
+    """
+    dropped: list[tuple] = []
+    try:
+        changes, companion = build_fn(
+            vanilla_body, vanilla_header, list(batched))
+        return changes, companion, dropped
+    except refused_exc as first_err:
+        logger.warning(
+            "Format 3 writer refused the %d-intent batch (%s); "
+            "probing per-intent to keep the rest",
+            len(batched), first_err)
+    survivors = []
+    for it in batched:
+        try:
+            build_fn(vanilla_body, vanilla_header, [it])
+            survivors.append(it)
+        except refused_exc as e:
+            dropped.append((it, str(e)))
+        except Exception as e:
+            dropped.append((it, f"writer error: {e}"))
+    if not survivors:
+        return [], None, dropped
+    try:
+        changes, companion = build_fn(
+            vanilla_body, vanilla_header, survivors)
+        return changes, companion, dropped
+    except refused_exc as e:
+        # Refusal only in combination (should not happen for these
+        # per-entry writers); conservative fallback drops everything
+        # rather than guessing.
+        for it in survivors:
+            dropped.append((it, f"refused in combination: {e}"))
+        return [], None, dropped
+
+
 def _intents_to_v2_changes(
     target: str, vanilla_body: bytes, vanilla_header: bytes,
     intents: list[Format3Intent],
@@ -599,7 +730,7 @@ def _intents_to_v2_changes(
     """Produce v2-format change dicts from a list of supported intents.
 
     Each output dict has: ``entry``, ``rel_offset``, ``original``,
-    ``patched`` — exactly the shape ``aggregate_json_mods_into_
+    ``patched``, exactly the shape ``aggregate_json_mods_into_
     synthetic_patches`` aggregates from real v2 mods.
     """
     table_name = identify_table_from_path(target) or _strip_pabgb(target)
@@ -662,23 +793,26 @@ def _intents_to_v2_changes(
             # single stale byte anywhere (contaminated vanilla backup,
             # composition with another mod) used to skip the entire
             # batch (falobos76's v3.3.19 retest on #191).
-            def _portable_intents(items):
-                return [
-                    {"entry": i.entry, "key": i.key, "field": i.field,
-                     "op": i.op, "new": i.new, "old": i.old}
-                    for i in items
-                ]
             if table_name == "iteminfo":
                 from cdumm.engine.iteminfo_writer import (
                     build_iteminfo_intent_change,
                 )
                 change = build_iteminfo_intent_change(
-                    vanilla_body, list(list_routable))
+                    vanilla_body, list(list_routable),
+                    vanilla_header=vanilla_header)
                 if change is not None:
                     change["_f3_rebuild"] = {
                         "table": "iteminfo",
                         "intents": _portable_intents(list_routable),
+                        # The live rebuild needs the index for exact
+                        # record framing (the sniff walk swallows
+                        # large-key records, audit M12) and so its
+                        # pre-flight refuses size-diverged buffers
+                        # whose prebuilt .pabgh companion would no
+                        # longer match (release-review finding 3).
+                        "header": vanilla_header.hex(),
                     }
+                    _route_pabgh_companion(change, target, out)
                     out.append(change)
             elif table_name == "skill":
                 from cdumm.engine.skill_writer import (
@@ -692,6 +826,7 @@ def _intents_to_v2_changes(
                         "intents": _portable_intents(list_routable),
                         "header": vanilla_header.hex(),
                     }
+                    _route_pabgh_companion(change, target, out)
                     out.append(change)
         # Per-record field_schema dispatch for primitive intents on
         # no-PABGB-schema tables. Mirrors the standard primitive path
@@ -898,13 +1033,17 @@ def _intents_to_v2_changes(
             or field.startswith("gimmick_visual_prefab_data_list[")
         )
 
-    iteminfo_force_batch = (
-        table_name == "iteminfo" and any(
-            (table_name, i.field) in LIST_WRITERS
-            or _is_iteminfo_nested_path(i.field)
-            for i in intents
-        )
-    )
+    # ALL iteminfo intents route through the native writer, not just
+    # list-of-dict batches. The PABGB schema walk below still carries
+    # the pre-1.09 layout (schemas/pabgb_type_overrides.json lists
+    # fields removed in 1.09/1.10 and lacks the added ones), so any
+    # primitive intent on a field at/after _itemIconList walks with
+    # wrong byte counts on a 1.10 binary: usually a silent drop, worst
+    # case an in-bounds wrong-offset write (audit finding C,
+    # 2026-06-10). The native parser tracks the live layout and the
+    # writer handles primitives via dict assignment, so it is the
+    # version-correct path for every iteminfo field.
+    iteminfo_force_batch = (table_name == "iteminfo")
     skill_force_batch = (
         table_name == "skill" and any(
             (table_name, i.field) in LIST_WRITERS for i in intents
@@ -912,12 +1051,14 @@ def _intents_to_v2_changes(
     )
 
     for intent in intents:
-        if intent.key not in entry_bounds:
-            continue
-        entry_off, entry_end, entry_name = entry_bounds[intent.key]
-
         # Batched whole-table writer dispatch (forced for iteminfo /
         # skill when any list-writer intent exists in the same mod).
+        # These MUST run before the entry_bounds gate below: key-
+        # omitted intents arrive with the sentinel key=0, which is
+        # never in the pabgh index, and the writers resolve them by
+        # entry NAME. Gating first silently dropped every name-only
+        # iteminfo/skill intent on the production (has-schema) path
+        # (release-review finding 1, 2026-06-11).
         if iteminfo_force_batch and table_name == "iteminfo":
             iteminfo_batch.append(intent)
             continue
@@ -934,6 +1075,10 @@ def _intents_to_v2_changes(
                 and (table_name, intent.field) in LIST_WRITERS):
             skill_batch.append(intent)
             continue
+
+        if intent.key not in entry_bounds:
+            continue
+        entry_off, entry_end, entry_name = entry_bounds[intent.key]
 
         # Per-record list writer dispatch (e.g. dropsetinfo.drops):
         # one change emitted per intent, anchored at the entry name.
@@ -979,7 +1124,7 @@ def _intents_to_v2_changes(
         # Bug from Faisal's Can It Stack JSON V3 test 2026-05-01: 1812
         # of 1827 max_stack_count patches mismatched because they were
         # reading bytes from adjacent string fields. Latent since
-        # v3.2.3 when Format 3 primitive support shipped — the
+        # v3.2.3 when Format 3 primitive support shipped, the
         # ZirconX1 / Lichtnocht "applies cleanly but doesn't work
         # in-game" reports trace here.
         if no_entry_header:
@@ -1004,14 +1149,32 @@ def _intents_to_v2_changes(
 
     # Flush the iteminfo batch (whole-table writer): all collected
     # intents become a single offset=0 change covering the full
-    # iteminfo.pabgb body.
+    # iteminfo.pabgb body, plus a .pabgh companion when record
+    # offsets shifted (audit finding A).
+    #
+    # `_f3_rebuild` (the raw intents riding on the change) MUST be
+    # attached HERE, not only in the no-schema branch above:
+    # has_schema("iteminfo") is True, so production iteminfo flows
+    # through THIS flush, and the v3.3.20 live-buffer rebuild never
+    # fired for iteminfo until this was added (audit finding B,
+    # 2026-06-10).
     if iteminfo_batch:
         from cdumm.engine.iteminfo_writer import (
             build_iteminfo_intent_change,
         )
         iteminfo_change = build_iteminfo_intent_change(
-            vanilla_body, iteminfo_batch)
+            vanilla_body, iteminfo_batch, vanilla_header=vanilla_header)
         if iteminfo_change is not None:
+            iteminfo_change["_f3_rebuild"] = {
+                "table": "iteminfo",
+                "intents": _portable_intents(iteminfo_batch),
+                # See the no-schema attach site: the live rebuild
+                # needs the index for exact record framing and for
+                # the size-divergence refusal (release-review
+                # finding 3, 2026-06-11).
+                "header": vanilla_header.hex(),
+            }
+            _route_pabgh_companion(iteminfo_change, target, out)
             out.append(iteminfo_change)
 
     # Same for skill: the skillinfo_parser needs the .pabgh
@@ -1023,9 +1186,38 @@ def _intents_to_v2_changes(
         skill_change = build_skill_intent_change(
             vanilla_body, vanilla_header, skill_batch)
         if skill_change is not None:
+            skill_change["_f3_rebuild"] = {
+                "table": "skill",
+                "intents": _portable_intents(skill_batch),
+                "header": vanilla_header.hex(),
+            }
+            _route_pabgh_companion(skill_change, target, out)
             out.append(skill_change)
 
     return out
+
+
+def _portable_intents(items) -> list[dict]:
+    """JSON-serializable copies of intents, carried on whole-table
+    changes so the apply loop can re-run the writer against the live
+    buffer on a byte mismatch (#191)."""
+    return [
+        {"entry": i.entry, "key": i.key, "field": i.field,
+         "op": i.op, "new": i.new, "old": i.old}
+        for i in items
+    ]
+
+
+def _route_pabgh_companion(change: dict, target: str, out: list) -> None:
+    """Pop a writer-attached ``_pabgh_companion`` off ``change`` and
+    append it to ``out`` pre-stamped with the companion target file,
+    so the caller's routing sends it to <table>.pabgh instead of the
+    .pabgb (audit finding A)."""
+    companion = change.pop("_pabgh_companion", None)
+    if companion is None:
+        return
+    companion["_target_file"] = target.replace(".pabgb", ".pabgh")
+    out.append(companion)
 
 
 def _buffinfo_field_candidates(field: str) -> list[str]:
@@ -1385,7 +1577,7 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
     or None if the type isn't safely walkable.
 
     Resolution order:
-      1. ``spec.type_descriptor`` (Path B override) — delegate to
+      1. ``spec.type_descriptor`` (Path B override), delegate to
          ``pabgb_types.consume_bytes`` for full PABGB primitive +
          CArray + COptional + tagged-variant + sub-struct support.
       2. Legacy ``CString`` literal in ``spec.field_type``.
@@ -1394,7 +1586,7 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
     """
     # Defensive negative-offset guard mirroring pabgb_types.consume_bytes.
     # struct.unpack_from with a negative offset reads from the buffer's
-    # end and raises struct.error when there aren't enough bytes — the
+    # end and raises struct.error when there aren't enough bytes, the
     # exception would propagate up. In production callers always pass
     # non-negative offsets, but this keeps the legacy path symmetric
     # with the walker's defenses. Iteration 5 systematic-debugging
@@ -1421,14 +1613,14 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
     if spec.stream_size:
         # Fixed-size field (struct_fmt set OR raw direct_NB): consume
         # the declared stream_size IF it fits within the entry payload
-        # AND the buffer. Iteration 6 systematic-debugging finding —
+        # AND the buffer. Iteration 6 systematic-debugging finding , 
         # the previous unconditional `return spec.stream_size` would
         # report a successful consume even past EOF, breaking
         # downstream offset accounting.
         if off + spec.stream_size > min(entry_end, len(body)):
             return None
         return spec.stream_size
-    # stream_size=0 means the schema didn't classify this — can't
+    # stream_size=0 means the schema didn't classify this, can't
     # walk safely.
     return None
 
@@ -1441,21 +1633,21 @@ def _payload_offset(body: bytes, entry_off: int,
 
     Three modes (in priority order):
 
-    * ``no_entry_header=True`` — payload IS the entry; return ``entry_off``
+    * ``no_entry_header=True``, payload IS the entry; return ``entry_off``
       verbatim. Required for tables like RegionInfo where ``_key`` and
       ``_stringKey`` are regular schema fields (no separate header).
 
-    * ``no_null_skip=True`` — skip the standard entry header (entry_id +
+    * ``no_null_skip=True``, skip the standard entry header (entry_id +
       name_len + name) but do NOT skip a trailing zero byte. Required for
       ItemInfo, VehicleInfo, FieldInfo, StageInfo where the byte after
       the name is a real ``_isBlocked`` u8 field, not padding.
 
-    * Default — legacy heuristic from ``format3_handler``: skip a single
+    * Default, legacy heuristic from ``format3_handler``: skip a single
       0 byte after the name when present. Works for tables where the
       post-name byte is genuinely padding.
     """
     if no_entry_header:
-        # Strict `<` so EOF itself is rejected — there's no field to
+        # Strict `<` so EOF itself is rejected, there's no field to
         # read at exactly `len(body)`. Adversarial review CONSENSUS-2
         # 2026-04-27. The walker's per-primitive bounds checks would
         # also catch a subsequent read, but rejecting up front
@@ -1479,7 +1671,7 @@ def _payload_offset(body: bytes, entry_off: int,
 def _entry_name(body: bytes, entry_off: int,
                 key_size: int) -> str:
     """Read the name string from an entry header. Empty string on
-    failure — the caller falls back to ``intent.entry``."""
+    failure, the caller falls back to ``intent.entry``."""
     eid_size = 2 if key_size == 2 else 4
     head_size = eid_size + 4
     if entry_off + head_size > len(body):

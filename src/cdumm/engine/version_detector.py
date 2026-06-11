@@ -186,19 +186,40 @@ def _hash_exe_fast(exe_path: Path) -> str:
     return h.hexdigest()[:12]
 
 
+def _buildid_from_acf(acf: Path) -> str | None:
+    """Extract the buildid value from one appmanifest file."""
+    text = acf.read_text(errors="replace")
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('"buildid"'):
+            return line.split('"')[-2]
+    return None
+
+
 def get_steam_build_id(game_dir: Path) -> str | None:
-    """Read Steam build ID from appmanifest file."""
+    """Read Steam build ID from the Crimson Desert appmanifest.
+
+    Targets ``appmanifest_3321460.acf`` directly (same precise lookup
+    as ``language.detect_steam_language``). The old "grep every
+    manifest for the string Crimson Desert" approach could match a
+    DLC/soundtrack manifest first and report its buildid; the name
+    grep is kept only as a fallback for the case where the canonical
+    manifest file is absent.
+    """
     try:
+        from cdumm.engine.language import STEAM_APP_ID
         # game_dir is like .../steamapps/common/Crimson Desert
         steamapps = game_dir.parent.parent
+        canonical = steamapps / f"appmanifest_{STEAM_APP_ID}.acf"
+        if canonical.exists():
+            return _buildid_from_acf(canonical)
         for acf in steamapps.glob("appmanifest_*.acf"):
             text = acf.read_text(errors="replace")
             if "Crimson Desert" not in text:
                 continue
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith('"buildid"'):
-                    return line.split('"')[-2]
+            bid = _buildid_from_acf(acf)
+            if bid:
+                return bid
     except Exception:
         pass
     return None

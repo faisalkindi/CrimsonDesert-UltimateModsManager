@@ -587,20 +587,48 @@ class ModManager:
                     f", +{len(kept_with_source) - 5} more"
                     if len(kept_with_source) > 5 else ""))
 
-        # Remove duplicate mods (same name, keep highest priority / newest)
+        # Remove TRUE duplicate mods only. A shared display name is
+        # NOT sufficient identity: prettify_mod_name strips versions
+        # and trailing multipliers, so "Trust Me 2x" and "Trust Me 5x"
+        # both land as "Trust Me", and the old name-only removal
+        # permanently destroyed one of two intentionally different
+        # variants (deltas + archived sources, via remove_mod) on
+        # every launch (audit finding C2/mod_manager, 2026-06-10).
+        # Two mods are duplicates only when name AND version AND the
+        # full delta fingerprint (file_path, entry_path, byte range,
+        # is_new) all match. Anything less stays untouched.
         dupes = self._db.connection.execute(
             "SELECT name, COUNT(*) as cnt FROM mods "
             "GROUP BY name HAVING cnt > 1").fetchall()
         for name, cnt in dupes:
             rows = self._db.connection.execute(
-                "SELECT id, priority FROM mods WHERE name = ? ORDER BY priority ASC",
+                "SELECT id, priority, COALESCE(version, '') FROM mods "
+                "WHERE name = ? ORDER BY priority ASC",
                 (name,)).fetchall()
-            # Keep the first (highest priority = lowest number), remove the rest
-            keep_id = rows[0][0]
-            for mod_id, _ in rows[1:]:
+
+            def _fingerprint(mod_id: int) -> tuple:
+                deltas = self._db.connection.execute(
+                    "SELECT file_path, COALESCE(entry_path, ''), "
+                    "COALESCE(byte_start, -1), COALESCE(byte_end, -1), "
+                    "is_new FROM mod_deltas WHERE mod_id = ? "
+                    "ORDER BY file_path, entry_path, byte_start",
+                    (mod_id,)).fetchall()
+                return tuple(tuple(d) for d in deltas)
+
+            keep_id, _, keep_ver = rows[0]
+            keep_fp = _fingerprint(keep_id)
+            for mod_id, _, ver in rows[1:]:
+                if ver != keep_ver or _fingerprint(mod_id) != keep_fp:
+                    logger.info(
+                        "Keeping same-name mod %r (id=%d): version or "
+                        "delta content differs from id=%d, not a true "
+                        "duplicate", name, mod_id, keep_id)
+                    continue
                 self.remove_mod(mod_id)
-                logger.info("Removed duplicate mod: %s (id=%d, kept id=%d)",
-                            name, mod_id, keep_id)
+                logger.info(
+                    "Removed true duplicate mod: %s (id=%d, kept id=%d, "
+                    "identical version + delta fingerprint)",
+                    name, mod_id, keep_id)
 
     def rename_mod(self, mod_id: int, new_name: str) -> None:
         """Rename a mod."""

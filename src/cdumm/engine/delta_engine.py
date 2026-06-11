@@ -67,22 +67,41 @@ def generate_delta(vanilla_bytes: bytes, modified_bytes: bytes) -> bytes:
         return FULL_COPY_MAGIC + modified_bytes
 
 
-def apply_delta(vanilla_bytes: bytes, delta_bytes: bytes) -> bytes:
-    """Apply a delta to vanilla bytes, returning modified bytes."""
+def apply_delta(vanilla_bytes: bytes, delta_bytes: bytes,
+                allow_raw: bool = False) -> bytes:
+    """Apply a delta to vanilla bytes, returning modified bytes.
+
+    ``allow_raw`` permits the legacy raw-replacement interpretation
+    for deltas with no recognized magic. Only ``.newfile`` deltas
+    (full copies stored by the importer for brand-new files) are
+    legitimately magic-less; for anything else an unknown magic means
+    a truncated/corrupt delta, and silently substituting its bytes
+    for a game file would ship garbage. Raise instead so callers can
+    skip that one delta.
+    """
     if delta_bytes[:4] == FULL_COPY_MAGIC:
         return delta_bytes[4:]
     if delta_bytes[:4] == SPARSE_MAGIC:
         return _apply_sparse_patch(vanilla_bytes, delta_bytes)
     if delta_bytes[:8] == b"BSDIFF40":
         return bsdiff4.patch(vanilla_bytes, delta_bytes)
-    # Unknown format — treat as raw file replacement (e.g., .newfile)
-    logger.warning("Unknown delta format (magic=%s), treating as raw file",
-                   delta_bytes[:4].hex())
-    return delta_bytes
+    if allow_raw:
+        # Raw file replacement (.newfile full copies have no magic).
+        logger.info("Raw-replacement delta (no magic), using file bytes "
+                    "verbatim")
+        return delta_bytes
+    raise ValueError(
+        f"Unknown delta format (magic={delta_bytes[:4].hex()}); the "
+        f"delta file is corrupt or truncated")
 
 
 def apply_delta_from_file(vanilla_bytes: bytes, delta_path: Path) -> bytes:
-    """Apply a delta from disk, streaming large sparse patches to avoid OOM."""
+    """Apply a delta from disk, streaming large sparse patches to avoid OOM.
+
+    Raises ValueError for deltas with an unrecognized magic unless the
+    file is a ``.newfile`` raw replacement (the only delta kind the
+    importer writes without a magic header).
+    """
     import os
     file_size = os.path.getsize(delta_path)
 
@@ -101,7 +120,8 @@ def apply_delta_from_file(vanilla_bytes: bytes, delta_path: Path) -> bytes:
 
     # Small enough to load into memory
     delta_bytes = delta_path.read_bytes()
-    return apply_delta(vanilla_bytes, delta_bytes)
+    return apply_delta(vanilla_bytes, delta_bytes,
+                       allow_raw=delta_path.name.endswith(".newfile"))
 
 
 def _apply_sparse_patch_streaming(vanilla_bytes: bytes, delta_path: Path) -> bytes:

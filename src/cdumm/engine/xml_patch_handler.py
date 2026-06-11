@@ -87,12 +87,18 @@ def detect_patch_file(path: Path) -> Optional[str]:
         return "xml_merge"
     if not path.is_file():
         return None
-    # Cap the probe size — most patch files are < 256 KB; anything bigger
-    # is unlikely to be a patch and sniffing slows down scans.
+    # Probe only the first 8 KB. read_bytes()[:8192] used to pull the
+    # WHOLE file into memory before slicing, which made archive scans
+    # pay full-file I/O for every non-patch asset; open()+read(8192)
+    # reads just the probe window.
     try:
-        head = path.read_bytes()[:8192].decode("utf-8", errors="replace")
+        with open(path, "rb") as f:
+            head_bytes = f.read(8192)
     except Exception:
         return None
+    if head_bytes.startswith(b"\xef\xbb\xbf"):
+        head_bytes = head_bytes[3:]
+    head = head_bytes.decode("utf-8", errors="replace")
     stripped = head.lstrip()
     if stripped.startswith("<"):
         try:
@@ -112,10 +118,13 @@ def detect_patch_file(path: Path) -> Optional[str]:
         try:
             data = json.loads(head)
         except json.JSONDecodeError:
-            # The truncated 8-KB probe may have cut the JSON off mid-token.
-            # Fall back to reading the full file only if it looks worth it.
+            # The truncated 8-KB probe may have cut the JSON off
+            # mid-token. The probe already confirmed the content looks
+            # like a JSON object (starts with '{' after BOM and
+            # whitespace), so this full read only happens for genuine
+            # JSON candidates, never for arbitrary large assets.
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
             except Exception:
                 return None
         if isinstance(data, dict) and isinstance(data.get("operations"), list):

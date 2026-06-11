@@ -84,6 +84,13 @@ class TransactionalIO:
             self._staged_files.append(rel_path)
         logger.debug("Staged: %s (%d bytes)", rel_path, len(data))
 
+    def staged_files(self) -> list[str]:
+        """Relative POSIX paths staged so far (copy). Phase 3b's
+        already-staged guard called this for months while it did not
+        exist; the hasattr fallback made the guard silently empty
+        (audit finding I4, 2026-06-10)."""
+        return list(self._staged_files)
+
     def stage_file_if_changed(self, rel_path: str, data: bytes) -> bool:
         """Stage only if the target differs from ``data``.
 

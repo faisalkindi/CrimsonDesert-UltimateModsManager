@@ -210,11 +210,13 @@ def apply_patches(original_bytes: bytes,
 def _apply_one(text: str, op: HtmlPatchOp,
                log: list[str], label: str) -> Optional[str]:
     matches = _find_all(text, op.selector)
-    if not matches and op.op != "append":
+    if not matches:
         log.append(f"    [HTML] SKIP {label}: selector matched nothing")
         return text
     out = text
-    # Apply in reverse document order so earlier offsets stay valid.
+    # Apply in reverse document order so earlier offsets stay valid:
+    # every edit (attribute or structural) only shifts offsets AFTER
+    # the edited element, and all remaining matches sit before it.
     for el in sorted(matches, key=lambda e: e.open_start, reverse=True):
         if op.op == "set-attr":
             out = _op_set_attr(out, el, op.name or "", op.value or "")
@@ -241,16 +243,6 @@ def _apply_one(text: str, op: HtmlPatchOp,
         else:
             log.append(f"    [HTML] SKIP {label}: unknown op")
             return text
-        # Re-scan after each edit since offsets shifted.
-        if op.op != "set-attr" and op.op != "remove-attr" and \
-                op.op != "add-class" and op.op != "remove-class":
-            # full structural edits invalidate later matches in `matches`
-            # — re-find under the same selector against the new text
-            matches_new = _find_all(out, op.selector)
-            # Use the first remaining unedited match in document order;
-            # since we iterate in reverse this break is fine.
-            del matches_new
-            break
     return out
 
 

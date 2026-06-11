@@ -80,7 +80,7 @@ def _should_reject_partial_pabgb(game_file: str, applied: int,
     Default behavior: ANY mismatch on .pabgb / .pabgh / .pamt rejects.
     Reason: shipping half-patched data tables crashes the game when
     paired-array fields drift (Kliff Wears Damiane V2 reference case
-    — 458/464 patches applied, 6 mismatched, game crashed on splash).
+   , 458/464 patches applied, 6 mismatched, game crashed on splash).
 
     Opt-in escape: mod author sets `allow_partial_apply: true` at the
     top level of the patch JSON OR inside `modinfo`. Cost-only or
@@ -182,7 +182,7 @@ def detect_json_patch(path: Path) -> dict | None:
 
     Returns parsed JSON dict if valid, None otherwise. For folders with
     multiple valid JSONs (e.g. Trust Me + Pet Abyss Gear shipped as one
-    zip), returns the first — callers that want all of them should use
+    zip), returns the first, callers that want all of them should use
     :func:`detect_json_patches_all` and import each separately.
     """
     results = detect_json_patches_all(path)
@@ -314,7 +314,7 @@ def detect_json_patches_all(path: Path) -> list[dict]:
         try:
             h = _hashlib.sha256(Path(p).read_bytes()).hexdigest()
         except OSError:
-            # Unreadable now (race with deletion?) — keep it under a
+            # Unreadable now (race with deletion?), keep it under a
             # unique key so we don't silently drop it.
             by_hash[f"_no_hash_{id(patch)}"] = patch
             continue
@@ -381,7 +381,7 @@ def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
                                         entry.path)
                             entry._encrypted_override = True
                     except Exception:
-                        # All decompression failed — DX10 multi-mip raw passthrough
+                        # All decompression failed, DX10 multi-mip raw passthrough
                         logger.info("DDS %s: returning raw (DX10 multi-mip)", entry.path)
                         return raw
             else:
@@ -393,14 +393,24 @@ def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
                                     entry.path)
                         entry._encrypted_override = True
                 except Exception:
-                    # All decompression failed — DX10 multi-mip raw passthrough
+                    # All decompression failed, DX10 multi-mip raw passthrough
                     logger.info("DDS %s: returning raw (DX10 multi-mip)", entry.path)
                     return raw
         return header + body
 
+    # Types 3 (zlib) and 4 (QuickLZ) are declared in the PAMT flags but
+    # not implemented anywhere in CDUMM. Falling through used to treat
+    # them as raw bytes while the flags still said "compressed", which
+    # corrupts the slot on repack. Refuse loudly instead; callers turn
+    # this into a per-file error.
+    if entry.compression_type in (3, 4):
+        raise ValueError(
+            f"unsupported compression type {entry.compression_type} "
+            f"for {entry.path}")
+
     if entry.compressed and entry.compression_type == 2:
         try:
-            return lz4_decompress(raw, entry.orig_size)
+            result = lz4_decompress(raw, entry.orig_size)
         except Exception:
             decrypted = decrypt(raw, basename)
             result = lz4_decompress(decrypted, entry.orig_size)
@@ -409,6 +419,20 @@ def decompress_entry(raw: bytes, entry: PazEntry) -> bytes:
                             entry.path)
                 entry._encrypted_override = True
             return result
+        if entry._encrypted_override is None and entry.encrypted:
+            # False-positive scenario: PazEntry.encrypted has no real
+            # flag to read, so it guesses from the extension (.xml /
+            # .css / .html / .js under ui paths). This entry decoded
+            # with plain LZ4 and NO decryption, so the payload is
+            # stored as plaintext and the heuristic guessed wrong.
+            # Clear the override so repack does not ChaCha20-encrypt
+            # a plaintext slot (the game would then read cipher bytes
+            # where it expects plaintext).
+            logger.info(
+                "Corrected encrypted flag for %s (heuristic said "
+                "encrypted, plain LZ4 decode succeeded)", entry.path)
+            entry._encrypted_override = False
+        return result
 
     if entry.encrypted:
         return decrypt(raw, basename)
@@ -436,6 +460,12 @@ def _extract_from_paz(entry: PazEntry, paz_path: str | None = None) -> bytes:
     return decompress_entry(raw, entry)
 
 
+# Patterns shorter than this must be UNIQUE in the searched range for
+# the simple scan tier to relocate them; >= this length the pattern is
+# effectively unique and nearest-match is safe.
+_SHORT_PATTERN_UNIQUE_LIMIT = 12
+
+
 def _pattern_scan(
     data: bytearray,
     original_offset: int,
@@ -452,12 +482,33 @@ def _pattern_scan(
        (<4 bytes) limited to ±512 bytes to prevent false matches.
 
     Returns new offset or None if not found/ambiguous.
+
+    Uniqueness guard for short patterns (<12 bytes): a 4-byte
+    ``original`` (a float, a count) recurs thousands of times in a
+    data table, and "nearest match to the stale offset" silently
+    patches the wrong record. Short patterns therefore must occur
+    exactly once in the searched range to relocate; long patterns
+    (>=12 bytes) are effectively unique and keep the nearest-match
+    behavior.
     """
     try:
         import cdumm_native
         result = cdumm_native.pattern_scan(
             bytes(data), original_offset, original_bytes, vanilla_data)
         if result is not None:
+            # Post-condition mirroring the Python fallback's simple-tier
+            # uniqueness rule: refuse a short-pattern relocation unless
+            # the pattern occurs exactly once in the whole buffer.
+            if (result != original_offset
+                    and 0 < len(original_bytes)
+                    < _SHORT_PATTERN_UNIQUE_LIMIT
+                    and bytes(data).count(original_bytes) != 1):
+                logger.warning(
+                    "Pattern scan (native): short pattern (%dB) is not "
+                    "unique in the buffer; refusing relocation from "
+                    "0x%X rather than guessing the record",
+                    len(original_bytes), original_offset)
+                return None
             logger.info("Pattern scan (native): offset 0x%X → 0x%X (delta %+d)",
                         original_offset, result, result - original_offset)
         return result
@@ -505,16 +556,31 @@ def _pattern_scan(
 
     best_match = None
     best_dist = float('inf')
+    match_count = 0
     pos = scan_start
     while True:
         idx = data_bytes.find(pattern, pos, scan_end)
         if idx == -1:
             break
+        match_count += 1
         dist = abs(idx - original_offset)
         if dist < best_dist:
             best_dist = dist
             best_match = idx
         pos = idx + 1
+
+    # Simple-tier uniqueness rule: short patterns must match exactly
+    # once in the searched range. Picking the match nearest the stale
+    # offset is only safe for long patterns; a short recurring value
+    # would silently relocate onto the wrong record.
+    if (len(pattern) < _SHORT_PATTERN_UNIQUE_LIMIT
+            and match_count > 1):
+        logger.warning(
+            "Pattern scan (simple): short pattern (%dB) matched %d "
+            "times in the searched range; refusing relocation from "
+            "0x%X rather than guessing the record",
+            len(pattern), match_count, original_offset)
+        return None
 
     if best_match is not None and best_match != original_offset:
         logger.info("Pattern scan (simple): offset 0x%X → 0x%X (delta %+d)",
@@ -525,47 +591,80 @@ def _pattern_scan(
 
 
 def _build_name_offsets_generic(pabgb_bytes: bytes,
-                                 pabgh_bytes: bytes) -> dict[str, int] | None:
+                                 pabgh_bytes: bytes,
+                                 key_size: int | None = None,
+                                 ) -> dict[str, int] | None:
     """Generic name→body-offset resolver for any .pabgb where each entry
-    begins with ``u32 entry_key`` + ``u32 name_len`` + UTF-8 ``name``.
+    begins with ``entry_key`` (u32 or u16) + ``u32 name_len`` + UTF-8
+    ``name``.
 
-    This is the standard PABGB record layout — characterinfo, iteminfo,
+    This is the standard PABGB record layout, characterinfo, iteminfo,
     and most other Crimson Desert data tables follow it. Returns a dict
     mapping entry name to the absolute body offset the patch's
     ``rel_offset`` is anchored against (which is the same offset the
     .pabgh index stores, i.e. the start of the record before the key).
 
+    ``key_size`` is an optional hint (2 or 4) from callers that already
+    ran ``parse_pabgh_index``. Without a hint the u32 layout is tried
+    first; if it yields zero entries, the u16-keyed layout (storeinfo
+    and other inventory-style tables: 6-byte index entries, name_len
+    at entry offset+2) is retried, so scalar patches on u16-keyed
+    tables can still anchor by name instead of dying "unresolvable
+    offset".
+
     Returns None if the formats don't match (caller falls back to
     absolute-offset mode).
     """
+    widths: tuple[int, ...] = (key_size,) if key_size in (2, 4) else (4, 2)
+    for eid_size in widths:
+        result = _build_name_offsets_for_key_width(
+            pabgb_bytes, pabgh_bytes, eid_size)
+        if result:
+            return result
+    return None
+
+
+def _build_name_offsets_for_key_width(
+        pabgb_bytes: bytes, pabgh_bytes: bytes,
+        eid_size: int) -> dict[str, int] | None:
+    """One key-width pass of :func:`_build_name_offsets_generic`.
+
+    .pabgh layout: ``u16 count`` + count x (``key`` of ``eid_size``
+    bytes + ``u32 offset``). Entry layout in .pabgb: ``key`` of
+    ``eid_size`` bytes + ``u32 name_len`` + name + record fields.
+    """
+    stride = eid_size + 4
+    head = eid_size + 4
     try:
         if len(pabgh_bytes) < 2:
             return None
         count = struct.unpack_from("<H", pabgh_bytes, 0)[0]
-        if count == 0 or 2 + count * 8 > len(pabgh_bytes) + 16:
+        if count == 0 or 2 + count * stride > len(pabgh_bytes) + 16:
             return None
         name_to_offset: dict[str, int] = {}
         for i in range(count):
-            pos = 2 + i * 8
-            if pos + 8 > len(pabgh_bytes):
+            pos = 2 + i * stride
+            if pos + stride > len(pabgh_bytes):
                 break
-            # .pabgh stores (u32 hash, u32 offset). Offset points at
+            # .pabgh stores (key, u32 offset). Offset points at
             # the entry's start in .pabgb. The entry layout:
-            #   u32 entry_key
+            #   entry_key (eid_size bytes)
             #   u32 name_len
             #   char[name_len] name
             #   ... (record-specific fields)
-            offset = struct.unpack_from("<I", pabgh_bytes, pos + 4)[0]
-            if offset + 8 > len(pabgb_bytes):
+            offset = struct.unpack_from(
+                "<I", pabgh_bytes, pos + eid_size)[0]
+            if offset + head > len(pabgb_bytes):
                 continue
-            name_len = struct.unpack_from("<I", pabgb_bytes, offset + 4)[0]
+            name_len = struct.unpack_from(
+                "<I", pabgb_bytes, offset + eid_size)[0]
             if name_len == 0 or name_len > 100_000:
                 continue
-            name_end = offset + 8 + name_len
+            name_end = offset + head + name_len
             if name_end > len(pabgb_bytes):
                 continue
             try:
-                name = pabgb_bytes[offset + 8:name_end].decode(
+                name = pabgb_bytes[offset + head:name_end].decode(
                     "utf-8", errors="strict")
             except (UnicodeDecodeError, ValueError):
                 continue
@@ -580,12 +679,34 @@ def _build_name_offsets_generic(pabgb_bytes: bytes,
             name_to_offset[name] = name_end
         return name_to_offset if name_to_offset else None
     except Exception as e:
-        logger.debug("generic name-offset build failed: %s", e)
+        logger.debug("generic name-offset build failed (key_size=%d): %s",
+                     eid_size, e)
         return None
 
 
+def _pabgh_key_size_hint(game_file: str,
+                         pabgh_bytes: bytes) -> int | None:
+    """Derive the PABGH key width (2 or 4) for ``game_file`` via
+    ``parse_pabgh_index``, or None when it can't be determined. Used to
+    steer :func:`_build_name_offsets_generic` toward the right entry
+    layout (u16-keyed tables like storeinfo put name_len at offset+2).
+    """
+    try:
+        from cdumm.semantic.parser import parse_pabgh_index
+        table_name = os.path.basename(game_file).rsplit(".", 1)[0]
+        ks, offsets = parse_pabgh_index(pabgh_bytes, table_name)
+        if offsets and ks in (2, 4):
+            return ks
+    except Exception as e:
+        logger.debug("pabgh key-size hint failed for %s: %s",
+                     game_file, e)
+    return None
+
+
 def _build_name_offsets_for_v2(game_file: str, pabgb_bytes: bytes,
-                               pabgh_bytes: bytes) -> dict[str, int] | None:
+                               pabgh_bytes: bytes,
+                               key_size: int | None = None,
+                               ) -> dict[str, int] | None:
     """Build a name→body-offset map for v2 entry-anchored patches.
 
     characterinfo.pabgb uses a dedicated SWISS Knife parser (we extract
@@ -594,7 +715,7 @@ def _build_name_offsets_for_v2(game_file: str, pabgb_bytes: bytes,
     standard ``u32 key + u32 name_len + name`` entry header.
 
     Returns None when the formats don't match so the caller can log
-    a clear error instead of silently applying at offset 0 — which was
+    a clear error instead of silently applying at offset 0, which was
     the root cause of ExtraSockets and RingEarringGearSockets crashing
     the game: mod patches use ``entry`` + ``rel_offset`` anchored
     against iteminfo.pabgb's body layout, but without a name-offset
@@ -612,7 +733,8 @@ def _build_name_offsets_for_v2(game_file: str, pabgb_bytes: bytes,
         except Exception as e:
             logger.warning("v2 name-offset build failed for %s: %s", game_file, e)
             return None
-    result = _build_name_offsets_generic(pabgb_bytes, pabgh_bytes)
+    result = _build_name_offsets_generic(
+        pabgb_bytes, pabgh_bytes, key_size=key_size)
     if result is None:
         logger.warning("v2 generic name-offset build failed for %s", game_file)
     return result
@@ -625,7 +747,7 @@ def fixup_pabgh_after_inserts(pabgh: bytes,
 
     Ports JMM V9.9.1 ``FixupPabghAfterInserts`` (ModManager.cs:855). Handles
     the two 8-byte-entry pabgh variants (2-byte ushort header and 4-byte uint
-    header). The 6-byte-entry variant is left alone — JMM skips it too.
+    header). The 6-byte-entry variant is left alone, JMM skips it too.
 
     ``inserts`` is a list of ``(original_offset, size)`` tuples referring to
     absolute byte positions in the PRE-insert .pabgb. Any pabgh pointer at
@@ -831,7 +953,19 @@ def _rebuild_f3_whole_table(change: dict, current: bytes) -> bytes | None:
             from cdumm.engine.iteminfo_writer import (
                 build_iteminfo_intent_change,
             )
-            rebuilt = build_iteminfo_intent_change(current, intents)
+            # Pass the vanilla .pabgh so the rebuild uses index-framed
+            # record parsing (the sniff walk swallows large-key
+            # records, audit M12) AND so the writer's index pre-flight
+            # refuses a size-diverged live buffer, whose prebuilt
+            # .pabgh companion in the change stream would no longer
+            # track the rebuilt table (release-review finding 3,
+            # 2026-06-11). Older changes without the header fall back
+            # to the sniff walk, same as before.
+            header_hex = info.get("header") or ""
+            rebuilt = build_iteminfo_intent_change(
+                current, intents,
+                vanilla_header=(bytes.fromhex(header_hex)
+                                if header_hex else None))
         elif table == "skill":
             from cdumm.engine.skill_writer import build_skill_intent_change
             header_hex = info.get("header") or ""
@@ -841,6 +975,13 @@ def _rebuild_f3_whole_table(change: dict, current: bytes) -> bytes | None:
             return None
         if not rebuilt:
             return None
+        # A rebuild against a SAME-SIZE diverged buffer produces the
+        # same record offsets as the prebuilt change, so any companion
+        # it emits is byte-identical to the one already riding in the
+        # change stream for <table>.pabgh; drop the duplicate. The
+        # size-diverged case never reaches here (the writer's index
+        # pre-flight refuses it above).
+        rebuilt.pop("_pabgh_companion", None)
         patched_hex = rebuilt.get("patched") or ""
         return bytes.fromhex(patched_hex) if patched_hex else None
     except Exception as e:
@@ -871,7 +1012,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     "record_key" + "relative_offset" resolve their offset via the
     record index instead of using the absolute "offset" field.
 
-    If name_offsets is provided (v2 entry-anchored format — JMM V8+ /
+    If name_offsets is provided (v2 entry-anchored format, JMM V8+ /
     SWISS Knife style), changes with "entry" name + "rel_offset" resolve
     their offset via the name→body-offset map. This lets mods survive
     game updates that shuffle record keys but keep names stable.
@@ -879,7 +1020,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     If ``skipped_out`` is a list, every patch that fails to apply
     appends a dict describing it: ``{label, expected, actual, offset,
     reason}``. Lets callers surface the per-patch skip details to the
-    user (JMM-parity UX — JMM v9.9.3 prints these inline; CDUMM
+    user (JMM-parity UX, JMM v9.9.3 prints these inline; CDUMM
     previously only debug-logged them so users thought silent skips
     meant the mod worked when in fact it didn't fully apply).
 
@@ -964,7 +1105,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     # with cumulative delta tracking. This correctly handles interleaved
     # insert+replace ops where inserts shift subsequent offsets.
     def _resolve_all_offsets(change):
-        """Return (primary, fallbacks) — all resolvable offsets for a change.
+        """Return (primary, fallbacks), all resolvable offsets for a change.
 
         Priority matters for the offset-drift scenario: anchored offsets
         (record_key via pabgh index, entry name via current-game pabgb)
@@ -975,7 +1116,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
         ships both and the game has drifted (Codex 2026-04 regression
         report). BUT: if anchored resolves to bytes that don't match
         vanilla (generic name-resolver gets specific formats like
-        multichangeinfo.pabgb wrong — the BRCC case), the apply loop
+        multichangeinfo.pabgb wrong, the BRCC case), the apply loop
         falls through to the literal fallback. Both paths are always
         returned; the loop picks whichever one verifies.
         """
@@ -1024,7 +1165,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                              "(%d names available)",
                              entry_name, len(name_offsets))
 
-        # 3. Literal numeric `offset` — the stale/stable absolute.
+        # 3. Literal numeric `offset`, the stale/stable absolute.
         raw = change.get("offset")
         if raw is not None:
             try:
@@ -1076,13 +1217,23 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     writes: list[tuple[int, int]] = []
     # Track the ORIGINAL-coord byte ranges this apply pass has written
     # to. Fallback-offset resolution must skip any candidate that
-    # lands inside one of these ranges — short `original` strings
+    # lands inside one of these ranges, short `original` strings
     # (2-4 bytes: '00 00', 'FF FF', float sentinels) can incidentally
     # match at an earlier patch's write zone and silently undo it. E2.
     written_ranges: list[tuple[int, int]] = []
 
     def _shift_for(pos: int) -> int:
         return sum(d for w_pos, d in writes if w_pos < pos)
+
+    def _record_write(pos: int, size_delta: int) -> None:
+        # Only record NONZERO size deltas. _shift_for sums the deltas of
+        # entries below a position, so zero-delta entries contribute
+        # nothing to any shift while still costing a scan per lookup;
+        # with thousands of same-size replaces (the common case) that
+        # turned shift tracking into O(n^2). written_ranges keeps its
+        # separate overlap semantics and still records every write.
+        if size_delta != 0:
+            writes.append((pos, size_delta))
 
     for original_offset, change, fallback_offsets in all_changes:
         offset = original_offset + _shift_for(original_offset)
@@ -1100,7 +1251,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 data[offset:offset] = insert_bytes
                 if inserts_out is not None:
                     inserts_out.append((original_offset, len(insert_bytes)))
-                writes.append((original_offset, len(insert_bytes)))
+                _record_write(original_offset, len(insert_bytes))
                 written_ranges.append(
                     (original_offset, original_offset + len(insert_bytes)))
                 applied += 1
@@ -1124,17 +1275,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 mismatched += 1
                 continue
 
-            if offset + len(patched_bytes) > len(data):
-                logger.warning("Patch at offset %d exceeds file size %d, skipping",
-                               offset, len(data))
-                # Record so the all-or-nothing filter taints the mod
-                # and the user sees the skip in the post-apply toast.
-                # /systematic-debugging finding 2026-05-05.
-                _record_skip(
-                    change, offset, None,
-                    f"offset {offset} exceeds file size {len(data)}")
-                continue
-
+            original_bytes = None
             if "original" in change:
                 try:
                     original_bytes = bytes.fromhex(change["original"])
@@ -1147,6 +1288,55 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                                  f"malformed hex in 'original': {e}")
                     mismatched += 1
                     continue
+
+            # A replace's footprint in the CURRENT buffer is the
+            # original's length, not the patched length: replaces
+            # support size deltas (the write below replaces old_len
+            # bytes with patched_bytes). Bounding on patched length
+            # skipped every size-GROWING whole-table Format 3 change
+            # before the compare or rebuild could run, socket intents
+            # grow iteminfo by ~2 KB, so patched was always longer
+            # than the live table (falobos76's v3.3.20 retest, #191).
+            replaced_len = (len(original_bytes)
+                            if original_bytes is not None
+                            else len(patched_bytes))
+            if offset + replaced_len > len(data):
+                # Mirror image of the growth bug above: the LIVE table
+                # can be SHORTER than vanilla (another whole-table mod
+                # shrank it), which lands here because original is
+                # vanilla-length. A whole-table change spans from its
+                # offset to EOF by construction, so rebuild against
+                # the real extent before giving up.
+                if "_f3_rebuild" in change and offset < len(data):
+                    rebuilt = _rebuild_f3_whole_table(
+                        change, bytes(data[offset:]))
+                    if rebuilt is not None:
+                        replaced = len(data) - offset
+                        data[offset:] = rebuilt
+                        _record_write(
+                            original_offset, len(rebuilt) - replaced)
+                        written_ranges.append(
+                            (original_offset,
+                             original_offset + len(rebuilt)))
+                        applied += 1
+                        logger.info(
+                            "Whole-table %s change rebuilt against the "
+                            "live buffer (live table shorter than the "
+                            "prebuilt original)",
+                            change.get("_f3_rebuild", {}).get(
+                                "table", "?"))
+                        continue
+                logger.warning("Patch at offset %d exceeds file size %d, skipping",
+                               offset, len(data))
+                # Record so the all-or-nothing filter taints the mod
+                # and the user sees the skip in the post-apply toast.
+                # /systematic-debugging finding 2026-05-05.
+                _record_skip(
+                    change, offset, None,
+                    f"offset {offset} exceeds file size {len(data)}")
+                continue
+
+            if original_bytes is not None:
                 size_delta = len(patched_bytes) - len(original_bytes)
                 actual = data[offset:offset + len(original_bytes)]
                 if actual != original_bytes:
@@ -1154,7 +1344,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     actual_at_patch = data[offset:offset + len(patched_bytes)]
                     if actual_at_patch == patched_bytes:
                         logger.debug("Already patched at %d, keeping as-is", offset)
-                        writes.append((original_offset, size_delta))
+                        _record_write(original_offset, size_delta)
                         written_ranges.append(
                             (original_offset,
                              original_offset + len(patched_bytes)))
@@ -1174,15 +1364,18 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     # rebuilt table preserves whatever else is there
                     # and layers the intents on top.
                     if "_f3_rebuild" in change:
+                        # Rebuild against the table's REAL extent
+                        # (offset to EOF), not the vanilla original's
+                        # length: a prior whole-table mod may have
+                        # grown the live table, and a vanilla-length
+                        # slice would cut it mid-record.
+                        replaced = len(data) - offset
                         rebuilt = _rebuild_f3_whole_table(
-                            change, bytes(data[offset:offset
-                                               + len(original_bytes)]))
+                            change, bytes(data[offset:]))
                         if rebuilt is not None:
-                            new_delta = (len(rebuilt)
-                                         - len(original_bytes))
-                            data[offset:offset
-                                 + len(original_bytes)] = rebuilt
-                            writes.append((original_offset, new_delta))
+                            new_delta = len(rebuilt) - replaced
+                            data[offset:] = rebuilt
+                            _record_write(original_offset, new_delta)
                             written_ranges.append(
                                 (original_offset,
                                  original_offset + len(rebuilt)))
@@ -1202,7 +1395,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             change.get("label", "?"))
 
                     # Vanilla-remnant check. The mod's 'original' bytes
-                    # appear in vanilla — either at original_offset or at
+                    # appear in vanilla, either at original_offset or at
                     # a fallback offset (in case primary was anchored
                     # against current-game, which drifted from vanilla).
                     # If any location matches vanilla, the buffer
@@ -1222,7 +1415,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             "Overlap at %d: vanilla matches original, writing "
                             "patched bytes over earlier-patch remnant", offset)
                         data[offset:offset + len(original_bytes)] = patched_bytes
-                        writes.append((original_offset, size_delta))
+                        _record_write(original_offset, size_delta)
                         written_ranges.append(
                             (original_offset,
                              original_offset + len(original_bytes)))
@@ -1234,7 +1427,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     # the wrong record when short `original` byte strings
                     # recur).
                     # Also reject fallbacks that would overwrite a region
-                    # this apply pass already wrote to — short `original`
+                    # this apply pass already wrote to, short `original`
                     # strings (2-4 bytes like '00 00', 'FF FF', floats)
                     # can incidentally match at an earlier patch's write
                     # zone and silently undo it. E2.
@@ -1263,7 +1456,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             "Fallback offset 0x%X matched (primary 0x%X missed) "
                             "for entry=%r", fb_orig, original_offset,
                             change.get("entry"))
-                        writes.append((fb_orig, size_delta))
+                        _record_write(fb_orig, size_delta)
                         applied += 1
                         continue
                     elif len(viable_fbs) > 1:
@@ -1283,7 +1476,15 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                                                vanilla_data=vanilla_data)
                     if new_offset is not None:
                         if data[new_offset:new_offset + len(original_bytes)] == original_bytes:
-                            data[new_offset:new_offset + len(patched_bytes)] = patched_bytes
+                            # Replace the ORIGINAL's length, like the
+                            # normal success path: an equal-length
+                            # patched slice clobbered bytes beyond the
+                            # original region on growing replaces and
+                            # left remnants on shrinking ones, while
+                            # still recording size_delta in the shift
+                            # tracker.
+                            data[new_offset:new_offset
+                                 + len(original_bytes)] = patched_bytes
                             # Record the write at the patch's ORIGINAL
                             # sort-key primary, not a reconstructed
                             # `new_offset - _shift_for(new_offset)`. The
@@ -1292,7 +1493,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                             # shift it. The sort was done by
                             # original_offset; the shift tracker needs
                             # to agree with that sort order.
-                            writes.append((original_offset, size_delta))
+                            _record_write(original_offset, size_delta)
                             written_ranges.append(
                                 (original_offset,
                                  original_offset + len(original_bytes)))
@@ -1307,19 +1508,12 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                     continue
 
             # Track size delta for replace ops that change size.
-            # The line 884 fromhex above is what catches malformed
-            # 'original' first; this branch is only reachable with
-            # valid hex. Wrap defensively against future refactors —
-            # cheap and keeps the apply loop crash-proof.
-            if "original" in change:
-                try:
-                    old_len = len(bytes.fromhex(change["original"]))
-                except ValueError:
-                    old_len = len(patched_bytes)
-            else:
-                old_len = len(patched_bytes)
+            # `replaced_len` already holds the original's length when
+            # one was provided (parsed once, before the bounds check),
+            # else the patched length.
+            old_len = replaced_len
             data[offset:offset + old_len] = patched_bytes
-            writes.append((original_offset, len(patched_bytes) - old_len))
+            _record_write(original_offset, len(patched_bytes) - old_len)
             written_ranges.append(
                 (original_offset, original_offset + old_len))
             applied += 1
@@ -1329,7 +1523,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
     # one mismatch, the mod author likely intended absolute offsets
     # but left a stale `signature` field. Restore the buffer and
     # retry without the signature; if absolute does strictly better,
-    # keep that result. (Max Inventory Storage v1.04.02 — issues
+    # keep that result. (Max Inventory Storage v1.04.02, issues
     # #54 / #53.)
     if (signature
             and applied == 0
@@ -1362,7 +1556,7 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                 applied + mismatched, fb_applied,
                 fb_applied + fb_mismatched)
             return fb_applied, fb_mismatched, fb_relocated
-        # Absolute also failed — re-restore the sig-relative skip
+        # Absolute also failed, re-restore the sig-relative skip
         # records so the user sees the original failure shape, then
         # return the original (zero-success) result.
         # The buffer claim "never successfully written" was wrong:
@@ -1416,7 +1610,7 @@ def convert_json_patch_to_paz(
 
     entry_cache: dict[str, PazEntry] = {}
 
-    # Same AIO performance fix as import_json_as_entr — collapse patches
+    # Same AIO performance fix as import_json_as_entr, collapse patches
     # that target the same game_file so we don't extract+recompress the
     # same .pabgb 4000 times for a 4000-offset stamina mod.
     grouped: dict[str, dict] = {}
@@ -1511,7 +1705,8 @@ def convert_json_patch_to_paz(
                     # Also build name→offset map if any change uses the v2 entry form
                     if any(c.get("entry") for c in changes):
                         name_offsets = _build_name_offsets_for_v2(
-                            game_file, bytes(plaintext), pabgh_plain)
+                            game_file, bytes(plaintext), pabgh_plain,
+                            key_size=_key_size)
                         if name_offsets is not None:
                             logger.info("Built v2 name index for %s: %d names",
                                         game_file, len(name_offsets))
@@ -1613,7 +1808,7 @@ def convert_json_patch_to_paz(
 
         # Repack: compress + encrypt back to PAZ format
         # Use allow_size_change=True because byte patches change the LZ4
-        # compression ratio slightly — we'll update PAMT to match.
+        # compression ratio slightly, we'll update PAMT to match.
         try:
             payload, actual_comp, actual_orig = repack_entry_bytes(
                 bytes(modified), entry, allow_size_change=True)
@@ -1632,7 +1827,7 @@ def convert_json_patch_to_paz(
 
         new_offset = entry.offset
         if actual_comp > entry.comp_size:
-            # Data doesn't fit in the original slot — append to end of PAZ
+            # Data doesn't fit in the original slot, append to end of PAZ
             # and update offset in PAMT
             restore_ts = _save_timestamps(str(paz_dst))
             with open(paz_dst, "r+b") as fh:
@@ -1789,7 +1984,7 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     if cache_path.exists():
         try:
             cache_mtime = cache_path.stat().st_mtime
-            # Only check vanilla PAMTs (< 0036) for staleness — mod PAMTs
+            # Only check vanilla PAMTs (< 0036) for staleness, mod PAMTs
             # change on every Apply and would always invalidate the cache
             stale = False
             for d in game_dir.iterdir():
@@ -1804,7 +1999,7 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
             if not stale:
                 t0 = _time.perf_counter()
                 with open(cache_path, "rb") as f:
-                    index = _pickle.load(f)  # noqa: S301 — self-generated cache
+                    index = _pickle.load(f)  # noqa: S301, self-generated cache
                 dt = _time.perf_counter() - t0
                 logger.info("Loaded PAMT index from cache: %d keys in %.2fs", len(index), dt)
                 _pamt_index_cache[key] = index
@@ -2065,7 +2260,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             (str(source_json_path), mod_id))
     except Exception as _archive_exc:
         # If archiving fails (disk full, permissions), the mod still
-        # works via its ENTR deltas — the aggregator just won't see it.
+        # works via its ENTR deltas, the aggregator just won't see it.
         logger.warning(
             "import_json_as_entr: json_source archive failed for mod "
             "%d: %s", mod_id, _archive_exc)
@@ -2174,7 +2369,9 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                 try:
                     pabgh_plain = _extract_from_paz(pabgh_entry)
                     name_offsets = _build_name_offsets_for_v2(
-                        game_file, bytes(plaintext), pabgh_plain)
+                        game_file, bytes(plaintext), pabgh_plain,
+                        key_size=_pabgh_key_size_hint(
+                            game_file, pabgh_plain))
                     if name_offsets is not None:
                         logger.info("Built v2 name index for %s: %d names",
                                     game_file, len(name_offsets))
@@ -2247,7 +2444,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         # All patches failed for THIS file due to byte mismatch.
         # For a single-file mod, this is a genuine version-incompat
         # rejection. For a multi-file mod, this might be ONE bad
-        # file out of many — accumulate it and continue so the
+        # file out of many, accumulate it and continue so the
         # other files still apply. Final whole-mod rejection happens
         # post-loop if changed_files stays empty AND every file
         # ended up here.
@@ -2395,7 +2592,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
 
     if not changed_files:
         # No changes produced. Two distinct reasons matter to the user:
-        #  (a) ALL files in the mod failed with version mismatches —
+        #  (a) ALL files in the mod failed with version mismatches , 
         #      the mod is genuinely incompatible with the current game
         #      build. Surface as version_mismatch so the importer
         #      shows the same banner the single-file path always did.
@@ -2482,8 +2679,8 @@ def import_json_fast(
     mods_dir.mkdir(parents=True, exist_ok=True)
     # JMM titles can contain `:` `/` `\` `<` `>` `"` `|` `?` `*`, any of
     # which raise OSError on Windows filesystems. Replace the reserved
-    # set with an underscore. Two different titles — `Foo:Bar` and
-    # `Foo?Bar` — both sanitize to `Foo_Bar`; append a short hash of
+    # set with an underscore. Two different titles, `Foo:Bar` and
+    # `Foo?Bar`, both sanitize to `Foo_Bar`; append a short hash of
     # the ORIGINAL title to keep them distinct and prevent one import
     # from silently overwriting another mod's stored JSON.
     import re as _re_fn
@@ -2523,7 +2720,7 @@ def import_json_fast(
     if existing_mod_id:
         mod_id = existing_mod_id
         db.connection.execute("DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-        # Clear disabled_patches on reimport — indices may not match new version
+        # Clear disabled_patches on reimport, indices may not match new version
         db.connection.execute(
             "UPDATE mods SET json_source = ?, game_version_hash = ?, "
             "disabled_patches = NULL, last_apply_skipped_count = 0, "
@@ -2539,7 +2736,7 @@ def import_json_fast(
         mod_id = cursor.lastrowid
 
     # Create lightweight mod_deltas rows (for conflict detection + Apply)
-    # No actual delta files — just entry_path references
+    # No actual delta files, just entry_path references
     changed_files = []
     for ep in entry_paths:
         db.connection.execute(
@@ -2591,7 +2788,7 @@ class VanillaSourceUnavailable(Exception):
 
     ``safe`` means either the vanilla backup is present, or the live
     PAZ has been hash-verified against the snapshot fingerprint. When
-    neither holds, the patch must be skipped — applying against modded
+    neither holds, the patch must be skipped, applying against modded
     bytes would produce a corrupt overlay.
     """
 
@@ -2618,12 +2815,12 @@ def process_json_patches_for_overlay(
     a known-clean (vanilla or hash-verified live) PAZ. Raising
     :class:`VanillaSourceUnavailable` causes the patch to be skipped
     with a logged error. When not supplied, the legacy inline lookup
-    is used — the caller in apply_engine.py normally provides a
+    is used, the caller in apply_engine.py normally provides a
     resolver so the live-PAZ fallback can self-heal after a missing
     vanilla backup.
 
     ``errors_out`` is an optional mutable list the function will append
-    user-facing error strings to — used to surface partial-apply aborts
+    user-facing error strings to, used to surface partial-apply aborts
     (Kliff Wears Damiane style mods that mismatch against the current
     game version) via InfoBar without crashing the game on a half-
     patched data table.
@@ -2687,7 +2884,7 @@ def process_json_patches_for_overlay(
         if not changes:
             continue
 
-        # Find entry in PAMT — prefer vanilla backup over game dir.
+        # Find entry in PAMT, prefer vanilla backup over game dir.
         # When the caller supplied a resolver, it's responsible for
         # deciding vanilla vs live (with hash verification) so the
         # bytes we get back are always safe to treat as vanilla.
@@ -2742,7 +2939,9 @@ def process_json_patches_for_overlay(
                 try:
                     pabgh_plain = _extract_from_paz(pabgh_entry)
                     name_offsets = _build_name_offsets_for_v2(
-                        game_file, bytes(plaintext), pabgh_plain)
+                        game_file, bytes(plaintext), pabgh_plain,
+                        key_size=_pabgh_key_size_hint(
+                            game_file, pabgh_plain))
                     # GitHub #105 pitonpp diagnostic: when this lookup
                     # silently mismatches on macOS, mount-time can't
                     # resolve any entry-anchored change. Log the index
@@ -2997,7 +3196,7 @@ def process_json_patches_for_overlay(
         # is shipping a half-patched file. The game may still crash
         # (LeoBodnar's prefab case). Surface it to the user via
         # errors_out so a post-apply InfoBar names the mod + file.
-        # Unlike the data-table case above, we don't abort — partial
+        # Unlike the data-table case above, we don't abort, partial
         # patches on prefabs etc. sometimes work, and refusing to ship
         # them would break mods that already work today. The user sees
         # the warning and can disable/reorder if the game crashes.
@@ -3033,7 +3232,7 @@ def process_json_patches_for_overlay(
         # JMM parity: preserve the vanilla's encryption state on the overlay
         # so the game's VFS decoder treats the bytes the same way it would
         # have treated the original PAZ entry. Pass the vanilla flags ushort
-        # verbatim — JMM writes it into the overlay PAMT unchanged.
+        # verbatim, JMM writes it into the overlay PAMT unchanged.
         if getattr(entry, "encrypted", False):
             metadata["encrypted"] = True
             metadata["crypto_filename"] = entry.path.rsplit("/", 1)[-1]

@@ -156,6 +156,14 @@ def start_sso_flow(on_key: Callable[[str], None],
 
     def runner():
         try:
+            # Same certifi-backed SSL context every urllib call uses
+            # (see ssl_ctx.py). Without it the frozen exe falls back
+            # to the CA bundle PyInstaller froze at build time, which
+            # is the CERTIFICATE_VERIFY_FAILED root cause of GitHub
+            # #175 / #178 / #179. websocket-client wires a caller-
+            # provided SSLContext through sslopt["context"]
+            # (_http.py _wrap_sni_socket, verified against v1.9.0).
+            from cdumm.engine.ssl_ctx import make_ssl_context
             ws = websocket.WebSocketApp(
                 SSO_WS_URL,
                 on_open=on_open, on_message=on_message,
@@ -164,7 +172,8 @@ def start_sso_flow(on_key: Callable[[str], None],
             # while the user authorises in the browser. Without this the
             # CloudFront-fronted WebSocket drops on long authorisations
             # and the user never gets a key.
-            ws.run_forever(ping_interval=30, ping_timeout=10)
+            ws.run_forever(ping_interval=30, ping_timeout=10,
+                           sslopt={"context": make_ssl_context()})
         except Exception as e:
             on_error(f"SSO failed: {e}")
 

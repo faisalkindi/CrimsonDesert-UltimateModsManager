@@ -31,7 +31,7 @@ class PazEntry:
     comp_size: int      # Compressed/stored size in the PAZ
     orig_size: int      # Original decompressed size
     flags: int          # Raw PAMT flags
-    paz_index: int      # PAZ file index (from flags & 0xFF)
+    paz_index: int      # PAZ file index (from flags & 0xFFFF, u16 chunk id)
     _encrypted_override: bool | None = field(default=None, repr=False)
 
     @property
@@ -197,7 +197,11 @@ def _parse_pamt_impl(pamt_path: str, paz_dir: str = None) -> list[PazEntry]:
             struct.unpack_from('<IIIII', data, off)
         off += 20
 
-        paz_index = flags & 0xFF
+        # The chunk id (PAZ file index) is a u16 in the vendored RE's
+        # flags layout (low 16 bits; compression type sits at bit 16).
+        # Masking with 0xFF truncated indices above 255, so dirs with
+        # more than 256 PAZ files resolved entries to the wrong archive.
+        paz_index = flags & 0xFFFF
         node_path = build_path(node_ref)
         full_path = f"{folder_prefix}/{node_path}" if folder_prefix else node_path
 

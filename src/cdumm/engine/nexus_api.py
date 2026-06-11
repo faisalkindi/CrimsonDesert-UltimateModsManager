@@ -165,6 +165,76 @@ def get_rate_limit_snapshot() -> dict[str, str]:
 
 _rate_limited_until: float = 0.0
 
+# Warn-once latch for non-integer X-RL-Hourly-Reset header forms so a
+# future bug report reveals the live format without log spam.
+_warned_reset_header_form = False
+
+
+def _parse_reset_epoch(raw: str) -> int:
+    """Parse an ``X-RL-Hourly-Reset`` header value into a unix epoch.
+
+    Nexus has shipped this header both as an integer epoch and as a
+    datetime string at different times, so parse both forms:
+
+    1. plain integer epoch (``"1775960000"``)
+    2. RFC 1123 / RFC 2822 (``"Wed, 11 Jun 2026 12:00:00 GMT"``)
+    3. ISO-8601 (``"2026-06-11 12:00:00 +0000"``)
+
+    Returns 0 when nothing parses; the caller keeps its conservative
+    fallback cooldown for that case. The first time a non-integer
+    value is seen, the raw header is logged at WARNING level so the
+    live format shows up in user-attached logs.
+    """
+    global _warned_reset_header_form
+    raw = (raw or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    dt = None
+    try:
+        dt = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        dt = None
+    if dt is None:
+        candidates = [raw]
+        # fromisoformat rejects a space before the UTC offset
+        # ("...00:00 +0000"); retry with the space collapsed.
+        normalized = re.sub(r"\s+([+-]\d{2}:?\d{2})$", r"\1", raw)
+        if normalized != raw:
+            candidates.append(normalized)
+        for cand in candidates:
+            try:
+                dt = datetime.fromisoformat(cand)
+                break
+            except ValueError:
+                continue
+
+    if dt is None:
+        if not _warned_reset_header_form:
+            _warned_reset_header_form = True
+            logger.warning(
+                "X-RL-Hourly-Reset header not parseable as epoch or "
+                "datetime: %r", raw)
+        return 0
+    if dt.tzinfo is None:
+        # Nexus serves times in UTC; a naive parse means the offset
+        # was absent, so pin UTC rather than guessing local time.
+        dt = dt.replace(tzinfo=timezone.utc)
+    epoch = int(dt.timestamp())
+    if not _warned_reset_header_form:
+        _warned_reset_header_form = True
+        logger.warning(
+            "X-RL-Hourly-Reset arrived as a datetime string %r "
+            "(parsed to epoch %d)", raw, epoch)
+    return epoch
+
 
 def _api_request(endpoint: str, api_key: str) -> dict | list:
     """Make an authenticated request to the NexusMods API.
@@ -234,7 +304,11 @@ def _api_request(endpoint: str, api_key: str) -> dict | list:
                     raw = (headers.get("X-RL-Hourly-Reset")
                            or headers.get("x-rl-hourly-reset"))
                     if raw:
-                        reset_at = int(raw)
+                        # Header may be an int epoch OR a datetime
+                        # string depending on Nexus's API era; parse
+                        # both so the cooldown doesn't silently
+                        # degrade to the 5-minute fallback forever.
+                        reset_at = _parse_reset_epoch(str(raw))
             except Exception:
                 reset_at = 0
             logger.warning("nexus rate limit hit (429), reset_at=%d",

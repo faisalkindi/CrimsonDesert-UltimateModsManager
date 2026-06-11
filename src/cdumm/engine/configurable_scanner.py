@@ -139,8 +139,13 @@ def _rescue_archive(archive: Path, dest_dir: Path) -> Path | None:
     try:
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         if suffix == ".zip":
-            import zipfile
-            with zipfile.ZipFile(archive) as zf:
+            # _open_zip_utf8 decodes non-UTF8-flagged member names as
+            # UTF-8 instead of zipfile's cp437 default (mojibake for
+            # the common Windows-tool case), with cp437 fallback.
+            # Imported lazily: import_handler is heavy and the scanner
+            # only needs it when an actual rescue runs.
+            from cdumm.engine.import_handler import _open_zip_utf8
+            with _open_zip_utf8(archive) as zf:
                 zf.extractall(dest_dir)
         elif suffix == ".7z":
             import py7zr
@@ -148,19 +153,21 @@ def _rescue_archive(archive: Path, dest_dir: Path) -> Path | None:
                 zf.extractall(dest_dir)
         elif suffix == ".rar":
             import subprocess
+            # Reuse import_handler's 7-Zip discovery (PATH, registry,
+            # standard install dirs) instead of a drifted local copy
+            # of candidate paths. Lazy import to avoid a module cycle.
+            from cdumm.engine.import_handler import _find_7z
+            tool = _find_7z()
+            if tool is None:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                return None
             _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            for tool in ("7z", "7z.exe", r"C:\Program Files\7-Zip\7z.exe"):
-                try:
-                    proc = subprocess.run(
-                        [tool, "x", str(archive), f"-o{dest_dir}", "-y"],
-                        capture_output=True, timeout=120,
-                        creationflags=_no_window,
-                    )
-                    if proc.returncode == 0:
-                        break
-                except FileNotFoundError:
-                    continue
-            else:
+            proc = subprocess.run(
+                [tool, "x", str(archive), f"-o{dest_dir}", "-y"],
+                capture_output=True, timeout=120,
+                creationflags=_no_window,
+            )
+            if proc.returncode != 0:
                 shutil.rmtree(dest_dir, ignore_errors=True)
                 return None
         return dest_dir

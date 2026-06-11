@@ -23,6 +23,32 @@ logger = logging.getLogger(__name__)
 
 SCRIPT_TIMEOUT = 60  # seconds
 
+# The game ships numbered data directories 0000-0035 (inclusive).
+# Used wherever CDUMM enumerates the vanilla game-data dirs (script
+# sandbox copies, fallback backups). Anything above 0035 is a
+# mod-installed dir, never vanilla.
+_GAME_DATA_DIR_RANGE = range(36)
+
+
+def _open_zip_utf8(zip_path) -> "zipfile.ZipFile":
+    """Open a zip decoding non-UTF8-flagged member names as UTF-8.
+
+    The zip spec says member names without the UTF-8 flag bit are
+    cp437, and that is what zipfile defaults to. Plenty of Windows
+    archiving tools write UTF-8 names WITHOUT setting the flag, so
+    non-ASCII names (CJK mod folders especially) extract as cp437
+    mojibake. metadata_encoding (Python 3.11+) applies ONLY to
+    non-flagged names; correctly flagged archives always decode as
+    UTF-8 and are unaffected. If the non-flagged names are NOT valid
+    UTF-8 (a genuine cp437/ANSI-named archive), the strict decode
+    raises at open, and we fall back to the cp437 default so those
+    archives keep working exactly as before.
+    """
+    try:
+        return zipfile.ZipFile(zip_path, metadata_encoding="utf-8")
+    except UnicodeDecodeError:
+        return zipfile.ZipFile(zip_path)
+
 import time
 
 # Thread-local progress callback for import operations.
@@ -37,6 +63,21 @@ def _emit_progress(pct, msg):
     cb = getattr(_progress_local, 'cb', None)
     if cb:
         cb(pct, msg)
+
+
+# Script-execution consent flag (audit C1/import, 2026-06-10). The
+# worker process sets this per import command from the GUI's explicit
+# --allow-scripts flag, which only exists after the user confirmed the
+# "this mod wants to run a script" prompt. Every routing path that
+# would execute a dropped script funnels through import_from_script,
+# which checks this. Process-global is safe: each worker process
+# handles one import command, and batch mode never grants consent.
+_allow_scripts_flag = False
+
+
+def set_allow_scripts(allowed: bool) -> None:
+    global _allow_scripts_flag
+    _allow_scripts_flag = bool(allowed)
 
 
 @contextlib.contextmanager
@@ -304,6 +345,11 @@ class ModImportResult:
         self.health_issues: list = []  # list[HealthIssue] from mod_health_check
         self.mod_id: int | None = None
         self.asi_staged: list[str] = []  # ASI file paths staged for GUI-side install
+        # Set (to the script filename) when the import was refused
+        # because it would execute a script and the caller did not
+        # pass allow_scripts=True. The GUI turns this into an explicit
+        # consent prompt and re-imports with consent on approval.
+        self.needs_script_consent: str | None = None
 
 
 def install_companion_asis(extract_dir: Path, asi_mgr) -> list:
@@ -1245,10 +1291,17 @@ def _try_paz_entry_import(
     _raw_candidates: list[tuple[str, object, object]] = []
     _raw_changed: list[tuple[str, object, object]] = []
 
+    _new_entry_paths: list[str] = []
     for entry_path, mod_entry in mod_by_path.items():
         van_entry = van_by_path.get(entry_path)
         if van_entry is None:
-            continue  # New entry — handled separately
+            # Entry exists in the mod's PAMT but not in vanilla's. The
+            # ENTR pipeline has no add-entry handler yet (the old
+            # "handled separately" comment named a handler that does
+            # not exist), so this content is dropped. Collect the paths
+            # so the data loss is loud instead of silent.
+            _new_entry_paths.append(entry_path)
+            continue
         _entr_counters["total_entries"] += 1
         if (mod_entry.offset == van_entry.offset
                 and mod_entry.comp_size == van_entry.comp_size):
@@ -1371,6 +1424,21 @@ def _try_paz_entry_import(
                         "Mod content may match current game version or decomposition failed.",
                         rel_path, len(mod_by_path), len(van_by_path))
         return False
+
+    if _new_entry_paths:
+        _shown = ", ".join(sorted(_new_entry_paths)[:5])
+        if len(_new_entry_paths) > 5:
+            _shown += f", +{len(_new_entry_paths) - 5} more"
+        logger.warning(
+            "ENTR import %s: %d entr(ies) in the mod's PAMT have no "
+            "vanilla counterpart and were NOT imported (no add-entry "
+            "support yet): %s",
+            rel_path, len(_new_entry_paths), _shown)
+        _new_msg = (
+            f"This mod adds {len(_new_entry_paths)} new file(s) to "
+            f"{dir_name} which CDUMM cannot apply yet: {_shown}")
+        result.info = (
+            f"{result.info}\n{_new_msg}" if result.info else _new_msg)
 
     _t = time.perf_counter()
     db.connection.commit()
@@ -2164,7 +2232,7 @@ def _extract_nested_archives(extracted_dir: Path,
         ext = archive.suffix.lower()
         try:
             if ext == ".zip":
-                with zipfile.ZipFile(archive) as zf:
+                with _open_zip_utf8(archive) as zf:
                     zf.extractall(target)
             elif ext == ".7z":
                 import py7zr
@@ -2884,9 +2952,28 @@ def _import_from_extracted(
     # Third pass: register XML XPath patch / merge files (JMM parity).
     # Runs regardless of whether the main pass found other content — some
     # mods are purely XML patches and have no other game files.
-    if result.mod_id is None and _scan_xml_patches(tmp_path):
+    result = _register_partial_patches_into_result(
+        tmp_path, result, mod_name, modinfo, db, deltas_dir)
+
+    return result
+
+
+def _register_partial_patches_into_result(
+    root: Path, result: ModImportResult, mod_name: str,
+    modinfo: dict | None, db: Database, deltas_dir: Path,
+) -> ModImportResult:
+    """Register XML / CSS / HTML partial-patch files found under ``root``.
+
+    Shared by the three extraction-shaped importers (7z/rar via
+    _import_from_extracted, zip via import_from_zip, folder via
+    import_from_folder) so all archive shapes support *.xml.patch /
+    *.css.patch / *.html.patch mods. Creates the mod row when the
+    archive is patches-only (no other recognized content) and clears
+    the unsupported-format error in that case.
+    """
+    if result.mod_id is None and _scan_xml_patches(root):
         # No prior pass created a mod row; create one now for this
-        # XML-patches-only mod so the deltas have somewhere to anchor.
+        # patches-only mod so the deltas have somewhere to anchor.
         author = (modinfo or {}).get("author")
         version = (modinfo or {}).get("version")
         description = (modinfo or {}).get("description")
@@ -2905,13 +2992,12 @@ def _import_from_extracted(
                     result.mod_id, mod_name)
     if result.mod_id is not None:
         claimed = _register_xml_patches(
-            tmp_path, result.mod_id, mod_name, db, deltas_dir)
+            root, result.mod_id, mod_name, db, deltas_dir)
         if claimed:
             for p in claimed:
-                rel = str(p.relative_to(tmp_path)).replace("\\", "/")
+                rel = str(p.relative_to(root)).replace("\\", "/")
                 if rel not in result.changed_files:
                     result.changed_files.append(rel)
-
     return result
 
 
@@ -2950,7 +3036,7 @@ def import_from_zip(
     with import_staging_dir(game_dir) as tmp:
         tmp_path = Path(tmp)
         try:
-            with zipfile.ZipFile(zip_path) as zf:
+            with _open_zip_utf8(zip_path) as zf:
                 zf.extractall(tmp_path)
         except zipfile.BadZipFile as e:
             result.error = f"Invalid zip file: {e}"
@@ -3029,6 +3115,20 @@ def import_from_zip(
         # Local copy preserved across any later `result = ...` reassignments.
         _carryover_asi_staged = list(result.asi_staged)
 
+        def _with_asi(res: "ModImportResult") -> "ModImportResult":
+            """Re-attach the loader files staged above to a result built
+            by a sub-importer. Every detection branch below delegates to
+            a helper that constructs a FRESH ModImportResult, losing the
+            asi_staged list populated at the top of import_from_zip.
+            Branches that returned without re-attaching (CB, loose-file,
+            single Format 3, texture, script) silently dropped the
+            staged .asi/.addon64: the GUI never installed them and the
+            next-launch sweep deleted the staging dir.
+            """
+            if _carryover_asi_staged and res is not None and not res.asi_staged:
+                res.asi_staged = list(_carryover_asi_staged)
+            return res
+
         # Check for OG_ XML replacement files and register them as a
         # full mod (mods row + mod_deltas rows). Falls through if none
         # of the OG_ targets resolve against the game's PAMT.
@@ -3067,7 +3167,7 @@ def import_from_zip(
                             tmp_path, cb_base, game_dir, db, deltas_dir)
                     except Exception as e:
                         logger.debug("Sibling JSON scan after CB failed: %s", e)
-                return result
+                return _with_asi(result)
 
         # Plain XML drop: some mod authors ship gamepad / UI XML mods
         # as raw `.xml` files in a folder with a `modinfo.json`, no
@@ -3111,9 +3211,9 @@ def import_from_zip(
                     "author": mi.get("author"), "description": mi.get("description"),
                     "force_inplace": mi.get("force_inplace"),
                 }
-                return _process_extracted_files(
+                return _with_asi(_process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=tmp_path)
+                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=tmp_path))
 
         # Check for JSON byte-patch format — use ENTR deltas for proper composition
         jp_data = detect_json_patch(tmp_path)
@@ -3220,10 +3320,10 @@ def import_from_zip(
                     if "_asi_staging" not in p.parts
                     and is_natt_format_3(p)]
         if len(f3_jsons) == 1:
-            return import_from_natt_format_3(
+            return _with_asi(import_from_natt_format_3(
                 json_path=f3_jsons[0], game_dir=game_dir, db=db,
                 snapshot=snapshot, deltas_dir=deltas_dir,
-                existing_mod_id=existing_mod_id)
+                existing_mod_id=existing_mod_id))
         if len(f3_jsons) > 1:
             # Variant pack (CrimsonWings: 10pct/25pct/50pct/75pct/
             # infinite of one mod) is detected via stem prefix +
@@ -3266,7 +3366,7 @@ def import_from_zip(
                 result = _process_extracted_files(
                     converted, game_dir, db, snapshot, deltas_dir, tex_name,
                     existing_mod_id=existing_mod_id, modinfo=modinfo, source_archive_dir=tmp_path)
-                return result
+                return _with_asi(result)
 
         # Check if zip contains a script. When it's a single-script
         # zip (like Glider Stamina's glider-stamina.bat), route it to
@@ -3275,13 +3375,13 @@ def import_from_zip(
         if scripts and not _match_game_files(tmp_path, game_dir, snapshot):
             if len(scripts) == 1:
                 logger.info(
-                    "Zip '%s' is a single-script mod (%s) — routing to "
-                    "import_from_script", archive_path.name, scripts[0].name)
-                return import_from_script(
-                    scripts[0], game_dir, db, snapshot, deltas_dir)
+                    "Zip '%s' is a single-script mod (%s), routing to "
+                    "import_from_script", zip_path.name, scripts[0].name)
+                return _with_asi(import_from_script(
+                    scripts[0], game_dir, db, snapshot, deltas_dir))
             names = ", ".join(s.name for s in scripts)
             result.error = (
-                f"'{archive_path.name}' contains {len(scripts)} scripts "
+                f"'{zip_path.name}' contains {len(scripts)} scripts "
                 f"({names}). Extract and drop the specific script you "
                 "want to run."
             )
@@ -3308,6 +3408,15 @@ def import_from_zip(
         result = _process_extracted_files(
             tmp_path, game_dir, db, snapshot, deltas_dir, mod_name,
             existing_mod_id=existing_mod_id, modinfo=modinfo)
+
+        # Register XML / CSS / HTML partial-patch files. Mirrors the
+        # block at the end of _import_from_extracted (the 7z/rar path);
+        # without it, *.xml.patch / *.css.patch / *.html.patch mods
+        # shipped as ZIPs were rejected as "no recognized format" even
+        # though the identical content imported fine from a .7z.
+        result = _register_partial_patches_into_result(
+            tmp_path, result, mod_name, modinfo, db, deltas_dir)
+
         # _process_extracted_files builds a fresh ModImportResult — re-attach
         # any ASI files we staged at the top of import_from_zip so the GUI
         # handler still gets the install list.
@@ -3800,6 +3909,13 @@ def import_from_folder(
             _import_remaining_loose_files(
                 folder_path, game_dir, db, snapshot, deltas_dir, result)
 
+    # Register XML / CSS / HTML partial-patch files. Mirrors the block
+    # at the end of _import_from_extracted (7z/rar path) so folder
+    # drops of *.xml.patch / *.css.patch / *.html.patch mods are not
+    # rejected as unsupported.
+    result = _register_partial_patches_into_result(
+        folder_path, result, mod_name, modinfo, db, deltas_dir)
+
     # C1: compound layout — the PAZ-dir primary has landed; now
     # import any sibling .json patches as their own separate mods so
     # users can toggle them independently (issue #34).
@@ -3898,18 +4014,41 @@ def _find_best_variant(folder_path: Path) -> Path | None:
 
 
 def import_from_script(
-    script_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path
+    script_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    allow_scripts: bool = False,
 ) -> ModImportResult:
-    """Import a mod by running a script in a sandbox and capturing the diff."""
+    """Import a mod by running a script in a sandbox and capturing the diff.
+
+    SECURITY GATE (audit finding C1/import, 2026-06-10): a script in
+    a dropped archive is arbitrary code running with the user's full
+    privileges; the sandbox is only a working directory, not a
+    privilege boundary. Until v3.3.20, dragging an untrusted zip that
+    contained a single .bat/.py auto-EXECUTED it with no consent
+    dialog anywhere. Execution now requires the caller to pass
+    ``allow_scripts=True``, which the GUI only does after the user
+    explicitly confirms a "this mod wants to run a script" prompt.
+    Without consent, the import returns a recognizable result the GUI
+    turns into that prompt (``needs_script_consent``).
+    """
     mod_name = script_path.stem
     result = ModImportResult(mod_name)
+
+    if not (allow_scripts or _allow_scripts_flag):
+        result.needs_script_consent = script_path.name
+        result.error = (
+            f"This mod wants to run a script ({script_path.name}). "
+            f"CDUMM does not run mod scripts without your explicit "
+            f"confirmation, because a script can do anything your "
+            f"user account can."
+        )
+        return result
 
     with import_staging_dir(game_dir) as sandbox:
         sandbox_path = Path(sandbox)
 
         # Copy game files the script might modify into sandbox
         # Copy all PAZ/PAMT files (script might target any of them)
-        for dir_name in [f"{i:04d}" for i in range(33)]:
+        for dir_name in [f"{i:04d}" for i in _GAME_DATA_DIR_RANGE]:
             src_dir = game_dir / dir_name
             if src_dir.exists():
                 dst_dir = sandbox_path / dir_name
@@ -5152,6 +5291,19 @@ def _process_extracted_files(
         except Exception as e:
             logger.error("Failed to process %s: %s", rel_path, e, exc_info=True)
             result.error = f"Failed to process {rel_path}: {e}"
+            # Roll back the open transaction before returning. Pending
+            # work at this point is only this failed import's rows (the
+            # mods INSERT/UPDATE, source_path UPDATE, and mod_deltas
+            # rows for files processed so far) since this function only
+            # commits at the very end; nothing this error path intends
+            # to keep is pending. Without the rollback, the next
+            # commit() on the shared connection (e.g. the following mod
+            # in a batch) silently flushed this half-imported mod.
+            try:
+                db.connection.rollback()
+            except Exception as rb_err:
+                logger.warning("Rollback after import failure failed: %s",
+                               rb_err)
             return result
         finally:
             _fp_sub_timings[_iter_branch] = (
@@ -5284,7 +5436,8 @@ def _process_sandbox_diff(
 
 
 def import_script_live(
-    script_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path
+    script_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
+    allow_scripts: bool = False,
 ) -> ModImportResult:
     """Run a mod script against the real game files, then capture changes.
 
@@ -5294,6 +5447,18 @@ def import_script_live(
     """
     mod_name = script_path.stem
     result = ModImportResult(mod_name)
+
+    # Same consent gate as import_from_script (audit C1/import); this
+    # variant runs against the REAL game files, so it is strictly more
+    # dangerous than the sandboxed path.
+    if not (allow_scripts or _allow_scripts_flag):
+        result.needs_script_consent = script_path.name
+        result.error = (
+            f"This mod wants to run a script ({script_path.name}) "
+            f"against your live game files. CDUMM does not run mod "
+            f"scripts without your explicit confirmation."
+        )
+        return result
 
     suffix = script_path.suffix.lower()
     if suffix == ".bat":
@@ -5318,7 +5483,7 @@ def import_script_live(
             _ensure_vanilla_backup(game_dir, vanilla_dir, rel_path)
     else:
         # Can't determine targets — back up all PAMT and PAPGT (small files)
-        for dir_name in [f"{i:04d}" for i in range(33)]:
+        for dir_name in [f"{i:04d}" for i in _GAME_DATA_DIR_RANGE]:
             pamt = f"{dir_name}/0.pamt"
             if (game_dir / dir_name / "0.pamt").exists():
                 _ensure_vanilla_backup(game_dir, vanilla_dir, pamt)

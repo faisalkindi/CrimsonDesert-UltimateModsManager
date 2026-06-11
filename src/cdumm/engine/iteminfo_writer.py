@@ -74,6 +74,83 @@ UNWRITEABLE_KNOWN_FIELDS = {
     "enchant_data_list",
 }
 
+# Element kind each SUPPORTED_FIELDS list carries on disk, used to
+# shape-check additive writes (vanilla record lacks the field, or has
+# it empty, so there is no existing value to compare against). Derived
+# from iteminfo_native_parser._ITEM_FIELDS: carray_u32/u16 lists hold
+# ints, carray_cstring holds strs, struct carrays hold dicts.
+_LIST_ELEMENT_KINDS: "dict[str, type]" = {
+    "equip_passive_skill_list": dict,
+    "occupied_equip_slot_data_list": dict,
+    "item_tag_list": int,
+    "consumable_type_list": int,
+    "item_use_info_list": int,
+    "item_icon_list": dict,
+    "sealable_item_info_list": dict,
+    "sealable_character_info_list": dict,
+    "sealable_gimmick_info_list": dict,
+    "sealable_gimmick_tag_list": dict,
+    "sealable_tribe_info_list": dict,
+    "sealable_money_info_list": int,
+    "transmutation_material_gimmick_list": int,
+    "transmutation_material_item_list": int,
+    "transmutation_material_item_group_list": int,
+    "multi_change_info_list": int,
+    "gimmick_tag_list": str,
+}
+
+
+def _elements_match_kind(values: list, kind: type) -> bool:
+    if kind is int:
+        # bool is an int subclass and packs fine; exclude floats/strs.
+        return all(isinstance(v, int) for v in values)
+    return all(isinstance(v, kind) for v in values)
+
+
+def shape_matches(existing, new) -> bool:
+    """Cheap per-intent shape gate before dict assignment.
+
+    The serializer walks the parsed dicts with struct.pack and raises
+    deep inside serialize when a mod ships e.g. a list of ints for a
+    list-of-dicts field, which used to abort the WHOLE multi-mod batch.
+    Comparing the new value's shape against the existing parsed value
+    keeps a malformed intent a per-intent skip instead.
+    """
+    if isinstance(existing, list):
+        if not isinstance(new, list):
+            return False
+        if existing and new:
+            e0 = existing[0]
+            if isinstance(e0, dict):
+                return all(isinstance(x, dict) for x in new)
+            if isinstance(e0, list):
+                return all(isinstance(x, list) for x in new)
+            if isinstance(e0, bool):
+                return all(isinstance(x, (bool, int)) for x in new)
+            if isinstance(e0, int):
+                return all(isinstance(x, int) for x in new)
+            if isinstance(e0, float):
+                return all(isinstance(x, (int, float)) for x in new)
+            if isinstance(e0, str):
+                return all(isinstance(x, str) for x in new)
+            if isinstance(e0, (bytes, bytearray)):
+                return all(isinstance(x, (bytes, bytearray)) for x in new)
+        return True
+    if isinstance(existing, dict):
+        return isinstance(new, dict)
+    if isinstance(existing, bool):
+        return isinstance(new, (bool, int))
+    if isinstance(existing, int):
+        return isinstance(new, int)
+    if isinstance(existing, float):
+        return isinstance(new, (int, float)) and not isinstance(new, bool)
+    if isinstance(existing, str):
+        return isinstance(new, str)
+    if isinstance(existing, (bytes, bytearray)):
+        return isinstance(new, (bytes, bytearray))
+    # None / unknown existing value: nothing to compare against.
+    return True
+
 
 def _resolve_field_name(intent_field: str, item: dict) -> Optional[str]:
     """Map a Format 3 intent field name to a key in the native
@@ -162,6 +239,7 @@ def _resolve_path_target(
 def build_iteminfo_intent_change(
     vanilla_body: bytes,
     intents: "list[Format3Intent]",
+    vanilla_header: bytes | None = None,
 ) -> Optional[dict]:
     """Apply all provided intents to a parsed copy of vanilla
     iteminfo.pabgb and return a single whole-file v2 change dict.
@@ -172,9 +250,32 @@ def build_iteminfo_intent_change(
 
     Per-intent failures (unknown key, unsupported field) are logged
     and skipped; surviving intents still produce their effect.
+
+    When ``vanilla_header`` (the companion .pabgh bytes) is given
+    and the rebuilt table shifted any record offsets, the returned
+    change carries a ``_pabgh_companion`` dict: a second whole-file
+    change for the .pabgh, with the index offsets rewritten to the
+    rebuilt table. Without it, size-changing edits (socket intents
+    grow records) ship a table whose index points at stale offsets
+    and the game reads garbage entry headers (audit finding A,
+    2026-06-10). When the header is given, this function also
+    refuses (returns None) if the table size changed but the index
+    cannot be rebuilt.
     """
+    # With the .pabgh available, frame records from the authoritative
+    # index instead of the sniff heuristic: the heuristic's key
+    # ceiling silently swallows real records with large keys
+    # (Delesyian_Flag, key 254M, audit finding M12), which makes
+    # the index rewrite below refuse.
+    record_offsets: "list[int] | None" = None
+    if vanilla_header is not None:
+        from cdumm.semantic.parser import parse_pabgh_index
+        _, idx_offsets = parse_pabgh_index(vanilla_header, "iteminfo")
+        if idx_offsets:
+            record_offsets = list(idx_offsets.values())
     try:
-        items = parse_iteminfo_from_bytes(vanilla_body)
+        items = parse_iteminfo_from_bytes(
+            vanilla_body, record_offsets=record_offsets)
     except Exception as e:
         # GitHub #182 (CD 1.09): the new game patch shifted the
         # iteminfo layout in ways the parser does not yet model.
@@ -190,11 +291,66 @@ def build_iteminfo_intent_change(
             e, exc_info=True)
         return None
 
+    # Round-trip pre-flight: serialize the UNMODIFIED parse and
+    # require byte equality with vanilla before mutating anything.
+    # On a future game version the parser's salvage heuristics may
+    # "succeed" lossily; without this gate the writer would then
+    # emit a whole-table change that silently rewrites unrelated
+    # bytes (audit finding I7, 2026-06-10). A refusal here is a
+    # clean "this game version is not supported yet" instead of
+    # corruption. The identity offsets double as the .pabgh
+    # rewrite validation below.
+    ident_offsets: dict[int, int] = {}
+    try:
+        ident_bytes = serialize_iteminfo(items, offsets_out=ident_offsets)
+    except Exception as e:
+        logger.error(
+            "iteminfo identity serialize failed (%s); refusing to "
+            "write this table", e, exc_info=True)
+        return None
+    if ident_bytes != vanilla_body:
+        first_diff = next(
+            (i for i in range(min(len(ident_bytes), len(vanilla_body)))
+             if ident_bytes[i] != vanilla_body[i]),
+            min(len(ident_bytes), len(vanilla_body)))
+        logger.error(
+            "iteminfo round-trip pre-flight FAILED: identity "
+            "serialize differs from vanilla at byte %d "
+            "(vanilla %d bytes, serialized %d bytes). The parser "
+            "does not model this game version's layout; refusing "
+            "to emit a whole-table change that would rewrite "
+            "unrelated bytes.", first_diff,
+            len(vanilla_body), len(ident_bytes))
+        return None
+    if vanilla_header is not None:
+        from cdumm.engine.pabgh_rewrite import rewrite_pabgh_offsets
+        ident_header = rewrite_pabgh_offsets(
+            vanilla_header, "iteminfo", ident_offsets)
+        if ident_header != vanilla_header:
+            logger.error(
+                "iteminfo .pabgh pre-flight FAILED: rewriting the "
+                "vanilla index with identity offsets did not "
+                "reproduce it (%s). Refusing to write this table.",
+                "rewrite refused" if ident_header is None
+                else "byte mismatch")
+            return None
+
     by_key = {it["key"]: it for it in items}
+    # Format 3 dialect contract: "lookup by entry name first, key as
+    # fallback". Key-omitted intents arrive with the sentinel key=0,
+    # so resolve through the record's string_key when the numeric key
+    # misses (mirrors the multichangeinfo/characterinfo writers).
+    by_name: dict = {}
+    for it in items:
+        sk = it.get("string_key")
+        if isinstance(sk, str) and sk:
+            by_name.setdefault(sk, it)
     applied = 0
+    name_resolved = 0
     skipped_op = 0
     skipped_key = 0
     skipped_field = 0
+    skipped_shape = 0
     for intent in intents:
         # Field-level early skip: some intent fields are known not
         # writeable by the current iteminfo serialiser even though
@@ -213,15 +369,24 @@ def build_iteminfo_intent_change(
                 "modded values can land in game bytes.",
                 intent.field, intent.key)
             continue
-        if intent.key not in by_key:
+        item = by_key.get(intent.key)
+        if item is None and intent.entry:
+            item = by_name.get(intent.entry)
+            if item is not None:
+                name_resolved += 1
+                logger.debug(
+                    "iteminfo writer: intent key %r missed, resolved "
+                    "by entry name %r (key=%d)",
+                    intent.key, intent.entry, item.get("key"))
+        if item is None:
             skipped_key += 1
             logger.debug(
-                "iteminfo writer: key %d not in table, skipping intent",
-                intent.key)
+                "iteminfo writer: key %d / entry %r not in table, "
+                "skipping intent", intent.key, intent.entry)
             continue
         if intent.op != "set":
             # WARNING (not debug) because it's a real intent the mod
-            # author wrote that gets silently dropped — bug reports
+            # author wrote that gets silently dropped, bug reports
             # should capture this. Users targeting `max_stack_count
             # op="add" new=10` (relative bump) need to know it ran as
             # nothing.
@@ -231,7 +396,6 @@ def build_iteminfo_intent_change(
                 "intent on key=%d field=%r dropped",
                 intent.op, intent.key, intent.field)
             continue
-        item = by_key[intent.key]
         # The v3.2.12 defensive guard for misaligned cooltime intents
         # is no longer needed: the parser's _read_DefaultSubItem now
         # consumes the trailing 13-byte block (i64 + u32 + u8) that
@@ -254,6 +418,21 @@ def build_iteminfo_intent_change(
                     "out of range)", intent.field, intent.key)
                 continue
             parent, last_seg = target
+            try:
+                existing_nested = parent[last_seg]
+            except (KeyError, IndexError, TypeError):
+                existing_nested = None
+            if not shape_matches(existing_nested, intent.new):
+                skipped_shape += 1
+                logger.warning(
+                    "iteminfo writer: nested path %r on key=%d has a "
+                    "new value whose shape (%s) does not match the "
+                    "existing value (%s); skipping intent instead of "
+                    "letting serialization fail later",
+                    intent.field, intent.key,
+                    type(intent.new).__name__,
+                    type(existing_nested).__name__)
+                continue
             try:
                 parent[last_seg] = intent.new
                 applied += 1
@@ -293,6 +472,29 @@ def build_iteminfo_intent_change(
                     "another intent on iteminfo uses a list-of-dict "
                     "field)", intent.field, intent.key)
                 continue
+        # Shape gate (audit 2026-06-11): a malformed `new` used to pass
+        # straight into the dict and blow up serialize_iteminfo, which
+        # returns None and silently kills EVERY mod batched on this
+        # table. Validate against the record's existing value, or for
+        # additive/empty lists against the known on-disk element kind.
+        existing_val = item.get(target_field)
+        shape_ok = shape_matches(existing_val, intent.new)
+        if shape_ok and (existing_val is None
+                         or (isinstance(existing_val, list)
+                             and not existing_val)):
+            kind = _LIST_ELEMENT_KINDS.get(target_field)
+            if kind is not None:
+                shape_ok = (isinstance(intent.new, list)
+                            and _elements_match_kind(intent.new, kind))
+        if not shape_ok:
+            skipped_shape += 1
+            logger.warning(
+                "iteminfo writer: intent on key=%d field=%r carries a "
+                "new value whose shape (%s) does not match the field; "
+                "skipping intent instead of letting serialization "
+                "fail later", intent.key, intent.field,
+                type(intent.new).__name__)
+            continue
         try:
             item[target_field] = intent.new
             applied += 1
@@ -301,18 +503,25 @@ def build_iteminfo_intent_change(
                 "iteminfo writer: applying intent on key=%d field=%r "
                 "failed: %s", intent.key, intent.field, e)
 
+    if name_resolved:
+        logger.info(
+            "iteminfo writer: %d intent(s) resolved by entry name "
+            "(key missing or not in table)", name_resolved)
     if applied == 0:
-        skip_total = skipped_op + skipped_key + skipped_field
+        skip_total = (skipped_op + skipped_key + skipped_field
+                      + skipped_shape)
         if skip_total:
             logger.warning(
                 "iteminfo writer: 0 of %d intent(s) applied "
-                "(%d non-'set' op, %d unknown key, %d unknown field). "
-                "No change emitted.",
-                skip_total, skipped_op, skipped_key, skipped_field)
+                "(%d non-'set' op, %d unknown key, %d unknown field, "
+                "%d bad value shape). No change emitted.",
+                skip_total, skipped_op, skipped_key, skipped_field,
+                skipped_shape)
         return None
 
+    new_offsets: dict[int, int] = {}
     try:
-        new_bytes = serialize_iteminfo(items)
+        new_bytes = serialize_iteminfo(items, offsets_out=new_offsets)
     except Exception as e:
         logger.error("iteminfo serialize failed: %s", e, exc_info=True)
         return None
@@ -322,7 +531,30 @@ def build_iteminfo_intent_change(
         # `set` to the same value). No change to emit.
         return None
 
-    skip_total = skipped_op + skipped_key + skipped_field
+    # Companion .pabgh rebuild. Record offsets only move when a
+    # record changed size, so compare the offset maps, not the body.
+    pabgh_companion: Optional[dict] = None
+    if vanilla_header is not None and new_offsets != ident_offsets:
+        from cdumm.engine.pabgh_rewrite import rewrite_pabgh_offsets
+        new_header = rewrite_pabgh_offsets(
+            vanilla_header, "iteminfo", new_offsets)
+        if new_header is None:
+            logger.error(
+                "iteminfo: record offsets shifted (%d bytes size "
+                "delta) but the .pabgh index could not be rewritten. "
+                "Refusing the whole change; shipping the table alone "
+                "would leave the index pointing at stale offsets.",
+                len(new_bytes) - len(vanilla_body))
+            return None
+        pabgh_companion = {
+            "offset": 0,
+            "original": vanilla_header.hex(),
+            "patched": new_header.hex(),
+            "label": "iteminfo .pabgh offsets (rebuilt for "
+                     "size-changed records)",
+        }
+
+    skip_total = skipped_op + skipped_key + skipped_field + skipped_shape
     if skip_total:
         skip_summary_parts = []
         if skipped_op:
@@ -331,6 +563,8 @@ def build_iteminfo_intent_change(
             skip_summary_parts.append(f"{skipped_key} unknown key")
         if skipped_field:
             skip_summary_parts.append(f"{skipped_field} unknown field")
+        if skipped_shape:
+            skip_summary_parts.append(f"{skipped_shape} bad value shape")
         skip_summary = ", ".join(skip_summary_parts)
         label = (
             f"iteminfo Format 3 intents ({applied} applied, "
@@ -339,9 +573,12 @@ def build_iteminfo_intent_change(
     else:
         label = f"iteminfo Format 3 intents ({applied} applied)"
 
-    return {
+    change = {
         "offset": 0,
         "original": vanilla_body.hex(),
         "patched": new_bytes.hex(),
         "label": label,
     }
+    if pabgh_companion is not None:
+        change["_pabgh_companion"] = pabgh_companion
+    return change

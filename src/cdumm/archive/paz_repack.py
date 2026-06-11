@@ -158,6 +158,23 @@ def _strip_whitespace_to_fit(plaintext: bytes, target_comp: int, target_orig: in
     return None
 
 
+def _reject_unsupported_compression(entry: PazEntry) -> None:
+    """Refuse compression types CDUMM cannot reproduce.
+
+    Types 3 (zlib) and 4 (QuickLZ) exist in the PAMT flags layout but
+    CDUMM only implements type 1 (DDS split) and type 2 (LZ4). Before
+    this guard, a type 3/4 entry silently took the uncompressed path:
+    the payload round-tripped as raw bytes while the PAMT flags still
+    claimed compression, corrupting the slot. A loud per-file refusal
+    is the correct behavior until those codecs are implemented; the
+    callers already convert exceptions into per-file errors.
+    """
+    if entry.compression_type in (3, 4):
+        raise ValueError(
+            f"unsupported compression type {entry.compression_type} "
+            f"for {entry.path}")
+
+
 # ── Core repack ──────────────────────────────────────────────────────
 
 def repack_entry(modified_path: str, entry: PazEntry,
@@ -177,6 +194,7 @@ def repack_entry(modified_path: str, entry: PazEntry,
         plaintext = f.read()
 
     basename = os.path.basename(entry.path)
+    _reject_unsupported_compression(entry)
     is_compressed = entry.compressed and entry.compression_type == 2
 
     if is_compressed:
@@ -246,6 +264,7 @@ def repack_entry_bytes(plaintext: bytes, entry: PazEntry,
         entry.orig_size if content grew).
     """
     basename = os.path.basename(entry.path)
+    _reject_unsupported_compression(entry)
     is_dds_split = entry.compression_type == 1  # 128-byte header + LZ4 body
     # DDS type 0x01 always uses inner LZ4 even when comp_size == orig_size
     # (the padded payload matches orig_size, actual LZ4 size is in header[32])

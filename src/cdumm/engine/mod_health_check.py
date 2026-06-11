@@ -151,7 +151,6 @@ def check_mod_health(
     """
     issues: list[HealthIssue] = []
 
-    import sys
     import time as _time
 
     pamt_files = {k: v for k, v in mod_files.items() if k.endswith(".pamt")}
@@ -277,7 +276,7 @@ def check_mod_health(
     if total >= 1.0:
         hot = sorted(timings.items(), key=lambda kv: kv[1], reverse=True)
         parts = " ".join(f"{name}={int(dt * 1000)}ms" for name, dt in hot if dt >= 0.05)
-        print(f"[HEALTH-TIMING] total={int(total * 1000)}ms {parts}", file=sys.stderr)
+        logger.debug("[HEALTH-TIMING] total=%dms %s", int(total * 1000), parts)
 
     # W3: PAZ-only mod (no PAMT)
     if paz_files and not pamt_files:
@@ -942,14 +941,29 @@ def _patch_file_record(
     pos = pamt_data.find(target)
     if pos < 0:
         return False
+    # Uniqueness guard: if the same 12-byte pattern appears again,
+    # we cannot tell which record is the right one and patching the
+    # first hit could corrupt an unrelated record. Refuse instead.
+    second = pamt_data.find(target, pos + 1)
+    if second >= 0:
+        logger.warning(
+            "PAMT auto-fix: pattern (offset=%d, comp=%d, orig=%d) is "
+            "ambiguous (matches at %d and %d); leaving record "
+            "unpatched", van_entry.offset, van_entry.comp_size,
+            van_entry.orig_size, pos, second)
+        return False
 
     # Write new values
     struct.pack_into("<III", pamt_data, pos, new_offset, new_comp_size, new_orig_size)
 
-    # Update paz_index in flags (lower byte)
+    # Update paz_index in flags. The chunk id is a u16 (vendored RE:
+    # chunk_id u16 + u8 flags byte); the old 8-bit mask silently
+    # wrapped indexes above 255 and pointed the record at the wrong
+    # PAZ in >255-archive directories (audit finding, paired with the
+    # same fix in archive/paz_parse.py).
     flags_pos = pos + 12
     old_flags = struct.unpack_from("<I", pamt_data, flags_pos)[0]
-    new_flags = (old_flags & 0xFFFFFF00) | (new_paz_index & 0xFF)
+    new_flags = (old_flags & 0xFFFF0000) | (new_paz_index & 0xFFFF)
     struct.pack_into("<I", pamt_data, flags_pos, new_flags)
 
     return True

@@ -710,9 +710,11 @@ def _diagnose_paz_dirs(numbered_dirs: set, names: list[str],
         if not papgt_files:
             _s(f"    WARNING: meta/ directory exists but 0.papgt not found.")
             _s(f"    The PAPGT file is required for the game to load the overlay.")
-
-        if not paz_in_dir and not pamt_in_dir:
-            _s(f"    NOTE: No .paz/.pamt files — may be a loose file mod.")
+        # (A copy-pasted "No .paz/.pamt" NOTE used to live here. It
+        # read paz_in_dir/pamt_in_dir left over from the LAST loop
+        # iteration above, producing a wrong-directory NOTE, and
+        # raised NameError when numbered_dirs was empty. The per-
+        # directory loop already emits that NOTE where it belongs.)
 
 
 # ── ASI plugin diagnosis ──────────────────────────────────────────────
@@ -743,13 +745,28 @@ def _check_game_version(game_dir: Path, db_path: Path,
     _s = sections.append
     _s("--- Game Version ---")
     try:
-        from cdumm.storage.database import Database
-        db = Database(Path(db_path))
-        db.initialize()
+        # Plain read-only sqlite3 access. This diagnostic only reads
+        # two values; constructing a full Database + initialize()
+        # here ran the whole schema/migration pipeline (and could
+        # create a brand-new DB file) just for two SELECTs.
+        import sqlite3
+        db_file = Path(db_path)
+        if not db_file.exists():
+            _s("  Could not check game version: database not found "
+               f"at {db_file}")
+            return
+        conn = sqlite3.connect(str(db_file))
+        try:
+            # Check if snapshot exists
+            snap_count = conn.execute(
+                "SELECT COUNT(*) FROM snapshots").fetchone()[0]
+            fp_row = conn.execute(
+                "SELECT value FROM config WHERE key = "
+                "'game_version_fingerprint'").fetchone()
+            fp = fp_row[0] if fp_row else None
+        finally:
+            conn.close()
 
-        # Check if snapshot exists
-        snap_count = db.connection.execute(
-            "SELECT COUNT(*) FROM snapshots").fetchone()[0]
         if snap_count == 0:
             _s("  No vanilla snapshot found.")
             _s("  Run 'Rescan' after verifying game files through Steam.")
@@ -757,9 +774,6 @@ def _check_game_version(game_dir: Path, db_path: Path,
             _s(f"  Vanilla snapshot: {snap_count} files indexed")
 
         # Check game version fingerprint
-        from cdumm.storage.config import Config
-        config = Config(db)
-        fp = config.get("game_version_fingerprint")
         if fp:
             from cdumm.engine.version_detector import detect_game_version
             current = detect_game_version(game_dir)
@@ -768,7 +782,6 @@ def _check_game_version(game_dir: Path, db_path: Path,
                 _s("  Some mods may be incompatible. Consider rescanning.")
             elif current:
                 _s("  Game version matches snapshot.")
-        db.close()
     except Exception as e:
         _s(f"  Could not check game version: {e}")
 

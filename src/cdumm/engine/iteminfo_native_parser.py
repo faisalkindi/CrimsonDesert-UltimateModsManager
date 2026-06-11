@@ -294,17 +294,47 @@ def _find_next_record_start(
     return -1
 
 
-def parse_iteminfo_from_bytes(data: bytes) -> list[dict]:
+def parse_iteminfo_from_bytes(
+    data: bytes,
+    record_offsets: "list[int] | None" = None,
+) -> list[dict]:
     """Parse an entire iteminfo.pabgb body to a list of item dicts.
 
-    Walks records back-to-back from offset 0 to len(data). Each
-    record self-describes its size via the schema, no .pabgh index
-    needed at parse time. When a record's prefab walker silently
-    over-consumes and the post-prefab boundary check needs an
-    rec_end anchor, sniff the next plausible record header and use
-    it as the bound.
+    With ``record_offsets`` (the authoritative record starts from the
+    companion .pabgh index): every record is framed exactly, no
+    sniffing. This matters because the sniff heuristic's key ceiling
+    (2e6 in ``_looks_like_record_header``) rejects at least one real
+    vanilla record ("Delesyian_Flag", key 254,143,257), which the
+    sequential walk then silently swallows into the previous record's
+    opaque tail (audit finding M12, hit live 2026-06-10 while
+    building the .pabgh companion rewrite). Any bytes between a
+    record's parsed end and the next index offset are preserved as
+    ``_tail_slack`` so serialization stays byte-exact.
+
+    Without offsets: walks records back-to-back from offset 0,
+    sniffing the next plausible record header as the rec_end anchor
+    for the prefab opaque-salvage path (legacy behavior).
     """
     items: list[dict] = []
+    if record_offsets:
+        starts = sorted(set(record_offsets))
+        if starts[0] == 0 and starts[-1] < len(data):
+            for i, rec_start in enumerate(starts):
+                rec_end = (starts[i + 1] if i + 1 < len(starts)
+                           else len(data))
+                r = _Reader(data, rec_start, rec_end=rec_end)
+                it = _read_item(r)
+                if r.pos > rec_end:
+                    raise ValueError(
+                        f"record at 0x{rec_start:X} overran its index "
+                        f"boundary (parsed to 0x{r.pos:X}, next record "
+                        f"at 0x{rec_end:X})")
+                if r.pos < rec_end:
+                    it["_tail_slack"] = bytes(data[r.pos:rec_end])
+                items.append(it)
+            return items
+        # Implausible index (doesn't start at 0 / points past EOF):
+        # fall through to the sniff walk.
     pos = 0
     while pos < len(data):
         rec_start = pos
@@ -325,11 +355,20 @@ def parse_iteminfo_from_bytes(data: bytes) -> list[dict]:
     return items
 
 
-def serialize_iteminfo(items: list[dict]) -> bytes:
+def serialize_iteminfo(
+    items: list[dict],
+    offsets_out: dict[int, int] | None = None,
+) -> bytes:
     """Inverse of parse_iteminfo_from_bytes. The byte output must be
-    identical to the input when items haven't been modified."""
+    identical to the input when items haven't been modified.
+
+    When ``offsets_out`` is given, it is filled with each record's
+    key -> output byte offset, so callers can rewrite the companion
+    .pabgh index after size-changing edits (audit finding A)."""
     w = _Writer()
     for it in items:
+        if offsets_out is not None:
+            offsets_out[it["key"]] = len(w.buf)
         _write_item(w, it)
     return bytes(w.buf)
 
@@ -2120,6 +2159,12 @@ def _write_item(w: _Writer, it: dict) -> None:
             _write_optional(w, v, spec[3])
         else:
             raise ValueError(f"unknown kind {kind!r} for field {name!r}")
+    # Index-framed parses preserve any bytes between the parsed end
+    # and the next record's index offset (see parse_iteminfo_from_bytes
+    # record_offsets mode); emit them back verbatim.
+    slack = it.get("_tail_slack")
+    if slack:
+        w.buf += slack
 
 
 # Cache: fields that come AFTER prefab_data_list. Computed lazily.

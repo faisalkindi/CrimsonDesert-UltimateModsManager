@@ -129,8 +129,20 @@ def build_equipslotinfo_changes(
         return [], None
     sorted_offs = sorted(offsets.values()) + [len(vanilla_body)]
 
+    # Format 3 dialect contract: "lookup by entry name first, key as
+    # fallback". Key-omitted intents arrive with the sentinel key=0;
+    # resolve through the entry name parsed from the table when the
+    # numeric key misses (mirrors the multichangeinfo writer).
+    name_to_key: dict[str, int] = {}
+    for k, off in offsets.items():
+        _eid, ename, _payload = _parse_entry_header(
+            vanilla_body, off, key_size)
+        if ename:
+            name_to_key.setdefault(ename, k)
+
     # Collect per (entry key) -> {record_index: new_hashes}.
     per_key: dict[int, dict[int, list[int]]] = {}
+    name_resolved = 0
     for it in intents:
         field = (getattr(it, "field", "") or "").strip()
         m = _FIELD_RE.match(field)
@@ -154,12 +166,26 @@ def build_equipslotinfo_changes(
                 "skipping", key)
             continue
         if key not in offsets:
-            logger.warning(
-                "equipslotinfo writer: entry key %d not in table, "
-                "skipping", key)
-            continue
+            entry_name = getattr(it, "entry", "") or ""
+            resolved = name_to_key.get(entry_name)
+            if resolved is not None:
+                logger.debug(
+                    "equipslotinfo writer: intent key %r missed, "
+                    "resolved by entry name %r (key=%d)",
+                    key, entry_name, resolved)
+                key = resolved
+                name_resolved += 1
+            else:
+                logger.warning(
+                    "equipslotinfo writer: entry key %d / entry %r not "
+                    "in table, skipping", key, entry_name)
+                continue
         per_key.setdefault(key, {})[int(m.group(1))] = new
 
+    if name_resolved:
+        logger.info(
+            "equipslotinfo writer: %d intent(s) resolved by entry name "
+            "(key missing or not in table)", name_resolved)
     if not per_key:
         return [], None
 
@@ -170,6 +196,18 @@ def build_equipslotinfo_changes(
         _, _, payload = _parse_entry_header(vanilla_body, off, key_size)
         unk, records, footer = parse_entry_records(
             vanilla_body, payload, entry_end)
+        # Round-trip identity (audit 2026-06-11, the iteminfo/skill
+        # writers gate on an explicit identity serialize): no separate
+        # pre-flight is needed here because parse_entry_records and
+        # serialize_entry_payload are structurally inverse. The parser
+        # enforces exact framing (footer must close the entry on the
+        # 0xb954d87c terminator, every record bound-checked) and keeps
+        # the 66-byte fixed blocks plus footer verbatim, raising
+        # EquipslotWriteRefused for anything outside the verified
+        # model instead of parsing lossily. Untouched records
+        # therefore reproduce their vanilla bytes exactly;
+        # tests/test_equipslotinfo_writer.py pins the 14-entry
+        # round-trip on the real table.
         for idx, hashes in idx_map.items():
             if not (0 <= idx < len(records)):
                 raise EquipslotWriteRefused(

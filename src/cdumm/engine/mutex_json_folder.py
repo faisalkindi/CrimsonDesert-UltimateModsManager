@@ -28,7 +28,8 @@ def json_offsets(json_path: Path) -> set[tuple[str, int]]:
     skipped — they're not what the mutex detector cares about.
     """
     try:
-        data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+        # utf-8-sig: tolerate BOM-prefixed JSONs (matches the F3 scanner)
+        data = json.loads(Path(json_path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return set()
     if not isinstance(data, dict):
@@ -92,7 +93,7 @@ def detect_mutex_folder_jsons(
     parsed: list[tuple[Path, dict]] = []
     for p in jsons:
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as e:
             logger.debug("mutex detector: skipping %s (%s)", p, e)
             continue
@@ -179,7 +180,7 @@ def collect_archive_mutex_jsons(
         pretty_folder = prettify_mod_name(folder_name) or folder_name
         for p in folder_jsons[folder_name]:
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
+                data = json.loads(p.read_text(encoding="utf-8-sig"))
             except (OSError, ValueError) as e:
                 logger.debug("archive mutex: skipping %s (%s)", p, e)
                 continue

@@ -17,7 +17,10 @@ use std::collections::HashMap;
 pub struct PazEntry {
     /// Full virtual path within the archive (e.g. `"data/config.xml"`).
     pub path: String,
-    /// Which `.paz` file holds this entry (low byte of `flags`).
+    /// Which `.paz` file holds this entry (low u16 of `flags`; the
+    /// chunk id is a u16 per the vendored RE, and directories can
+    /// carry more than 255 PAZ files, so an 8-bit mask silently
+    /// resolved entries to the wrong archive).
     pub paz_index: u32,
     /// Byte offset inside the `.paz` file.
     pub offset: u64,
@@ -234,7 +237,7 @@ pub fn parse_pamt(data: &[u8]) -> Result<Vec<PazEntry>, PamtError> {
         let flags = read_u32(data, off + 16, "file flags")?;
         off += 20;
 
-        let paz_index = flags & 0xFF;
+        let paz_index = flags & 0xFFFF;
 
         let node_path = build_path(&nodes, node_ref);
         let full_path = if folder_prefix.is_empty() {
@@ -563,12 +566,25 @@ mod tests {
     fn parse_paz_index_from_flags() {
         let mut b = PamtBuilder::new("d");
         let n = b.add_node(0xFFFF_FFFF, "f.bin");
-        // paz_index = 3 (low byte), compression_type = 4 (bits 16-19)
+        // paz_index = 3 (low u16), compression_type = 4 (bits 16-19)
         b.add_file(n, 0, 10, 20, 0x0004_0003);
 
         let entries = parse_pamt(&b.build()).unwrap();
         assert_eq!(entries[0].paz_index, 3);
         assert_eq!(entries[0].compression_type(), 4);
+    }
+
+    #[test]
+    fn parse_paz_index_above_255() {
+        // The chunk id is a u16; an 8-bit mask wrapped index 300 to
+        // 44 and resolved entries to the wrong PAZ in directories
+        // with more than 255 archives.
+        let mut b = PamtBuilder::new("d");
+        let n = b.add_node(0xFFFF_FFFF, "f.bin");
+        b.add_file(n, 0, 10, 20, 300);
+
+        let entries = parse_pamt(&b.build()).unwrap();
+        assert_eq!(entries[0].paz_index, 300);
     }
 
     #[test]

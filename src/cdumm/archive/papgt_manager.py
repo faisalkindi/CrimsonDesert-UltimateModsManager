@@ -71,7 +71,8 @@ class PapgtManager:
 
     def rebuild(self, modified_pamts: dict[str, bytes] | None = None,
                 mod_papgt: bytes | None = None,
-                mod_entry_options: dict[str, dict] | None = None) -> bytes:
+                mod_entry_options: dict[str, dict] | None = None,
+                exclude_dirs: "set[str] | None" = None) -> bytes:
         """Rebuild PAPGT with correct hashes for all directories.
 
         Starts from the vanilla PAPGT structure (or mod-shipped PAPGT if
@@ -138,9 +139,20 @@ class PapgtManager:
         # Determine which directories should be in the PAPGT:
         # - Keep entries where the PAMT exists on disk OR is in modified_pamts
         # - Remove entries for directories that no longer exist (mod cleanup)
+        # - exclude_dirs: dirs the caller has PLANNED to delete but is
+        #   deferring until after the transaction commits (audit
+        #   finding C1, 2026-06-10: deleting overlay dirs before
+        #   commit meant a failed commit rolled back to a PAPGT that
+        #   referenced already-deleted dirs, which crashes the game at
+        #   boot). Treat them as already gone so the new PAPGT never
+        #   references them.
+        excluded = exclude_dirs or set()
         live_entries: list[tuple[str, int, int]] = []
         removed = []
         for dir_name, flags, pamt_hash in parsed_entries:
+            if dir_name in excluded:
+                removed.append(dir_name)
+                continue
             pamt_on_disk = (self._game_dir / dir_name / "0.pamt").exists()
             in_modified = modified_pamts and dir_name in modified_pamts
             # Keep vanilla entries (dirs < 0036) even if not on disk — they may
@@ -178,6 +190,8 @@ class PapgtManager:
                     continue  # vanilla directories, already in PAPGT
                 if d.name in existing_names:
                     continue  # already covered
+                if d.name in excluded:
+                    continue  # deletion deferred until post-commit
                 if (d / "0.pamt").exists():
                     new_dirs.append(d.name)
                     existing_names.add(d.name)

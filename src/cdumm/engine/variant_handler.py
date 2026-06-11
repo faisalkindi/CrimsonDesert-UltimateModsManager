@@ -391,7 +391,9 @@ def synthesize_merged_json(
             logger.warning("variant file missing: %s", vpath)
             continue
         try:
-            data = json.loads(vpath.read_text(encoding="utf-8"))
+            # utf-8-sig: tolerate BOM-prefixed variant JSONs (mod-author
+            # files; matches the F3 scanner and mutex detector).
+            data = json.loads(vpath.read_text(encoding="utf-8-sig"))
         except Exception as e:
             logger.error("variant parse failed (%s): %s", vpath, e)
             continue

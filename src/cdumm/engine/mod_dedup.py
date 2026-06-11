@@ -59,12 +59,49 @@ def _fetch_rows(conn) -> list[_Row]:
     return out
 
 
+def _delta_fingerprint(conn, mod_id: int) -> tuple:
+    """Content identity for a mod's deltas: what files it touches and
+    where. Two rows are only true duplicates when this matches."""
+    rows = conn.execute(
+        "SELECT file_path, COALESCE(entry_path, ''), "
+        "COALESCE(byte_start, -1), COALESCE(byte_end, -1), is_new "
+        "FROM mod_deltas WHERE mod_id = ? "
+        "ORDER BY file_path, entry_path, byte_start",
+        (mod_id,)).fetchall()
+    return tuple(tuple(r) for r in rows)
+
+
 def find_duplicate_groups(conn) -> dict[str, list[_Row]]:
-    """Return ``{mod_name: [rows]}`` for every name with > 1 row."""
-    groups: dict[str, list[_Row]] = {}
+    """Return ``{group_key: [rows]}`` for every TRUE duplicate group.
+
+    Display name alone is NOT identity: prettify_mod_name strips
+    versions and trailing multipliers, so "Trust Me 2x" and
+    "Trust Me 5x" both land as "Trust Me", and name-only dedup
+    deleted one of two intentionally different variants (audit
+    finding, 2026-06-10). Rows must share name AND version AND the
+    full delta fingerprint to be considered duplicates.
+    """
+    groups: dict[tuple, list[_Row]] = {}
+    by_name: dict[str, list[_Row]] = {}
     for row in _fetch_rows(conn):
-        groups.setdefault(row.name, []).append(row)
-    return {name: rows for name, rows in groups.items() if len(rows) > 1}
+        by_name.setdefault(row.name, []).append(row)
+    for name, rows in by_name.items():
+        if len(rows) < 2:
+            continue
+        for row in rows:
+            key = (name, row.version or "",
+                   _delta_fingerprint(conn, row.id))
+            groups.setdefault(key, []).append(row)
+    # Key must stay unique per (name, version, fingerprint) group:
+    # two DIFFERENT fingerprint groups can share name+version, and a
+    # display-string key silently dropped one of them per run
+    # (release-review minor, 2026-06-11). Append a stable fingerprint
+    # tag; callers ignore the key or use it only for logging.
+    return {
+        f"{key[0]} (v{key[1] or '?'}) [{abs(hash(key[2])) % 0xFFFF:04x}]":
+            rows
+        for key, rows in groups.items() if len(rows) > 1
+    }
 
 
 def _row_score(row: _Row) -> tuple:
