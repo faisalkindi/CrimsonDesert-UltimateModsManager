@@ -21,10 +21,17 @@ CD 1.10 additionally:
   - added a u32 inside money UnitData after icon_path (verified on
     record 1's Copper/Silver entries)
 
+Game build 23693656 (Steam patch 2026-06-12) additionally:
+  - added one u8 between apply_drop_stat_type and drop_default_data
+    (schema name unk_flag_b23693656, value 1 on 6332 of 6333 records).
+    iteminfo.pabgb grew 5,532,062 -> 5,543,339, records 6325 -> 6333.
+    The committed tests/fixtures/vanilla110/ extract is now this
+    build, so these round-trip tests pin the field's presence.
+
 Trust anchor (same as the original post-1.0.4.1 fix): parse +
 serialize on the extracted vanilla iteminfo.pabgb must be
-byte-identical. These tests use the extracted fixtures under
-issue_repro/182/ and skip when absent.
+byte-identical. The committed fixture (loaded via has_vanilla110 /
+load_vanilla110) tracks the current game build.
 """
 from __future__ import annotations
 

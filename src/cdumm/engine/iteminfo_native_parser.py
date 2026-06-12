@@ -1837,6 +1837,16 @@ _ITEM_FIELDS = [
     ("item_tier", "u8"),
     ("is_important_item", "u8"),
     ("apply_drop_stat_type", "u8"),
+    # Crimson Desert game build 23693656 (Steam patch 2026-06-12) added
+    # one u8 here, between apply_drop_stat_type and drop_default_data.
+    # It is 1 on all but one of the 6333 records in that build. The
+    # patch grew iteminfo.pabgb from 5,532,062 to 5,543,339 bytes
+    # (+1 byte per record + 8 new records) and desynced the parser at
+    # the first record whose downstream length prefix the stray byte
+    # shifted (Goblin_Pot). Same class as the 1.09/1.10 layout deltas.
+    # Found via falobos76 / pinapana socket-mod crash reports (#191),
+    # which a clean re-validation traced to this game patch.
+    ("unk_flag_b23693656", "u8"),
     ("drop_default_data", "struct", _read_DropDefaultData,
      _write_DropDefaultData),
     ("prefab_data_list", "carray", _read_PrefabData, _write_PrefabData),
