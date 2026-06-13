@@ -15,10 +15,18 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
-    "<b>Mods skipped by the API-saving optimization now show their real up-to-date state.</b> Mods confirmed current within the past week are not re-checked against Nexus (by design, to save API calls), but they showed up grey as if never checked. They now show green from their cached state, and a cached state can never hide a known pending update. Thanks to Faisal for the report.",
 ]
 
 CHANGELOG = [
+    {
+        "version": "3.3.22",
+        "date": "2026-06-13",
+        "notes": [
+            "<b>Item mods work again on game version 1.11.</b> The June 12 game update (build 23693656) changed the item table layout one more time, and every item mod stopped applying with a '0 byte changes' result. The parser now reads the new layout, so stack mods, socket mods, refinement and store mods, and all other item-table mods apply on 1.11 again. Found through retests from falobos76, pinapana, woowoots, and bjbutcher on GitHub (#191, #207, #209).",
+            "<b>Mods with a hidden or removed Nexus page, and mods you renamed locally, no longer sit with a blank up-to-date status.</b> A page that was taken down now shows a clear source-removed mark instead of being re-checked forever, and a mod you renamed on your own machine is matched back to its original Nexus file so its status resolves.",
+            "<b>Mods skipped by the API-saving optimization now show their real up-to-date state.</b> Mods confirmed current within the past week are not re-checked against Nexus (by design, to save API calls), but they showed up grey as if never checked. They now show green from their cached state, and a cached state can never hide a known pending update. Thanks to Faisal for the report.",
+        ],
+    },
     {
         "version": "3.3.21",
         "date": "2026-06-11",
