@@ -173,6 +173,20 @@ def _resolve_field_name(intent_field: str, item: dict) -> Optional[str]:
         snake = re.sub(r"(?<!^)([A-Z])", r"_\1", stripped).lower()
         if snake in item:
             return snake
+        # Separator-insensitive fallback. camelCase word boundaries do
+        # not always line up with the parser's snake_case: the mechanical
+        # split of `_equipAbleHash` gives `equip_able_hash`, but the real
+        # parser field is the one-word `equipable_hash`. Compare on a
+        # normalized form that drops underscores and case so the two meet
+        # at `equipablehash`. Accept only an unambiguous single match so
+        # we never silently pick the wrong field. Found via pinapana's
+        # AbyssGearUnlock report on GitHub (#191): 190 _equipAbleHash
+        # intents all skipped with "field not in ItemInfo dict", which
+        # looked like the 1.11 parser break but was this resolver gap.
+        norm = stripped.replace("_", "").lower()
+        matches = [k for k in item if k.replace("_", "").lower() == norm]
+        if len(matches) == 1:
+            return matches[0]
     return None
 
 
