@@ -40,8 +40,9 @@ class _Intent:
 def build_store_table(entries):
     """entries: list of (key, name, [StockRecord, ...]). Returns
     (body, header) with the u16-keyed storeinfo layout: entry header
-    (u16 key + u32 name_len + name + NUL), 43 scalar bytes, then the
-    u32-count stock list."""
+    (u16 key + u32 name_len + name + NUL), 44 scalar bytes (CD 1.11
+    added one byte to the entry head, #183), then the u32-count stock
+    list."""
     body = bytearray()
     offs = {}
     for key, name, records in entries:
@@ -49,7 +50,7 @@ def build_store_table(entries):
         nb = name.encode("utf-8")
         body += struct.pack("<H", key)
         body += struct.pack("<I", len(nb)) + nb + b"\x00"
-        body += b"\x07" * 43
+        body += b"\x07" * 44
         body += serialize_stock_list(records)
     header = struct.pack("<H", len(entries))
     for key, _name, _records in entries:

@@ -1,9 +1,10 @@
 """GitHub #183 (pinapana): Format 3 ``stock_data_list`` writer.
 
-End-to-end against the real inputs: the extracted CD 1.10 vanilla
-storeinfo pair and the reporter's HernandPets mod (IHateLacey.json),
-which sets store 3101's stock list to 41 records (the 37 vanilla ones
-plus 4 added pets).
+End-to-end against the real inputs: the extracted current-build (CD
+1.11) vanilla storeinfo pair and the reporter's HernandPets mod
+(HernandPets_v1.1.json, updated for the 1.11 is_restore_item layout),
+which sets store 3101's stock list to 42 records. On the 1.11 build 37
+of those match a vanilla record by identity and 5 are new.
 
 Safety contract pinned here:
 * matched records keep their vanilla bytes verbatim (interior diffs in
@@ -29,7 +30,7 @@ import pytest
 _BASE = Path(__file__).resolve().parents[1] / "issue_repro" / "183"
 _BODY = _BASE / "vanilla" / "storeinfo.pabgb"
 _HDR = _BASE / "vanilla" / "storeinfo.pabgh"
-_MOD = _BASE / "IHateLacey.json"
+_MOD = _BASE / "HernandPets_v1.1.json"
 
 
 def _have_fixtures() -> bool:
@@ -46,7 +47,7 @@ class _Intent:
 
 
 def _mod_intent():
-    data = json.loads(_MOD.read_text(encoding="utf-8"))
+    data = json.loads(_MOD.read_text(encoding="utf-8-sig"))
     raw = data["targets"][0]["intents"][0]
     return _Intent(entry=raw.get("entry", ""), key=raw["key"],
                    field=raw["field"], op=raw.get("op", "set"),
@@ -72,10 +73,13 @@ def test_hernandpets_applies_end_to_end():
         LIST_COUNT_PAYLOAD_OFFSET, parse_stock_list)
     from cdumm.semantic.parser import parse_pabgh_index, _parse_entry_header
 
+    from cdumm.engine.storeinfo_native_parser import serialize_stock_list
+    from cdumm.engine.storeinfo_writer import _record_identity
+
     body = _BODY.read_bytes()
     header = _HDR.read_bytes()
     intent = _mod_intent()
-    assert len(intent.new) == 41
+    assert len(intent.new) == 42
 
     pabgb_changes, pabgh_change = build_storeinfo_changes(
         body, header, [intent])
@@ -87,32 +91,47 @@ def test_hernandpets_applies_end_to_end():
     growth = len(patched) - len(body)
     assert growth > 0
 
-    # The patched entry parses back to exactly the mod's 41 records.
+    # The patched entry parses back to exactly the mod's 42 records.
     ks, offs = parse_pabgh_index(new_header, "storeinfo")
     _, _, payload = _parse_entry_header(patched, offs[3101], ks)
     records, _s, _e = parse_stock_list(
         patched, payload + LIST_COUNT_PAYLOAD_OFFSET)
-    assert len(records) == 41
+    assert len(records) == 42
 
-    # The 4 new pets carry the mod's values in the mapped fields.
-    new_bodies = [r["value"]["payload"]["body"] for r in intent.new[37:]]
-    tail = records[37:]
-    assert [r.body for r in tail] == new_bodies
-    for r, j in zip(tail, intent.new[37:]):
+    # Split the mod's records into matched-vanilla vs new by identity
+    # (body), the same key the writer uses, instead of assuming a fixed
+    # tail position.
+    _, voffs = parse_pabgh_index(header, "storeinfo")
+    _, _, vpayload = _parse_entry_header(body, voffs[3101], ks)
+    vrecords, _vs, _ve = parse_stock_list(
+        body, vpayload + LIST_COUNT_PAYLOAD_OFFSET)
+    vbodies = {r.body for r in vrecords}
+    new_js = [j for j in intent.new
+              if _record_identity(j) not in vbodies]
+    assert len(new_js) == 5, "37 of 42 match vanilla, 5 are new"
+
+    # Every new record carries the mod's mapped values.
+    by_body = {r.body: r for r in records}
+    for j in new_js:
+        r = by_body[_record_identity(j)]
         assert r.raw_a == j["raw_a"] and r.raw_b == j["raw_b"]
         assert r.lookup_a == j["lookup_a"]
         assert (r.sub_data is None) == (j["sub_data"] is None)
 
-    # Matched records keep vanilla bytes verbatim: the first 37 parsed
-    # records re-serialize to the same bytes as vanilla's list payload
-    # (the mod's interior diffs must NOT have been written).
-    from cdumm.engine.storeinfo_native_parser import serialize_stock_list
-    _, voffs = parse_pabgh_index(header, "storeinfo")
-    _, _, vpayload = _parse_entry_header(body, voffs[3101], ks)
-    vrecords, vs, ve = parse_stock_list(
-        body, vpayload + LIST_COUNT_PAYLOAD_OFFSET)
-    assert serialize_stock_list(records[:37])[4:] == \
-        serialize_stock_list(vrecords)[4:]
+    # Matched records keep vanilla bytes verbatim: each parsed record
+    # whose body matches a vanilla record re-serializes to that vanilla
+    # record's exact bytes (the mod's interior diffs must NOT have been
+    # written).
+    vby_body = {r.body: r for r in vrecords}
+    for r in records:
+        if r.body in vbodies:
+            from cdumm.engine.storeinfo_native_parser import _Writer
+            wa, wb = _Writer(), _Writer()
+            from cdumm.engine.storeinfo_native_parser import (
+                write_stock_record)
+            write_stock_record(wa, r)
+            write_stock_record(wb, vby_body[r.body])
+            assert bytes(wa.out) == bytes(wb.out), r.body
 
     # Every entry offset after store 3101 shifted by exactly +growth.
     for key, voff in voffs.items():
@@ -132,14 +151,24 @@ def test_hernandpets_applies_end_to_end():
 @pytest.mark.skipif(not _have_fixtures(), reason="183 fixtures absent")
 def test_new_record_with_unmapped_field_refuses():
     from cdumm.engine.storeinfo_writer import (
-        StoreinfoWriteRefused, build_storeinfo_changes)
+        StoreinfoWriteRefused, build_storeinfo_changes, _record_identity)
+    from cdumm.engine.storeinfo_native_parser import (
+        LIST_COUNT_PAYLOAD_OFFSET, parse_stock_list)
+    from cdumm.semantic.parser import parse_pabgh_index, _parse_entry_header
     body = _BODY.read_bytes()
     header = _HDR.read_bytes()
     intent = _mod_intent()
-    # Make one ADDED record (not matching any vanilla body) carry a
-    # non-zero unmapped interior value.
+    # Find an ADDED record (not matching any vanilla body) by identity,
+    # rather than assuming a fixed index, and make it carry a non-zero
+    # unmapped interior value.
+    ks, offs = parse_pabgh_index(header, "storeinfo")
+    _, _, pl = _parse_entry_header(body, offs[3101], ks)
+    vrecs, _s, _e = parse_stock_list(body, pl + LIST_COUNT_PAYLOAD_OFFSET)
+    vbodies = {r.body for r in vrecs}
     bad = json.loads(json.dumps(intent.new))
-    bad[37]["value"]["raw_b"] = 12345
+    new_i = next(i for i, j in enumerate(bad)
+                 if _record_identity(j) not in vbodies)
+    bad[new_i]["value"]["raw_b"] = 12345
     intent.new = bad
     with pytest.raises(StoreinfoWriteRefused, match="raw_b"):
         build_storeinfo_changes(body, header, [intent])
@@ -152,5 +181,10 @@ def test_unknown_store_key_yields_no_changes():
     header = _HDR.read_bytes()
     intent = _mod_intent()
     intent.key = 999999
+    # Also clear the entry name: the writer falls back to resolving a
+    # missing key by entry name, and the real mod carries the valid name
+    # "Store_Her_General", so an unknown key alone still resolves. A
+    # genuinely unknown store has neither.
+    intent.entry = "NoSuchStore_zzz"
     changes, hdr_change = build_storeinfo_changes(body, header, [intent])
     assert changes == [] and hdr_change is None

@@ -49,8 +49,9 @@ def _sample_records() -> list[StockRecord]:
 def test_synthetic_round_trip():
     recs = _sample_records()
     blob = serialize_stock_list(recs)
-    # 4 (count) + rec0 with sub_data (109+1+13+4) + rec1 without (109+1+4)
-    assert len(blob) == 4 + 127 + 114
+    # 4 (count) + rec0 with sub_data (110+1+13+4) + rec1 without (110+1+4).
+    # Head is 110 since CD 1.11 added the is_restore_item u8 (#183).
+    assert len(blob) == 4 + 128 + 115
     parsed, start, end = parse_stock_list(blob, 0)
     assert (start, end) == (0, len(blob))
     assert serialize_stock_list(parsed) == blob
@@ -61,8 +62,8 @@ def test_synthetic_round_trip():
 
 def test_refuses_unknown_sub_data_flag():
     blob = bytearray(serialize_stock_list([_sample_records()[1]]))
-    # Corrupt the sub_data optional flag (count 4B + head 109B).
-    blob[4 + 109] = 7
+    # Corrupt the sub_data optional flag (count 4B + head 110B).
+    blob[4 + 110] = 7
     with pytest.raises(StoreinfoParseError, match="optional flag is 7"):
         parse_stock_list(bytes(blob), 0)
 
@@ -102,14 +103,18 @@ def _entry_payload_offsets():
 @pytest.mark.skipif(not _have_live_fixture(),
                     reason="extracted vanilla storeinfo fixture not present")
 def test_live_entry_3101_round_trips_byte_exact():
-    """Entry 3101 is the #183 mod's target. Its 37 records must
-    survive parse + serialize byte-identically."""
+    """Entry 3101 is the #183 mod's target. On the current CD 1.11
+    build it has 38 records (one more than the pre-patch 37); they must
+    survive parse + serialize byte-identically. Also pins the 1.11
+    layout: const33==1 and is_restore_item in {0,1} for every record."""
     body, entries = _entry_payload_offsets()
     payload, _end = entries[3101]
     count_off = payload + LIST_COUNT_PAYLOAD_OFFSET
     records, start, end = parse_stock_list(body, count_off)
-    assert len(records) == 37
+    assert len(records) == 38
     assert serialize_stock_list(records) == body[start:end]
+    assert all(r.const33 == 1 for r in records)
+    assert all(r.is_restore_item in (0, 1) for r in records)
 
 
 @pytest.mark.skipif(not _have_live_fixture(),
@@ -118,7 +123,7 @@ def test_live_full_file_clean_entries_round_trip():
     """Every entry the parser accepts must round-trip byte-exact.
     Entries it cannot handle yet (disc-variant value payloads or
     non-empty effect lists) must raise — never mis-parse silently.
-    At the time of RE, 192 of 293 entries were clean."""
+    On the current CD 1.11 build, 268 of 293 entries are clean."""
     body, entries = _entry_payload_offsets()
     ok = failed = refused = 0
     for key, (payload, end) in entries.items():
@@ -136,4 +141,4 @@ def test_live_full_file_clean_entries_round_trip():
         else:
             failed += 1
     assert failed == 0, f"{failed} entries mis-round-tripped"
-    assert ok >= 190, f"only {ok} entries round-tripped (expected >=190)"
+    assert ok >= 260, f"only {ok} entries round-tripped (expected >=260)"

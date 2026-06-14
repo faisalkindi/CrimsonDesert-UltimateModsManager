@@ -10,24 +10,30 @@ CD v1.10 vanilla storeinfo.pabgb, including all 37 records of entry
 3101 "Store_Her_General"; the decode scripts live in
 ``issue_repro/183/``):
 
+Layout note: this module tracks the current CD 1.11 build (game build
+23693656). The original RE was against CD 1.10 (count at payload+43,
+109-byte record); the 1.11 patch added one byte to the entry head
+(count moved to payload+44) and one byte to each record
+(is_restore_item @33, head 110). See GitHub #183.
+
 - Entry body: u16 entry_id + u32 name_len + name + NUL, then fixed
-  scalar fields. The stock-list u32 ``count`` is at payload+43 and
-  records start at payload+47 in every entry.
+  scalar fields. The stock-list u32 ``count`` is at payload+44 and
+  records start at payload+48 in every entry.
 - A disc-0 stock record is::
 
-      [109-byte fixed head][sub_data optional][effect_list carray]
+      [110-byte fixed head][sub_data optional][effect_list carray]
 
-  Head fields pinned against the mod JSON across all 37 records of
-  entry 3101: @0 u16 lookup_a, @2 u64 raw_a, @10 u64 raw_b,
+  Head fields: @0 u16 lookup_a, @2 u64 raw_a, @10 u64 raw_b,
   @18 u32 raw_c, @22 u32 raw_d, @26 u32 raw_e, @30/31/32 u8
-  flag_a/b/c, @33 u8 const(=1), @34 u32 value.payload.body. The
-  remaining @38-108 bytes are the value-struct interior; its fields
-  (value.disc/lookup_*/raw_a..raw_g) are all zero or mod-edited in
-  the only ground-truth entry, so they CANNOT be safely placed yet
-  and are carried as an opaque ``_vgap`` blob (round-trips exactly).
+  flag_a/b/c, @33 u8 is_restore_item (CD 1.11), @34 u8 const(=1),
+  @35 u32 value.payload.body. The remaining @39-109 bytes are the
+  value-struct interior; its fields (value.disc/lookup_*/raw_a..raw_g)
+  are all zero or mod-edited in the only ground-truth entry, so they
+  CANNOT be safely placed yet and are carried as an opaque ``_vgap``
+  blob (round-trips exactly).
 - ``sub_data`` uses the engine's optional encoding (same primitive
   as iteminfo_native_parser._read_optional): u8 flag at record
-  offset 109; when 1, 13 more bytes follow (u8 flag + u32 lookup_a
+  offset 110; when 1, 13 more bytes follow (u8 flag + u32 lookup_a
   + u32 lookup_b + u32 lookup_c).
 - ``effect_list`` is a u32-count carray at the record end. Its
   element layout is NOT yet decoded (13 vanilla entries have a
@@ -50,14 +56,21 @@ class StoreinfoParseError(ValueError):
     """Raised when bytes do not match the verified disc-0 layout."""
 
 
-# Fixed head size of a disc-0 stock record (verified: the sub_data
-# optional flag sits at record-relative offset 109 in every record).
-_HEAD_SIZE = 109
-# Opaque value-struct interior carried verbatim: bytes @38..108.
-_VGAP_SIZE = _HEAD_SIZE - 38
+# Fixed head size of a disc-0 stock record. CD game build 23693656
+# (the 2026-06-12 / 1.11 patch) inserted one u8 (is_restore_item) at
+# record-relative offset 33, between flag_c and the const(=1) byte, so
+# the head grew 109 -> 110 and the sub_data optional flag now sits at
+# record-relative offset 110. Confirmed on the current build: across
+# all 3555 disc-0 records the const byte (@34) is 1 and is_restore_item
+# (@33) is a clean 0/1 flag (both values present). See GitHub #183.
+_HEAD_SIZE = 110
+# Opaque value-struct interior carried verbatim: bytes @39..109.
+_VGAP_SIZE = _HEAD_SIZE - 39
 # Offset of the stock-list u32 count relative to the entry payload
-# start (after entry_id + name_len + name + NUL).
-LIST_COUNT_PAYLOAD_OFFSET = 43
+# start (after entry_id + name_len + name + NUL). The same 1.11 patch
+# also added one byte to the entry head (lands in the skipped region
+# before the count), moving the count from payload+43 to payload+44.
+LIST_COUNT_PAYLOAD_OFFSET = 44
 
 
 @dataclass
@@ -73,6 +86,7 @@ class StockRecord:
     flag_a: int = 0
     flag_b: int = 0
     flag_c: int = 0
+    is_restore_item: int = 0           # u8 @33, added in CD 1.11 (#183)
     const33: int = 1
     body: int = 0                      # value.payload.body (u32 @34)
     vgap: bytes = b"\x00" * _VGAP_SIZE  # opaque value interior @38-108
@@ -146,7 +160,19 @@ def read_stock_record(r: _Reader) -> StockRecord:
     rec.flag_a = r.u8()
     rec.flag_b = r.u8()
     rec.flag_c = r.u8()
+    rec.is_restore_item = r.u8()       # @33, CD 1.11 (#183)
     rec.const33 = r.u8()
+    if rec.const33 != 1:
+        # The byte at record offset 34 is 1 in every disc-0 record on
+        # the verified build (all 3555). It is the cheapest tripwire
+        # against a one-byte layout drift (the exact failure mode behind
+        # #183, which recurred when CD 1.11 inserted is_restore_item):
+        # if the record is misaligned this byte stops being 1 and we
+        # refuse rather than rewrite a misread record.
+        raise StoreinfoParseError(
+            f"const byte at record offset 34 is {rec.const33} (expected "
+            f"1) at byte {r.pos - 1}; record is not the verified disc-0 "
+            f"shape or the layout has drifted")
     rec.body = r.u32()
     rec.vgap = r.raw(_VGAP_SIZE)
 
@@ -195,6 +221,7 @@ def write_stock_record(w: _Writer, rec: StockRecord) -> None:
     w.u8(rec.flag_a)
     w.u8(rec.flag_b)
     w.u8(rec.flag_c)
+    w.u8(rec.is_restore_item)          # @33, CD 1.11 (#183)
     w.u8(rec.const33)
     w.u32(rec.body)
     w.raw(rec.vgap)

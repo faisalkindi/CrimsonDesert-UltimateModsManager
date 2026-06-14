@@ -109,16 +109,20 @@ def _build_new_record(j: dict, idx: int) -> StockRecord:
         flag_a=int(j.get("flag_a") or 0),
         flag_b=int(j.get("flag_b") or 0),
         flag_c=int(j.get("flag_c") or 0),
+        is_restore_item=int(j.get("is_restore_item") or 0),
         const33=1,
         body=int(_record_identity(j) or 0),
     )
-    # Mapped interior fields: body u32@34 is in the typed prefix; the
-    # vgap carries raw_e@79 (record-rel) = vgap[41], raw_g u16@95 =
-    # vgap[57], raw_q u32@97 = vgap[59].
+    # Mapped interior fields live inside the opaque value-struct blob
+    # (vgap). These indices are vgap-relative and stay stable across the
+    # CD 1.11 layout shift: is_restore_item was inserted before the vgap,
+    # so the blob's contents and internal offsets did not move (only the
+    # vgap's record-relative start did, 38 -> 39). raw_e -> vgap[41],
+    # raw_g u16 -> vgap[57], raw_q u32 -> vgap[59].
     vgap = bytearray(rec.vgap)
-    struct.pack_into("<I", vgap, 79 - 38, int(v.get("raw_e") or 0))
-    struct.pack_into("<H", vgap, 95 - 38, int(v.get("raw_g") or 0) & 0xFFFF)
-    struct.pack_into("<I", vgap, 97 - 38, int(v.get("raw_q") or 0))
+    struct.pack_into("<I", vgap, 41, int(v.get("raw_e") or 0))
+    struct.pack_into("<H", vgap, 57, int(v.get("raw_g") or 0) & 0xFFFF)
+    struct.pack_into("<I", vgap, 59, int(v.get("raw_q") or 0))
     rec.vgap = bytes(vgap)
     sd = j.get("sub_data")
     if sd is not None:
