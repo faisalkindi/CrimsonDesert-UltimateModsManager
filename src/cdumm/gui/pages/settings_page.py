@@ -907,7 +907,6 @@ class SettingsPage(SmoothScrollArea):
             pointer_file.parent.mkdir(parents=True, exist_ok=True)
             pointer_file.write_text(str(new_path), encoding="utf-8")
         except Exception as e:
-            from qfluentwidgets import InfoBar, InfoBarPosition
             logger.error(
                 "settings: failed to write game_dir pointer at %s: %s",
                 pointer_file, e)

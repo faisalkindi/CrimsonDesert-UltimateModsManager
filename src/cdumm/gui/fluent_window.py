@@ -2310,10 +2310,6 @@ class CdummWindow(FluentWindow):
         self._update_banner.setGeometry(0, self.titleBar.height(),
                                          self.width(), 36)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._position_update_banner()
-
     # ------------------------------------------------------------------
     # DB watcher helpers
     # ------------------------------------------------------------------
@@ -8058,6 +8054,10 @@ class CdummWindow(FluentWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # Reposition the update banner on resize. This lived in an earlier
+        # resizeEvent that this method silently overrode, so it had stopped
+        # running; fold it back in here.
+        self._position_update_banner()
         if hasattr(self, '_drop_overlay'):
             self._drop_overlay.resize(self.size())
         # Center title label across the full window width

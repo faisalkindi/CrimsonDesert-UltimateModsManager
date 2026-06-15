@@ -15,6 +15,7 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
+    "<b>Two latent bugs fixed (found via static analysis).</b> (1) Picking an invalid game directory in Settings raised an <code>UnboundLocalError</code> instead of showing the invalid-directory warning -- a redundant local <code>InfoBar</code>/<code>InfoBarPosition</code> import shadowed the module-level one, leaving the name unbound on that path. (2) The main window defined <code>resizeEvent</code> twice; the second silently overrode the first, so the update banner stopped following the window on resize. Both restored.",
 ]
 
 CHANGELOG = [
