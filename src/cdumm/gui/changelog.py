@@ -15,6 +15,7 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
+    "<b>CDUMM no longer crashes when importing a .zip mod on Python 3.10.</b> The zip reader requested a UTF-8 filename-decoding option that only exists on Python 3.11 and newer, so on 3.10 (still a supported version) every .zip import failed with an unhandled error before the mod could load. That option is now used only where the running Python provides it, with a clean fallback on 3.10.",
 ]
 
 CHANGELOG = [

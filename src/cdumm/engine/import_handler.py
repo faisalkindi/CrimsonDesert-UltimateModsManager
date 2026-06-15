@@ -44,6 +44,12 @@ def _open_zip_utf8(zip_path) -> "zipfile.ZipFile":
     raises at open, and we fall back to the cp437 default so those
     archives keep working exactly as before.
     """
+    if sys.version_info < (3, 11):
+        # metadata_encoding was added in Python 3.11; on 3.10 it raises
+        # TypeError (not UnicodeDecodeError), which the handler below
+        # would not catch. Fall back to zipfile's cp437 default (the
+        # documented pre-3.11 behaviour) so imports keep working on 3.10.
+        return zipfile.ZipFile(zip_path)
     try:
         return zipfile.ZipFile(zip_path, metadata_encoding="utf-8")
     except UnicodeDecodeError:
