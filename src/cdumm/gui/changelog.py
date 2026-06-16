@@ -19,6 +19,14 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.3.23",
+        "date": "2026-06-16",
+        "notes": [
+            "<b>Store and refinement mods now apply on game version 1.11.</b> The June 12 game update changed the store table layout the same way it changed the item table, so any mod editing a shop's stock list (refinement cost mods, store mods) came back with a '0 byte changes' result. The store parser now reads the new layout. Found through pinapana's report on GitHub (#183).",
+            "<b>Equipment unlock mods now apply.</b> AbyssGearUnlock and mods like it write a field name in a mixed-case style the apply step could not match to the game's own name for it, so the edit silently did nothing. Those names now resolve. Found via the AbyssGearUnlock retest on GitHub (#191).",
+        ],
+    },
+    {
         "version": "3.3.22",
         "date": "2026-06-13",
         "notes": [
