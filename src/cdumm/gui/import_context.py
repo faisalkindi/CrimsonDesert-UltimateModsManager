@@ -18,6 +18,7 @@ from __future__ import annotations
 IMPORT_CONTEXT_KEYS: tuple[str, ...] = (
     "update_priority",
     "update_enabled",
+    "update_group_id",
     "configurable_source",
     "configurable_labels",
     "variant_leaf_rel",
@@ -38,6 +39,7 @@ def snapshot_and_clear_import_context(win) -> dict:
     ctx = {k: getattr(win, f"_{k}", None) for k in IMPORT_CONTEXT_KEYS}
     win._update_priority = None
     win._update_enabled = None
+    win._update_group_id = None
     win._configurable_source = None
     win._configurable_labels = None
     win._variant_leaf_rel = None

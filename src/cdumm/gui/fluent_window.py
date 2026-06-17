@@ -514,6 +514,7 @@ def _clear_pending_post_import_state(win, path) -> None:
     for attr in (
         "_update_priority",
         "_update_enabled",
+        "_update_group_id",
         "_configurable_source",
         "_configurable_labels",
         "_original_drop_path",
@@ -3998,6 +3999,7 @@ class CdummWindow(FluentWindow):
                             if m["id"] == mid:
                                 self._update_priority = m.get("priority")
                                 self._update_enabled = m.get("enabled")
+                                self._update_group_id = m.get("group_id")
                                 break
                         # Bug 34: snapshot the configurable mod's
                         # selected_labels BEFORE the old row goes away.
@@ -5384,15 +5386,20 @@ class CdummWindow(FluentWindow):
                 except Exception:
                     pass
 
-            # Post-import: restore update state (priority/enabled)
+            # Post-import: restore update state (priority/enabled/group).
+            # #161: the user's folder group_id must be re-applied too --
+            # the old row is dup-removed on update, so without this the
+            # mod silently falls out of its group after every update.
             upri = _ctx.get("update_priority")
             if upri is not None:
                 try:
                     mod_id = _primary_id()
                     if mod_id is not None:
                         self._db.connection.execute(
-                            "UPDATE mods SET priority = ?, enabled = ? WHERE id = ?",
-                            (upri, _ctx.get("update_enabled") or 0, mod_id))
+                            "UPDATE mods SET priority = ?, enabled = ?, "
+                            "group_id = ? WHERE id = ?",
+                            (upri, _ctx.get("update_enabled") or 0,
+                             _ctx.get("update_group_id"), mod_id))
                         self._db.connection.commit()
                 except Exception:
                     pass
