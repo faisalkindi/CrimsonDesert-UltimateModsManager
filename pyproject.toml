@@ -1,6 +1,6 @@
 [project]
 name = "cdumm"
-version = "3.3.21"
+version = "3.3.23"
 description = "Crimson Desert Ultimate Mods Manager: archive-aware mod composition with conflict detection"
 requires-python = ">=3.10"
 dependencies = [
