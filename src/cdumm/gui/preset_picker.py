@@ -1009,6 +1009,22 @@ class TogglePickerDialog(MessageBoxBase):
 
         self.widget.setMinimumWidth(500)
 
+    def _cap_scroll_height(self, scroll):
+        """#196: keep the dialog inside the parent window so a mod with
+        many presets/toggles doesn't grow the modal past the screen and
+        push the Apply/Cancel buttons off the bottom (the same screen-fit
+        cap PresetPickerDialog got for #200). Without it the dialog is
+        unclickable and the whole app appears frozen."""
+        try:
+            par = self.parent()
+            par_h = par.window().height() if par else 0
+        except Exception:
+            par_h = 0
+        if par_h:
+            avail = max(160, par_h - 300)
+            scroll.setMaximumHeight(avail)
+            scroll.setMinimumHeight(min(250, avail))
+
     def _build_preset_mode(self):
         """Mutually exclusive presets — radio buttons."""
         from PySide6.QtWidgets import QRadioButton
@@ -1021,6 +1037,7 @@ class TogglePickerDialog(MessageBoxBase):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(250)
+        self._cap_scroll_height(scroll)
         scroll_widget = QWidget()
         if isDarkTheme():
             scroll_widget.setStyleSheet("QWidget { background: #1C2028; } "
@@ -1117,6 +1134,7 @@ class TogglePickerDialog(MessageBoxBase):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(SingleDirectionScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(250)
+        self._cap_scroll_height(scroll)
         scroll_widget = QWidget()
         if isDarkTheme():
             scroll_widget.setStyleSheet("QWidget { background: #1C2028; } "
