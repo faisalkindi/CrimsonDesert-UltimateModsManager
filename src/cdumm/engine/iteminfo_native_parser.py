@@ -323,14 +323,26 @@ def parse_iteminfo_from_bytes(
                 rec_end = (starts[i + 1] if i + 1 < len(starts)
                            else len(data))
                 r = _Reader(data, rec_start, rec_end=rec_end)
-                it = _read_item(r)
-                if r.pos > rec_end:
-                    raise ValueError(
-                        f"record at 0x{rec_start:X} overran its index "
-                        f"boundary (parsed to 0x{r.pos:X}, next record "
-                        f"at 0x{rec_end:X})")
-                if r.pos < rec_end:
-                    it["_tail_slack"] = bytes(data[r.pos:rec_end])
+                try:
+                    it = _read_item(r)
+                    if r.pos > rec_end:
+                        raise ValueError(
+                            f"record at 0x{rec_start:X} overran its index "
+                            f"boundary (parsed to 0x{r.pos:X}, next record "
+                            f"at 0x{rec_end:X})")
+                    if r.pos < rec_end:
+                        it["_tail_slack"] = bytes(data[r.pos:rec_end])
+                except Exception:
+                    # GitHub #219: a record the schema can't decode yet
+                    # (the 64 1.12 "*_Flag_I" guild flags). Carry it
+                    # verbatim so the whole-table round-trip stays
+                    # byte-exact and normal items remain editable.
+                    key = struct.unpack_from("<I", data, rec_start)[0]
+                    it = {
+                        "key": key,
+                        "_opaque_record": True,
+                        "bytes": bytes(data[rec_start:rec_end]),
+                    }
                 items.append(it)
             return items
         # Implausible index (doesn't start at 0 / points past EOF):
@@ -350,8 +362,20 @@ def parse_iteminfo_from_bytes(
         if next_start < 0:
             next_start = len(data)
         r = _Reader(data, rec_start, rec_end=next_start)
-        items.append(_read_item(r))
-        pos = r.pos
+        try:
+            items.append(_read_item(r))
+            pos = r.pos
+        except Exception:
+            # GitHub #219: undecodable record (1.12 "*_Flag_I" flags) —
+            # carry verbatim to the sniffed boundary so the walk
+            # continues and round-trips byte-exact.
+            key = struct.unpack_from("<I", data, rec_start)[0]
+            items.append({
+                "key": key,
+                "_opaque_record": True,
+                "bytes": bytes(data[rec_start:next_start]),
+            })
+            pos = next_start
     return items
 
 
@@ -1927,6 +1951,13 @@ _ITEM_FIELDS = [
      _write_MoneyTypeDefine),
     ("emoji_texture_id", "cstring"),
     ("enable_equip_in_clone_actor", "u8"),
+    # CD 1.12 (Steam build 23831243) inserted a u32 here, the ItemInfo
+    # "_itemEffectInfo" field per the CDMT 1.12 notes. Value is 0 on the
+    # records checked; carried as a plain u32 so it round-trips. Byte-
+    # diff of record 0 (key 2200) across 1.11/1.12 pinned the insertion
+    # at this exact position (between enable_equip_in_clone_actor and
+    # is_blocked_store_sell). GitHub #219.
+    ("item_effect_info_b23831243", "u32"),
     ("is_blocked_store_sell", "u8"),
     ("is_preorder_item", "u8"),
     # Post-1.0.4.1 additions between is_preorder_item and respawn_time_seconds.
@@ -2125,6 +2156,15 @@ def _read_item(r: _Reader) -> dict:
 
 
 def _write_item(w: _Writer, it: dict) -> None:
+    # GitHub #219: records the parser couldn't decode (the 64 "*_Flag_I"
+    # guild-flag items whose 1.12 post-gimmick layout isn't modelled yet)
+    # are carried verbatim as opaque raw bytes so the whole-table round
+    # trip stays byte-exact and the apply gate doesn't reject every item
+    # mod. These records can't be edited by Format 3 intents (no fields),
+    # which is fine — no mod targets guild flags.
+    if it.get("_opaque_record"):
+        w.buf += it["bytes"]
+        return
     for spec in _ITEM_FIELDS:
         name, kind = spec[0], spec[1]
         # Symmetric lantern conditional: emit 12 bytes only when
@@ -2272,7 +2312,10 @@ def _trial_continue_to_rec_end(data: bytes, post_pos: int, rec_end: int,
         ts = post_pos + delta
         if ts < 0 or ts > rec_end:
             continue
-        for dsi in (15, 0):
+        # CD 1.12 bumped the default_sub_item sentinel 15 -> 16, so the
+        # 1.12 sharpness/None form is dsi 16. Try it first, then the
+        # older 15/0 forms for backwards compatibility. GitHub #219.
+        for dsi in (16, 15, 0):
             if _trial_continue(data, ts, rec_end, dsi) == rec_end:
                 return delta
     return None

@@ -92,18 +92,30 @@ def test_cd110_first_record_size_matches_pabgh_index():
 
 @pytest.mark.skipif(not _V109.exists(),
                     reason="CD 1.09 iteminfo fixture not present")
-def test_cd109_differs_only_by_known_deltas():
-    """The 1.09 fixture must NOT round-trip with the 1.10 schema (it
-    still carries material_match_info and the old UnitData), pinning
-    that the 1.09->1.10 deltas are real and the schema tracks the live
-    game, not an accidental superset that matches both."""
+def test_cd109_not_genuinely_decoded_by_current_schema():
+    """The 1.09 fixture must NOT be genuinely DECODED by the current
+    (CD 1.12) schema, pinning that the schema tracks the live game and is
+    not an accidental superset that decodes old layouts too.
+
+    Note: as of GitHub #219 the parser carries records it cannot decode
+    as opaque raw bytes (so the whole-table round-trip stays byte-exact
+    even with a few undecodable records). That makes EVERY file
+    round-trip, so the old "must not round-trip" check no longer
+    distinguishes versions. The version-specificity invariant is now:
+    under a foreign-version layout the records come back OPAQUE, not
+    decoded into editable field dicts."""
     from cdumm.engine.iteminfo_native_parser import (
-        parse_iteminfo_from_bytes, serialize_iteminfo)
+        parse_iteminfo_from_bytes)
     body = _V109.read_bytes()
     try:
         items = parse_iteminfo_from_bytes(body)
     except Exception:
         return  # refusing to parse the old layout is acceptable
-    assert serialize_iteminfo(items) != body, (
-        "1.09 should not round-trip under the 1.10 schema; if it does, "
-        "a layout assumption is wrong somewhere")
+    opaque = sum(1 for it in items if it.get("_opaque_record"))
+    # The 1.09 layout differs from 1.12 in every record, so essentially
+    # all of them should fail to decode and be carried opaque. If most
+    # decoded cleanly, the schema is accidentally matching 1.09.
+    assert opaque >= len(items) // 2, (
+        f"1.09 should not be genuinely decoded by the 1.12 schema, but "
+        f"only {opaque}/{len(items)} records came back opaque; a layout "
+        f"assumption is wrong somewhere")
