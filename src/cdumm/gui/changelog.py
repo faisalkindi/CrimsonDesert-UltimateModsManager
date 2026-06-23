@@ -19,6 +19,18 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.4.1",
+        "date": "2026-06-23",
+        "notes": [
+            "<b>Item mods work again on game version 1.12.</b> The June 20 game update (build 23831243) changed the item table layout again, and every Format 3 item mod stopped applying with a '0 byte changes' result. The parser now reads the 1.12 layout, so stack mods, store mods, equipment unlocks and the rest apply on 1.12 again. A small group of guild-flag items uses a shape that is not fully decoded yet, so those are carried through untouched, which is fine since no mod edits them. Found via woowoots, pinapana and falobos76 on GitHub (#219).",
+            "<b>One-click Update All.</b> A new button on the mods page downloads and reimports every outdated mod in one go, one at a time, keeping each mod's enabled state, load order and folder group. Press Apply afterwards to write the updates to the game.",
+            "<b>Applying a very large mod no longer gets cut off partway through.</b> The progress watchdog judged a stall by the percentage bar, which does not move while one huge archive is being composed (the No Camera Auto Zoom mod routes thousands of animation files into a single archive), so it killed a working apply after about three minutes. It now treats ongoing work as alive and only stops a genuinely hung process. Found via drayvenvindell on GitHub (#218).",
+            "<b>Configurable mods no longer vanish when you re-pick their options.</b> Opening the gear on an already imported configurable mod and choosing different options used to delete the mod and re-import it as new entries, so the original disappeared from your list. It now updates the existing mod in place. Found via lurkser on GitHub (#203).",
+            "<b>Remove ReShade from inside CDUMM.</b> The ReShade panel has a new Remove ReShade button that deletes the proxy DLL, ReShade.ini and the shaders folder after a confirmation. Your imported preset files are kept and you can reinstall any time. Requested on GitHub (#205).",
+            "<b>The 'ReShade is not installed' steps are easier to spot.</b> The title and the steps now sit in a highlighted box that draws the eye, with the Download button below it. Suggested by ProfessorRaltheraz on Nexus.",
+        ],
+    },
+    {
         "version": "3.4.0",
         "date": "2026-06-17",
         "notes": [
