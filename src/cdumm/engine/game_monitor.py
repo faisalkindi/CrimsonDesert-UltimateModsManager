@@ -18,6 +18,8 @@ import ctypes
 import glob
 import logging
 import os
+import psutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -71,9 +73,13 @@ def find_game_process() -> int | None:
     Windows-only — uses ``EnumProcesses`` from ``psapi.dll``. On macOS
     and Linux the bisect / crash-monitor flow doesn't run (it needs
     the Pearl Abyss crashpad ``.dmp`` infrastructure that only exists
-    on Windows), so return None and let callers short-circuit.
+    on Windows).
     """
     if not _IS_WINDOWS:
+        for proc in psutil.process_iter(['pid', 'cmdline']):
+            if (proc.info['cmdline']
+            and proc.info['cmdline'][0] == f"S:\\common\\Crimson Desert\\bin64\\{GAME_EXE_NAME}"):
+                return proc.info['pid'];
         return None
     arr = (ctypes.c_ulong * 4096)()
     needed = ctypes.c_ulong()
@@ -101,17 +107,15 @@ def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
 
     If the process is already gone (can't open handle), returns
     :data:`PROCESS_GONE` as a sentinel to distinguish from "still
-    running" (None). Windows-only; non-Windows callers should not
-    reach this path because :func:`find_game_process` returns None
-    before this is invoked. If a non-Windows caller does reach here
-    (programming error elsewhere), raise NotImplementedError rather
-    than silently returning the same sentinel as a real "process gone"
-    — review feedback on PR #64 flagged the conflation as a footgun.
+    running" (None).
     """
     if not _IS_WINDOWS:
-        raise NotImplementedError(
-            "wait_for_exit is Windows-only; find_game_process() returns "
-            "None on macOS / Linux so this should never be called.")
+        try:
+            p = psutil.Process(pid)
+            p.wait(timeout=(timeout_ms / 1000))
+        except:
+            return None
+        return PROCESS_GONE
     h = _k32.OpenProcess(0x00100400, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_INFORMATION
     if not h:
         return PROCESS_GONE  # process already gone before we could open a handle
@@ -129,6 +133,7 @@ def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
 def kill_process(pid: int) -> None:
     """Terminate a process by PID. Windows-only."""
     if not _IS_WINDOWS:
+        os.kill(pid, signal.SIGTERM)
         return
     h = _k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
     if h:
