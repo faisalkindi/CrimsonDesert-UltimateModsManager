@@ -38,6 +38,9 @@ from qfluentwidgets import (
     CardWidget,
     FluentIcon,
     HyperlinkButton,
+    InfoBar,
+    InfoBarPosition,
+    MessageBox,
     PrimaryPushButton,
     PushButton,
     SmoothScrollArea,
@@ -209,19 +212,38 @@ class ReshadePage(SmoothScrollArea):
         lay.setContentsMargins(32, 24, 32, 24)
         lay.setSpacing(12)
 
-        title = StrongBodyLabel(tr("reshade.not_installed_title"), card)
+        # ProfessorRaltheraz (Nexus suggestion): wrap the title + steps in
+        # a CDUMM-yellow notice box so the "not installed" text catches the
+        # eye, and keep the Download button OUTSIDE/below that box.
+        notice = QFrame(card)
+        notice.setObjectName("reshadeNotInstalledNotice")
+        if isDarkTheme():
+            notice.setStyleSheet(
+                "#reshadeNotInstalledNotice { background: #2A2410; "
+                "border: 1px solid #5A4A20; border-radius: 8px; }")
+        else:
+            notice.setStyleSheet(
+                "#reshadeNotInstalledNotice { background: #FFF8E6; "
+                "border: 1px solid #F0D080; border-radius: 8px; }")
+        nlay = QVBoxLayout(notice)
+        nlay.setContentsMargins(20, 18, 20, 18)
+        nlay.setSpacing(10)
+
+        title = StrongBodyLabel(tr("reshade.not_installed_title"), notice)
         tf = title.font()
         tf.setPixelSize(18)
         title.setFont(tf)
-        lay.addWidget(title)
-        lay.addSpacing(4)
+        nlay.addWidget(title)
+        nlay.addSpacing(2)
 
         for key in ("reshade.not_installed_step1",
                     "reshade.not_installed_step2",
                     "reshade.not_installed_step3"):
-            row = BodyLabel(tr(key), card)
+            row = BodyLabel(tr(key), notice)
             row.setWordWrap(True)
-            lay.addWidget(row)
+            nlay.addWidget(row)
+
+        lay.addWidget(notice)
 
         lay.addSpacing(8)
         btn = PrimaryPushButton(FluentIcon.LINK,
@@ -352,6 +374,17 @@ class ReshadePage(SmoothScrollArea):
         self._merge_btn.setEnabled(len(install.presets) >= 2)
         actions_row.addWidget(self._merge_btn)
         actions_row.addStretch()
+
+        # GitHub #205: let users uninstall ReShade from inside CDUMM
+        # (removes the proxy DLL + ReShade.ini + shaders) instead of
+        # hunting for the files in bin64 by hand.
+        self._remove_btn = PushButton(
+            FluentIcon.DELETE,
+            tr("reshade.remove_btn")
+            if tr("reshade.remove_btn") != "reshade.remove_btn"
+            else "Remove ReShade", summary)
+        self._remove_btn.clicked.connect(self._on_remove_reshade_clicked)
+        actions_row.addWidget(self._remove_btn)
         slay.addLayout(actions_row)
 
         self._body_layout.addWidget(summary)
@@ -733,6 +766,59 @@ class ReshadePage(SmoothScrollArea):
             if not open_path(output_path.parent):
                 logger.warning(
                     "open merged preset folder failed for %s", output_path.parent)
+
+    def _on_remove_reshade_clicked(self) -> None:
+        """GitHub #205: uninstall ReShade from the game's bin64.
+
+        Deletes the proxy DLL (dxgi/d3d12.dll), ReShade.ini and the
+        shaders directory. Refuses while the game is running (the DLL is
+        locked) and asks for confirmation first. Preset .ini files the
+        user imported are left alone; only the ReShade runtime is removed.
+        """
+        if getattr(self, "_game_running", False):
+            InfoBar.warning(
+                title="Game is running",
+                content=("Close Crimson Desert first, then remove ReShade. "
+                         "The proxy DLL is locked while the game runs."),
+                duration=6000, position=InfoBarPosition.TOP, parent=self)
+            return
+        install = detect_reshade_install(self._game_dir) \
+            if self._game_dir else None
+        if install is None or not install.installed:
+            self.refresh()
+            return
+        box = MessageBox(
+            "Remove ReShade",
+            ("This removes ReShade from the game: the proxy DLL"
+             f" ({install.dll_path.name if install.dll_path else 'dxgi.dll'}),"
+             " ReShade.ini and the shaders folder. Your imported preset"
+             " files are kept. You can reinstall ReShade any time. Continue?"),
+            self.window())
+        if not box.exec():
+            return
+        import shutil
+        removed = []
+        for p in (install.dll_path, install.ini_path):
+            try:
+                if p and p.exists():
+                    p.unlink()
+                    removed.append(p.name)
+            except OSError as e:
+                logger.warning("ReShade remove: could not delete %s: %s", p, e)
+        try:
+            if install.shaders_dir and install.shaders_dir.exists():
+                shutil.rmtree(install.shaders_dir, ignore_errors=True)
+                removed.append(install.shaders_dir.name + "/")
+        except OSError as e:
+            logger.warning("ReShade remove: shaders dir %s: %s",
+                           install.shaders_dir, e)
+        logger.info("ReShade removed: %s", removed)
+        InfoBar.success(
+            title="ReShade removed",
+            content=("Removed " + ", ".join(removed) + "."
+                     if removed else "Nothing to remove."),
+            duration=5000, position=InfoBarPosition.TOP, parent=self)
+        self.refresh()
 
     def _on_revert_clicked(self) -> None:
         if self._game_running:
