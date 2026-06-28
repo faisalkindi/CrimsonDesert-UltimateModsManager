@@ -49,4 +49,4 @@ jobs:
         # No filtering — full suite. Quiet mode so the log isn't
         # buried in PASSED lines; -ra shows reasons for any
         # skip / xfail.
-        run: python -m pytest tests/ -q -ra -n auto --dist loadfile
+        run: python -m pytest tests/ -q -ra -n auto --dist worksteal
