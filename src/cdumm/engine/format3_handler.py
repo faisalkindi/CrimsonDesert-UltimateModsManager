@@ -945,13 +945,25 @@ def _classify_intent(
         # the loaded schema, so the field-not-found path can't tell
         # "really doesn't exist" from "exists but is an array we
         # can't write yet". Hit the raw schema for a better message.
-        raw = _raw_field_metadata(table_name, intent.field)
+        # Try the same name candidates the field_specs lookup used,
+        # so an engine-internal underscore/camelCase name (user
+        # 'buffer' -> schema '_buffer') resolves to its raw metadata
+        # and yields the accurate variable-length message instead of a
+        # misleading "add a field_schema entry" the author cannot act
+        # on for a variable-length field (#224).
+        raw = None
+        raw_name = intent.field
+        for _cand in candidate_names:
+            _meta = _raw_field_metadata(table_name, _cand)
+            if _meta is not None:
+                raw, raw_name = _meta, _cand
+                break
         if raw is not None and (
             raw.get("stream") is None
             or raw.get("type") is None
         ):
             return (
-                f"field '{intent.field}' is a variable-length / "
+                f"field '{raw_name}' is a variable-length / "
                 f"array field (stream=None in schema); writing "
                 f"variable-length data lands in a later phase"
             )

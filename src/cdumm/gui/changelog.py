@@ -15,6 +15,7 @@ from cdumm.i18n import tr
 # move them up under a real {"version": "X.Y.Z", "date": "..."} block.
 # This keeps __version__ stable until you actually cut a release.
 _UNRELEASED_NOTES: list[str] = [
+    "<b>Clearer status for Format 3 mods that edit variable-length string fields (such as stringinfo <code>buffer</code>).</b> Mods like the Female Armor Module set string fields CDUMM stores as variable-length (engine name <code>_buffer</code>), which CDUMM cannot write yet. They were rejected with a misleading 'add a field_schema entry' instruction that cannot work for a variable-length field. CDUMM now resolves the engine-internal field name and reports the accurate 'variable-length field, lands in a later phase' status, so authors are not sent down a dead end. GitHub #224. The compiled-PAZ variant of these mods still applies today.",
 ]
 
 CHANGELOG = [
