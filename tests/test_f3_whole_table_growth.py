@@ -21,6 +21,8 @@ import pytest
 
 from tests.fixture_loaders import has_vanilla110, load_vanilla110
 
+pytestmark = pytest.mark.slow
+
 # A real intent from the Sockets 1 module of CD QOL Suite (nexus 1591):
 # appends a socket-material element, growing the record.
 _GROWTH_INTENT = dict(

@@ -26,10 +26,10 @@ import pytest
 
 from tests.fixture_loaders import has_vanilla110, load_vanilla110
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.slow, pytest.mark.skipif(
     not (has_vanilla110("iteminfo.pabgb")
          and has_vanilla110("iteminfo.pabgh")),
-    reason="1.10 iteminfo fixtures absent")
+    reason="1.10 iteminfo fixtures absent")]
 
 
 @dataclass

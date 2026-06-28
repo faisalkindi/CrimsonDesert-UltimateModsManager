@@ -22,6 +22,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-qt>=4.4",
+    "pytest-xdist>=3.5",
+    "pytest-shard>=0.1.2",
     "pyinstaller>=6.0",
     "ruff>=0.4",
 ]
@@ -39,3 +41,6 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: heavy full-table iteminfo round-trip tests (pure-Python parse of the 6k-record game table, ~150-530s each); run in the separate slow-tests job, not the fast per-PR job",
+]

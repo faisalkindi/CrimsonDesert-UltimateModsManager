@@ -41,6 +41,8 @@ import pytest
 
 from tests.fixture_loaders import has_vanilla110, load_vanilla110
 
+pytestmark = pytest.mark.slow
+
 _BASE = Path(__file__).resolve().parents[1] / "issue_repro" / "182"
 _V109 = _BASE / "versions" / "iteminfo - 1.09.pabgb"
 
