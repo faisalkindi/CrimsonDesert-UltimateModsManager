@@ -15,7 +15,9 @@
 
 ---
 
-## New in v3.2.9
+## What's New
+
+CDUMM ships frequent updates. For the complete per-version history, see the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page (the in-app updater also shows release notes after each update). Recent highlights:
 
 - **Buff mods now apply.** Field-name `.field.json` mods that target `buffinfo.pabgb` (NoCooldownForALLItems, Double Resource Buff, etc.) used to import cleanly and then quietly do nothing in game. CDUMM now decodes the actual on-disk layout instead of relying on a structurally wrong schema, and a 4185-intent test mod goes from 0% applying to 100%. If you installed any buffinfo `.field.json` mod on an older build, run Settings > Fix Everything before re-applying because the old code was silently corrupting unrelated bytes.
 - **SKIPPED badge surfaces partial-apply state (v3.2.9 series).** When a game patch drifts a mod's bytes off, the card shows a yellow pill with the dropped patch count and a tooltip naming each affected file. Right-click > Reimport from source clears it. Active and SKIPPED never both show; one mod is either fully active or fully off.
