@@ -93,6 +93,50 @@ def persist_skip_summary(
     db_connection.commit()
 
 
+def log_patch_skips(
+    patch_skips: list[dict], limit: int = 15,
+) -> tuple[list[str], int]:
+    """Format skipped byte-patches, log them at WARNING, and return
+    ``(lines, overflow)`` so the caller can reuse the same lines for the
+    post-apply InfoBar.
+
+    ``lines`` holds at most ``limit`` ``"  - <label> (expected <hex>,
+    got <hex>, <reason>)"`` strings; ``overflow`` is the count beyond it.
+    Hex fields are truncated to 32 chars (+ a byte count) so whole-table
+    changes — whose expected/actual can be multiple MB of hex — don't
+    blow up the message (falobos76, #191 retest).
+
+    Issue #222 (falobos76): the skip detail previously reached only the
+    transient InfoBar, so a saved bug report — which tails cdumm.log —
+    had no record of WHICH patches were skipped and couldn't be
+    diagnosed without the user's screenshot. Logging the same lines the
+    InfoBar shows closes that gap and keeps the two sinks in lock-step.
+    """
+    def _short_hex(h: str) -> str:
+        h = h or ""
+        if len(h) <= 32:
+            return h
+        return f"{h[:32]}... ({len(h) // 2:,} bytes)"
+
+    lines = [
+        f"  - {s.get('label') or '(unnamed)'}"
+        f" (expected {_short_hex(s.get('expected'))}, "
+        f"got {_short_hex(s.get('actual'))}, "
+        f"{s.get('reason')})"
+        for s in patch_skips[:limit]
+    ]
+    overflow = max(0, len(patch_skips) - limit)
+    logger.warning(
+        "%d JSON patch(es) skipped (expected bytes don't match the "
+        "current game; mod likely built for an older version):",
+        len(patch_skips))
+    for ln in lines:
+        logger.warning("%s", ln.strip())
+    if overflow:
+        logger.warning("  ... and %d more", overflow)
+    return lines, overflow
+
+
 def invalidate_apply_fingerprint(
     game_dir: Path,
     config: "Config | None" = None,
@@ -1948,19 +1992,10 @@ class ApplyWorker(QObject):
                         # them raw turned the post-apply warning into
                         # an unreadable hex wall (falobos76, #191
                         # retest). Show a short prefix + total size.
-                        def _short_hex(h: str) -> str:
-                            h = h or ""
-                            if len(h) <= 32:
-                                return h
-                            return f"{h[:32]}... ({len(h) // 2:,} bytes)"
-                        skip_lines = [
-                            f"  - {s.get('label') or '(unnamed)'}"
-                            f" (expected {_short_hex(s.get('expected'))}, "
-                            f"got {_short_hex(s.get('actual'))}, "
-                            f"{s.get('reason')})"
-                            for s in patch_skips[:15]
-                        ]
-                        more = max(0, len(patch_skips) - 15)
+                        # Shared formatter also writes these lines to the
+                        # log at WARNING so a saved bug report records them
+                        # (issue #222) — not just the transient InfoBar.
+                        skip_lines, more = log_patch_skips(patch_skips)
                         suffix = (f"\n  ... and {more} more"
                                   if more else "")
                         msg = (
