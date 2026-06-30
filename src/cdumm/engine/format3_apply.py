@@ -125,9 +125,13 @@ def expand_format3_into_aggregated(
     # equipslotinfo.pabgb (GitHub #190): records grow when a mod
     # appends etl hashes, so the writer rebuilds entry + .pabgh
     # offsets in one pass, same contract as storeinfo.
+    # stringinfo.pabgb is whole-table because its writer rewrites the
+    # variable-length _buffer string per record (records change length)
+    # and rebuilds the companion stringinfo.pabgh offsets in one pass
+    # (GitHub #224 Female Armor Module).
     _WHOLE_TABLE_TARGETS = {
         "iteminfo.pabgb", "skill.pabgb", "multichangeinfo.pabgb",
-        "storeinfo.pabgb", "equipslotinfo.pabgb"}
+        "storeinfo.pabgb", "equipslotinfo.pabgb", "stringinfo.pabgb"}
     whole_table_intents: dict[str, list] = {}
     whole_table_mod_names: dict[str, list[str]] = {}
     # Per-INTENT mod attribution, index-aligned with
@@ -403,6 +407,65 @@ def expand_format3_into_aggregated(
                     n_bytes_changed += len(c.get("patched", "")) // 2
                 logger.info(
                     "Format 3 multichangeinfo writer: applied %d intent(s) "
+                    "across %d mod(s), %d record change(s)%s",
+                    len(batched), len(contributing_mods), len(pabgb_changes),
+                    ", + pabgh offset rebuild"
+                    if pabgh_change is not None else "")
+                continue
+
+            # stringinfo.pabgb (GitHub #224): same two-file contract as
+            # multichangeinfo. The writer rewrites the variable-length
+            # _buffer string per record (records change length) and
+            # rebuilds the companion stringinfo.pabgh offsets in one pass.
+            if target == "stringinfo.pabgb":
+                from cdumm.engine.stringinfo_writer import (
+                    build_stringinfo_changes,
+                )
+                si_intents = [
+                    (i.entry, i.key, i.field, i.new) for i in batched
+                ]
+                try:
+                    pabgb_changes, pabgh_change = build_stringinfo_changes(
+                        vanilla_body, vanilla_header, si_intents)
+                except Exception as e:
+                    logger.error(
+                        "Format 3 stringinfo writer crashed on %d "
+                        "intent(s): %s", len(batched), e, exc_info=True)
+                    pabgb_changes, pabgh_change = [], None
+                if not pabgb_changes:
+                    logger.warning(
+                        "Format 3 stringinfo: %d intent(s) from %d mod(s) "
+                        "produced 0 record changes",
+                        len(batched), len(contributing_mods))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod(s) "
+                            f"{', '.join(repr(n) for n in contributing_mods)} "
+                            f"produced 0 byte changes for "
+                            f"'stringinfo.pabgb'. The targeted string keys "
+                            f"may not exist in this game version, or the new "
+                            f"values matched the vanilla strings."
+                        )
+                    continue
+                contrib_ids = list(whole_table_mod_ids.get(target, []))
+                for c in pabgb_changes:
+                    c["_target_file"] = target
+                    if contrib_ids:
+                        c["_source_mod_ids"] = list(contrib_ids)
+                aggregated.setdefault(target, []).extend(pabgb_changes)
+                if pabgh_change is not None:
+                    pabgh_change["_target_file"] = "stringinfo.pabgh"
+                    if contrib_ids:
+                        pabgh_change["_source_mod_ids"] = list(contrib_ids)
+                    aggregated.setdefault(
+                        "stringinfo.pabgh", []).append(pabgh_change)
+                if participating_mod_ids is not None:
+                    for mid in contrib_ids:
+                        participating_mod_ids.add(mid)
+                for c in pabgb_changes:
+                    n_bytes_changed += len(c.get("patched", "")) // 2
+                logger.info(
+                    "Format 3 stringinfo writer: applied %d intent(s) "
                     "across %d mod(s), %d record change(s)%s",
                     len(batched), len(contributing_mods), len(pabgb_changes),
                     ", + pabgh offset rebuild"

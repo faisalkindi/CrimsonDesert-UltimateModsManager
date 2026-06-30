@@ -896,6 +896,20 @@ def _classify_intent(
             "fixed_material_data_list["):
         return None
 
+    # GitHub #224 (Female Armor Module): stringinfo's _buffer is a
+    # length-prefixed variable-length string the PABGB schema drops
+    # (stream=None), so the generic walker can't write it. The clean-room
+    # stringinfo writer (stringinfo_writer.build_stringinfo_changes)
+    # locates the record by key, rewrites the buffer, and rebuilds the
+    # companion .pabgh offsets. Accept the DMM name 'buffer' and the
+    # engine name '_buffer' so these whole-table intents reach the
+    # writer; intents whose key isn't in the table are dropped cleanly at
+    # apply time with a logged warning. The value must be a string, which
+    # the writer re-checks before committing.
+    if tn_norm == "stringinfo" and intent.field.lstrip("_").lower() == (
+            "buffer") and isinstance(getattr(intent, "new", None), str):
+        return None
+
     # GitHub #150 (Female Animations) + #192 (mesh swap): characterinfo's
     # PABGB schema is a positional name-less decompiled structure, so the
     # schema walker can't resolve these field names. The clean-room
