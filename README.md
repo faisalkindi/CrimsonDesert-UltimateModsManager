@@ -17,16 +17,21 @@
 
 ## What's New
 
-CDUMM ships frequent updates. For the complete per-version history, see the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page (the in-app updater also shows release notes after each update). Recent highlights:
+CDUMM ships frequent updates. For the complete per-version history, see the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page (the in-app updater also shows release notes after each update). Recent progress, newest first:
 
-- **Buff mods now apply.** Field-name `.field.json` mods that target `buffinfo.pabgb` (NoCooldownForALLItems, Double Resource Buff, etc.) used to import cleanly and then quietly do nothing in game. CDUMM now decodes the actual on-disk layout instead of relying on a structurally wrong schema, and a 4185-intent test mod goes from 0% applying to 100%. If you installed any buffinfo `.field.json` mod on an older build, run Settings > Fix Everything before re-applying because the old code was silently corrupting unrelated bytes.
-- **SKIPPED badge surfaces partial-apply state (v3.2.9 series).** When a game patch drifts a mod's bytes off, the card shows a yellow pill with the dropped patch count and a tooltip naming each affected file. Right-click > Reimport from source clears it. Active and SKIPPED never both show; one mod is either fully active or fully off.
-- **Click-to-update no longer creates duplicate cards on Format 3 mods.** Two import paths were dropping the existing-mod-id when forwarding to the Format 3 importer, so updates inserted a fresh row instead of replacing the original.
-- **Three texture mods touching the same file no longer hang the loading screen.** v3.2.8 byte-level merging was firing on DDS textures and producing corrupt files the GPU rejected. Texture / audio / image mods now fall back to last-wins like before.
-- **Barber Unlocked and similar OG_ XML mods apply.** The OG_ XML import was writing delta files without the right header, apply hit "corrupt entry delta" and silently no-opped. Re-importing rewrote the same broken file.
-- **"Vanilla backup missing" warning no longer loops forever after Fix Everything.** The self-heal path now creates the backup the first time it succeeds, so subsequent applies skip the warn entirely.
-- **Revert to Vanilla no longer freezes around 90% on installs with many archives.** Per-dir progress, faster hash-stream comparison for large files, single locked file logs and continues instead of aborting the whole revert.
-- **Xbox installs at custom paths now launch correctly.** Detection also checks for the Microsoft publisher hash and the canonical Content/packages layout token, so installs moved off the default `C:\XboxGames\` path use the right launch URI.
+### v3.4 series — game 1.12 support & one-click updates
+
+- **v3.4.2** — _June 30, 2026_ — **Text / string mods apply.** Mods like the Female Armor Module edit variable-length string entries that were silently getting skipped; CDUMM now rewrites the string in place by its key and rebuilds the table index (checked byte-for-byte against the whole vanilla string table). The "Missing directory" error when disabling a folder-adding mod is fixed and now names the mod responsible. (#224, #225)
+- **v3.4.1** — _June 23, 2026_ — **Item mods work again on game 1.12** (the June 20 patch changed the item-table layout). A new **Update All** button reimports every outdated mod in one go, keeping each mod's enabled state, load order and folder group. A very large mod no longer has its apply killed early by the progress watchdog. (#219, #218)
+- **v3.4.0** — _June 17, 2026_ — `equipable_hash` equipment-unlock mods apply now (the importer was skipping them before they reached the writer; verified on AbyssGearUnlock). Bare ReShade `.addon64` mods install into `bin64`, a mod's folder group survives an update, and the preset / toggle picker no longer pushes Apply / Cancel off-screen. (#191, #202, #161, #196)
+
+### v3.3 series — item-table overhaul & robustness
+
+- **v3.3.19 – v3.3.23** — _June 10–16, 2026_ — The big item-data campaign. After successive game patches reshuffled the item-table layout, Format 3 item mods (stack sizes, durability, cooldowns, buffs, sockets, **store** stock lists, **equip-slot** hash lists, storeinfo) went from importing with zero changes to applying completely again — verified byte-for-byte. Encrypted material mods (e.g. VAXIS Water Physics) write correctly again, a third "Game exe (skip Steam)" launch option was added, and available updates no longer vanish from the list after a follow-up check. (#182, #191, #183, #190, #199, #186, #194)
+- **v3.3.15 – v3.3.18** — _May 29–June 8, 2026_ — The self-update download-complete freeze is properly fixed (work moved back to the main thread, plus a `.old` exe swap so Windows can replace the running app). Downloads and update checks work again after the 1.09 patch (certifi trust store). Character-creator mods now ask which race / gender to install first, recovery no longer loops after a game update, characterinfo mesh / model fields apply, and silent import failures are surfaced instead of counting as success. (#170/#172, #190, #163, #192, #193, #165)
+- **v3.3.0 – v3.3.14** — _May 10–27, 2026_ — Stale-overlay cleanup (#141), `gamedata/` wrapper imports (#146), a 4 GB texture-pack guard (#148), the hide-on-launch toggle, preset persistence, and a steady run of apply-correctness fixes.
+
+Older releases — **v3.1–v3.2** (NexusMods integration, one-click game-update recovery, and the first Format 3 field-name mod support) — are on the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page.
 
 ---
 
