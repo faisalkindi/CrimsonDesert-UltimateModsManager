@@ -18,6 +18,14 @@ on:
   schedule:
     - cron: "0 6 * * *"
 
+# Queue a new run behind one already running for the same branch/PR instead of
+# cancelling it. `cancel-in-progress: false` is what makes a fresh push wait its
+# turn rather than kill the run in progress. The group is keyed per ref, so
+# different branches and PRs still run in parallel — only same-ref runs serialize.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     name: fast tests

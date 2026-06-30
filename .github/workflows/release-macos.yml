@@ -37,6 +37,12 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Queue a duplicate build for the same tag/ref behind the one already running
+# instead of cancelling it; different tags still build in parallel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write # needed to create / update GitHub Releases
 
