@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Releases & changelog
+    url: https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases
+    about: Check the latest release and per-version notes — your issue may already be fixed.
+  - name: Support CDUMM (Ko-fi)
+    url: https://ko-fi.com/kindiboy
+    about: CDUMM is free. If it's useful to you, a tip is appreciated.

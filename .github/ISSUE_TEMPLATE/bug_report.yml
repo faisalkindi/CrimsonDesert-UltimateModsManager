@@ -1,0 +1,62 @@
+name: Bug report
+description: Report something in CDUMM that's broken or behaving wrong.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        **Please generate a bug report inside CDUMM and paste it below.** It
+        captures your app version, game version, storage layout, installed
+        mods, and the recent log — which is almost always what's needed to
+        diagnose the problem.
+  - type: textarea
+    id: bug-report
+    attributes:
+      label: CDUMM bug report
+      description: Paste the full report from CDUMM's built-in report generator.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: mod
+    attributes:
+      label: Which mod, and its Nexus page?
+      description: >
+        Name the specific mod and link its Nexus page. "A mod won't apply" or
+        "updates don't work" is very hard to chase down — one concrete example
+        is what actually gets fixed.
+      placeholder: "Example: Bigger Minimap — https://www.nexusmods.com/crimsondesert/mods/275"
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What did you do, and what went wrong?
+      description: >
+        Steps to reproduce, what you expected, and what actually happened.
+        Exact error text (or a screenshot) helps a lot.
+    validations:
+      required: true
+  - type: checkboxes
+    id: environment
+    attributes:
+      label: Environment checks
+      description: >
+        The report's own TL;DR flags these — they break mod installs and are
+        not CDUMM bugs. Please rule them out first.
+      options:
+        - label: CDUMM is **not** running as administrator
+        - label: The game is **not** installed under `Program Files`
+        - label: The game exe does **not** have the "Run as administrator" compatibility flag set
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I'm on the latest CDUMM release
+          required: true
+        - label: I searched existing issues and didn't find a duplicate
+          required: true
