@@ -1,24 +1,26 @@
-"""Game Data page — build a searchable catalog of the installed game.
+"""Game Data page — build + browse a searchable catalog of the installed game.
 
-A thin tool page over ``cdumm.engine.game_index``: one button builds (or
-refreshes) a SQLite index of every archive asset + the keyed game-data tables,
-on a background thread, then shows a summary. Search/browse UI is a planned
-follow-up; this first version reuses only ToolPageBase's built-in widgets
-(button, progress, stat cards, result cards) to keep it low-risk.
+A tool page over ``cdumm.engine.game_index``: one button builds (or refreshes)
+a SQLite index of every archive asset + the keyed game-data tables, on a
+background thread. You can choose where the index file is saved, open its
+folder, and search the indexed assets in a table right in the app.
 
-Strings are intentionally literal (not tr() keys) for this first version, so it
-adds no new localization keys; localization is a follow-up.
+Strings are literal (not tr() keys) for this first version, so it adds no new
+localization keys; localization is a follow-up.
 """
 from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 import tempfile
 
 from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QTableWidgetItem
 
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
+from cdumm.platform import IS_MACOS, IS_WINDOWS
 
 
 class _GameIndexWorker(QObject):
@@ -51,7 +53,7 @@ class _GameIndexWorker(QObject):
 
 
 class GameDataPage(ToolPageBase):
-    """Build + summarize a searchable index of the installed game's data."""
+    """Build, locate, and search an index of the installed game's data."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(
@@ -65,8 +67,7 @@ class GameDataPage(ToolPageBase):
             run_label="Build / refresh game-data index",
             parent=parent,
         )
-        # Persisted next to the OS temp dir for this first version; a future
-        # revision can move it under CDMods and add a search UI over it.
+        self._app_data_dir = None
         self._index_path = os.path.join(
             tempfile.gettempdir(), "cdumm_game_index.sqlite")
         self._thread: QThread | None = None
@@ -75,6 +76,117 @@ class GameDataPage(ToolPageBase):
         self._stat_assets = self._add_stat_card("--", "Assets", "#2878D0")
         self._stat_archives = self._add_stat_card("--", "Archives", "#8B5CF6")
         self._stat_tables = self._add_stat_card("--", "Data tables", "#0EA5E9")
+
+        self._build_controls()
+
+    # ── extra controls (persistent — not wiped by _clear_results) ────
+    def _build_controls(self) -> None:
+        from qfluentwidgets import (BodyLabel, CaptionLabel, LineEdit,
+                                     PushButton, TableWidget)
+        root = self._container.layout()
+
+        # Save-location row: path label + Change + Open folder
+        loc_row = QHBoxLayout()
+        loc_row.setSpacing(8)
+        self._path_label = CaptionLabel(
+            f"Save location:  {self._index_path}", self._container)
+        self._path_label.setWordWrap(True)
+        loc_row.addWidget(self._path_label, 1)
+        self._change_btn = PushButton("Change…", self._container)
+        self._change_btn.clicked.connect(self._choose_location)
+        loc_row.addWidget(self._change_btn)
+        self._open_btn = PushButton("Open folder", self._container)
+        self._open_btn.clicked.connect(self._open_location)
+        loc_row.addWidget(self._open_btn)
+        root.insertLayout(root.count() - 1, loc_row)
+
+        # Search + results table
+        self._search = LineEdit(self._container)
+        self._search.setPlaceholderText(
+            "Search assets by path (build the index first)…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search)
+        root.insertWidget(root.count() - 1, self._search)
+
+        self._hits = BodyLabel("", self._container)
+        self._hits.setContentsMargins(2, 4, 0, 0)
+        root.insertWidget(root.count() - 1, self._hits)
+
+        self._table = TableWidget(self._container)
+        self._table.setColumnCount(4)
+        self._table.setHorizontalHeaderLabels(
+            ["Path", "Archive", "Type", "Size (bytes)"])
+        self._table.verticalHeader().hide()
+        self._table.setMinimumHeight(320)
+        self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
+        try:
+            self._table.setColumnWidth(0, 620)
+        except Exception:  # noqa: BLE001
+            pass
+        root.insertWidget(root.count() - 1, self._table)
+
+    # ── engine wiring ────────────────────────────────────────────────
+    def set_managers(self, **kwargs) -> None:
+        super().set_managers(**kwargs)
+        # Preserve across re-wire calls that don't pass app_data_dir.
+        self._app_data_dir = kwargs.get("app_data_dir") or self._app_data_dir
+        saved = self._load_pref()
+        if saved:
+            self._index_path = saved
+        elif self._app_data_dir:
+            self._index_path = os.path.join(
+                str(self._app_data_dir), "game_index.sqlite")
+        if hasattr(self, "_path_label"):
+            self._path_label.setText(f"Save location:  {self._index_path}")
+        if hasattr(self, "_open_btn"):
+            self._open_btn.setEnabled(os.path.exists(self._index_path))
+
+    def _load_pref(self):
+        try:
+            if self._db:
+                from cdumm.storage.config import Config
+                return Config(self._db).get("game_index_path") or None
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _save_pref(self, path: str) -> None:
+        try:
+            if self._db:
+                from cdumm.storage.config import Config
+                Config(self._db).set("game_index_path", path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ── location actions ─────────────────────────────────────────────
+    def _choose_location(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Choose where to save the game-data index",
+            self._index_path, "SQLite database (*.sqlite)")
+        if path:
+            self._index_path = path
+            self._save_pref(path)
+            self._path_label.setText(f"Save location:  {path}")
+            self._open_btn.setEnabled(os.path.exists(path))
+
+    def _open_location(self) -> None:
+        p = self._index_path
+        folder = os.path.dirname(p) or "."
+        try:
+            if IS_WINDOWS:
+                if os.path.exists(p):
+                    subprocess.Popen(["explorer", "/select,",
+                                      os.path.normpath(p)])
+                else:
+                    os.startfile(folder)  # noqa: S606
+            elif IS_MACOS:
+                args = ["open", "-R", p] if os.path.exists(p) else ["open",
+                                                                     folder]
+                subprocess.Popen(args)
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as ex:  # noqa: BLE001
+            self._set_status(f"Could not open folder: {ex}", "#BF616A")
 
     # ── run ─────────────────────────────────────────────────────────
     def _on_run_clicked(self) -> None:
@@ -94,7 +206,6 @@ class GameDataPage(ToolPageBase):
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
         self._worker.error.connect(self._on_error)
-        # Teardown: quit the loop + delete the worker once it reports back.
         self._worker.done.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
         self._worker.done.connect(self._worker.deleteLater)
@@ -118,6 +229,7 @@ class GameDataPage(ToolPageBase):
         except Exception:  # noqa: BLE001
             pass
         self._set_status("Index built.", "#2E7D32")
+        self._open_btn.setEnabled(os.path.exists(self._index_path))
 
         detail = ""
         try:
@@ -132,9 +244,41 @@ class GameDataPage(ToolPageBase):
         except Exception as ex:  # noqa: BLE001
             detail = f"(could not read tables: {ex})"
         self._add_result_card("Largest keyed game-data tables", detail)
-        self._add_result_card("Index file", self._index_path)
+        # refresh the viewer if a search is active
+        self._on_search(self._search.text())
 
     def _on_error(self, msg: str) -> None:
         self._set_running(False)
         self._set_status("Index failed.", "#BF616A")
         self._add_result_card("Error", msg, "#BF616A")
+
+    # ── search / viewer ──────────────────────────────────────────────
+    def _on_search(self, text: str) -> None:
+        text = (text or "").strip()
+        if not os.path.exists(self._index_path):
+            self._hits.setText("Build the index first to search.")
+            self._table.setRowCount(0)
+            return
+        if len(text) < 2:
+            self._hits.setText("Type at least 2 characters to search.")
+            self._table.setRowCount(0)
+            return
+        try:
+            con = sqlite3.connect(self._index_path)
+            try:
+                rows = game_index.search_assets(con, query=text, limit=300)
+            finally:
+                con.close()
+        except Exception as ex:  # noqa: BLE001
+            self._hits.setText(f"Search failed: {ex}")
+            return
+        self._hits.setText(
+            f"{len(rows)} match(es)" + (" (showing first 300)"
+                                        if len(rows) == 300 else ""))
+        self._table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            self._table.setItem(i, 0, QTableWidgetItem(str(r["path"])))
+            self._table.setItem(i, 1, QTableWidgetItem(str(r["archive"])))
+            self._table.setItem(i, 2, QTableWidgetItem(str(r["ext"])))
+            self._table.setItem(
+                i, 3, QTableWidgetItem(f"{int(r['orig_size']):,}"))

@@ -1218,7 +1218,8 @@ class CdummWindow(FluentWindow):
         self.rescan_page.rescan_requested.connect(self._on_refresh_snapshot)
 
         self.game_data_page = GameDataPage(self)
-        self.game_data_page.set_managers(**tool_kwargs)
+        self.game_data_page.set_managers(
+            **tool_kwargs, app_data_dir=getattr(self, "_app_data_dir", None))
 
         self.reshade_page = ReshadePage(self)
         self.reshade_page.set_managers(db=self._db, game_dir=self._game_dir)
