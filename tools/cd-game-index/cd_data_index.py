@@ -12,8 +12,10 @@ for the item sample. It never extracts or redistributes game assets — you run
 it against your own legally-owned install and get a local index.
 
 Usage:
-    python cd_data_index.py "E:/SteamLibrary/steamapps/common/Crimson Desert" \
-        --out cd_gamedata.sqlite [--items] [--cdumm-src PATH_TO/cdumm/src]
+    # auto-detects your install (Steam / Epic / Xbox / macOS / Linux):
+    python cd_data_index.py --out cd_gamedata.sqlite [--items]
+    # or point it at a specific install folder:
+    python cd_data_index.py "<path to Crimson Desert>" --out cd_gamedata.sqlite
 
 Reuses CDUMM's PAMT parser (src/cdumm/archive/paz_parse.py). When this script
 lives at <repo>/tools/cd-game-index/ the parser is found automatically; from a
@@ -59,6 +61,27 @@ def archive_dirs(game_dir: str) -> list[str]:
         if os.path.isdir(d) and os.path.exists(os.path.join(d, "0.pamt")):
             out.append(name)
     return out
+
+
+def detect_game_dir(cdumm_src: str):
+    """Auto-detect the Crimson Desert install using CDUMM's own finder
+    (Steam / Epic / Xbox / macOS / Linux). Returns ``(path, note)`` on success
+    or ``(None, reason)``. Requires ``cdumm`` to be importable from
+    ``cdumm_src`` (the same checkout that provides paz_parse)."""
+    if cdumm_src not in sys.path:
+        sys.path.insert(0, cdumm_src)
+    try:
+        from cdumm.storage.game_finder import find_game_directories
+    except Exception as ex:  # noqa: BLE001
+        return None, f"auto-detect unavailable ({ex})"
+    try:
+        found = find_game_directories()
+    except Exception as ex:  # noqa: BLE001
+        return None, f"auto-detect failed ({ex})"
+    if not found:
+        return None, "no Crimson Desert install found automatically"
+    note = f"  (+{len(found) - 1} more found)" if len(found) > 1 else ""
+    return str(found[0]), note
 
 
 def category_of(path: str) -> str:
@@ -221,7 +244,9 @@ def try_items(con, parse_pamt, game_dir, dirs, cdumm_src):
 
 def main():
     ap = argparse.ArgumentParser(description="Index a Crimson Desert install.")
-    ap.add_argument("game_dir", help="path to the Crimson Desert install dir")
+    ap.add_argument("game_dir", nargs="?", default=None,
+                    help="path to the Crimson Desert install dir "
+                         "(auto-detected if omitted)")
     ap.add_argument("--out", default="cd_gamedata.sqlite")
     ap.add_argument("--cdumm-src", default=DEFAULT_CDUMM_SRC,
                     help="path to a CDUMM checkout's src/ (for paz_parse)")
@@ -230,9 +255,21 @@ def main():
     args = ap.parse_args()
 
     pp = load_paz_parse(args.cdumm_src)
-    dirs = archive_dirs(args.game_dir)
+
+    game_dir = args.game_dir
+    if not game_dir:
+        game_dir, note = detect_game_dir(args.cdumm_src)
+        if not game_dir:
+            sys.exit(
+                f"Could not find a Crimson Desert install automatically "
+                f"({note}).\nPass the install folder explicitly, e.g.:\n"
+                f'  python cd_data_index.py "D:/SteamLibrary/steamapps/'
+                f'common/Crimson Desert"')
+        print(f"Auto-detected install: {game_dir}{note}")
+
+    dirs = archive_dirs(game_dir)
     if not dirs:
-        sys.exit(f"No NNNN/0.pamt archives under {args.game_dir}")
+        sys.exit(f"No NNNN/0.pamt archives under {game_dir}")
     print(f"Archives: {len(dirs)}  ->  {args.out}")
 
     if os.path.exists(args.out):
@@ -243,7 +280,7 @@ def main():
     build_schema(con)
 
     t0 = time.monotonic()
-    total = index_assets(con, pp.parse_pamt, args.game_dir, dirs)
+    total = index_assets(con, pp.parse_pamt, game_dir, dirs)
     add_indexes(con)
 
     n_tables = con.execute("SELECT COUNT(*) FROM data_tables").fetchone()[0]
@@ -259,7 +296,7 @@ def main():
 
     items_msg = "not requested (use --items)"
     if args.items:
-        ok, msg = try_items(con, pp.parse_pamt, args.game_dir, dirs,
+        ok, msg = try_items(con, pp.parse_pamt, game_dir, dirs,
                             args.cdumm_src)
         items_msg = ("OK: " + msg) if ok else ("skipped: " + msg)
         stats["items"] = items_msg

@@ -45,17 +45,22 @@ through the vendored `crimson_rs` parser. This is best-effort — see
 
 ## Usage
 
+The install folder is **auto-detected** (Steam / Epic / Xbox / macOS / Linux) via
+CDUMM's own game-finder, so you don't need to know your path — but you can pass
+one to override (e.g. a second copy, or if detection misses it).
+
 ```sh
-# From inside the repo (paz_parse auto-located):
-python tools/cd-game-index/cd_data_index.py \
-    "E:/SteamLibrary/steamapps/common/Crimson Desert" \
-    --out cd_gamedata.sqlite
+# From inside the repo — auto-detects your install:
+python tools/cd-game-index/cd_data_index.py --out cd_gamedata.sqlite
+
+# Point it at a specific install folder instead:
+python tools/cd-game-index/cd_data_index.py "D:/SteamLibrary/steamapps/common/Crimson Desert" --out cd_gamedata.sqlite
 
 # Also attempt item-record extraction:
-python tools/cd-game-index/cd_data_index.py "<game dir>" --out cd_gamedata.sqlite --items
+python tools/cd-game-index/cd_data_index.py --out cd_gamedata.sqlite --items
 
-# Running a standalone copy of the script:
-python cd_data_index.py "<game dir>" --out cd_gamedata.sqlite --cdumm-src "C:/path/to/CrimsonDesert-UltimateModsManager/src"
+# Running a standalone copy of the script (point --cdumm-src at a CDUMM checkout):
+python cd_data_index.py --out cd_gamedata.sqlite --cdumm-src "C:/path/to/CrimsonDesert-UltimateModsManager/src"
 ```
 
 ## What you get — schema
