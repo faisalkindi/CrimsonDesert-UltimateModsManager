@@ -105,11 +105,18 @@ class GameDataPage(ToolPageBase):
         self._search.setPlaceholderText(
             "Search assets by path (build the index first)…")
         self._search.setClearButtonEnabled(True)
+        self._search.setFixedHeight(38)
+        _sf = self._search.font()
+        _sf.setPixelSize(15)
+        self._search.setFont(_sf)
         self._search.textChanged.connect(self._on_search)
         root.insertWidget(root.count() - 1, self._search)
 
         self._hits = BodyLabel("", self._container)
         self._hits.setContentsMargins(2, 4, 0, 0)
+        _hitf = self._hits.font()
+        _hitf.setPixelSize(15)
+        self._hits.setFont(_hitf)
         root.insertWidget(root.count() - 1, self._hits)
 
         self._table = TableWidget(self._container)
@@ -117,8 +124,16 @@ class GameDataPage(ToolPageBase):
         self._table.setHorizontalHeaderLabels(
             ["Path", "Archive", "Type", "Size (bytes)"])
         self._table.verticalHeader().hide()
-        self._table.setMinimumHeight(320)
+        self._table.setMinimumHeight(380)
         self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
+        # Larger, more readable text + roomier rows.
+        _tf = self._table.font()
+        _tf.setPixelSize(15)
+        self._table.setFont(_tf)
+        _hf = self._table.horizontalHeader().font()
+        _hf.setPixelSize(15)
+        self._table.horizontalHeader().setFont(_hf)
+        self._table.verticalHeader().setDefaultSectionSize(36)
         try:
             self._table.setColumnWidth(0, 620)
         except Exception:  # noqa: BLE001
