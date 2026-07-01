@@ -212,12 +212,22 @@ class _Texture3DView(QDialog):
 
     def __init__(self, qimage, title="Texture — 3D preview", parent=None):
         super().__init__(parent)
-        from PySide6.Qt3DExtras import (Qt3DWindow, QOrbitCameraController,
-                                        QDiffuseMapMaterial, QSphereMesh,
-                                        QCuboidMesh)
-        from PySide6.Qt3DCore import QEntity, QTransform
-        from PySide6.Qt3DRender import (QTexture2D, QPaintedTextureImage,
-                                        QPointLight)
+        # PySide6 6.10 nests the Qt3D classes under a same-named namespace
+        # (PySide6.Qt3DExtras.Qt3DExtras.Qt3DWindow, etc.), so pull them off
+        # the nested namespace rather than the top-level module.
+        from PySide6.Qt3DExtras import Qt3DExtras as _E
+        from PySide6.Qt3DCore import Qt3DCore as _C
+        from PySide6.Qt3DRender import Qt3DRender as _R
+        Qt3DWindow = _E.Qt3DWindow
+        QOrbitCameraController = _E.QOrbitCameraController
+        QDiffuseMapMaterial = _E.QDiffuseMapMaterial
+        QSphereMesh = _E.QSphereMesh
+        QCuboidMesh = _E.QCuboidMesh
+        QEntity = _C.QEntity
+        QTransform = _C.QTransform
+        QTexture2D = _R.QTexture2D
+        QPaintedTextureImage = _R.QPaintedTextureImage
+        QPointLight = _R.QPointLight
         from PySide6.QtGui import QVector3D, QColor
         from qfluentwidgets import CaptionLabel, PushButton
 
