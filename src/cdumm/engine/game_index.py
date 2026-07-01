@@ -1,0 +1,228 @@
+"""Game-data index engine.
+
+Turns a Crimson Desert install into a searchable SQLite catalog of every
+archive asset (path / category / type / location / size) plus the keyed
+"game data" tables (iteminfo, characterinfo, questinfo, skill, ...).
+
+This is a pure library — no GUI, no argparse — so it can back an in-app
+"Game Data" page and be unit-tested headless. The heavy enumeration reuses
+the same PAMT parser CDUMM uses everywhere else
+(``cdumm.archive.paz_parse.parse_pamt``); it is injected in ``build_index`` so
+the DB-building and query helpers can be exercised without a real install.
+
+Nothing here extracts or stores asset bytes — only metadata (paths, sizes,
+IDs, and where the bytes live).
+"""
+from __future__ import annotations
+
+import os
+import sqlite3
+import time
+from typing import Any, Callable, Iterable
+
+# Data-table blob (.pabgb) + schema/header (.pabgh) extensions.
+TABLE_EXTS = (".pabgb", ".pabgh")
+
+
+def category_of(path: str) -> str:
+    """First path segment, e.g. 'gamedata' for 'gamedata/iteminfo.pabgb'."""
+    return path.split("/", 1)[0] if "/" in path else "(root)"
+
+
+def ext_of(path: str) -> str:
+    """Lower-cased extension, or '(none)' when the path has none."""
+    return (os.path.splitext(path)[1] or "(none)").lower()
+
+
+def archive_dirs(game_dir: str) -> list[str]:
+    """NNNN subdirs of an install that carry a 0.pamt index."""
+    out = []
+    for name in sorted(os.listdir(game_dir)):
+        d = os.path.join(game_dir, name)
+        if os.path.isdir(d) and os.path.exists(os.path.join(d, "0.pamt")):
+            out.append(name)
+    return out
+
+
+# ── schema / build ───────────────────────────────────────────────────
+
+def create_schema(con: sqlite3.Connection) -> None:
+    con.executescript(
+        """
+        DROP TABLE IF EXISTS assets;
+        DROP TABLE IF EXISTS data_tables;
+        DROP TABLE IF EXISTS stats;
+        CREATE TABLE assets (
+            path       TEXT NOT NULL,
+            archive    TEXT NOT NULL,
+            category   TEXT NOT NULL,
+            ext        TEXT NOT NULL,
+            paz_file   TEXT NOT NULL,
+            offset     INTEGER NOT NULL,
+            comp_size  INTEGER NOT NULL,
+            orig_size  INTEGER NOT NULL,
+            compressed INTEGER NOT NULL,
+            encrypted  INTEGER NOT NULL
+        );
+        CREATE TABLE data_tables (
+            name      TEXT NOT NULL,
+            path      TEXT NOT NULL,
+            archive   TEXT NOT NULL,
+            orig_size INTEGER NOT NULL
+        );
+        CREATE TABLE stats (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """
+    )
+
+
+def insert_archive(con: sqlite3.Connection, archive: str,
+                   entries: Iterable[Any]) -> int:
+    """Insert one archive's entries.
+
+    ``entries`` is any iterable of objects exposing ``path``, ``paz_file``,
+    ``offset``, ``comp_size``, ``orig_size``, ``compressed`` and ``encrypted``
+    (i.e. ``cdumm.archive.paz_parse.PazEntry``). Returns the number inserted.
+    """
+    rows = []
+    trows = []
+    n = 0
+    for e in entries:
+        ext = ext_of(e.path)
+        rows.append((e.path, archive, category_of(e.path), ext, e.paz_file,
+                     e.offset, e.comp_size, e.orig_size,
+                     int(bool(e.compressed)), int(bool(e.encrypted))))
+        if ext in TABLE_EXTS:
+            trows.append((os.path.basename(e.path), e.path, archive,
+                          e.orig_size))
+        n += 1
+    con.executemany(
+        "INSERT INTO assets(path,archive,category,ext,paz_file,offset,"
+        "comp_size,orig_size,compressed,encrypted) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        rows)
+    if trows:
+        con.executemany(
+            "INSERT INTO data_tables(name,path,archive,orig_size) "
+            "VALUES(?,?,?,?)", trows)
+    return n
+
+
+def finalize(con: sqlite3.Connection) -> None:
+    """Add lookup indexes. Call once after all archives are inserted."""
+    con.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS ix_assets_path ON assets(path);
+        CREATE INDEX IF NOT EXISTS ix_assets_ext ON assets(ext);
+        CREATE INDEX IF NOT EXISTS ix_assets_cat ON assets(category);
+        CREATE INDEX IF NOT EXISTS ix_assets_archive ON assets(archive);
+        CREATE INDEX IF NOT EXISTS ix_tables_name ON data_tables(name);
+        """
+    )
+
+
+def write_stats(con: sqlite3.Connection, **extra: Any) -> dict:
+    """Compute + persist summary stats; return them as a dict."""
+    total = con.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+    archives = con.execute(
+        "SELECT COUNT(DISTINCT archive) FROM assets").fetchone()[0]
+    distinct = con.execute(
+        "SELECT COUNT(DISTINCT name) FROM data_tables").fetchone()[0]
+    stats: dict[str, Any] = {
+        "assets_total": total,
+        "archives": archives,
+        "data_table_distinct": distinct,
+        "generated_epoch": int(time.time()),
+    }
+    stats.update(extra)
+    con.execute("DELETE FROM stats")
+    con.executemany("INSERT INTO stats(key,value) VALUES(?,?)",
+                    [(k, str(v)) for k, v in stats.items()])
+    con.commit()
+    return stats
+
+
+# ── query helpers (for the GUI page / callers) ───────────────────────
+
+def _dicts(cur) -> list[dict]:
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def search_assets(con: sqlite3.Connection, query: str = "", *,
+                  ext: str | None = None, category: str | None = None,
+                  archive: str | None = None, limit: int = 200) -> list[dict]:
+    """Search assets by path substring, optionally filtered by ext/category/
+    archive. Returns up to ``limit`` rows as dicts, path-ordered."""
+    where = []
+    args: list[Any] = []
+    if query:
+        where.append("path LIKE ? ESCAPE '\\'")
+        esc = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        args.append(f"%{esc}%")
+    if ext:
+        where.append("ext = ?"); args.append(ext.lower())
+    if category:
+        where.append("category = ?"); args.append(category)
+    if archive:
+        where.append("archive = ?"); args.append(archive)
+    sql = "SELECT path,archive,category,ext,paz_file,offset,orig_size FROM assets"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY path LIMIT ?"
+    args.append(int(limit))
+    return _dicts(con.execute(sql, args))
+
+
+def list_data_tables(con: sqlite3.Connection) -> list[dict]:
+    """The keyed game-data tables, largest first, de-duplicated by name."""
+    return _dicts(con.execute(
+        "SELECT name, archive, MAX(orig_size) AS orig_size "
+        "FROM data_tables GROUP BY name ORDER BY orig_size DESC"))
+
+
+def category_counts(con: sqlite3.Connection) -> list[dict]:
+    return _dicts(con.execute(
+        "SELECT category, COUNT(*) AS n FROM assets "
+        "GROUP BY category ORDER BY n DESC"))
+
+
+def get_stats(con: sqlite3.Connection) -> dict:
+    return {k: v for k, v in con.execute("SELECT key,value FROM stats")}
+
+
+# ── full build (integration entry point) ─────────────────────────────
+
+def build_index(game_dir: str, out_path: str, *,
+                parse_pamt: Callable[..., Iterable[Any]] | None = None,
+                progress: Callable[[str, int], None] | None = None) -> dict:
+    """Build the full catalog for ``game_dir`` into the SQLite at ``out_path``.
+
+    ``parse_pamt`` defaults to CDUMM's real parser but can be injected for
+    testing. ``progress(archive, count)`` is called after each archive.
+    Returns the stats dict.
+    """
+    if parse_pamt is None:
+        from cdumm.archive.paz_parse import parse_pamt as parse_pamt  # noqa
+
+    dirs = archive_dirs(game_dir)
+    if not dirs:
+        raise ValueError(f"No NNNN/0.pamt archives under {game_dir}")
+
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    con = sqlite3.connect(out_path)
+    try:
+        con.execute("PRAGMA journal_mode=OFF")
+        con.execute("PRAGMA synchronous=OFF")
+        create_schema(con)
+        for d in dirs:
+            base = os.path.join(game_dir, d)
+            entries = parse_pamt(os.path.join(base, "0.pamt"), paz_dir=base)
+            n = insert_archive(con, d, entries)
+            if progress is not None:
+                progress(d, n)
+        finalize(con)
+        stats = write_stats(con)
+    finally:
+        con.commit()
+        con.close()
+    return stats
