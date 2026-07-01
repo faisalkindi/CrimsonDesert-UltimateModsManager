@@ -970,7 +970,6 @@ class CdummWindow(FluentWindow):
                         _sh.rmtree(sub, ignore_errors=True)
         except OSError:
             pass
-        self._worker_thread: QThread | None = None
         self._needs_apply = False
         self._applied_state: dict[int, bool] = {}
         self._snapshot_in_progress = False
@@ -7337,65 +7336,6 @@ class CdummWindow(FluentWindow):
         watchdog.start()
         logger.info("QProcess started [%s]: PID %s", worker_args[0], proc.processId())
 
-    def _run_worker(self, worker, thread: QThread, progress: StateToolTip, on_finished) -> None:
-        """Wire a worker + thread + StateToolTip with safe signal routing."""
-        self._active_worker = worker
-        self._worker_thread = thread
-        self._active_progress = progress
-        self._last_progress_time = 0.0
-
-        # Disable AUTOMATIC GC, mandatory to prevent crash.
-        # PySide6/shiboken crashes when GC runs on the worker thread and
-        # finalizes Qt objects (confirmed by crash_trace.txt: "Garbage-collecting"
-        # on QThread → access violation in summary_bar.paintEvent).
-        # NO periodic gc.collect() during workers, profiling showed even
-        # gen-0 collection takes 300-660ms when objects have accumulated,
-        # causing the worst UI stalls. Single full collect after worker ends.
-        import gc
-        gc.disable()
-
-        # Pause non-essential timers to keep event loop lean
-        if hasattr(self, "_db_watcher_paused"):
-            self._db_watcher_paused = True
-        if hasattr(self, '_db_poll_timer'):
-            self._db_poll_timer.stop()
-        if hasattr(self, '_update_timer'):
-            self._update_timer.stop()
-
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        # CRITICAL: Route progress through dispatcher, lambdas in PySide6
-        # execute on the emitter's thread, not the receiver's. Calling
-        # StateToolTip.setContent() from a worker thread segfaults silently.
-        worker.progress_updated.connect(
-            lambda pct, msg: self._dispatcher.call(
-                self._update_progress_tip, pct, msg))
-
-        worker.finished.connect(
-            lambda *args: self._dispatcher.call(
-                self._worker_done, thread, progress, on_finished, *args))
-        worker.error_occurred.connect(
-            lambda err: self._dispatcher.call(
-                self._worker_error, thread, progress, err))
-
-        thread.start()
-
-    def _update_progress_tip(self, pct: int, msg: str) -> None:
-        """Update StateToolTip from main thread, throttled to max ~7 fps."""
-        import time
-        now = time.monotonic()
-        # Always show 0% (start) and 100% (end); throttle the rest to 150ms
-        if pct not in (0, 100) and (now - self._last_progress_time) < 0.15:
-            return
-        self._last_progress_time = now
-        tip = self._active_progress
-        if tip is None:
-            return
-        try:
-            tip.setContent(f"{msg} ({pct}%)")
-        except RuntimeError:
-            pass  # tooltip already deleted
-
     def _resume_timers(self) -> None:
         """Restart non-essential timers after worker completes."""
         if hasattr(self, '_db_poll_timer'):
@@ -7405,64 +7345,6 @@ class CdummWindow(FluentWindow):
         if hasattr(self, "_db_watcher_paused"):
             self._db_watcher_paused = False
             self._stamp_db_mtime()
-
-    def _worker_done(self, thread, progress: StateToolTip, callback, *args) -> None:
-        progress.setContent(tr("progress.completed"))
-        progress.setState(True)
-        # Disconnect all signals BEFORE quit, prevents lambda closures
-        # (which capture Qt objects) from lingering on the worker thread
-        # where GC could finalize them on the wrong thread.
-        worker = self._active_worker
-        if worker is not None:
-            try:
-                worker.progress_updated.disconnect()
-                worker.finished.disconnect()
-                worker.error_occurred.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-        thread.quit()
-        thread.wait(5000)
-        thread.deleteLater()
-        self._active_progress = None
-        self._active_worker = None
-        self._worker_thread = None
-        import gc
-        gc.enable()
-        # DON'T call gc.collect() here, profiling showed it takes 1-1.5s
-        # after gc.disable(). Let automatic GC handle it incrementally.
-        self._resume_timers()
-        try:
-            callback(*args)
-        except Exception:
-            logger.error("Completion callback crashed", exc_info=True)
-
-    def _worker_error(self, thread, progress: StateToolTip, err) -> None:
-        progress.setContent(tr("progress.failed_short"))
-        progress.setState(True)
-        worker = self._active_worker
-        if worker is not None:
-            try:
-                worker.progress_updated.disconnect()
-                worker.finished.disconnect()
-                worker.error_occurred.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-        thread.quit()
-        thread.wait(5000)
-        thread.deleteLater()
-        self._active_progress = None
-        self._active_worker = None
-        self._worker_thread = None
-        import gc
-        gc.enable()
-        self._resume_timers()
-        # If there's an import queue, continue after cleanup settles
-        if hasattr(self, '_import_queue') and self._import_queue:
-            QTimer.singleShot(100, self._process_next_import)
-            return
-        InfoBar.error(
-            title=tr("main.error"), content=str(err),
-            duration=-1, position=InfoBarPosition.TOP, parent=self)
 
     # (Tool methods removed -- logic moved to individual tool pages)
 
@@ -8246,7 +8128,7 @@ class CdummWindow(FluentWindow):
         # deleted') if Qt's normal parent-teardown has already reaped
         # the QThread before our closeEvent runs. Seen in the debug
         # build's log at line 4192 after a clean app exit.
-        for thread_name in ("_worker_thread", "_update_thread"):
+        for thread_name in ("_update_thread",):
             thread = getattr(self, thread_name, None)
             if thread is None:
                 continue
