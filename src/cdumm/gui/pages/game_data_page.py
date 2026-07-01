@@ -54,6 +54,115 @@ class _GameIndexWorker(QObject):
             self.error.emit(str(ex))
 
 
+_GRID_ROW_CAP = 500          # max records rendered in the table-preview grid
+
+
+def _cell(v) -> str:
+    """Stringify one field value for a grid cell (bounded)."""
+    if v is None:
+        return ""
+    s = str(v)
+    return s if len(s) <= 200 else s[:200] + "…"
+
+
+def _shape_records(records: dict, schema) -> tuple[list, list, int]:
+    """Turn parse_records output into (columns, rows, total) for the grid.
+
+    Columns are ``_key`` + ``_name`` + the schema's field names in order;
+    rows are stringified and capped to the first ``_GRID_ROW_CAP`` by key.
+    """
+    field_names = [f.name for f in schema.fields] if schema else []
+    cols = ["_key", "_name"] + field_names
+    rows = [[_cell(records[k].get(c)) for c in cols]
+            for k in sorted(records)[:_GRID_ROW_CAP]]
+    return cols, rows, len(records)
+
+
+class _PreviewWorker(QObject):
+    """Reads + decodes one asset off the UI thread so a large table or
+    texture can never freeze the app. Emits exactly one ``ready`` dict
+    carrying its generation id (stale results are ignored by the page)."""
+
+    ready = Signal(dict)
+
+    def __init__(self, index_path, game_dir, path, gen,
+                 byte_limit, table_limit, text_cap, hex_cap):
+        super().__init__()
+        self._index_path = index_path
+        self._game_dir = game_dir
+        self._path = path
+        self._gen = gen
+        self._byte_limit = byte_limit
+        self._table_limit = table_limit
+        self._text_cap = text_cap
+        self._hex_cap = hex_cap
+
+    def run(self) -> None:
+        res = {"gen": self._gen, "path": self._path}
+        try:
+            con = sqlite3.connect(self._index_path)
+            try:
+                self._work(con, res)
+            finally:
+                con.close()
+        except Exception as ex:  # noqa: BLE001 — surface to the pane
+            res.update(kind="error", error=str(ex))
+        self.ready.emit(res)
+
+    def _work(self, con, res: dict) -> None:
+        row = game_index.get_asset(con, self._path)
+        if row is None:
+            res.update(kind="error", error="asset not in index")
+            return
+        res["row"] = {k: row[k] for k in
+                      ("ext", "orig_size", "archive", "compressed", "encrypted")}
+        orig = int(row["orig_size"])
+        gd = self._game_dir
+
+        # 1) keyed game-data table → parsed grid (CDUMM's semantic schemas)
+        if gd and self._path.endswith(".pabgb"):
+            try:
+                from cdumm.semantic import parser as sem
+                table = sem.identify_table_from_path(self._path)
+            except Exception:  # noqa: BLE001
+                table = None
+            if table:
+                if orig > self._table_limit:
+                    res.update(kind="toobig")
+                    return
+                try:
+                    body = game_index.extract_asset(con, self._path, gd)
+                    header = game_index.extract_asset(
+                        con, self._path[:-6] + ".pabgh", gd)
+                    recs = sem.parse_records(table, body, header)
+                except Exception:  # noqa: BLE001 — fall back to a raw view
+                    recs = {}
+                if recs:
+                    cols, rows, total = _shape_records(
+                        recs, sem.get_schema(table))
+                    res.update(kind="table", table=table,
+                               cols=cols, rows=rows, total=total)
+                    return
+
+        # 2) no game folder → metadata only
+        if not gd:
+            res.update(kind="meta")
+            return
+        # 3) too big for an inline byte preview
+        if orig > self._byte_limit:
+            res.update(kind="toobig")
+            return
+        # 4) text or hex
+        data = game_index.extract_asset(con, self._path, gd)
+        text = game_index.decode_text(data, limit=self._text_cap)
+        if text is not None:
+            res.update(kind="text", text=text[:self._text_cap],
+                       truncated=len(text) >= self._text_cap)
+        else:
+            res.update(kind="hex",
+                       text=game_index.hexdump(data, limit=self._hex_cap))
+
+
 class GameDataPage(ToolPageBase):
     """Build, locate, and search an index of the installed game's data."""
 
@@ -193,11 +302,25 @@ class GameDataPage(ToolPageBase):
         _mf.setPixelSize(13)
         self._pv_text.setFont(_mf)
         self._pv_text.setPlaceholderText(
-            "Click any row on the left to view that asset.\n\nText formats "
-            "(XML, JSON, JS, CSS) show as text; everything else shows a hex "
-            "+ metadata view. Textures, audio and models need format "
-            "converters, which are a later addition.")
+            "Click any row on the left to view that asset.\n\nKeyed data "
+            "tables (items, NPCs, quests, skills, drops …) open as a grid of "
+            "records. Text formats (XML, JSON, JS, CSS) show as text; "
+            "everything else shows a hex + metadata view. Textures, audio and "
+            "models need format converters, which are a later addition.")
         pv.addWidget(self._pv_text, 1)
+
+        # Grid view for keyed game-data tables (.pabgb), parsed via CDUMM's
+        # semantic schemas. Hidden until a table is selected.
+        self._pv_grid = TableWidget(pane)
+        self._pv_grid.verticalHeader().hide()
+        self._pv_grid.setEditTriggers(self._pv_grid.EditTrigger.NoEditTriggers)
+        _gf = self._pv_grid.font()
+        _gf.setPixelSize(13)
+        self._pv_grid.setFont(_gf)
+        self._pv_grid.verticalHeader().setDefaultSectionSize(30)
+        self._pv_grid.setVisible(False)
+        pv.addWidget(self._pv_grid, 1)
+
         self._pv_extract = PushButton("Extract raw file…", pane)
         self._pv_extract.setEnabled(False)
         self._pv_extract.clicked.connect(self._extract_raw)
@@ -208,6 +331,8 @@ class GameDataPage(ToolPageBase):
         split.setStretchFactor(1, 2)
         self._preview_bytes: bytes | None = None
         self._preview_name: str | None = None
+        self._pv_gen = 0                 # bumped per selection; ignore stale
+        self._pv_jobs: list = []         # live (thread, worker) — keep refs
         # stretch=1 makes this row absorb the page's spare vertical space
         # (the base layout's trailing addStretch() has factor 0, so it yields).
         root.insertWidget(root.count() - 1, split, 1)
@@ -373,9 +498,10 @@ class GameDataPage(ToolPageBase):
     # ── preview pane ─────────────────────────────────────────────────
     _PREVIEW_TEXT_CAP = 200_000            # chars shown for text assets
     _PREVIEW_HEX_CAP = 4096               # bytes shown for the hex view
-    _PREVIEW_SIZE_LIMIT = 4 * 1024 * 1024   # keep inline decode cheap: a 4 MB
-    #   read+LZ4+decode is ~tens of ms; a multi-MB table/texture would freeze
-    #   the UI thread (AppHang). Bigger assets show metadata + Extract raw only.
+    _PREVIEW_SIZE_LIMIT = 4 * 1024 * 1024   # inline byte-preview ceiling
+    _TABLE_SIZE_LIMIT = 8 * 1024 * 1024     # parse .pabgb data tables up to here
+    #   Reading / decoding / parsing all run on a background worker, so these
+    #   caps just bound memory + latency — they no longer gate the UI thread.
 
     def _selected_path(self) -> str | None:
         items = self._table.selectedItems()
@@ -385,79 +511,122 @@ class GameDataPage(ToolPageBase):
         return cell.text() if cell else None
 
     def _on_asset_selected(self) -> None:
-        """Read + preview the clicked asset (metadata always; text or hex
-        when the bytes are reachable and within the inline size limit)."""
+        """Kick off a background read of the clicked asset. The heavy work
+        (extract / decompress / decode / parse) runs on a worker thread;
+        results land in _on_preview_ready, so the UI can never freeze."""
         path = self._selected_path()
         if not path:
             return
+        self._pv_gen += 1
         self._preview_bytes = None
         self._preview_name = os.path.basename(path)
         self._pv_extract.setEnabled(False)
         self._pv_title.setText(self._preview_name)
+        self._pv_meta.setText("")
+        self._show_text("Reading…", wrap=True)
 
-        row = data = err = None
-        try:
-            con = sqlite3.connect(self._index_path)
-            try:
-                row = game_index.get_asset(con, path)
-                if (row and self._game_dir
-                        and int(row["orig_size"]) <= self._PREVIEW_SIZE_LIMIT):
-                    data = game_index.extract_asset(
-                        con, path, str(self._game_dir))
-            finally:
-                con.close()
-        except Exception as ex:  # noqa: BLE001 — surface to the pane
-            err = str(ex)
+        th = QThread(self)
+        w = _PreviewWorker(
+            self._index_path,
+            str(self._game_dir) if self._game_dir else "",
+            path, self._pv_gen, self._PREVIEW_SIZE_LIMIT,
+            self._TABLE_SIZE_LIMIT, self._PREVIEW_TEXT_CAP,
+            self._PREVIEW_HEX_CAP)
+        w.moveToThread(th)
+        th.started.connect(w.run)
+        w.ready.connect(self._on_preview_ready)
+        w.ready.connect(th.quit)
+        w.ready.connect(w.deleteLater)
+        th.finished.connect(th.deleteLater)
+        job = (th, w)
+        self._pv_jobs.append(job)
+        th.finished.connect(
+            lambda job=job: job in self._pv_jobs and self._pv_jobs.remove(job))
+        th.start()
 
-        if row is None:
+    def _on_preview_ready(self, res: dict) -> None:
+        if res.get("gen") != self._pv_gen:
+            return   # a newer selection superseded this result
+        row = res.get("row")
+        meta = ""
+        if row:
+            flags = []
+            if row["compressed"]:
+                flags.append("LZ4")
+            if row["encrypted"]:
+                flags.append("encrypted")
+            meta = (f"{row['ext']}  ·  {int(row['orig_size']):,} bytes  ·  "
+                    f"archive {row['archive']}  ·  "
+                    f"{', '.join(flags) or 'stored raw'}")
+        kind = res.get("kind")
+
+        if kind == "table":
+            total = res.get("total", 0)
+            shown = len(res.get("rows", []))
+            more = f" (showing first {shown:,})" if shown < total else ""
             self._pv_meta.setText(
-                f"Could not read: {err}" if err else "Asset not in index.")
-            self._pv_text.setPlainText("")
-            return
-
-        flags = []
-        if row["compressed"]:
-            flags.append("LZ4")
-        if row["encrypted"]:
-            flags.append("encrypted")
-        self._pv_meta.setText(
-            f"{row['ext']}  ·  {int(row['orig_size']):,} bytes  ·  archive "
-            f"{row['archive']}  ·  {', '.join(flags) or 'stored raw'}\n{path}")
-
-        if not self._game_dir:
-            self._pv_text.setPlainText(
-                "No game folder configured — can't read asset bytes.")
-            return
-        if int(row["orig_size"]) > self._PREVIEW_SIZE_LIMIT:
-            self._pv_text.setPlainText(
-                f"Asset is {int(row['orig_size']):,} bytes — too large to "
-                "preview inline.\nUse “Extract raw file…” to save it to disk.")
+                f"data table “{res.get('table', '')}”  ·  {total:,} records"
+                f"{more}\n{res.get('path', '')}")
+            self._show_grid(res.get("cols", []), res.get("rows", []))
             self._pv_extract.setEnabled(True)
             return
-        if err is not None:
-            self._pv_text.setPlainText(f"Could not read asset bytes:\n{err}")
-            return
-        if data is None:
-            self._pv_text.setPlainText("(no data)")
-            return
 
-        self._preview_bytes = data
-        self._pv_extract.setEnabled(True)
-        text = game_index.decode_text(data, limit=self._PREVIEW_TEXT_CAP)
-        if text is not None:
-            if len(text) >= self._PREVIEW_TEXT_CAP:
-                text += ("\n\n… (truncated preview — use Extract raw for the "
+        self._pv_meta.setText(f"{meta}\n{res.get('path', '')}" if meta
+                              else res.get("path", ""))
+        if kind == "text":
+            body = res.get("text", "")
+            if res.get("truncated"):
+                body += ("\n\n… (truncated preview — use Extract raw for the "
                          "full file)")
-            self._pv_text.setLineWrapMode(
-                self._pv_text.LineWrapMode.WidgetWidth)
-            self._pv_text.setPlainText(text)
-        else:
-            self._pv_text.setLineWrapMode(self._pv_text.LineWrapMode.NoWrap)
-            self._pv_text.setPlainText(
+            self._show_text(body, wrap=True)
+            self._pv_extract.setEnabled(True)
+        elif kind == "hex":
+            self._show_text(
                 "Binary asset — no visual decoder for this format yet "
                 "(textures, audio and models need converters). Hex view of "
-                "the first bytes:\n\n"
-                + game_index.hexdump(data, limit=self._PREVIEW_HEX_CAP))
+                "the first bytes:\n\n" + res.get("text", ""), wrap=False)
+            self._pv_extract.setEnabled(True)
+        elif kind == "toobig":
+            self._show_text(
+                "Asset is too large to preview inline.\nUse “Extract raw "
+                "file…” to save it to disk.", wrap=True)
+            self._pv_extract.setEnabled(True)
+        elif kind == "meta":
+            self._show_text(
+                "No game folder configured — can't read asset bytes.",
+                wrap=True)
+        else:  # error
+            self._show_text(
+                f"Could not read asset:\n{res.get('error', '')}", wrap=True)
+
+    def _show_text(self, text: str, *, wrap: bool) -> None:
+        self._pv_grid.setVisible(False)
+        self._pv_text.setVisible(True)
+        self._pv_text.setLineWrapMode(
+            self._pv_text.LineWrapMode.WidgetWidth if wrap
+            else self._pv_text.LineWrapMode.NoWrap)
+        self._pv_text.setPlainText(text)
+
+    def _show_grid(self, cols: list, rows: list) -> None:
+        self._pv_text.setVisible(False)
+        self._pv_grid.setVisible(True)
+        self._pv_grid.clear()
+        self._pv_grid.setColumnCount(len(cols))
+        self._pv_grid.setHorizontalHeaderLabels([str(c) for c in cols])
+        self._pv_grid.setRowCount(len(rows))
+        for r, rowvals in enumerate(rows):
+            for c, v in enumerate(rowvals):
+                self._pv_grid.setItem(r, c, QTableWidgetItem(v))
+        # Auto-size only for narrow tables; wide ones (e.g. iteminfo's 113
+        # fields) keep a default width and scroll, so sizing stays instant.
+        if len(cols) <= 25:
+            try:
+                self._pv_grid.resizeColumnsToContents()
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            for c in range(len(cols)):
+                self._pv_grid.setColumnWidth(c, 130)
 
     def _extract_raw(self) -> None:
         """Save the selected asset's real (decoded) bytes to a file."""
