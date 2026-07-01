@@ -10,8 +10,10 @@ the same PAMT parser CDUMM uses everywhere else
 (``cdumm.archive.paz_parse.parse_pamt``); it is injected in ``build_index`` so
 the DB-building and query helpers can be exercised without a real install.
 
-Nothing here extracts or stores asset bytes — only metadata (paths, sizes,
-IDs, and where the bytes live).
+Building the index stores only metadata (paths, sizes, IDs, and where the
+bytes live) — never asset bytes. ``extract_asset`` can then read one asset's
+real bytes back on demand (decrypt + LZ4-decompress) so a caller can preview
+it; ``decode_text`` / ``hexdump`` turn those bytes into something viewable.
 """
 from __future__ import annotations
 
@@ -187,6 +189,97 @@ def category_counts(con: sqlite3.Connection) -> list[dict]:
 
 def get_stats(con: sqlite3.Connection) -> dict:
     return {k: v for k, v in con.execute("SELECT key,value FROM stats")}
+
+
+def get_asset(con: sqlite3.Connection, path: str) -> dict | None:
+    """Full stored row for one asset path (or None). Includes the fields
+    ``extract_asset`` needs that ``search_assets`` omits (comp_size,
+    compressed, encrypted)."""
+    rows = _dicts(con.execute(
+        "SELECT path,archive,category,ext,paz_file,offset,comp_size,"
+        "orig_size,compressed,encrypted FROM assets WHERE path=? LIMIT 1",
+        (path,)))
+    return rows[0] if rows else None
+
+
+# ── on-demand extraction + preview (read one asset's real bytes) ──────
+
+def extract_asset(con: sqlite3.Connection, path: str, game_dir: str) -> bytes:
+    """Read one asset's real bytes back out of its PAZ.
+
+    Reverses the repack pipeline (plaintext -> LZ4 -> ChaCha20): read the
+    stored slice, decrypt if the entry is an encrypted text format, then
+    LZ4-decompress if it was compressed. The ``.paz`` is re-resolved under
+    ``game_dir`` so an index built before the install moved still works.
+
+    Raises KeyError if the path isn't indexed, FileNotFoundError if the
+    archive is gone. A decompress failure (e.g. DDS-split / unsupported
+    codec) falls back to the raw stored bytes rather than raising, so the
+    caller can still show a hex view.
+    """
+    row = get_asset(con, path)
+    if row is None:
+        raise KeyError(path)
+
+    paz = row["paz_file"]
+    if not os.path.exists(paz):
+        # Index may have been built on another machine / before a move.
+        paz = os.path.join(game_dir, row["archive"], os.path.basename(paz))
+    if not os.path.exists(paz):
+        raise FileNotFoundError(paz)
+
+    with open(paz, "rb") as f:
+        f.seek(int(row["offset"]))
+        raw = f.read(int(row["comp_size"]))
+
+    from cdumm.archive import paz_crypto
+    if row["encrypted"]:
+        raw = paz_crypto.decrypt(raw, os.path.basename(path))
+
+    comp, orig = int(row["comp_size"]), int(row["orig_size"])
+    if comp != orig and orig > 0:
+        try:
+            raw = paz_crypto.lz4_decompress(raw, orig)
+        except Exception:  # noqa: BLE001 — DDS-split / type 3-4: show raw
+            pass
+    return raw
+
+
+def decode_text(data: bytes, limit: int = 200_000) -> str | None:
+    """Return decoded text if the bytes look like a text file, else None.
+
+    Tries UTF-8 then UTF-16-LE over a leading sample and only accepts the
+    result when it's overwhelmingly printable — so XML/CSS/JSON/JS assets
+    render as text while binary blobs fall through to a hex view.
+    """
+    sample = data[:limit]
+    if not sample:
+        return ""
+    for enc in ("utf-8", "utf-16-le"):
+        try:
+            s = sample.decode(enc)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not s:
+            continue
+        printable = sum((c.isprintable() or c in "\r\n\t") for c in s)
+        if printable / len(s) >= 0.90:
+            return s
+    return None
+
+
+def hexdump(data: bytes, limit: int = 4096) -> str:
+    """Classic ``offset  hex  ascii`` dump of the first ``limit`` bytes."""
+    out = []
+    chunk = data[:limit]
+    for i in range(0, len(chunk), 16):
+        row = chunk[i:i + 16]
+        hexs = " ".join(f"{b:02X}" for b in row)
+        ascii_ = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        out.append(f"{i:08X}  {hexs:<47}  {ascii_}")
+    if len(data) > limit:
+        out.append(f"… ({len(data):,} bytes total, showing first {limit:,})")
+    return "\n".join(out)
 
 
 # ── full build (integration entry point) ─────────────────────────────

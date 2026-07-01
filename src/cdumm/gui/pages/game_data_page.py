@@ -15,8 +15,9 @@ import sqlite3
 import subprocess
 import tempfile
 
-from PySide6.QtCore import QObject, QThread, Signal
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QTableWidgetItem
+from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QSplitter,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
@@ -62,8 +63,9 @@ class GameDataPage(ToolPageBase):
             description=(
                 "Build a searchable catalog of this Crimson Desert install — "
                 "every asset the game ships plus the keyed game-data tables "
-                "(items, NPCs, quests, skills, drops, ...). Metadata only; no "
-                "asset files are extracted."),
+                "(items, NPCs, quests, skills, drops, ...). Click any result "
+                "to preview it on the right — text formats show as text, "
+                "everything else as hex + metadata — or extract it to disk."),
             run_label="Build / refresh game-data index",
             parent=parent,
         )
@@ -82,7 +84,8 @@ class GameDataPage(ToolPageBase):
     # ── extra controls (persistent — not wiped by _clear_results) ────
     def _build_controls(self) -> None:
         from qfluentwidgets import (BodyLabel, CaptionLabel, LineEdit,
-                                     PushButton, TableWidget)
+                                     PlainTextEdit, PushButton,
+                                     StrongBodyLabel, TableWidget)
         root = self._container.layout()
 
         # Save-location row: path label + Change + Open folder
@@ -119,13 +122,20 @@ class GameDataPage(ToolPageBase):
         self._hits.setFont(_hitf)
         root.insertWidget(root.count() - 1, self._hits)
 
-        self._table = TableWidget(self._container)
+        # Results table (left) + live preview pane (right), in a draggable
+        # splitter so the user can trade list width for preview width.
+        split = QSplitter(Qt.Horizontal, self._container)
+        split.setChildrenCollapsible(False)
+        split.setMinimumHeight(420)
+
+        self._table = TableWidget(split)
         self._table.setColumnCount(4)
         self._table.setHorizontalHeaderLabels(
             ["Path", "Archive", "Type", "Size (bytes)"])
         self._table.verticalHeader().hide()
-        self._table.setMinimumHeight(380)
         self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(
+            self._table.SelectionBehavior.SelectRows)
         # Larger, more readable text + roomier rows.
         _tf = self._table.font()
         _tf.setPixelSize(15)
@@ -135,10 +145,50 @@ class GameDataPage(ToolPageBase):
         self._table.horizontalHeader().setFont(_hf)
         self._table.verticalHeader().setDefaultSectionSize(36)
         try:
-            self._table.setColumnWidth(0, 620)
+            self._table.setColumnWidth(0, 360)
         except Exception:  # noqa: BLE001
             pass
-        root.insertWidget(root.count() - 1, self._table)
+        self._table.itemSelectionChanged.connect(self._on_asset_selected)
+        split.addWidget(self._table)
+
+        # Preview pane: title + metadata + monospace text/hex view + extract.
+        pane = QWidget(split)
+        pv = QVBoxLayout(pane)
+        pv.setContentsMargins(10, 0, 0, 0)
+        pv.setSpacing(6)
+        self._pv_title = StrongBodyLabel("Select an asset to preview", pane)
+        _ptf = self._pv_title.font()
+        _ptf.setPixelSize(16)
+        self._pv_title.setFont(_ptf)
+        pv.addWidget(self._pv_title)
+        self._pv_meta = CaptionLabel("", pane)
+        self._pv_meta.setWordWrap(True)
+        pv.addWidget(self._pv_meta)
+        self._pv_text = PlainTextEdit(pane)
+        self._pv_text.setReadOnly(True)
+        self._pv_text.setLineWrapMode(PlainTextEdit.LineWrapMode.NoWrap)
+        _mf = self._pv_text.font()
+        _mf.setFamily("Consolas")
+        _mf.setStyleHint(_mf.StyleHint.Monospace)
+        _mf.setPixelSize(13)
+        self._pv_text.setFont(_mf)
+        self._pv_text.setPlaceholderText(
+            "Click any row on the left to view that asset.\n\nText formats "
+            "(XML, JSON, JS, CSS) show as text; everything else shows a hex "
+            "+ metadata view. Textures, audio and models need format "
+            "converters, which are a later addition.")
+        pv.addWidget(self._pv_text, 1)
+        self._pv_extract = PushButton("Extract raw file…", pane)
+        self._pv_extract.setEnabled(False)
+        self._pv_extract.clicked.connect(self._extract_raw)
+        pv.addWidget(self._pv_extract)
+        split.addWidget(pane)
+
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        self._preview_bytes: bytes | None = None
+        self._preview_name: str | None = None
+        root.insertWidget(root.count() - 1, split)
 
     # ── engine wiring ────────────────────────────────────────────────
     def set_managers(self, **kwargs) -> None:
@@ -297,3 +347,121 @@ class GameDataPage(ToolPageBase):
             self._table.setItem(i, 2, QTableWidgetItem(str(r["ext"])))
             self._table.setItem(
                 i, 3, QTableWidgetItem(f"{int(r['orig_size']):,}"))
+
+    # ── preview pane ─────────────────────────────────────────────────
+    _PREVIEW_TEXT_CAP = 200_000            # chars shown for text assets
+    _PREVIEW_HEX_CAP = 4096               # bytes shown for the hex view
+    _PREVIEW_SIZE_LIMIT = 32 * 1024 * 1024  # don't inline-decode above this
+
+    def _selected_path(self) -> str | None:
+        items = self._table.selectedItems()
+        if not items:
+            return None
+        cell = self._table.item(items[0].row(), 0)
+        return cell.text() if cell else None
+
+    def _on_asset_selected(self) -> None:
+        """Read + preview the clicked asset (metadata always; text or hex
+        when the bytes are reachable and within the inline size limit)."""
+        path = self._selected_path()
+        if not path:
+            return
+        self._preview_bytes = None
+        self._preview_name = os.path.basename(path)
+        self._pv_extract.setEnabled(False)
+        self._pv_title.setText(self._preview_name)
+
+        row = data = err = None
+        try:
+            con = sqlite3.connect(self._index_path)
+            try:
+                row = game_index.get_asset(con, path)
+                if (row and self._game_dir
+                        and int(row["orig_size"]) <= self._PREVIEW_SIZE_LIMIT):
+                    data = game_index.extract_asset(
+                        con, path, str(self._game_dir))
+            finally:
+                con.close()
+        except Exception as ex:  # noqa: BLE001 — surface to the pane
+            err = str(ex)
+
+        if row is None:
+            self._pv_meta.setText(
+                f"Could not read: {err}" if err else "Asset not in index.")
+            self._pv_text.setPlainText("")
+            return
+
+        flags = []
+        if row["compressed"]:
+            flags.append("LZ4")
+        if row["encrypted"]:
+            flags.append("encrypted")
+        self._pv_meta.setText(
+            f"{row['ext']}  ·  {int(row['orig_size']):,} bytes  ·  archive "
+            f"{row['archive']}  ·  {', '.join(flags) or 'stored raw'}\n{path}")
+
+        if not self._game_dir:
+            self._pv_text.setPlainText(
+                "No game folder configured — can't read asset bytes.")
+            return
+        if int(row["orig_size"]) > self._PREVIEW_SIZE_LIMIT:
+            self._pv_text.setPlainText(
+                f"Asset is {int(row['orig_size']):,} bytes — too large to "
+                "preview inline.\nUse “Extract raw file…” to save it to disk.")
+            self._pv_extract.setEnabled(True)
+            return
+        if err is not None:
+            self._pv_text.setPlainText(f"Could not read asset bytes:\n{err}")
+            return
+        if data is None:
+            self._pv_text.setPlainText("(no data)")
+            return
+
+        self._preview_bytes = data
+        self._pv_extract.setEnabled(True)
+        text = game_index.decode_text(data, limit=self._PREVIEW_TEXT_CAP)
+        if text is not None:
+            if len(text) >= self._PREVIEW_TEXT_CAP:
+                text += ("\n\n… (truncated preview — use Extract raw for the "
+                         "full file)")
+            self._pv_text.setLineWrapMode(
+                self._pv_text.LineWrapMode.WidgetWidth)
+            self._pv_text.setPlainText(text)
+        else:
+            self._pv_text.setLineWrapMode(self._pv_text.LineWrapMode.NoWrap)
+            self._pv_text.setPlainText(
+                "Binary asset — no visual decoder for this format yet "
+                "(textures, audio and models need converters). Hex view of "
+                "the first bytes:\n\n"
+                + game_index.hexdump(data, limit=self._PREVIEW_HEX_CAP))
+
+    def _extract_raw(self) -> None:
+        """Save the selected asset's real (decoded) bytes to a file."""
+        path = self._selected_path()
+        if not path:
+            return
+        data = self._preview_bytes
+        if data is None:                       # large asset — extract on demand
+            try:
+                con = sqlite3.connect(self._index_path)
+                try:
+                    data = game_index.extract_asset(
+                        con, path, str(self._game_dir))
+                finally:
+                    con.close()
+            except Exception as ex:  # noqa: BLE001
+                self._set_status(f"Extract failed: {ex}", "#BF616A")
+                return
+        default = os.path.join(
+            os.path.expanduser("~"),
+            self._preview_name or os.path.basename(path))
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Save extracted asset", default, "All files (*.*)")
+        if not out:
+            return
+        try:
+            with open(out, "wb") as f:
+                f.write(data)
+            self._set_status(f"Saved {len(data):,} bytes to {out}.", "#2E7D32")
+        except Exception as ex:  # noqa: BLE001
+            self._set_status(f"Save failed: {ex}", "#BF616A")

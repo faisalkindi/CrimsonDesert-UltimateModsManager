@@ -147,3 +147,99 @@ def test_build_index_no_archives_raises(tmp_path):
     with pytest.raises(ValueError):
         gi.build_index(str(tmp_path), str(tmp_path / "x.sqlite"),
                        parse_pamt=lambda *a, **k: [])
+
+
+# ── on-demand extraction + preview helpers ───────────────────────────
+
+def _con_with_asset(path, paz_file, offset, comp, orig, enc=0):
+    """In-memory index carrying exactly one hand-built asset row."""
+    con = sqlite3.connect(":memory:")
+    gi.create_schema(con)
+    con.execute(
+        "INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (path, "0008", gi.category_of(path), gi.ext_of(path),
+         paz_file, offset, comp, orig, int(comp != orig), enc))
+    gi.finalize(con)
+    return con
+
+
+def _write_paz(tmp_path, payload, prefix=b"PAZ0hdr!"):
+    """A fake .paz: prefix bytes then the stored payload; returns (path, off)."""
+    p = tmp_path / "0008" / "8.paz"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(prefix + payload)
+    return str(p), len(prefix)
+
+
+def test_get_asset_returns_extract_fields():
+    con = _con_with_asset("ui/x.xml", "/g/0008/8.paz", 0, 5, 9, enc=1)
+    row = gi.get_asset(con, "ui/x.xml")
+    assert row["comp_size"] == 5 and row["orig_size"] == 9
+    assert row["compressed"] == 1 and row["encrypted"] == 1
+    assert gi.get_asset(con, "nope") is None
+
+
+def test_extract_uncompressed(tmp_path):
+    data = b"hello world, plain stored bytes"
+    paz, off = _write_paz(tmp_path, data)
+    con = _con_with_asset("gamedata/x.txt", paz, off, len(data), len(data))
+    assert gi.extract_asset(con, "gamedata/x.txt", str(tmp_path)) == data
+
+
+def test_extract_compressed_roundtrip(tmp_path):
+    import pytest
+    pytest.importorskip("lz4")
+    from cdumm.archive import paz_crypto
+    plain = b"<root>" + b"AB" * 500 + b"</root>"     # compressible
+    payload = paz_crypto.lz4_compress(plain)
+    assert len(payload) != len(plain)                # actually compressed
+    paz, off = _write_paz(tmp_path, payload)
+    con = _con_with_asset("gamedata/x.bin", paz, off, len(payload), len(plain))
+    assert gi.extract_asset(con, "gamedata/x.bin", str(tmp_path)) == plain
+
+
+def test_extract_encrypted_roundtrip(tmp_path):
+    import pytest
+    from cdumm.archive import paz_crypto
+    try:
+        stored = paz_crypto.encrypt(b"<xml>secret</xml>", "x.xml")
+    except Exception:                                # no crypto backend
+        pytest.skip("no ChaCha20 backend available")
+    paz, off = _write_paz(tmp_path, stored)
+    con = _con_with_asset("ui/x.xml", paz, off, len(stored), len(stored), enc=1)
+    assert gi.extract_asset(
+        con, "ui/x.xml", str(tmp_path)) == b"<xml>secret</xml>"
+
+
+def test_extract_reresolves_paz_under_game_dir(tmp_path):
+    data = b"relocated install bytes"
+    paz, off = _write_paz(tmp_path, data)            # real file at tmp/0008/8.paz
+    # Stored path is stale (old machine); extract must re-resolve via game_dir.
+    con = _con_with_asset("gamedata/x.txt",
+                          r"E:\old\0008\8.paz", off, len(data), len(data))
+    assert gi.extract_asset(con, "gamedata/x.txt", str(tmp_path)) == data
+
+
+def test_extract_missing_asset_and_missing_paz(tmp_path):
+    import pytest
+    con = _con_with_asset("gamedata/x.txt", str(tmp_path / "gone.paz"),
+                          0, 4, 4)
+    with pytest.raises(KeyError):
+        gi.extract_asset(con, "not/indexed", str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        gi.extract_asset(con, "gamedata/x.txt", str(tmp_path))
+
+
+def test_decode_text_accepts_text_rejects_binary():
+    assert gi.decode_text(b"<root>hi</root>\n") == "<root>hi</root>\n"
+    assert gi.decode_text("héllo".encode("utf-16-le")) == "héllo"
+    assert gi.decode_text(b"") == ""
+    assert gi.decode_text(bytes(range(256)) * 8) is None   # mostly non-print
+
+
+def test_hexdump_shape_and_truncation():
+    d = gi.hexdump(b"ABC\x00\xff", limit=64)
+    assert d.startswith("00000000  41 42 43 00 FF")
+    assert "ABC.." in d
+    big = gi.hexdump(b"\x00" * 100, limit=16)
+    assert "showing first 16" in big and "100 bytes total" in big
