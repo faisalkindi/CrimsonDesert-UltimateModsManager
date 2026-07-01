@@ -141,13 +141,24 @@ def test_apply_engine_warning_includes_skip_details():
     assert anchor != -1
     # Look in the next ~30 lines
     block = src[anchor:anchor + 1500]
-    assert "label" in block, (
-        "warning must reference the patch label so users know "
-        "which entries skipped")
-    assert "expected" in block.lower(), (
-        "warning must show the expected bytes so users can "
-        "diagnose game-version mismatch themselves")
-    assert "actual" in block.lower() or "got" in block.lower(), (
-        "warning must show the actual bytes for the same reason")
+    # Per-patch details (label / expected / actual) are formatted by the
+    # shared log_patch_skips() helper so the InfoBar pop-up and the
+    # bug-report log stay in lockstep (#222). Assert the block delegates to
+    # it and keeps the JMM "X applied, Y skipped" shape, and that the
+    # formatter itself carries the label + expected + actual detail.
+    assert "log_patch_skips(" in block, (
+        "the skip block must delegate to the shared log_patch_skips() "
+        "formatter so details reach both the InfoBar and the log")
     # And the JMM-parity 'X applied, Y skipped' shape
     assert "skipped" in block.lower()
+    fmt_start = src.find("def log_patch_skips")
+    assert fmt_start != -1, "log_patch_skips() formatter must be defined"
+    fmt = src[fmt_start:fmt_start + 2500]
+    assert "label" in fmt, (
+        "the skip formatter must reference the patch label so users "
+        "know which entries skipped")
+    assert "expected" in fmt.lower(), (
+        "the skip formatter must show the expected bytes so users can "
+        "diagnose game-version mismatch themselves")
+    assert "actual" in fmt.lower() or "got" in fmt.lower(), (
+        "the skip formatter must show the actual bytes for the same reason")
