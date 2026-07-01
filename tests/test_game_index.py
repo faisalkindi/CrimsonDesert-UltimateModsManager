@@ -243,3 +243,22 @@ def test_hexdump_shape_and_truncation():
     assert "ABC.." in d
     big = gi.hexdump(b"\x00" * 100, limit=16)
     assert "showing first 16" in big and "100 bytes total" in big
+
+
+def test_decode_image_png_roundtrips_and_downscales():
+    import pytest
+    PILImage = pytest.importorskip("PIL.Image")
+    import io
+    buf = io.BytesIO()
+    PILImage.new("RGB", (2000, 1000), (10, 20, 30)).save(buf, format="PNG")
+    r = gi.decode_image(buf.getvalue(), "x.png", max_dim=512)
+    assert r is not None
+    assert r["orig_w"] == 2000 and r["orig_h"] == 1000
+    assert max(r["width"], r["height"]) == 512            # downscaled
+    assert r["png"][:8] == b"\x89PNG\r\n\x1a\n"             # valid PNG out
+
+
+def test_decode_image_rejects_non_images():
+    # Not an image and not an image extension → no decode attempt / None.
+    assert gi.decode_image(b"not an image at all", "x.bin") is None
+    assert gi.decode_image(bytes(64), "gamedata/iteminfo.pabgb") is None

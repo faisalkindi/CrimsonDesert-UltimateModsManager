@@ -282,6 +282,47 @@ def hexdump(data: bytes, limit: int = 4096) -> str:
     return "\n".join(out)
 
 
+_IMAGE_EXTS = (".dds", ".png", ".jpg", ".jpeg", ".bmp", ".tga")
+
+
+def decode_image(data: bytes, path: str = "", max_dim: int = 1024):
+    """Decode an image asset (chiefly the game's standard DDS textures) to a
+    small PNG for previewing.
+
+    Returns ``{png, width, height, orig_w, orig_h, mode}`` or None when the
+    bytes aren't a decodable image (not an image, an unsupported DDS codec
+    such as BC7, or Pillow missing). The output is downscaled so its long
+    edge is at most ``max_dim`` — a cheap PNG the GUI can show. Pillow does
+    the decode and is called off the UI thread by the preview worker.
+    """
+    if not (data[:4] == b"DDS " or path.lower().endswith(_IMAGE_EXTS)):
+        return None
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001 — Pillow is optional
+        return None
+    import io
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+    except Exception:  # noqa: BLE001 — unsupported codec / not an image
+        return None
+    ow, oh = im.size
+    if im.mode not in ("RGB", "RGBA", "L", "LA"):
+        try:
+            im = im.convert("RGBA")
+        except Exception:  # noqa: BLE001
+            return None
+    w, h = im.size
+    if w and h and max(w, h) > max_dim:
+        scale = max_dim / max(w, h)
+        im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return {"png": buf.getvalue(), "width": im.size[0], "height": im.size[1],
+            "orig_w": ow, "orig_h": oh, "mode": im.mode}
+
+
 # ── full build (integration entry point) ─────────────────────────────
 
 def build_index(game_dir: str, out_path: str, *,

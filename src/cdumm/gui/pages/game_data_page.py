@@ -16,9 +16,10 @@ import subprocess
 import tempfile
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView,
-                               QSizePolicy, QSplitter, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+                               QScrollArea, QSizePolicy, QSplitter,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
@@ -109,7 +110,7 @@ class _PreviewWorker(QObject):
     ready = Signal(dict)
 
     def __init__(self, index_path, game_dir, path, gen,
-                 byte_limit, table_limit, text_cap, hex_cap):
+                 byte_limit, table_limit, image_limit, text_cap, hex_cap):
         super().__init__()
         self._index_path = index_path
         self._game_dir = game_dir
@@ -117,6 +118,7 @@ class _PreviewWorker(QObject):
         self._gen = gen
         self._byte_limit = byte_limit
         self._table_limit = table_limit
+        self._image_limit = image_limit
         self._text_cap = text_cap
         self._hex_cap = hex_cap
 
@@ -171,11 +173,26 @@ class _PreviewWorker(QObject):
         if not gd:
             res.update(kind="meta")
             return
-        # 3) too big for an inline byte preview
+
+        # 3) image asset (chiefly DDS textures) → rendered PNG for the pane
+        if self._path.lower().endswith(game_index._IMAGE_EXTS):
+            if orig > self._image_limit:
+                res.update(kind="toobig")
+                return
+            data = game_index.extract_asset(con, self._path, gd)
+            img = game_index.decode_image(data, self._path)
+            if img:
+                res.update(kind="image", img=img)
+            else:  # unsupported codec (e.g. BC7) → show the header bytes
+                res.update(kind="hex",
+                           text=game_index.hexdump(data, limit=self._hex_cap))
+            return
+
+        # 4) too big for an inline byte preview
         if orig > self._byte_limit:
             res.update(kind="toobig")
             return
-        # 4) text or hex
+        # 5) text or hex
         data = game_index.extract_asset(con, self._path, gd)
         text = game_index.decode_text(data, limit=self._text_cap)
         if text is not None:
@@ -327,9 +344,9 @@ class GameDataPage(ToolPageBase):
         self._pv_text.setPlaceholderText(
             "Click any row on the left to view that asset.\n\nKeyed data "
             "tables (items, NPCs, quests, skills, drops …) open as a grid of "
-            "records. Text formats (XML, JSON, JS, CSS) show as text; "
-            "everything else shows a hex + metadata view. Textures, audio and "
-            "models need format converters, which are a later addition.")
+            "records, DDS textures render as images, and text formats "
+            "(XML, JSON, JS, CSS) show as text; everything else shows a "
+            "hex + metadata view.")
         pv.addWidget(self._pv_text, 1)
 
         # Grid view for keyed game-data tables (.pabgb), parsed via CDUMM's
@@ -343,6 +360,16 @@ class GameDataPage(ToolPageBase):
         self._pv_grid.verticalHeader().setDefaultSectionSize(30)
         self._pv_grid.setVisible(False)
         pv.addWidget(self._pv_grid, 1)
+
+        # Image view for textures (DDS decoded to PNG). Hidden until selected.
+        self._pv_image = QLabel(pane)
+        self._pv_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pv_img_scroll = QScrollArea(pane)
+        self._pv_img_scroll.setWidget(self._pv_image)
+        self._pv_img_scroll.setWidgetResizable(True)
+        self._pv_img_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pv_img_scroll.setVisible(False)
+        pv.addWidget(self._pv_img_scroll, 1)
 
         self._pv_extract = PushButton("Extract raw file…", pane)
         self._pv_extract.setEnabled(False)
@@ -523,6 +550,7 @@ class GameDataPage(ToolPageBase):
     _PREVIEW_HEX_CAP = 4096               # bytes shown for the hex view
     _PREVIEW_SIZE_LIMIT = 4 * 1024 * 1024   # inline byte-preview ceiling
     _TABLE_SIZE_LIMIT = 8 * 1024 * 1024     # parse .pabgb data tables up to here
+    _IMAGE_SIZE_LIMIT = 64 * 1024 * 1024    # decode DDS textures up to here
     #   Reading / decoding / parsing all run on a background worker, so these
     #   caps just bound memory + latency — they no longer gate the UI thread.
 
@@ -553,8 +581,8 @@ class GameDataPage(ToolPageBase):
             self._index_path,
             str(self._game_dir) if self._game_dir else "",
             path, self._pv_gen, self._PREVIEW_SIZE_LIMIT,
-            self._TABLE_SIZE_LIMIT, self._PREVIEW_TEXT_CAP,
-            self._PREVIEW_HEX_CAP)
+            self._TABLE_SIZE_LIMIT, self._IMAGE_SIZE_LIMIT,
+            self._PREVIEW_TEXT_CAP, self._PREVIEW_HEX_CAP)
         w.moveToThread(th)
         th.started.connect(w.run)
         w.ready.connect(self._on_preview_ready)
@@ -600,6 +628,17 @@ class GameDataPage(ToolPageBase):
             self._pv_extract.setEnabled(True)
             return
 
+        if kind == "image":
+            img = res.get("img", {})
+            self._pv_meta.setText(
+                f"texture  ·  {img.get('orig_w', '?')}×"
+                f"{img.get('orig_h', '?')}  ·  {img.get('mode', '')}"
+                + (f"  ·  {meta}" if meta else "")
+                + f"\n{res.get('path', '')}")
+            self._show_image(img.get("png", b""))
+            self._pv_extract.setEnabled(True)
+            return
+
         self._pv_meta.setText(f"{meta}\n{res.get('path', '')}" if meta
                               else res.get("path", ""))
         if kind == "text":
@@ -630,14 +669,31 @@ class GameDataPage(ToolPageBase):
 
     def _show_text(self, text: str, *, wrap: bool) -> None:
         self._pv_grid.setVisible(False)
+        self._pv_img_scroll.setVisible(False)
         self._pv_text.setVisible(True)
         self._pv_text.setLineWrapMode(
             self._pv_text.LineWrapMode.WidgetWidth if wrap
             else self._pv_text.LineWrapMode.NoWrap)
         self._pv_text.setPlainText(text)
 
+    def _show_image(self, png: bytes) -> None:
+        self._pv_text.setVisible(False)
+        self._pv_grid.setVisible(False)
+        self._pv_img_scroll.setVisible(True)
+        pm = QPixmap()
+        if png:
+            pm.loadFromData(png, "PNG")
+        # Fit to the pane width (preserve aspect); the scroll area handles
+        # anything taller than the viewport.
+        avail = self._pv_img_scroll.viewport().width() or 600
+        if not pm.isNull() and pm.width() > avail:
+            pm = pm.scaledToWidth(
+                avail, Qt.TransformationMode.SmoothTransformation)
+        self._pv_image.setPixmap(pm)
+
     def _show_grid(self, cols: list, rows: list) -> None:
         self._pv_text.setVisible(False)
+        self._pv_img_scroll.setVisible(False)
         self._pv_grid.setVisible(True)
         self._pv_grid.clear()
         self._pv_grid.setColumnCount(len(cols))
