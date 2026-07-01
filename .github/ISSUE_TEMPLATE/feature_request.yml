@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement or a new capability for CDUMM.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of CDUMM does this touch?
+      options:
+        - Mod install / apply
+        - Conflict handling & load order
+        - Updates / Nexus integration
+        - Backups & safety
+        - Interface / usability
+        - Other
+    validations:
+      required: false
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What are you trying to do that's awkward or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like CDUMM to do?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: Anything you've tried or considered instead.
+    validations:
+      required: false

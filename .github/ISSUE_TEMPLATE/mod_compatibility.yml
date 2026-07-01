@@ -1,0 +1,71 @@
+name: Mod won't install or apply
+description: A specific mod fails to install, or only part of it applies (often a game-version mismatch).
+title: "[Mod]: "
+labels: ["mod-compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when **one specific mod** doesn't install or only partly applies.
+
+        If CDUMM showed a "patches skipped" warning after Apply, that usually
+        means the mod was built for a different game version — see the pinned
+        **FAQ**. Paste the skipped-patch text below so we can confirm.
+  - type: input
+    id: mod
+    attributes:
+      label: Mod name + Nexus page
+      placeholder: "Example: Even Faster Vanilla Animations Trimmer — https://www.nexusmods.com/crimsondesert/mods/774"
+    validations:
+      required: true
+  - type: input
+    id: mod-version
+    attributes:
+      label: Mod version
+    validations:
+      required: false
+  - type: dropdown
+    id: mod-type
+    attributes:
+      label: Mod type (if known)
+      options:
+        - PAZ (game data / archive)
+        - ASI plugin
+        - JSON / Format 3 patch
+        - Preset / configurable
+        - Not sure
+    validations:
+      required: false
+  - type: textarea
+    id: skipped
+    attributes:
+      label: Skipped-patch / error text
+      description: Paste the post-Apply warning (the "expected … got …" lines) or any error CDUMM showed.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: game-version
+    attributes:
+      label: Your game version
+      description: Shown in CDUMM's bug report (Game Version Hash) or via Steam.
+    validations:
+      required: false
+  - type: dropdown
+    id: other-manager
+    attributes:
+      label: Does the mod work in another manager (e.g. DMM) on the same game version?
+      options:
+        - Haven't tried
+        - Yes, it works there
+        - No, it fails there too
+    validations:
+      required: false
+  - type: textarea
+    id: report
+    attributes:
+      label: CDUMM bug report
+      description: Paste the full report from CDUMM's built-in generator (it scrubs your Windows username).
+      render: text
+    validations:
+      required: false

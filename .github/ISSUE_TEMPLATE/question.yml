@@ -1,0 +1,23 @@
+name: Question / how-to
+description: Ask how to do something, or whether a behavior is expected.
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Many common questions are answered in the pinned **FAQ** — please check
+        it first. If it's not covered there, ask away.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before asking
+      options:
+        - label: I checked the pinned FAQ and didn't find the answer
+          required: true

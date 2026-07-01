@@ -1,0 +1,47 @@
+# Dedicated issue labels for CDUMM triage (in addition to GitHub's defaults
+# such as bug / enhancement / question / documentation / duplicate / wontfix).
+#
+# These can't be created through a pull request directly — labels live in repo
+# settings, not in files. A maintainer can apply this set either way:
+#   • run the `gh label create` commands listed in this PR's description, or
+#   • point a label-sync action (e.g. EndBug/label-sync, additive / skip-delete)
+#     at this file.
+#
+# Colors are hex without the leading '#'.
+
+- name: mod-compatibility
+  color: "5319e7"
+  description: A specific mod won't install or only partly applies
+- name: version-drift
+  color: "b60205"
+  description: Mod built for a different game version; byte offsets moved
+- name: install-failure
+  color: "d93f0b"
+  description: Install / drag-and-drop / Apply fails (often admin or Program Files)
+- name: crash
+  color: "e11d21"
+  description: CDUMM or the game crashes
+- name: update-check
+  color: "0e8a16"
+  description: Nexus update detection / linking
+- name: paz
+  color: "1d76db"
+  description: PAZ (game data / archive) mod
+- name: asi
+  color: "fbca04"
+  description: ASI plugin / loader
+- name: format3
+  color: "c5def5"
+  description: JSON / Format 3 (.field.json) mods
+- name: ui
+  color: "bfd4f2"
+  description: Interface / usability
+- name: needs-info
+  color: "d4c5f9"
+  description: Waiting on more detail from the reporter (repro / bug report)
+- name: not-a-bug
+  color: "ededed"
+  description: Working as intended (e.g. a mismatched patch was safely skipped)
+- name: upstream-game
+  color: "fef2c0"
+  description: Caused by a game update, not by CDUMM

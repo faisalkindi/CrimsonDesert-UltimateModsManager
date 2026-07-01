@@ -1,0 +1,47 @@
+name: Crash report
+description: CDUMM crashed, or the game crashes after applying mods.
+title: "[Crash]: "
+labels: ["crash"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For **game-launch** crashes after applying mods, the pinned **FAQ**
+        covers the two usual causes (a missing `meta/` file, or a snapshot taken
+        before a game update). Please try those first, then file this if it
+        still crashes.
+  - type: dropdown
+    id: when
+    attributes:
+      label: When does it crash?
+      options:
+        - CDUMM crashes on startup
+        - CDUMM crashes during import or Apply
+        - Game crashes at launch (after applying mods)
+        - Game crashes in-game
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: CDUMM bug report (includes crash trace)
+      description: >
+        Paste the full report from CDUMM's generator. If CDUMM itself crashed,
+        its report includes the crash trace from the previous session.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: What were you doing when it crashed?
+    validations:
+      required: false
+  - type: checkboxes
+    id: tried
+    attributes:
+      label: Already tried
+      options:
+        - label: Verified game files via Steam
+        - label: Rescanned game files in CDUMM and re-applied
+        - label: I'm on the latest CDUMM release
