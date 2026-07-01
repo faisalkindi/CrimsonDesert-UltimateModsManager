@@ -51,7 +51,7 @@ class _ActivityEntryCard(CardWidget):
         badge.setFixedWidth(80)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
-            f"background: {color}{alpha}; color: {color}; "
+            f"background: #{alpha}{color.lstrip('#')}; color: {color}; "
             f"border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 12px;"
         )
         layout.addWidget(badge)
@@ -107,7 +107,7 @@ class _ActivityEntryCard(CardWidget):
             c = category_color(self._category, dark=dark)
             alpha = "33" if dark else "20"
             self._badge.setStyleSheet(
-                f"background: {c}{alpha}; color: {c}; "
+                f"background: #{alpha}{c.lstrip('#')}; color: {c}; "
                 f"border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 12px;"
             )
 
