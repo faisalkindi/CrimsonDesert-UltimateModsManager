@@ -262,3 +262,19 @@ def test_decode_image_rejects_non_images():
     # Not an image and not an image extension → no decode attempt / None.
     assert gi.decode_image(b"not an image at all", "x.bin") is None
     assert gi.decode_image(bytes(64), "gamedata/iteminfo.pabgb") is None
+
+
+def test_dds_split_decompress_roundtrips():
+    import pytest
+    pytest.importorskip("lz4")
+    from cdumm.archive import paz_crypto
+    header = b"DDS " + bytes(124)            # 128-byte plaintext DDS header
+    body = b"PIXELDATA" * 400                # compressible pixel body
+    stored = header + paz_crypto.lz4_compress(body)   # header + LZ4 body
+    out = gi._dds_split_decompress(stored, len(header) + len(body))
+    assert out == header + body
+
+
+def test_dds_split_decompress_rejects_non_dds():
+    assert gi._dds_split_decompress(b"\x00" * 200, 500) is None       # no magic
+    assert gi._dds_split_decompress(b"DDS " + bytes(60), 500) is None  # too short

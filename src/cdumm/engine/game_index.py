@@ -204,6 +204,24 @@ def get_asset(con: sqlite3.Connection, path: str) -> dict | None:
 
 # ── on-demand extraction + preview (read one asset's real bytes) ──────
 
+def _dds_split_decompress(raw: bytes, orig: int) -> bytes | None:
+    """Recover a 'DDS-split' texture: a plaintext DDS header + one LZ4 block
+    for the pixel body. Returns header + decompressed body, or None if this
+    isn't a single-block DDS-split. The header is 128 bytes, or 148 for DX10
+    (the extra 20-byte DXGI header)."""
+    if raw[:4] != b"DDS " or len(raw) < 128:
+        return None
+    hdr = 148 if raw[84:88] == b"DX10" else 128
+    if orig <= hdr:
+        return None
+    from cdumm.archive import paz_crypto
+    try:
+        body = paz_crypto.lz4_decompress(raw[hdr:], orig - hdr)
+    except Exception:  # noqa: BLE001 — chunked / unsupported codec
+        return None
+    return raw[:hdr] + body
+
+
 def extract_asset(con: sqlite3.Connection, path: str, game_dir: str) -> bytes:
     """Read one asset's real bytes back out of its PAZ.
 
@@ -240,8 +258,13 @@ def extract_asset(con: sqlite3.Connection, path: str, game_dir: str) -> bytes:
     if comp != orig and orig > 0:
         try:
             raw = paz_crypto.lz4_decompress(raw, orig)
-        except Exception:  # noqa: BLE001 — DDS-split / type 3-4: show raw
-            pass
+        except Exception:  # noqa: BLE001
+            # Whole-buffer LZ4 failed — try DDS-split (plaintext header + one
+            # LZ4 body). If that's not it either (chunked / type 3-4), keep
+            # the raw bytes so the caller can still show a hex view.
+            split = _dds_split_decompress(raw, orig)
+            if split is not None:
+                raw = split
     return raw
 
 
