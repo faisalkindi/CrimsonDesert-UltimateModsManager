@@ -65,17 +65,40 @@ def _cell(v) -> str:
     return s if len(s) <= 200 else s[:200] + "…"
 
 
-def _shape_records(records: dict, schema) -> tuple[list, list, int]:
-    """Turn parse_records output into (columns, rows, total) for the grid.
+def _shape_records(records: dict, schema) -> tuple[list, list, int, float]:
+    """Turn parse_records output into (columns, rows, total, health).
 
     Columns are ``_key`` + ``_name`` + the schema's field names in order;
     rows are stringified and capped to the first ``_GRID_ROW_CAP`` by key.
+    ``health`` is the fraction of schema-field columns whose sampled values
+    look unusable — constant, all-zero/None, or simply mirroring the key —
+    i.e. a signal that CDUMM's patch-oriented parser mis-read this table's
+    fields (its job is diffing, not a clean human dump).
     """
     field_names = [f.name for f in schema.fields] if schema else []
     cols = ["_key", "_name"] + field_names
-    rows = [[_cell(records[k].get(c)) for c in cols]
-            for k in sorted(records)[:_GRID_ROW_CAP]]
-    return cols, rows, len(records)
+    keys = sorted(records)[:_GRID_ROW_CAP]
+    rows = [[_cell(records[k].get(c)) for c in cols] for k in keys]
+
+    suspect = 0
+    sample = keys[:60]
+    for fn in field_names:
+        vals = [records[k].get(fn) for k in sample]
+        sv = [str(v) for v in vals]
+        const = len(set(sv)) == 1
+        zero = all(s in ("", "None") or set(s) <= set("0") for s in sv)
+        seq = False
+        try:
+            iv = [int(v) for v in vals]
+            seq = len(iv) > 2 and all(
+                (iv[i] - iv[0]) == (sample[i] - sample[0])
+                for i in range(len(iv)))
+        except (TypeError, ValueError):
+            pass
+        if const or zero or seq:
+            suspect += 1
+    health = (suspect / len(field_names)) if field_names else 0.0
+    return cols, rows, len(records), health
 
 
 class _PreviewWorker(QObject):
@@ -138,10 +161,10 @@ class _PreviewWorker(QObject):
                 except Exception:  # noqa: BLE001 — fall back to a raw view
                     recs = {}
                 if recs:
-                    cols, rows, total = _shape_records(
+                    cols, rows, total, health = _shape_records(
                         recs, sem.get_schema(table))
-                    res.update(kind="table", table=table,
-                               cols=cols, rows=rows, total=total)
+                    res.update(kind="table", table=table, cols=cols,
+                               rows=rows, total=total, health=health)
                     return
 
         # 2) no game folder → metadata only
@@ -564,9 +587,15 @@ class GameDataPage(ToolPageBase):
             total = res.get("total", 0)
             shown = len(res.get("rows", []))
             more = f" (showing first {shown:,})" if shown < total else ""
+            if res.get("health", 0.0) >= 0.9:
+                note = ("\n⚠ field columns didn't parse cleanly for this "
+                        "table on this build — trust _key and _name only")
+            else:
+                note = ("\nfield columns are experimental (from CDUMM's patch "
+                        "parser); _key and _name are authoritative")
             self._pv_meta.setText(
                 f"data table “{res.get('table', '')}”  ·  {total:,} records"
-                f"{more}\n{res.get('path', '')}")
+                f"{more}{note}\n{res.get('path', '')}")
             self._show_grid(res.get("cols", []), res.get("rows", []))
             self._pv_extract.setEnabled(True)
             return
