@@ -296,12 +296,18 @@ class ActivityPage(SmoothScrollArea):
 
     # Per-category chip colors: (light_text, dark_text, light_border, dark_border)
     _CHIP_CATEGORY_COLORS = {
-        "apply":    ("#2E7D32", "#81C784", "#A5D6A7", "#2E7D32"),
-        "revert":   ("#E65100", "#FFB74D", "#FFCC80", "#E65100"),
-        "import":   ("#1565C0", "#64B5F6", "#90CAF9", "#1565C0"),
-        "remove":   ("#C62828", "#EF5350", "#EF9A9A", "#C62828"),
-        "verify":   ("#00796B", "#4DB6AC", "#80CBC4", "#00796B"),
-        "error":    ("#C62828", "#EF5350", "#EF9A9A", "#C62828"),
+        "apply":     ("#2E7D32", "#81C784", "#A5D6A7", "#2E7D32"),
+        "revert":    ("#E65100", "#FFB74D", "#FFCC80", "#E65100"),
+        "import":    ("#1565C0", "#64B5F6", "#90CAF9", "#1565C0"),
+        "remove":    ("#C62828", "#EF5350", "#EF9A9A", "#C62828"),
+        "snapshot":  ("#3949AB", "#7986CB", "#9FA8DA", "#3949AB"),
+        "verify":    ("#00796B", "#4DB6AC", "#80CBC4", "#00796B"),
+        "cleanup":   ("#7B1FA2", "#BA68C8", "#CE93D8", "#7B1FA2"),
+        "warning":   ("#F9A825", "#FFD54F", "#FFE082", "#F9A825"),
+        "error":     ("#C62828", "#EF5350", "#EF9A9A", "#C62828"),
+        "health":    ("#00838F", "#4DD0E1", "#80DEEA", "#00838F"),
+        "fix":       ("#4527A0", "#7E57C2", "#B39DDB", "#4527A0"),
+        "uninstall": ("#455A64", "#90A4AE", "#B0BEC5", "#455A64"),
     }
     # Fallback for categories not in the map above
     _CHIP_DEFAULT_COLORS = ("#4A5568", "#A0AEC0", "#E2E8F0", "#4A5568")
@@ -310,35 +316,41 @@ class ActivityPage(SmoothScrollArea):
     def _apply_chip_style(btn: PushButton, color: str, active: bool,
                           category: str | None = None) -> None:
         from qfluentwidgets import setCustomStyleSheet
+        # Look up the category's palette (fall back to grey). Prefer the
+        # explicit English category key over the (now-localized) button text.
+        cat_key = (category or btn.text()).lower()
+        lt, dt, lb, db = ActivityPage._CHIP_CATEGORY_COLORS.get(
+            cat_key, ActivityPage._CHIP_DEFAULT_COLORS)
+
+        def _tint(hexc: str, aa: str) -> str:
+            # Qt QSS 8-digit hex is #AARRGGBB (alpha FIRST) — build the
+            # translucent fill by PREFIXING the alpha, not suffixing it.
+            return f"#{aa}{hexc.lstrip('#')}"
+
         if active:
+            # Solid fill in the category's saturated colour, white text.
             light = (
-                f"PushButton {{ background: {color}; color: white; "
+                f"PushButton {{ background: {lt}; color: white; "
                 "border: none; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
-                f"PushButton:hover {{ background: {color}; opacity: 0.85; }}"
+                f"PushButton:hover {{ background: {db}; }}"
             )
             dark = (
-                f"PushButton {{ background: {color}; color: white; "
+                f"PushButton {{ background: {db}; color: white; "
                 "border: none; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }"
-                f"PushButton:hover {{ background: {color}; opacity: 0.85; }}"
+                f"PushButton:hover {{ background: {lt}; }}"
             )
-            setCustomStyleSheet(btn, light, dark)
         else:
-            # Look up per-category color, fall back to grey. Prefer the explicit
-            # English category key over the (now-localized) button text.
-            cat_key = (category or btn.text()).lower()
-            lt, dt, lb, db = ActivityPage._CHIP_CATEGORY_COLORS.get(
-                cat_key, ActivityPage._CHIP_DEFAULT_COLORS)
             light = (
-                f"PushButton {{ background: {lt}14; color: {lt}; "
+                f"PushButton {{ background: {_tint(lt, '14')}; color: {lt}; "
                 f"border: 1px solid {lb}; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }}"
-                f"PushButton:hover {{ background: {lt}28; }}"
+                f"PushButton:hover {{ background: {_tint(lt, '28')}; }}"
             )
             dark = (
-                f"PushButton {{ background: {dt}14; color: {dt}; "
+                f"PushButton {{ background: {_tint(dt, '14')}; color: {dt}; "
                 f"border: 1px solid {db}; border-radius: 15px; padding: 0 16px; padding-bottom: 6px; }}"
-                f"PushButton:hover {{ background: {dt}28; }}"
+                f"PushButton:hover {{ background: {_tint(dt, '28')}; }}"
             )
-            setCustomStyleSheet(btn, light, dark)
+        setCustomStyleSheet(btn, light, dark)
 
     def _populate_cards(self, entries: list[dict], search_query: str = "") -> None:
         """Build cards from a list of log entries."""
