@@ -16,9 +16,9 @@ import subprocess
 import tempfile
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QScrollArea, QSizePolicy, QSplitter,
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QHeaderView,
+                               QLabel, QScrollArea, QSizePolicy, QSplitter,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from cdumm.engine import game_index
@@ -203,6 +203,112 @@ class _PreviewWorker(QObject):
                        text=game_index.hexdump(data, limit=self._hex_cap))
 
 
+class _Texture3DView(QDialog):
+    """Pop-up 3D material preview: the selected texture on an orbitable
+    sphere or cube. Built with Qt3D and constructed lazily (Qt3D is only
+    imported when the user opens a 3D preview). The caller wraps
+    construction in try/except so a GPU/driver problem can't take the app
+    down — it just reports the texture can't be shown in 3D."""
+
+    def __init__(self, qimage, title="Texture — 3D preview", parent=None):
+        super().__init__(parent)
+        from PySide6.Qt3DExtras import (Qt3DWindow, QOrbitCameraController,
+                                        QDiffuseMapMaterial, QSphereMesh,
+                                        QCuboidMesh)
+        from PySide6.Qt3DCore import QEntity, QTransform
+        from PySide6.Qt3DRender import (QTexture2D, QPaintedTextureImage,
+                                        QPointLight)
+        from PySide6.QtGui import QVector3D, QColor
+        from qfluentwidgets import CaptionLabel, PushButton
+
+        class _Painted(QPaintedTextureImage):
+            def __init__(self):
+                super().__init__()
+                self._img = None
+
+            def set_image(self, img):
+                self._img = img
+                self.setSize(img.size())
+                self.update()
+
+            def paint(self, painter):
+                if self._img is not None:
+                    painter.drawImage(0, 0, self._img)
+
+        self.setWindowTitle(title)
+        self.resize(720, 660)
+
+        self._window = Qt3DWindow()
+        self._window.defaultFrameGraph().setClearColor(QColor("#20222E"))
+        container = QWidget.createWindowContainer(self._window, self)
+        container.setMinimumSize(400, 400)
+        container.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(8)
+        bar = QHBoxLayout()
+        self._sphere_btn = PushButton("Sphere", self)
+        self._cube_btn = PushButton("Cube", self)
+        self._sphere_btn.clicked.connect(lambda: self._set_shape(True))
+        self._cube_btn.clicked.connect(lambda: self._set_shape(False))
+        hint = CaptionLabel("Drag to orbit · scroll to zoom", self)
+        bar.addWidget(self._sphere_btn)
+        bar.addWidget(self._cube_btn)
+        bar.addStretch(1)
+        bar.addWidget(hint)
+        root_layout.addLayout(bar)
+        root_layout.addWidget(container, 1)
+
+        self._root = QEntity()
+        cam = self._window.camera()
+        cam.lens().setPerspectiveProjection(45.0, 1.0, 0.1, 1000.0)
+        cam.setPosition(QVector3D(0, 0, 3.5))
+        cam.setViewCenter(QVector3D(0, 0, 0))
+        ctrl = QOrbitCameraController(self._root)
+        ctrl.setCamera(cam)
+        ctrl.setLinearSpeed(50.0)
+        ctrl.setLookSpeed(180.0)
+
+        light_ent = QEntity(self._root)
+        light = QPointLight(light_ent)
+        light.setIntensity(1.1)
+        lt = QTransform()
+        lt.setTranslation(QVector3D(0, 0, 8))
+        light_ent.addComponent(light)
+        light_ent.addComponent(lt)
+
+        self._painted = _Painted()
+        tex = QTexture2D(self._root)
+        tex.addTextureImage(self._painted)
+        mat = QDiffuseMapMaterial(self._root)
+        mat.setDiffuse(tex)
+        mat.setAmbient(QColor(80, 80, 80))
+        mat.setSpecular(QColor(28, 28, 28))
+        mat.setShininess(8.0)
+
+        self._sphere = QEntity(self._root)
+        sm = QSphereMesh()
+        sm.setRadius(1.2)
+        sm.setRings(60)
+        sm.setSlices(60)
+        self._sphere.addComponent(sm)
+        self._sphere.addComponent(mat)
+
+        self._cube = QEntity(self._root)
+        cm = QCuboidMesh()
+        self._cube.addComponent(cm)
+        self._cube.addComponent(mat)
+        self._cube.setEnabled(False)
+
+        self._window.setRootEntity(self._root)
+        self._painted.set_image(qimage)
+
+    def _set_shape(self, sphere: bool) -> None:
+        self._sphere.setEnabled(sphere)
+        self._cube.setEnabled(not sphere)
+
+
 class GameDataPage(ToolPageBase):
     """Build, locate, and search an index of the installed game's data."""
 
@@ -371,6 +477,13 @@ class GameDataPage(ToolPageBase):
         self._pv_img_scroll.setVisible(False)
         pv.addWidget(self._pv_img_scroll, 1)
 
+        # "View in 3D" — only shown for image previews; opens a pop-up with
+        # the texture on a rotatable sphere/cube (Qt3D).
+        self._pv_3d_btn = PushButton("View in 3D  ⬤", pane)
+        self._pv_3d_btn.setVisible(False)
+        self._pv_3d_btn.clicked.connect(self._on_view_3d)
+        pv.addWidget(self._pv_3d_btn)
+
         self._pv_extract = PushButton("Extract raw file…", pane)
         self._pv_extract.setEnabled(False)
         self._pv_extract.clicked.connect(self._extract_raw)
@@ -383,6 +496,8 @@ class GameDataPage(ToolPageBase):
         self._preview_name: str | None = None
         self._pv_gen = 0                 # bumped per selection; ignore stale
         self._pv_jobs: list = []         # live (thread, worker) — keep refs
+        self._pv_qimage: QImage | None = None   # current texture, for 3D
+        self._pv_3d_dlg = None                   # open 3D dialog (keep a ref)
         # stretch=1 makes this row absorb the page's spare vertical space
         # (the base layout's trailing addStretch() has factor 0, so it yields).
         root.insertWidget(root.count() - 1, split, 1)
@@ -670,6 +785,7 @@ class GameDataPage(ToolPageBase):
     def _show_text(self, text: str, *, wrap: bool) -> None:
         self._pv_grid.setVisible(False)
         self._pv_img_scroll.setVisible(False)
+        self._pv_3d_btn.setVisible(False)
         self._pv_text.setVisible(True)
         self._pv_text.setLineWrapMode(
             self._pv_text.LineWrapMode.WidgetWidth if wrap
@@ -680,6 +796,9 @@ class GameDataPage(ToolPageBase):
         self._pv_text.setVisible(False)
         self._pv_grid.setVisible(False)
         self._pv_img_scroll.setVisible(True)
+        self._pv_qimage = QImage.fromData(png, "PNG") if png else None
+        self._pv_3d_btn.setVisible(
+            self._pv_qimage is not None and not self._pv_qimage.isNull())
         pm = QPixmap()
         if png:
             pm.loadFromData(png, "PNG")
@@ -694,6 +813,7 @@ class GameDataPage(ToolPageBase):
     def _show_grid(self, cols: list, rows: list) -> None:
         self._pv_text.setVisible(False)
         self._pv_img_scroll.setVisible(False)
+        self._pv_3d_btn.setVisible(False)
         self._pv_grid.setVisible(True)
         self._pv_grid.clear()
         self._pv_grid.setColumnCount(len(cols))
@@ -712,6 +832,19 @@ class GameDataPage(ToolPageBase):
         else:
             for c in range(len(cols)):
                 self._pv_grid.setColumnWidth(c, 130)
+
+    def _on_view_3d(self) -> None:
+        """Open the current texture on a rotatable sphere/cube (pop-up)."""
+        if self._pv_qimage is None or self._pv_qimage.isNull():
+            return
+        try:
+            dlg = _Texture3DView(
+                self._pv_qimage, self._preview_name or "Texture", self)
+        except Exception as ex:  # noqa: BLE001 — Qt3D / GPU/driver issue
+            self._set_status(f"3D preview unavailable: {ex}", "#BF616A")
+            return
+        self._pv_3d_dlg = dlg          # keep a ref so it isn't GC'd
+        dlg.show()
 
     def _extract_raw(self) -> None:
         """Save the selected asset's real (decoded) bytes to a file."""
