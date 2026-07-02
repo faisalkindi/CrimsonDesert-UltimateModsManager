@@ -192,6 +192,18 @@ class _PreviewWorker(QObject):
                            text=game_index.hexdump(data, limit=self._hex_cap))
             return
 
+        # 3.5) Wwise audio (.wem streams / .bnk soundbanks) → metadata + play
+        if self._path.lower().endswith(game_index.WWISE_EXTS):
+            if orig > self._image_limit:
+                res.update(kind="toobig")
+                return
+            data = game_index.extract_asset(con, self._path, gd)
+            audio = game_index.decode_audio(data, self._path)
+            if audio:
+                res.update(kind="audio", audio=audio,
+                           vgmstream=bool(game_index.find_vgmstream()))
+                return
+
         # 4) too big for an inline byte preview
         if orig > self._byte_limit:
             res.update(kind="toobig")
@@ -536,6 +548,18 @@ class GameDataPage(ToolPageBase):
         self._pv_3d_btn.clicked.connect(self._on_view_3d)
         pv.addWidget(self._pv_3d_btn)
 
+        # Wwise audio controls — only shown for .wem/.bnk previews. Play/Export
+        # need the bundled vgmstream; they stay disabled (with a note) if it
+        # isn't present, but raw extract always works.
+        self._pv_play_btn = PushButton("▶  Play", pane)
+        self._pv_play_btn.setVisible(False)
+        self._pv_play_btn.clicked.connect(self._on_play_audio)
+        pv.addWidget(self._pv_play_btn)
+        self._pv_export_btn = PushButton("Export as WAV…", pane)
+        self._pv_export_btn.setVisible(False)
+        self._pv_export_btn.clicked.connect(self._on_export_wav)
+        pv.addWidget(self._pv_export_btn)
+
         self._pv_extract = PushButton("Extract raw file…", pane)
         self._pv_extract.setEnabled(False)
         self._pv_extract.clicked.connect(self._extract_raw)
@@ -845,6 +869,9 @@ class GameDataPage(ToolPageBase):
         elif kind == "struct":
             self._show_struct(res)
             self._pv_extract.setEnabled(True)
+        elif kind == "audio":
+            self._show_audio(res)
+            self._pv_extract.setEnabled(True)
         elif kind == "hex":
             self._show_text(
                 "Binary asset — no visual decoder for this format yet "
@@ -868,6 +895,8 @@ class GameDataPage(ToolPageBase):
         self._pv_grid.setVisible(False)
         self._pv_img_scroll.setVisible(False)
         self._pv_3d_btn.setVisible(False)
+        self._pv_play_btn.setVisible(False)
+        self._pv_export_btn.setVisible(False)
         self._pv_text.setVisible(True)
         self._pv_text.setLineWrapMode(
             self._pv_text.LineWrapMode.WidgetWidth if wrap
@@ -891,9 +920,46 @@ class GameDataPage(ToolPageBase):
                 for r in res.get("rows", [])]
         self._show_grid(cols, rows)
 
+    def _show_audio(self, res: dict) -> None:
+        a = res.get("audio", {})
+        has_vgm = res.get("vgmstream", False)
+        if a.get("kind") == "wem":
+            dur = a.get("duration")
+            durs = f"{dur:.2f} s" if dur else "(shown after decode)"
+            body = ("Wwise audio stream (.wem)\n\n"
+                    f"Codec         {a.get('codec')}\n"
+                    f"Channels      {a.get('channels')}\n"
+                    f"Sample rate   {a.get('sample_rate', 0):,} Hz\n"
+                    f"Audio bytes   {a.get('data_bytes', 0):,}\n"
+                    f"Duration      {durs}\n"
+                    f"Chunks        {', '.join(a.get('chunks', []))}\n")
+            playable = has_vgm
+        else:  # .bnk SoundBank
+            body = ("Wwise SoundBank (.bnk)\n\n"
+                    f"Bank version       {a.get('bank_version')}\n"
+                    f"Sections           {', '.join(a.get('sections', []))}\n"
+                    f"Embedded streams   {a.get('embedded_streams', 0)}\n")
+            playable = False   # banks hold many subsongs — extract, don't play
+        note = ("\nThe game ships all sound through Wwise: .wem are the encoded "
+                "streams (Wwise Vorbis) and .bnk are SoundBanks — Windows can't "
+                "play these directly.\n")
+        if has_vgm:
+            note += ("Use ▶ Play to hear it or Export as WAV for a playable "
+                     "copy; Extract raw file saves the original .wem/.bnk.")
+        else:
+            note += ("Playback needs vgmstream — drop vgmstream-cli.exe into the "
+                     "app's tools/vgmstream folder. Extract raw file works now.")
+        self._show_text(body + note, wrap=True)
+        self._pv_play_btn.setVisible(True)
+        self._pv_play_btn.setEnabled(playable)
+        self._pv_export_btn.setVisible(True)
+        self._pv_export_btn.setEnabled(playable)
+
     def _show_image(self, png: bytes) -> None:
         self._pv_text.setVisible(False)
         self._pv_grid.setVisible(False)
+        self._pv_play_btn.setVisible(False)
+        self._pv_export_btn.setVisible(False)
         self._pv_img_scroll.setVisible(True)
         self._pv_qimage = QImage.fromData(png, "PNG") if png else None
         self._pv_3d_btn.setVisible(
@@ -913,6 +979,8 @@ class GameDataPage(ToolPageBase):
         self._pv_text.setVisible(False)
         self._pv_img_scroll.setVisible(False)
         self._pv_3d_btn.setVisible(False)
+        self._pv_play_btn.setVisible(False)
+        self._pv_export_btn.setVisible(False)
         self._pv_grid.setVisible(True)
         self._pv_grid.clear()
         self._pv_grid.setColumnCount(len(cols))
@@ -975,3 +1043,72 @@ class GameDataPage(ToolPageBase):
             self._set_status(f"Saved {len(data):,} bytes to {out}.", "#2E7D32")
         except Exception as ex:  # noqa: BLE001
             self._set_status(f"Save failed: {ex}", "#BF616A")
+
+    # ── Wwise audio playback / export (via bundled vgmstream) ─────────
+    def _audio_wav(self, path: str) -> str | None:
+        """Decode the selected .wem to a temp WAV via vgmstream. Returns the
+        temp path or None (with a status message) on failure."""
+        data = self._preview_bytes
+        if data is None:                       # large asset — read on demand
+            try:
+                con = sqlite3.connect(self._index_path)
+                try:
+                    data = game_index.extract_asset(
+                        con, path, str(self._game_dir))
+                finally:
+                    con.close()
+            except Exception as ex:  # noqa: BLE001
+                self._set_status(f"Read failed: {ex}", "#BF616A")
+                return None
+        import tempfile
+        fd, wav = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        if not game_index.convert_to_wav(data, wav):
+            self._set_status(
+                "Could not decode audio — is vgmstream installed?", "#BF616A")
+            try:
+                os.unlink(wav)
+            except OSError:
+                pass
+            return None
+        return wav
+
+    def _on_play_audio(self) -> None:
+        path = self._selected_path()
+        if not path:
+            return
+        wav = self._audio_wav(path)
+        if not wav:
+            return
+        try:                                   # winsound is Windows-only
+            import winsound
+            winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self._set_status("Playing…", "#2E7D32")
+        except Exception as ex:  # noqa: BLE001
+            self._set_status(f"Playback failed: {ex}", "#BF616A")
+        # temp WAV is left for the async player; the OS reclaims %TEMP%.
+
+    def _on_export_wav(self) -> None:
+        path = self._selected_path()
+        if not path:
+            return
+        wav = self._audio_wav(path)
+        if not wav:
+            return
+        base = os.path.splitext(
+            self._preview_name or os.path.basename(path))[0]
+        default = os.path.join(os.path.expanduser("~"), base + ".wav")
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Save WAV", default, "WAV audio (*.wav)")
+        try:
+            if out:
+                import shutil
+                shutil.copyfile(wav, out)
+                self._set_status(f"Saved WAV to {out}.", "#2E7D32")
+        except Exception as ex:  # noqa: BLE001
+            self._set_status(f"Save failed: {ex}", "#BF616A")
+        finally:
+            try:
+                os.unlink(wav)
+            except OSError:
+                pass

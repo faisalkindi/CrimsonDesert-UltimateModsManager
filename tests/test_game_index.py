@@ -348,3 +348,46 @@ def test_decode_struct_needs_two_words_and_caps():
     assert r["total_words"] == 1000 and r["shown"] == 512
     r2 = gi.decode_struct(bytes(9))                        # 2 words + 1 tail byte
     assert r2["total_words"] == 2 and r2["trailing"] == 1
+
+
+# ── Wwise audio (.wem / .bnk) ───────────────────────────────────────
+
+def _wem(tag=0xFFFF, ch=1, sr=44100, bits=0, data=b"\x00" * 100):
+    import struct as _s
+    fmt = _s.pack("<HHIIHH", tag, ch, sr, 0, 0, bits)
+    body = (b"fmt " + _s.pack("<I", len(fmt)) + fmt
+            + b"data" + _s.pack("<I", len(data)) + data)
+    return b"RIFF" + _s.pack("<I", 4 + len(body)) + b"WAVE" + body
+
+
+def test_decode_audio_wem_wwise_vorbis():
+    m = gi.decode_audio(_wem(), "sound/195812854.wem")
+    assert m["kind"] == "wem" and m["codec"] == "Wwise Vorbis"
+    assert m["channels"] == 1 and m["sample_rate"] == 44100
+    assert m["data_bytes"] == 100
+    assert "fmt" in m["chunks"] and "data" in m["chunks"]
+
+
+def test_decode_audio_wem_pcm_duration():
+    # PCM stereo / 16-bit / 48kHz, 192,000 data bytes → exactly 1.0 s
+    m = gi.decode_audio(_wem(tag=1, ch=2, sr=48000, bits=16,
+                             data=b"\x00" * 192_000), "x.wem")
+    assert m["codec"] == "PCM" and abs(m["duration"] - 1.0) < 1e-6
+
+
+def test_decode_audio_bnk_soundbank():
+    import struct as _s
+    bkhd = b"BKHD" + _s.pack("<I", 4) + _s.pack("<I", 150)     # version 150
+    didx = b"DIDX" + _s.pack("<I", 24) + b"\x00" * 24          # 2 streams
+    m = gi.decode_audio(bkhd + didx, "sound/y.bnk")
+    assert m["kind"] == "bnk" and m["bank_version"] == 150
+    assert m["sections"] == ["BKHD", "DIDX"] and m["embedded_streams"] == 2
+
+
+def test_decode_audio_rejects_non_audio():
+    assert gi.decode_audio(b"\x01\x00\x00\x00not audio", "x.paatt") is None
+
+
+def test_find_vgmstream_never_raises():
+    r = gi.find_vgmstream()          # str path if bundled/on PATH, else None
+    assert r is None or isinstance(r, str)

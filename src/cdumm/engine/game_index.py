@@ -343,6 +343,109 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
             "trailing": len(data) - nwords * 4}
 
 
+# ── Wwise audio (.wem / .bnk) ─────────────────────────────────────────
+# The game ships ALL sound through Wwise: .wem are the encoded media streams
+# (almost always Wwise Vorbis) and .bnk are SoundBanks. Windows can't play a
+# raw .wem, and Wwise Vorbis can't be decoded in pure Python — so this is a
+# header parse for metadata, paired with vgmstream for actual WAV playback.
+WWISE_EXTS = (".wem", ".bnk")
+_WEM_CODECS = {0x0001: "PCM", 0x0002: "ADPCM", 0x0011: "IMA ADPCM",
+               0x0069: "Wwise IMA", 0x0166: "XMA2",
+               0xFFFE: "WAVE extensible", 0xFFFF: "Wwise Vorbis"}
+
+
+def _parse_wem_header(data: bytes) -> dict | None:
+    if data[:4] not in (b"RIFF", b"RIFX") or data[8:12] != b"WAVE":
+        return None
+    end = ">" if data[:4] == b"RIFX" else "<"
+    pos, chunks = 12, []
+    codec = channels = sample_rate = bits = data_bytes = None
+    while pos + 8 <= len(data):
+        cid = data[pos:pos + 4]
+        csz = struct.unpack_from(end + "I", data, pos + 4)[0]
+        chunks.append(cid.decode("ascii", "replace").strip())
+        if cid == b"fmt " and csz >= 16 and pos + 8 + 16 <= len(data):
+            tag, channels, sample_rate, _br, _ba, bits = \
+                struct.unpack_from(end + "HHIIHH", data, pos + 8)
+            codec = _WEM_CODECS.get(tag, f"0x{tag:04X}")
+        elif cid == b"data":
+            data_bytes = csz
+        pos += 8 + csz + (csz & 1)
+    dur = None
+    if codec == "PCM" and channels and sample_rate and bits and data_bytes:
+        dur = data_bytes / (channels * (bits // 8) * sample_rate)
+    return {"kind": "wem", "codec": codec, "channels": channels,
+            "sample_rate": sample_rate, "bits": bits or None,
+            "data_bytes": data_bytes, "chunks": chunks,
+            "endian": "big" if end == ">" else "little", "duration": dur}
+
+
+def _parse_bnk_header(data: bytes) -> dict | None:
+    if data[:4] != b"BKHD":
+        return None
+    version = struct.unpack_from("<I", data, 8)[0] if len(data) >= 12 else None
+    pos, sections, n_streams = 0, [], 0
+    while pos + 8 <= len(data):
+        sid = data[pos:pos + 4]
+        ssz = struct.unpack_from("<I", data, pos + 4)[0]
+        if not (sid.isalpha() and sid.isupper()):
+            break
+        sections.append(sid.decode("ascii", "replace"))
+        if sid == b"DIDX":            # data index: 12 bytes per embedded stream
+            n_streams = ssz // 12
+        pos += 8 + ssz
+    return {"kind": "bnk", "bank_version": version, "sections": sections,
+            "embedded_streams": n_streams}
+
+
+def decode_audio(data: bytes, path: str = "") -> dict | None:
+    """Parse a Wwise audio container header into readable metadata, or None if
+    it isn't one. Header parse only — the encoded audio needs vgmstream (see
+    ``find_vgmstream`` / ``convert_to_wav``) to become a playable WAV."""
+    if data[:4] in (b"RIFF", b"RIFX"):
+        return _parse_wem_header(data)
+    if data[:4] == b"BKHD":
+        return _parse_bnk_header(data)
+    return None
+
+
+def find_vgmstream() -> str | None:
+    """Locate the vgmstream CLI used to decode Wwise audio to WAV: the copy
+    bundled under ``cdumm/tools/vgmstream/`` first, then anything on PATH."""
+    import shutil
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # …/cdumm
+    for name in ("vgmstream-cli.exe", "vgmstream-cli", "test.exe"):
+        cand = os.path.join(pkg, "tools", "vgmstream", name)
+        if os.path.exists(cand):
+            return cand
+    return shutil.which("vgmstream-cli") or shutil.which("vgmstream_cli")
+
+
+def convert_to_wav(data: bytes, out_wav: str) -> bool:
+    """Decode Wwise ``.wem`` bytes to a standard WAV at ``out_wav`` via
+    vgmstream. Returns True on success, False if vgmstream is unavailable or
+    the decode fails."""
+    exe = find_vgmstream()
+    if not exe:
+        return False
+    import subprocess
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".wem", delete=False)
+    try:
+        tmp.write(data)
+        tmp.close()
+        subprocess.run([exe, "-o", out_wav, tmp.name],
+                       capture_output=True, timeout=60, check=False)
+        return os.path.exists(out_wav) and os.path.getsize(out_wav) > 44
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
     """Printable-ASCII runs of at least ``min_len`` chars — the embedded
     field / type / object names in the game's reflection-serialized binaries
