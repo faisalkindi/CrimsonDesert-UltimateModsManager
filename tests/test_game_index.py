@@ -330,11 +330,13 @@ def test_decode_struct_typed_words_and_keys():
     assert rows[3][4] == "2"                                   # float 2.0
 
 
-def test_decode_struct_blanks_noise_floats():
+def test_decode_struct_always_populates_float():
     import struct as _s
-    # 0x123A6E00 as float32 is ~4e-28 — outside the sane range → blank cell
+    # the float column is never blank: it's the exact IEEE-754 reading of the
+    # bytes even when the word is really an int (a tiny/denormal number)
     data = _s.pack("<I", 1) + _s.pack("<I", 0x123A6E00)
-    assert gi.decode_struct(data)["rows"][1][4] == ""
+    rows = gi.decode_struct(data)["rows"]
+    assert rows[0][4] != "" and rows[1][4] != ""
     # an all-zero word is a legitimate 0.0 and shows "0"
     assert gi.decode_struct(bytes(8))["rows"][1][4] == "0"
 

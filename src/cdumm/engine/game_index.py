@@ -17,7 +17,6 @@ it; ``decode_text`` / ``hexdump`` turn those bytes into something viewable.
 """
 from __future__ import annotations
 
-import math
 import os
 import sqlite3
 import struct
@@ -318,9 +317,9 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
     attributes all become readable. Returns ``None`` when there aren't at
     least two whole words to show — nothing a struct view adds over hex.
 
-    Each row is ``(offset, hex, uint32, int32, float, ascii, is_key)``; the
-    float cell is blank when the bit-pattern isn't a sane finite number
-    (i.e. it's really an int/flag), and ``is_key`` flags values in the
+    Each row is ``(offset, hex, uint32, int32, float, ascii, is_key)`` and
+    every column is always populated; the float is the exact IEEE-754 reading
+    of the same 4 bytes, and ``is_key`` flags values in the
     1,000,000–9,999,999 game-data record-key range.
     """
     nwords = len(data) // 4
@@ -334,12 +333,11 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
         u = int.from_bytes(chunk, "little")
         i = u - 0x1_0000_0000 if u & 0x8000_0000 else u
         f = struct.unpack_from("<f", data, off)[0]
-        if f == 0.0 or (math.isfinite(f) and 1e-4 <= abs(f) < 1e9):
-            fstr = f"{f:.4g}"
-        else:  # an int/flag reinterpreted as float is just noise
-            fstr = ""
+        # Every column is always populated: the float is the exact IEEE-754
+        # reading of the same 4 bytes (a word that's really an int just reads
+        # as a tiny/denormal number) — no blank cells.
         ascii_ = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-        rows.append((f"{off:04X}", chunk.hex(), str(u), str(i), fstr,
+        rows.append((f"{off:04X}", chunk.hex(), str(u), str(i), f"{f:.6g}",
                      ascii_, 1_000_000 <= u <= 9_999_999))
     return {"rows": rows, "total_words": nwords, "shown": shown,
             "trailing": len(data) - nwords * 4}
