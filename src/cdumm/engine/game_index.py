@@ -18,6 +18,7 @@ it; ``decode_text`` / ``hexdump`` turn those bytes into something viewable.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import struct
 import time
@@ -563,6 +564,73 @@ def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
         if s not in seen:
             out.append(s)
     return out
+
+
+_REFLECT_ID = re.compile(r"[A-Za-z][A-Za-z0-9]*$")   # class / type identifier
+
+
+def _raw_ascii_runs(data: bytes, min_len: int = 4, cap: int = 12000) -> list:
+    """Ordered ASCII runs WITHOUT de-duplication (unlike ``extract_strings``),
+    so the field→type alternation of reflection binaries is preserved."""
+    out: list = []
+    cur = bytearray()
+    for b in data:
+        if 32 <= b < 127:
+            cur.append(b)
+        else:
+            if len(cur) >= min_len:
+                out.append(cur.decode("ascii"))
+                if len(out) >= cap:
+                    return out
+            cur = bytearray()
+    if len(cur) >= min_len and len(out) < cap:
+        out.append(cur.decode("ascii"))
+    return out
+
+
+def decode_reflection(data: bytes, limit: int = 4000) -> dict | None:
+    """Parse a verbose reflection-serialized binary (.pae / .paseq / .prefab /
+    .meshinfo / .paproj / …) into the schema it embeds: the object/class names
+    and their ``(field, type)`` pairs, plus any asset references.
+
+    These formats store their own reflection metadata inline as an alternating
+    stream — a class name, then ``_field`` followed by its type, repeating, with
+    nested objects starting a new class section. Returns ``None`` when it isn't
+    one (fewer than 3 field/type pairs), so callers can fall back to the plain
+    string outline / hex. Everything here is the engine's OWN names, read
+    straight from the file — nothing inferred.
+    """
+    ss = _raw_ascii_runs(data, 4, cap=limit * 3)
+    fields: list = []
+    objects: list = []
+    refs: list = []
+    cur = ""
+    i, n = 0, len(ss)
+    while i < n and len(fields) < limit:
+        s = ss[i]
+        if s.startswith("_"):
+            fields.append((cur, s, ss[i + 1] if i + 1 < n else ""))
+            i += 2
+        else:
+            nxt = ss[i + 1] if i + 1 < n else ""
+            if nxt.startswith("_") and _REFLECT_ID.match(s):
+                cur = s
+                objects.append(s)
+                i += 1
+            else:
+                if "/" in s:                  # a real asset-path reference
+                    refs.append(s)
+                i += 1
+    if len(fields) < 3:
+        return None
+    seen: set = set()
+    urefs: list = []
+    for r in refs:
+        if r not in seen:
+            seen.add(r)
+            urefs.append(r)
+    return {"objects": objects, "fields": fields,
+            "refs": urefs[:400], "nfields": len(fields)}
 
 
 def _lz4_stream_decode(src: bytes, pos: int, want: int) -> bytes:

@@ -410,3 +410,30 @@ def test_pick_vgmstream_asset_by_os():
     assert pick(assets, "Darwin", "arm64")["name"] == "vgmstream-mac.zip"
     assert pick([], "Windows", "AMD64") is None      # nothing published
     assert pick(assets, "Plan9", "") is None          # unknown OS
+
+
+# ── reflection schema (.pae / .paseq / .prefab / .meshinfo …) ────────
+
+def test_decode_reflection_pairs_fields_types_and_objects():
+    # magic → class → field/type pairs → nested object → a reference
+    parts = [b"PARC", b"EffectData",
+             b"_effectName", b"staticstringA",
+             b"_lights", b"bool",
+             b"_life", b"float",
+             b"TimelineRootNode",                 # nested object section
+             b"_nodeId", b"uint32",
+             b"fx/thing.action.effect"]           # asset reference
+    r = gi.decode_reflection(b"\x00".join(parts) + b"\x00")
+    assert r is not None
+    assert r["objects"] == ["EffectData", "TimelineRootNode"]
+    fmap = {(o, f): t for o, f, t in r["fields"]}
+    assert fmap[("EffectData", "_effectName")] == "staticstringA"
+    assert fmap[("EffectData", "_lights")] == "bool"
+    assert fmap[("TimelineRootNode", "_nodeId")] == "uint32"
+    assert "fx/thing.action.effect" in r["refs"]
+    assert r["nfields"] == 4
+
+
+def test_decode_reflection_rejects_non_schema():
+    # plain strings, no _field/type pairs → not a reflection binary
+    assert gi.decode_reflection(b"hello\x00world\x00foo\x00bar\x00") is None

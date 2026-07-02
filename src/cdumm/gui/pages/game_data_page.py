@@ -218,6 +218,12 @@ class _PreviewWorker(QObject):
         # Reflection-serialized binaries (.paseq/.prefab/.meshinfo/...) embed
         # their field/type/object names as text — surface those as a readable
         # outline instead of raw hex.
+        # Verbose reflection binaries (.pae/.paseq/.prefab/.meshinfo/…) embed a
+        # full field→type schema; surface it as a named table.
+        refl = game_index.decode_reflection(data)
+        if refl:
+            res.update(kind="schema", **refl)
+            return
         strings = game_index.extract_strings(data)
         if len(strings) >= 6:
             res.update(kind="outline", strings=strings, nstr=len(strings))
@@ -883,6 +889,9 @@ class GameDataPage(ToolPageBase):
                          "full file)")
             self._show_text(body, wrap=True)
             self._pv_extract.setEnabled(True)
+        elif kind == "schema":
+            self._show_schema(res)
+            self._pv_extract.setEnabled(True)
         elif kind == "outline":
             strings = res.get("strings", [])
             self._show_text(
@@ -946,6 +955,29 @@ class GameDataPage(ToolPageBase):
         rows = [[r[0], r[1], r[2], r[3], r[4], r[5], "key" if r[6] else ""]
                 for r in res.get("rows", [])]
         self._show_grid(cols, rows)
+
+    def _show_schema(self, res: dict) -> None:
+        fields = res.get("fields", [])
+        objects = res.get("objects", [])
+        refs = res.get("refs", [])
+        rows = []
+        last_obj = None
+        for obj, name, typ in fields:            # object name only on its first
+            rows.append([obj if obj != last_obj else "", name, typ])
+            last_obj = obj
+        if refs:                                 # asset references / values
+            rows.append(["", "", ""])
+            rows.append([f"references ({len(refs)})", "", ""])
+            for r in refs:
+                rows.append(["", r, ""])
+        note = (
+            f"Reflection schema — {res.get('nfields', len(fields))} fields "
+            f"across {len(objects)} object(s)"
+            + (f", {len(refs)} references" if refs else "")
+            + ". These are the engine's own field + type names, read straight "
+            "from the file (not inferred).")
+        self._pv_meta.setText(note + "\n" + self._pv_meta.text())
+        self._show_grid(["Object", "Field", "Type"], rows)
 
     def _show_audio(self, res: dict) -> None:
         a = res.get("audio", {})
