@@ -313,3 +313,36 @@ def test_extract_strings_pulls_field_names():
     assert "Sequence" in s and "_isAccessLock" in s and "bool" in s
     assert s.count("Sequence") == 1                      # de-duplicated
     assert gi.extract_strings(b"\x00\x01ab\x00", min_len=4) == []  # too short
+
+
+def test_decode_struct_typed_words_and_keys():
+    import struct as _s
+    # version=1, a record key (1,000,040), a negative int, and a float 2.0
+    data = (_s.pack("<I", 1) + _s.pack("<I", 1_000_040)
+            + _s.pack("<i", -5) + _s.pack("<f", 2.0))
+    r = gi.decode_struct(data)
+    assert r is not None
+    assert r["total_words"] == 4 and r["shown"] == 4 and r["trailing"] == 0
+    rows = r["rows"]                     # (off, hex, u32, i32, float, ascii, key)
+    assert rows[0][0] == "0000" and rows[0][2] == "1" and rows[0][6] is False
+    assert rows[1][2] == "1000040" and rows[1][6] is True      # key flagged
+    assert rows[2][2] == "4294967291" and rows[2][3] == "-5"   # signed view
+    assert rows[3][4] == "2"                                   # float 2.0
+
+
+def test_decode_struct_blanks_noise_floats():
+    import struct as _s
+    # 0x123A6E00 as float32 is ~4e-28 — outside the sane range → blank cell
+    data = _s.pack("<I", 1) + _s.pack("<I", 0x123A6E00)
+    assert gi.decode_struct(data)["rows"][1][4] == ""
+    # an all-zero word is a legitimate 0.0 and shows "0"
+    assert gi.decode_struct(bytes(8))["rows"][1][4] == "0"
+
+
+def test_decode_struct_needs_two_words_and_caps():
+    assert gi.decode_struct(b"\x00\x00\x00") is None       # <1 word
+    assert gi.decode_struct(bytes(4)) is None              # only 1 word
+    r = gi.decode_struct(bytes(4000), max_words=512)       # 1000 words
+    assert r["total_words"] == 1000 and r["shown"] == 512
+    r2 = gi.decode_struct(bytes(9))                        # 2 words + 1 tail byte
+    assert r2["total_words"] == 2 and r2["trailing"] == 1

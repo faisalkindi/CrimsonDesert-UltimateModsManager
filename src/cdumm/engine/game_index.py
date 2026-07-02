@@ -17,8 +17,10 @@ it; ``decode_text`` / ``hexdump`` turn those bytes into something viewable.
 """
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
+import struct
 import time
 from typing import Any, Callable, Iterable
 
@@ -303,6 +305,44 @@ def hexdump(data: bytes, limit: int = 4096) -> str:
     if len(data) > limit:
         out.append(f"… ({len(data):,} bytes total, showing first {limit:,})")
     return "\n".join(out)
+
+
+def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
+    """Interpret a small, string-free binary as a table of 32-bit words.
+
+    The game stores fixed-layout structs with no embedded field names for
+    per-record attribute blocks (``.paatt``) and table key indexes
+    (``.pabgh``). There's no schema to name the fields, but showing each
+    4-byte word as uint32 / int32 / float32 is far more legible than a raw
+    hex wall: record keys (1,000,000+n), byte offsets, flags and float
+    attributes all become readable. Returns ``None`` when there aren't at
+    least two whole words to show — nothing a struct view adds over hex.
+
+    Each row is ``(offset, hex, uint32, int32, float, ascii, is_key)``; the
+    float cell is blank when the bit-pattern isn't a sane finite number
+    (i.e. it's really an int/flag), and ``is_key`` flags values in the
+    1,000,000–9,999,999 game-data record-key range.
+    """
+    nwords = len(data) // 4
+    if nwords < 2:
+        return None
+    shown = min(nwords, max_words)
+    rows: list = []
+    for k in range(shown):
+        off = k * 4
+        chunk = data[off:off + 4]
+        u = int.from_bytes(chunk, "little")
+        i = u - 0x1_0000_0000 if u & 0x8000_0000 else u
+        f = struct.unpack_from("<f", data, off)[0]
+        if f == 0.0 or (math.isfinite(f) and 1e-4 <= abs(f) < 1e9):
+            fstr = f"{f:.4g}"
+        else:  # an int/flag reinterpreted as float is just noise
+            fstr = ""
+        ascii_ = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        rows.append((f"{off:04X}", chunk.hex(), str(u), str(i), fstr,
+                     ascii_, 1_000_000 <= u <= 9_999_999))
+    return {"rows": rows, "total_words": nwords, "shown": shown,
+            "trailing": len(data) - nwords * 4}
 
 
 def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:

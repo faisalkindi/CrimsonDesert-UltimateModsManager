@@ -77,6 +77,10 @@ def _shape_records(records: dict, schema) -> tuple[list, list, int, float]:
     fields (its job is diffing, not a clean human dump).
     """
     field_names = [f.name for f in schema.fields] if schema else []
+    # _key and _name are shown as their own leading columns; several tables
+    # (e.g. sequencerspawninfo) also list _key/_name among their schema
+    # fields, which would render a redundant duplicate column — drop those.
+    field_names = [f for f in field_names if f not in ("_key", "_name")]
     cols = ["_key", "_name"] + field_names
     keys = sorted(records)[:_GRID_ROW_CAP]
     rows = [[_cell(records[k].get(c)) for c in cols] for k in keys]
@@ -205,6 +209,13 @@ class _PreviewWorker(QObject):
         strings = game_index.extract_strings(data)
         if len(strings) >= 6:
             res.update(kind="outline", strings=strings, nstr=len(strings))
+            return
+        # No embedded names, but a word-aligned struct (.paatt attribute
+        # blocks, .pabgh key indexes) reads far better as a typed word
+        # table than a raw hex wall.
+        st = game_index.decode_struct(data)
+        if st:
+            res.update(kind="struct", **st)
         else:
             res.update(kind="hex",
                        text=game_index.hexdump(data, limit=self._hex_cap))
@@ -800,6 +811,9 @@ class GameDataPage(ToolPageBase):
                 "file…” for the full bytes.\n\n" + "\n".join(strings),
                 wrap=True)
             self._pv_extract.setEnabled(True)
+        elif kind == "struct":
+            self._show_struct(res)
+            self._pv_extract.setEnabled(True)
         elif kind == "hex":
             self._show_text(
                 "Binary asset — no visual decoder for this format yet "
@@ -828,6 +842,23 @@ class GameDataPage(ToolPageBase):
             self._pv_text.LineWrapMode.WidgetWidth if wrap
             else self._pv_text.LineWrapMode.NoWrap)
         self._pv_text.setPlainText(text)
+
+    def _show_struct(self, res: dict) -> None:
+        total = res.get("total_words", 0)
+        shown = res.get("shown", 0)
+        trailing = res.get("trailing", 0)
+        more = f" · first {shown:,} of {total:,}" if shown < total else ""
+        tail = f" · +{trailing} trailing byte(s)" if trailing else ""
+        self._pv_meta.setText(
+            "Struct view — this format has no embedded field names, so each "
+            "32-bit word is shown as unsigned / signed / float. Values in the "
+            "1,000,000+ range are flagged as likely record keys."
+            f"  ({total:,} words{more}{tail})\n"
+            + self._pv_meta.text())
+        cols = ["Offset", "Bytes", "UInt32", "Int32", "Float32", "ASCII", ""]
+        rows = [[r[0], r[1], r[2], r[3], r[4], r[5], "key" if r[6] else ""]
+                for r in res.get("rows", [])]
+        self._show_grid(cols, rows)
 
     def _show_image(self, png: bytes) -> None:
         self._pv_text.setVisible(False)
