@@ -378,7 +378,7 @@ class GameDataPage(ToolPageBase):
 
     # ── extra controls (persistent — not wiped by _clear_results) ────
     def _build_controls(self) -> None:
-        from qfluentwidgets import (BodyLabel, CaptionLabel, LineEdit,
+        from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, LineEdit,
                                      PlainTextEdit, PushButton,
                                      StrongBodyLabel, TableWidget)
         root = self._container.layout()
@@ -389,13 +389,15 @@ class GameDataPage(ToolPageBase):
         self._path_label = CaptionLabel(
             f"Save location:  {self._index_path}", self._container)
         self._path_label.setWordWrap(True)
-        loc_row.addWidget(self._path_label, 1)
+        loc_row.addWidget(self._path_label)
+        loc_row.addSpacing(12)
         self._change_btn = PushButton("Change…", self._container)
         self._change_btn.clicked.connect(self._choose_location)
         loc_row.addWidget(self._change_btn)
         self._open_btn = PushButton("Open folder", self._container)
         self._open_btn.clicked.connect(self._open_location)
         loc_row.addWidget(self._open_btn)
+        loc_row.addStretch(1)   # keep the buttons grouped by the path, not far right
         root.insertLayout(root.count() - 1, loc_row)
         root.insertSpacing(root.count() - 1, 16)
 
@@ -414,6 +416,17 @@ class GameDataPage(ToolPageBase):
         self._search.setFont(_sf)
         self._search.textChanged.connect(self._on_search)
         search_row.addWidget(self._search)
+        _show_lbl = CaptionLabel("Show", self._container)
+        _show_lbl.setContentsMargins(14, 0, 6, 0)
+        search_row.addWidget(_show_lbl)
+        self._limit_combo = ComboBox(self._container)
+        self._limit_combo.addItems([f"{n:,}" for n in self._LIMIT_OPTIONS])
+        self._limit_combo.setCurrentIndex(1)          # default 300 (unchanged)
+        self._limit_combo.setFixedHeight(38)
+        self._limit_combo.setMinimumWidth(104)
+        self._limit_combo.currentIndexChanged.connect(
+            lambda _i: self._on_search(self._search.text()))
+        search_row.addWidget(self._limit_combo)
         search_row.addStretch(1)
         root.insertLayout(root.count() - 1, search_row)
 
@@ -659,7 +672,9 @@ class GameDataPage(ToolPageBase):
                 for t in tables)
         except Exception as ex:  # noqa: BLE001
             detail = f"(could not read tables: {ex})"
-        self._add_result_card("Largest keyed game-data tables", detail)
+        card = self._add_result_card("Largest keyed game-data tables", detail)
+        card.setMaximumWidth(600)   # hug the content instead of spanning the page
+        self._results_layout.setAlignment(card, Qt.AlignLeft)
         # refresh the viewer if a search is active
         self._on_search(self._search.text())
 
@@ -669,6 +684,19 @@ class GameDataPage(ToolPageBase):
         self._add_result_card("Error", msg, "#BF616A")
 
     # ── search / viewer ──────────────────────────────────────────────
+    # Result-count choices for the "Show" selector. Capped at 20,000: a broad
+    # 2-char substring can match >1,000,000 paths and the results table renders
+    # on the UI thread, so an unbounded "All" would freeze the app — 20,000
+    # already covers every realistic per-type query (e.g. .pae is 6,638).
+    _LIMIT_OPTIONS = (100, 300, 1_000, 5_000, 20_000)
+
+    def _result_limit(self) -> int:
+        combo = getattr(self, "_limit_combo", None)
+        idx = combo.currentIndex() if combo is not None else 1
+        if 0 <= idx < len(self._LIMIT_OPTIONS):
+            return self._LIMIT_OPTIONS[idx]
+        return 300
+
     def _on_search(self, text: str) -> None:
         text = (text or "").strip()
         if not os.path.exists(self._index_path):
@@ -679,18 +707,21 @@ class GameDataPage(ToolPageBase):
             self._hits.setText("Type at least 2 characters to search.")
             self._table.setRowCount(0)
             return
+        limit = self._result_limit()
         try:
             con = sqlite3.connect(self._index_path)
             try:
-                rows = game_index.search_assets(con, query=text, limit=300)
+                rows = game_index.search_assets(con, query=text, limit=limit)
             finally:
                 con.close()
         except Exception as ex:  # noqa: BLE001
             self._hits.setText(f"Search failed: {ex}")
             return
+        capped = len(rows) >= limit
         self._hits.setText(
-            f"{len(rows)} match(es)" + (" (showing first 300)"
-                                        if len(rows) == 300 else ""))
+            f"{len(rows):,} match(es)"
+            + (f" (showing first {limit:,} — narrow the search for more)"
+               if capped else ""))
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             self._table.setItem(i, 0, QTableWidgetItem(str(r["path"])))
