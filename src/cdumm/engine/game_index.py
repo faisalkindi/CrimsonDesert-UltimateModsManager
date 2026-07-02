@@ -307,6 +307,18 @@ def hexdump(data: bytes, limit: int = 4096) -> str:
     return "\n".join(out)
 
 
+def _identify_binary_format(data: bytes) -> str | None:
+    """Best-effort identification of a packed binary from its magic — the one
+    thing that IS verifiable in these schema-less formats. Returns a human
+    label or None. Does NOT name individual fields (those aren't in the file).
+    """
+    if data[:4] == b"PAR ":            # constant across all .paa in the corpus
+        return "Pearl Abyss animation (PAR container)"
+    if data[:2] == b"\xff\xff" and b"AnimationMetaData" in data[:64]:
+        return "Animation metadata (AnimationMetaData)"
+    return None
+
+
 def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
     """Interpret a small, string-free binary as a table of 32-bit words.
 
@@ -316,7 +328,7 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
     4-byte word as uint32 / int32 / float32 is far more legible than a raw
     hex wall: record keys (1,000,000+n), byte offsets, flags and float
     attributes all become readable. Returns ``None`` when there aren't at
-    least two whole words to show — nothing a struct view adds over hex.
+    least one whole 4-byte word to show — nothing a struct view adds over hex.
 
     Each row is ``(offset, hex, uint32, int32, float, ascii, is_key)`` and
     every column is always populated; the float is the exact IEEE-754 reading
@@ -324,7 +336,7 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
     1,000,000–9,999,999 game-data record-key range.
     """
     nwords = len(data) // 4
-    if nwords < 2:
+    if nwords < 1:                    # need at least one whole 4-byte word
         return None
     shown = min(nwords, max_words)
     rows: list = []
@@ -341,7 +353,8 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
         rows.append((f"{off:04X}", chunk.hex(), str(u), str(i), f"{f:.6g}",
                      ascii_, 1_000_000 <= u <= 9_999_999))
     return {"rows": rows, "total_words": nwords, "shown": shown,
-            "trailing": len(data) - nwords * 4}
+            "trailing": len(data) - nwords * 4,
+            "format": _identify_binary_format(data)}
 
 
 # ── Wwise audio (.wem / .bnk) ─────────────────────────────────────────

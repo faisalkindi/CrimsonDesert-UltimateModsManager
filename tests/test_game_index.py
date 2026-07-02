@@ -341,13 +341,25 @@ def test_decode_struct_always_populates_float():
     assert gi.decode_struct(bytes(8))["rows"][1][4] == "0"
 
 
-def test_decode_struct_needs_two_words_and_caps():
-    assert gi.decode_struct(b"\x00\x00\x00") is None       # <1 word
-    assert gi.decode_struct(bytes(4)) is None              # only 1 word
+def test_decode_struct_word_count_and_caps():
+    assert gi.decode_struct(b"\x00\x00\x00") is None       # <1 word → None
+    # a single word is enough now (closes the tiny-.pabgh raw-hex gap)
+    assert gi.decode_struct(bytes(4))["total_words"] == 1
     r = gi.decode_struct(bytes(4000), max_words=512)       # 1000 words
     assert r["total_words"] == 1000 and r["shown"] == 512
     r2 = gi.decode_struct(bytes(9))                        # 2 words + 1 tail byte
     assert r2["total_words"] == 2 and r2["trailing"] == 1
+
+
+def test_identify_binary_format_and_struct_label():
+    ident = gi._identify_binary_format
+    assert "PAR" in ident(b"PAR \x20\x03\x00\x01rest of the animation")
+    assert "AnimationMetaData" in ident(
+        b"\xff\xff\x04\x00" + bytes(10) + b"AnimationMetaData\x00")
+    assert ident(b"\x01\x02\x03\x04 not a known magic") is None
+    # decode_struct surfaces the label so the struct view can show it
+    d = b"PAR \x20\x03\x00\x01" + bytes(8)
+    assert gi.decode_struct(d)["format"] == "Pearl Abyss animation (PAR container)"
 
 
 # ── Wwise audio (.wem / .bnk) ───────────────────────────────────────

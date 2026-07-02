@@ -945,8 +945,11 @@ class GameDataPage(ToolPageBase):
         trailing = res.get("trailing", 0)
         more = f" · first {shown:,} of {total:,}" if shown < total else ""
         tail = f" · +{trailing} trailing byte(s)" if trailing else ""
+        fmt = res.get("format")
+        fmt_line = f"Format: {fmt}.  " if fmt else ""
         self._pv_meta.setText(
-            "Struct view — this format has no embedded field names, so each "
+            fmt_line
+            + "Struct view — this format has no embedded field names, so each "
             "32-bit word is shown as unsigned / signed / float. Values in the "
             "1,000,000+ range are flagged as likely record keys."
             f"  ({total:,} words{more}{tail})\n"
