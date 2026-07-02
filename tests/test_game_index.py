@@ -304,3 +304,12 @@ def test_lz4_stream_decode_partial():
     full = b"HELLO_WORLD_" * 500
     comp = paz_crypto.lz4_compress(full)
     assert gi._lz4_stream_decode(comp, 0, 100) == full[:100]   # stop early
+
+
+def test_extract_strings_pulls_field_names():
+    blob = (b"\x00\x01Sequence\x00\x00_isAccessLock\x00\x04bool"
+            b"\x00\xffSequence\x00")
+    s = gi.extract_strings(blob, min_len=4)
+    assert "Sequence" in s and "_isAccessLock" in s and "bool" in s
+    assert s.count("Sequence") == 1                      # de-duplicated
+    assert gi.extract_strings(b"\x00\x01ab\x00", min_len=4) == []  # too short

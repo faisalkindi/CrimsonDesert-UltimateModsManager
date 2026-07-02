@@ -305,6 +305,33 @@ def hexdump(data: bytes, limit: int = 4096) -> str:
     return "\n".join(out)
 
 
+def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
+    """Printable-ASCII runs of at least ``min_len`` chars — the embedded
+    field / type / object names in the game's reflection-serialized binaries
+    (.paseq, .prefab, .meshinfo, ...). De-duplicated in encounter order and
+    capped to ``limit`` — a readable structure outline instead of raw hex."""
+    out: list = []
+    seen: set = set()
+    cur = bytearray()
+    for b in data:
+        if 32 <= b < 127:
+            cur.append(b)
+        else:
+            if len(cur) >= min_len:
+                s = cur.decode("ascii")
+                if s not in seen:
+                    seen.add(s)
+                    out.append(s)
+                    if len(out) >= limit:
+                        return out
+            cur = bytearray()
+    if len(cur) >= min_len and len(out) < limit:
+        s = cur.decode("ascii")
+        if s not in seen:
+            out.append(s)
+    return out
+
+
 def _lz4_stream_decode(src: bytes, pos: int, want: int) -> bytes:
     """Decode a continuous LZ4-block byte stream from ``src[pos:]`` until
     ``want`` output bytes are produced. Raises on malformed / truncated

@@ -192,12 +192,19 @@ class _PreviewWorker(QObject):
         if orig > self._byte_limit:
             res.update(kind="toobig")
             return
-        # 5) text or hex
+        # 5) text, structure outline, or hex
         data = game_index.extract_asset(con, self._path, gd)
         text = game_index.decode_text(data, limit=self._text_cap)
         if text is not None:
             res.update(kind="text", text=text[:self._text_cap],
                        truncated=len(text) >= self._text_cap)
+            return
+        # Reflection-serialized binaries (.paseq/.prefab/.meshinfo/...) embed
+        # their field/type/object names as text — surface those as a readable
+        # outline instead of raw hex.
+        strings = game_index.extract_strings(data)
+        if len(strings) >= 6:
+            res.update(kind="outline", strings=strings, nstr=len(strings))
         else:
             res.update(kind="hex",
                        text=game_index.hexdump(data, limit=self._hex_cap))
@@ -254,12 +261,12 @@ class _Texture3DView(QDialog):
         root_layout.addWidget(container, 1)
 
         self._root = _C.QEntity()
-        cam = self._window.camera()
-        cam.lens().setPerspectiveProjection(45.0, 1.2, 0.1, 1000.0)
-        cam.setPosition(QVector3D(0, 0, 3.2))
-        cam.setViewCenter(QVector3D(0, 0, 0))
+        self._cam = self._window.camera()
+        self._cam.lens().setPerspectiveProjection(45.0, 1.2, 0.1, 1000.0)
+        self._cam.setPosition(QVector3D(0, 0, 3.2))
+        self._cam.setViewCenter(QVector3D(0, 0, 0))
         ctrl = _E.QOrbitCameraController(self._root)
-        ctrl.setCamera(cam)
+        ctrl.setCamera(self._cam)
         ctrl.setLinearSpeed(60.0)
         ctrl.setLookSpeed(180.0)
 
@@ -270,34 +277,52 @@ class _Texture3DView(QDialog):
         mat = _E.QTextureMaterial(self._root)
         mat.setTexture(tex)
 
+        # Keep Python references to every Qt3D node. PySide6 garbage-collects
+        # unparented meshes / transforms / materials otherwise, destroying the
+        # component and leaving the scene empty — the bug that made earlier
+        # attempts render nothing. Parenting each mesh to its entity + holding
+        # them in a list guarantees they survive.
+        self._keep = [ctrl, tex, mat]
         self._shapes = {}
         # Plane — a flat card (thin cuboid, visible from both sides).
         pe = _C.QEntity(self._root)
-        pmesh = _E.QCuboidMesh()
-        ptx = _C.QTransform()
+        pmesh = _E.QCuboidMesh(pe)
+        ptx = _C.QTransform(pe)
         ptx.setScale3D(QVector3D(2.0, 2.0, 0.03))
         pe.addComponent(pmesh)
         pe.addComponent(mat)
         pe.addComponent(ptx)
         self._shapes["plane"] = pe
+        self._keep += [pmesh, ptx]
         # Sphere
         se = _C.QEntity(self._root)
-        smesh = _E.QSphereMesh()
+        smesh = _E.QSphereMesh(se)
         smesh.setRadius(1.2)
         smesh.setRings(60)
         smesh.setSlices(60)
         se.addComponent(smesh)
         se.addComponent(mat)
         self._shapes["sphere"] = se
+        self._keep.append(smesh)
         # Cube
         ce = _C.QEntity(self._root)
-        cmesh = _E.QCuboidMesh()
+        cmesh = _E.QCuboidMesh(ce)
         ce.addComponent(cmesh)
         ce.addComponent(mat)
         self._shapes["cube"] = ce
+        self._keep.append(cmesh)
 
         self._window.setRootEntity(self._root)
         self._set_shape("plane")
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        try:
+            w = max(1, self._window.width())
+            h = max(1, self._window.height())
+            self._cam.lens().setPerspectiveProjection(45.0, w / h, 0.1, 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _set_shape(self, which: str) -> None:
         for name, ent in self._shapes.items():
@@ -765,6 +790,15 @@ class GameDataPage(ToolPageBase):
                 body += ("\n\n… (truncated preview — use Extract raw for the "
                          "full file)")
             self._show_text(body, wrap=True)
+            self._pv_extract.setEnabled(True)
+        elif kind == "outline":
+            strings = res.get("strings", [])
+            self._show_text(
+                "Structure outline — the field / type / object names embedded "
+                "in this reflection-serialized binary ("
+                f"{res.get('nstr', len(strings))} names). Use “Extract raw "
+                "file…” for the full bytes.\n\n" + "\n".join(strings),
+                wrap=True)
             self._pv_extract.setEnabled(True)
         elif kind == "hex":
             self._show_text(
