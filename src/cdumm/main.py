@@ -668,6 +668,11 @@ def main() -> int:
     logger.info("Startup: main window constructed; showing")
     window.show()
     splash.finish(window)
+    # Bring the window to the foreground. Windows won't auto-raise a window
+    # spawned from an already-focused terminal, so without this it can open
+    # hidden behind other windows and look like it never launched.
+    window.raise_()
+    window.activateWindow()
 
     # ── Frame stall profiler ─────────────────────────────────────────
     # Fires a 16ms timer and logs whenever the main thread stalls > 50ms.
