@@ -596,6 +596,7 @@ class GameDataPage(ToolPageBase):
         self._preview_bytes: bytes | None = None
         self._preview_name: str | None = None
         self._pv_gen = 0                 # bumped per selection; ignore stale
+        self._play_token = 0             # bumped per Play; ignore stale finish
         self._pv_jobs: list = []         # live (thread, worker) — keep refs
         self._pv_qimage: QImage | None = None   # current texture, for 3D
         self._pv_3d_dlg = None                   # open 3D dialog (keep a ref)
@@ -1109,13 +1110,39 @@ class GameDataPage(ToolPageBase):
         wav = self._audio_wav(path)
         if not wav:
             return
+        name = self._preview_name or os.path.basename(path)
         try:                                   # winsound is Windows-only
             import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)      # stop any prior
             winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            self._set_status("Playing…", "#2E7D32")
         except Exception as ex:  # noqa: BLE001
             self._set_status(f"Playback failed: {ex}", "#BF616A")
+            return
+        # Read the decoded WAV's real length so we can flip the status back
+        # to "finished" live when it ends (winsound gives no end callback).
+        dur = 0.0
+        try:
+            import contextlib
+            import wave
+            with contextlib.closing(wave.open(wav, "rb")) as w:
+                if w.getframerate():
+                    dur = w.getnframes() / float(w.getframerate())
+        except Exception:  # noqa: BLE001
+            pass
+        self._play_token += 1
+        token = self._play_token
+        tag = f"  ({dur:.1f}s)" if dur else ""
+        self._set_status(f"▶ Playing: {name}{tag}", "#2E7D32")
+        if dur > 0:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(
+                int(dur * 1000) + 150,
+                lambda t=token, n=name: self._on_play_finished(t, n))
         # temp WAV is left for the async player; the OS reclaims %TEMP%.
+
+    def _on_play_finished(self, token: int, name: str) -> None:
+        if token == self._play_token:      # not superseded by a newer Play
+            self._set_status(f"Finished: {name}", "")
 
     def _on_export_wav(self) -> None:
         path = self._selected_path()
