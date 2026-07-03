@@ -742,9 +742,9 @@ class GameDataPage(ToolPageBase):
         self._pv_3d_btn.clicked.connect(self._on_view_3d)
         pv.addWidget(self._pv_3d_btn)
 
-        # Save the decoded texture as a normal image (JPEG, or PNG to keep
-        # transparency) — only shown for image previews.
-        self._pv_saveimg_btn = PushButton("Save as JPEG…", pane)
+        # Save the decoded texture as a normal image — PNG keeps the
+        # transparent background, JPEG flattens it. Only shown for images.
+        self._pv_saveimg_btn = PushButton("Save as PNG / JPEG…", pane)
         self._pv_saveimg_btn.setVisible(False)
         self._pv_saveimg_btn.clicked.connect(self._on_save_image)
         pv.addWidget(self._pv_saveimg_btn)
@@ -1326,17 +1326,18 @@ class GameDataPage(ToolPageBase):
     def _on_save_image(self) -> None:
         """Save the decoded texture as a standard image the OS can open.
 
-        JPEG by default (small, universally viewable); PNG is offered too for
-        anyone who needs the alpha channel kept.
+        PNG by default — it keeps the transparent background exactly as shown
+        in the preview. JPEG is offered too (smaller, but no transparency, so
+        transparent areas are flattened onto white).
         """
         img = self._pv_qimage
         if img is None or img.isNull():
             return
         base = os.path.splitext(self._preview_name or "texture")[0]
-        start = os.path.join(os.path.expanduser("~"), base + ".jpg")
+        start = os.path.join(os.path.expanduser("~"), base + ".png")
         path, _sel = QFileDialog.getSaveFileName(
             self, "Save texture as image", start,
-            "JPEG image (*.jpg *.jpeg);;PNG image (*.png)")
+            "PNG image — keeps transparency (*.png);;JPEG image (*.jpg *.jpeg)")
         if not path:
             return
         ext = os.path.splitext(path)[1].lower()
