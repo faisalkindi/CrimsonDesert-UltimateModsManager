@@ -589,6 +589,20 @@ class GameDataPage(ToolPageBase):
         self._search.setFont(_sf)
         self._search.textChanged.connect(self._on_search)
         search_row.addWidget(self._search)
+        # File-type filter — narrow results to one extension (e.g. .dds). The
+        # list is curated until the index is built, then repopulated from the
+        # actual extensions present (with counts) in _populate_type_filter().
+        _type_lbl = CaptionLabel("Type", self._container)
+        _type_lbl.setContentsMargins(14, 0, 6, 0)
+        search_row.addWidget(_type_lbl)
+        self._type_combo = ComboBox(self._container)
+        self._type_combo.setFixedHeight(38)
+        self._type_combo.setMinimumWidth(150)
+        self._type_exts: list[str | None] = []
+        self._set_type_items(self._DEFAULT_TYPE_FILTERS)
+        self._type_combo.currentIndexChanged.connect(
+            lambda _i: self._on_search(self._search.text()))
+        search_row.addWidget(self._type_combo)
         _show_lbl = CaptionLabel("Show", self._container)
         _show_lbl.setContentsMargins(14, 0, 6, 0)
         search_row.addWidget(_show_lbl)
@@ -885,6 +899,7 @@ class GameDataPage(ToolPageBase):
         try:
             con = sqlite3.connect(self._index_path)
             try:
+                self._populate_type_filter(con)   # real extensions + counts
                 tables = game_index.list_data_tables(con)[:12]
             finally:
                 con.close()
@@ -918,13 +933,63 @@ class GameDataPage(ToolPageBase):
             return self._LIMIT_OPTIONS[idx]
         return 300
 
+    # Curated file-type filter shown before the index is built (and as a
+    # fallback). Once built, _populate_type_filter() replaces this with the
+    # extensions actually present, each with its count.
+    _DEFAULT_TYPE_FILTERS = (
+        ("All types", None), (".pabgb", ".pabgb"), (".dds", ".dds"),
+        (".wem", ".wem"), (".bnk", ".bnk"), (".paa", ".paa"),
+        (".pae", ".pae"), (".paseq", ".paseq"), (".prefab", ".prefab"),
+        (".meshinfo", ".meshinfo"), (".hkx", ".hkx"), (".xml", ".xml"),
+    )
+
+    def _set_type_items(self, items) -> None:
+        """Rebuild the Type dropdown from ``items`` (list of (label, ext)),
+        keeping the current selection by extension when it still exists."""
+        prev = self._type_filter() if getattr(self, "_type_exts", None) else None
+        self._type_combo.blockSignals(True)
+        self._type_combo.clear()
+        self._type_exts = [ext for _lbl, ext in items]
+        self._type_combo.addItems([lbl for lbl, _ext in items])
+        if prev in self._type_exts:
+            self._type_combo.setCurrentIndex(self._type_exts.index(prev))
+        self._type_combo.blockSignals(False)
+
+    def _type_filter(self) -> str | None:
+        """The currently selected extension filter, or None for 'All types'."""
+        exts = getattr(self, "_type_exts", None)
+        if not exts:
+            return None
+        idx = self._type_combo.currentIndex()
+        return exts[idx] if 0 <= idx < len(exts) else None
+
+    def _populate_type_filter(self, con) -> None:
+        """Fill the Type dropdown from the extensions actually indexed, most
+        common first, each labelled with its file count."""
+        try:
+            rows = con.execute(
+                "SELECT ext, COUNT(*) c FROM assets GROUP BY ext "
+                "ORDER BY c DESC").fetchall()
+        except Exception:  # noqa: BLE001
+            return
+        items = [("All types", None)]
+        for ext, c in rows[:40]:
+            if ext and ext != "(none)":
+                items.append((f"{ext}  ({c:,})", ext))
+        if len(items) > 1:
+            self._set_type_items(items)
+
     def _on_search(self, text: str) -> None:
         text = (text or "").strip()
+        ext = self._type_filter()
         if not os.path.exists(self._index_path):
             self._hits.setText("Build the index first to search.")
             self._table.setRowCount(0)
             return
-        if len(text) < 2:
+        # A type filter lets you browse every file of that type with no search
+        # text; without one, require 2+ chars so a bare query can't scan all
+        # 1.6M paths.
+        if ext is None and len(text) < 2:
             self._hits.setText("Type at least 2 characters to search.")
             self._table.setRowCount(0)
             return
@@ -932,7 +997,8 @@ class GameDataPage(ToolPageBase):
         try:
             con = sqlite3.connect(self._index_path)
             try:
-                rows = game_index.search_assets(con, query=text, limit=limit)
+                rows = game_index.search_assets(
+                    con, query=text, ext=ext, limit=limit)
             finally:
                 con.close()
         except Exception as ex:  # noqa: BLE001
