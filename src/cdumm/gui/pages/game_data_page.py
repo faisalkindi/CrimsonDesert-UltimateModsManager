@@ -742,6 +742,13 @@ class GameDataPage(ToolPageBase):
         self._pv_3d_btn.clicked.connect(self._on_view_3d)
         pv.addWidget(self._pv_3d_btn)
 
+        # Save the decoded texture as a normal image (JPEG, or PNG to keep
+        # transparency) — only shown for image previews.
+        self._pv_saveimg_btn = PushButton("Save as JPEG…", pane)
+        self._pv_saveimg_btn.setVisible(False)
+        self._pv_saveimg_btn.clicked.connect(self._on_save_image)
+        pv.addWidget(self._pv_saveimg_btn)
+
         # Wwise audio controls — only shown for .wem/.bnk previews. Play/Export
         # need the bundled vgmstream; they stay disabled (with a note) if it
         # isn't present, but raw extract always works.
@@ -1070,6 +1077,9 @@ class GameDataPage(ToolPageBase):
     def _on_preview_ready(self, res: dict) -> None:
         if res.get("gen") != self._pv_gen:
             return   # a newer selection superseded this result
+        # Image-only button; _show_image re-shows it, every other branch leaves
+        # it hidden.
+        self._pv_saveimg_btn.setVisible(False)
         row = res.get("row")
         meta = ""
         if row:
@@ -1260,8 +1270,9 @@ class GameDataPage(ToolPageBase):
         self._pv_getvgm_btn.setVisible(False)
         self._pv_img_scroll.setVisible(True)
         self._pv_qimage = QImage.fromData(png, "PNG") if png else None
-        self._pv_3d_btn.setVisible(
-            self._pv_qimage is not None and not self._pv_qimage.isNull())
+        _has_img = self._pv_qimage is not None and not self._pv_qimage.isNull()
+        self._pv_3d_btn.setVisible(_has_img)
+        self._pv_saveimg_btn.setVisible(_has_img)
         pm = QPixmap()
         if png:
             pm.loadFromData(png, "PNG")
@@ -1311,6 +1322,40 @@ class GameDataPage(ToolPageBase):
             return
         self._pv_3d_dlg = dlg          # keep a ref so it isn't GC'd
         dlg.show()
+
+    def _on_save_image(self) -> None:
+        """Save the decoded texture as a standard image the OS can open.
+
+        JPEG by default (small, universally viewable); PNG is offered too for
+        anyone who needs the alpha channel kept.
+        """
+        img = self._pv_qimage
+        if img is None or img.isNull():
+            return
+        base = os.path.splitext(self._preview_name or "texture")[0]
+        start = os.path.join(os.path.expanduser("~"), base + ".jpg")
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "Save texture as image", start,
+            "JPEG image (*.jpg *.jpeg);;PNG image (*.png)")
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        is_jpeg = ext in (".jpg", ".jpeg")
+        out = img
+        if is_jpeg and img.hasAlphaChannel():
+            # JPEG has no alpha — flatten onto white so transparent regions
+            # don't turn black.
+            from PySide6.QtGui import QPainter, QColor
+            out = QImage(img.size(), QImage.Format.Format_RGB32)
+            out.fill(QColor("white"))
+            p = QPainter(out)
+            p.drawImage(0, 0, img)
+            p.end()
+        ok = (out.save(path, "JPG", 92) if is_jpeg else out.save(path, "PNG"))
+        base_meta = self._pv_meta.text()
+        self._pv_meta.setText(
+            (f"Saved image → {path}" if ok
+             else f"Could not save image to {path}") + "\n" + base_meta)
 
     def _extract_raw(self) -> None:
         """Save the selected asset's real (decoded) bytes to a file."""
