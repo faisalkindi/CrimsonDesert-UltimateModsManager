@@ -233,7 +233,9 @@ JSON patches also support `editable_value` metadata for inline value editing in 
 
 ### Field-name JSON mods (Format 3)
 
-CDUMM supports the field-name JSON format (`.field.json`) for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), mount character data (`characterinfo.pabgb`), buffs (`buffinfo.pabgb`), drop sets (`dropsetinfo.pabgb`), and skills (`skill.pabgb`). Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
+CDUMM supports the field-name JSON format (`.field.json`) for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), mount character data (`characterinfo.pabgb`), buffs (`buffinfo.pabgb`), drop sets (`dropsetinfo.pabgb`), skills (`skill.pabgb`), and wanted-bounty prices (`wantedinfo.pabgb` — the `increase_price` field). Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
+
+Coverage grows as more tables get a validated schema: a table becomes moddable field-by-field as each field is confirmed against real record data (via `_verified_fields` in `schemas/pabgb_type_overrides.json`). Only fields proven to sit at a known offset are writable — an unproven field is refused rather than risk writing to the wrong byte.
 
 Both file shapes work: the original singular `{"format": 3, "target": "iteminfo.pabgb", "intents": [...]}` and the newer multi-target `{"format": 3, "targets": [{"file": "...", "intents": [...]}, ...]}` form. The `op` key is optional and defaults to `"set"`.
 

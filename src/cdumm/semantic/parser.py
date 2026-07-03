@@ -91,6 +91,13 @@ class TableSchema:
     notes: 'There is NO per-entry name header in RegionInfo PABGB.
     The _key and _stringKey are regular fields read by the table
     reader')."""
+    verified_fields: frozenset[str] | None = None
+    """Verified-only display gate. ``None`` = table not yet hand-curated;
+    show every schema field as decoded (legacy behavior). A set = only
+    these fields have been validated against real record data; the GUI
+    renders any other field as ``(unverified)`` instead of a possibly-
+    wrong value. Set via ``_verified_fields: [...]`` in the override file.
+    ``_key`` / ``_name`` are always trustworthy and never gated."""
 
     @property
     def fixed_record_size(self) -> int | None:
@@ -156,6 +163,12 @@ def _load_schemas() -> dict[str, TableSchema]:
         table_overrides = overrides.get(table_name, {})
         no_null_skip = bool(table_overrides.get("_no_null_skip", False))
         no_entry_header = bool(table_overrides.get("_no_entry_header", False))
+        # `_verified_fields`: opt-in list of hand-validated fields. When
+        # present, the GUI shows only these as decoded values and marks
+        # every other field `(unverified)` — so a table can be worked
+        # incrementally without ever presenting an unproven column.
+        vf_raw = table_overrides.get("_verified_fields")
+        verified_fields = frozenset(vf_raw) if vf_raw is not None else None
         # `_ordered_fields` REPLACES the upstream schema's array order.
         # The upstream schema sorts by memory address; the actual
         # on-disk deserialization order often differs (verified
@@ -262,7 +275,8 @@ def _load_schemas() -> dict[str, TableSchema]:
             schemas[table_name.lower()] = TableSchema(
                 table_name=table_name, fields=fields,
                 no_null_skip=no_null_skip,
-                no_entry_header=no_entry_header)
+                no_entry_header=no_entry_header,
+                verified_fields=verified_fields)
 
     _loaded_schemas = schemas
     logger.info("Loaded %d PABGB table schemas (%d with type overrides)",
