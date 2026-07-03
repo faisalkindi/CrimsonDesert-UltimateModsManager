@@ -795,6 +795,15 @@ class GameDataPage(ToolPageBase):
         self._set_status("Index built.", "#2E7D32")
         self._open_btn.setEnabled(os.path.exists(self._index_path))
 
+        # Record the build in the Activity Log, the same way the other pages
+        # log their actions (shows up as a "snapshot" entry).
+        self._log_activity(
+            "snapshot",
+            f"Game data index built: "
+            f"{int(stats.get('assets_total', 0)):,} assets indexed",
+            f"{stats.get('archives', '?')} archives · "
+            f"{stats.get('data_table_distinct', '?')} data tables")
+
         detail = ""
         try:
             con = sqlite3.connect(self._index_path)
