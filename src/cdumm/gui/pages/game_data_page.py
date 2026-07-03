@@ -233,7 +233,10 @@ class _PreviewWorker(QObject):
                     body = game_index.extract_asset(con, self._path, gd)
                     header = game_index.extract_asset(
                         con, self._path[:-6] + ".pabgh", gd)
-                    recs = sem.parse_records(table, body, header)
+                    # Display-only decoder: honors override flags + walks
+                    # variable-length fields so richly-schema'd tables
+                    # (iteminfo, regioninfo, ...) show their real columns.
+                    recs = sem.parse_records_display(table, body, header)
                 except Exception:  # noqa: BLE001 — fall back to a raw view
                     recs = {}
                 if recs:

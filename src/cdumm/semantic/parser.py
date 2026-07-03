@@ -545,6 +545,141 @@ def parse_records(table_name: str, body_bytes: bytes, header_bytes: bytes
     return records
 
 
+# ── Display decode (read-only, for the Game Data grid) ───────────────────────
+#
+# parse_records() above is shared with the apply/diff pipeline (engine.py) and
+# must not change. The functions below are a *display-only* decoder: they honor
+# the override flags (no_entry_header / no_null_skip) and drive byte
+# consumption through the format3 walker (pabgb_types.consume_bytes), so keyed
+# tables with rich schema overrides — iteminfo, regioninfo, vehicleinfo,
+# fieldinfo, stageinfo, characterinfo — render their real fields in the grid
+# instead of stopping at the first variable-length field. When the walker can't
+# safely step past a field, decoding stops there: earlier fields are kept and
+# the rest are simply absent (never guessed).
+
+_DISPLAY_PRIM_FMT = {
+    "u8": "B", "i8": "b", "u16": "H", "i16": "h", "u32": "I", "i32": "i",
+    "u64": "Q", "i64": "q", "f32": "f", "f64": "d",
+}
+
+
+def _display_payload_start(entry: bytes, schema: "TableSchema",
+                           key_size: int) -> int:
+    """Byte offset of the first field, honoring the override flags."""
+    if schema.no_entry_header:
+        return 0
+    eid_size = 2 if key_size == 2 else 4
+    head = eid_size + 4
+    if len(entry) < head:
+        return 0
+    nlen = struct.unpack_from("<I", entry, eid_size)[0]
+    if nlen > 500 or head + nlen > len(entry):
+        return head
+    name_end = head + nlen
+    if schema.no_null_skip:
+        return name_end
+    return (name_end + 1
+            if name_end < len(entry) and entry[name_end] == 0 else name_end)
+
+
+def _display_value(td: str, body: bytes, off: int, width: int) -> Any:
+    """Human-readable value for a walked field. Strings decode inline;
+    arrays show their element count; optionals show present/absent; anything
+    without a scalar rendering falls back to compact hex."""
+    td = (td or "").strip()
+    fmt = _DISPLAY_PRIM_FMT.get(td)
+    if fmt:
+        try:
+            return struct.unpack_from("<" + fmt, body, off)[0]
+        except struct.error:
+            return None
+    if td == "CString":
+        slen = struct.unpack_from("<I", body, off)[0]
+        return body[off + 4:off + 4 + slen].decode("utf-8", "replace")
+    if td == "LocalizableString":
+        idx = struct.unpack_from("<Q", body, off + 1)[0]
+        slen = struct.unpack_from("<I", body, off + 9)[0]
+        if slen:
+            return body[off + 13:off + 13 + slen].decode("utf-8", "replace")
+        return f"loc#{idx}"          # text lives in the localization table
+    if td.startswith("CArray<"):
+        return f"[{struct.unpack_from('<I', body, off)[0]} items]"
+    if td.startswith("COptional<"):
+        return "—" if body[off] == 0 else "present"
+    return body[off:off + width].hex()
+
+
+def decode_record_display(entry_data: bytes, schema: "TableSchema",
+                          key_size: int) -> dict[str, Any]:
+    """Walk one entry into {field: display_value}, walker-driven."""
+    from cdumm.semantic import pabgb_types as _pt
+    off = _display_payload_start(entry_data, schema, key_size)
+    end = len(entry_data)
+    out: dict[str, Any] = {}
+    for spec in schema.fields:
+        if spec.type_descriptor:
+            w = _pt.consume_bytes(spec.type_descriptor, entry_data, off, end)
+            if w is None:
+                break
+            out[spec.name] = _display_value(
+                spec.type_descriptor, entry_data, off, w)
+            off += w
+        elif spec.struct_fmt:
+            w = spec.stream_size
+            if off + w > end:
+                break
+            out[spec.name] = struct.unpack_from(
+                "<" + spec.struct_fmt, entry_data, off)[0]
+            off += w
+        elif spec.field_type == "CString":
+            if off + 4 > end:
+                break
+            slen = struct.unpack_from("<I", entry_data, off)[0]
+            if off + 4 + slen > end:
+                break
+            out[spec.name] = entry_data[
+                off + 4:off + 4 + slen].decode("utf-8", "replace")
+            off += 4 + slen
+        else:
+            w = spec.stream_size or 0
+            if w == 0 or off + w > end:
+                break
+            out[spec.name] = entry_data[off:off + w].hex()
+            off += w
+    return out
+
+
+def parse_records_display(table_name: str, body_bytes: bytes,
+                          header_bytes: bytes) -> dict[int, dict[str, Any]]:
+    """Display-only variant of parse_records for the Game Data grid.
+
+    Same {key: {field: value}} shape, but flag- and walker-aware so richly
+    overridden tables decode fully. Never used by the apply/diff pipeline.
+    """
+    schema = get_schema(table_name)
+    if schema is None:
+        return {}
+    key_size, offsets = parse_pabgh_index(header_bytes, table_name)
+    if not offsets:
+        return {}
+    sorted_entries = sorted(offsets.items(), key=lambda x: x[1])
+    records: dict[int, dict[str, Any]] = {}
+    for idx, (key, entry_offset) in enumerate(sorted_entries):
+        entry_end = (sorted_entries[idx + 1][1]
+                     if idx + 1 < len(sorted_entries) else len(body_bytes))
+        if entry_offset >= len(body_bytes):
+            continue
+        entry_data = body_bytes[entry_offset:entry_end]
+        name = ""
+        if not schema.no_entry_header:
+            _eid, name, _ps = _parse_entry_header(entry_data, 0, key_size)
+        fields = decode_record_display(entry_data, schema, key_size)
+        fields["_key"] = key
+        fields["_name"] = name
+        records[key] = fields
+    return records
+
+
 def identify_table_from_path(entry_path: str) -> str | None:
     """Extract table name from a PAMT entry path.
 
