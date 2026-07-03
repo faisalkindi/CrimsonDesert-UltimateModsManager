@@ -362,7 +362,6 @@ class _Texture3DView(QDialog):
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowCloseButtonHint)
-        self._mid_last = None            # middle-mouse orbit anchor
 
         # Most portable way to get a QImage into a Qt3D texture across PySide6
         # builds: a temp PNG loaded by QTextureLoader (a painted-texture
@@ -395,13 +394,18 @@ class _Texture3DView(QDialog):
 
         self._root = _C.QEntity()
         self._cam = self._window.camera()
-        self._cam.lens().setPerspectiveProjection(45.0, 1.2, 0.1, 1000.0)
-        self._cam.setPosition(QVector3D(0, 0, 3.2))
-        self._cam.setViewCenter(QVector3D(0, 0, 0))
-        ctrl = _E.QOrbitCameraController(self._root)
-        ctrl.setCamera(self._cam)
-        ctrl.setLinearSpeed(60.0)
-        ctrl.setLookSpeed(180.0)
+        self._cam.lens().setPerspectiveProjection(45.0, 1.2, 0.05, 1000.0)
+        # Unreal-style orbit: the camera revolves around a FIXED pivot at the
+        # origin (where the shape sits) at a controllable distance, so the asset
+        # stays centred and can never translate off-screen. Drag = orbit,
+        # wheel = dolly. Driven by hand — QOrbitCameraController was removed
+        # because it also pans the view centre, which let the asset fly out of
+        # frame and vanish at the window edges (the reported bug).
+        self._azimuth = 0.0        # degrees, around the vertical axis
+        self._elevation = 0.0      # degrees, up/down (kept off the poles)
+        self._distance = 3.2       # camera distance from the pivot
+        self._orbit_last = None
+        self._update_camera()
 
         # Unlit texture material — shows the texture at full brightness with
         # no lighting dependency, so the shape is always visible.
@@ -415,7 +419,7 @@ class _Texture3DView(QDialog):
         # component and leaving the scene empty — the bug that made earlier
         # attempts render nothing. Parenting each mesh to its entity + holding
         # them in a list guarantees they survive.
-        self._keep = [ctrl, tex, mat]
+        self._keep = [tex, mat]
         self._shapes = {}
         # Plane — a flat card (thin cuboid, visible from both sides).
         pe = _C.QEntity(self._root)
@@ -448,29 +452,50 @@ class _Texture3DView(QDialog):
         self._window.setRootEntity(self._root)
         self._set_shape("plane")
 
+    def _update_camera(self):
+        """Position the camera on a sphere around the origin from the current
+        azimuth / elevation / distance. The view centre is pinned to the
+        origin, so the asset is always framed no matter how you spin it."""
+        import math
+        from PySide6.QtGui import QVector3D
+        self._elevation = max(-89.0, min(89.0, self._elevation))
+        a = math.radians(self._azimuth)
+        e = math.radians(self._elevation)
+        cos_e = math.cos(e)
+        pos = QVector3D(self._distance * cos_e * math.sin(a),
+                        self._distance * math.sin(e),
+                        self._distance * cos_e * math.cos(a))
+        self._cam.setViewCenter(QVector3D(0, 0, 0))
+        self._cam.setPosition(pos)
+        self._cam.setUpVector(QVector3D(0, 1, 0))
+
     def eventFilter(self, obj, event):  # noqa: N802
-        """Middle-mouse drag orbits the camera around the asset (in addition to
-        the orbit controller's left-drag), the way 3D tools behave."""
+        """Drag (left or middle button) orbits the camera around the fixed
+        pivot; the wheel dollies in and out. Same feel as an Unreal viewport —
+        the asset stays put and you move the camera around it."""
         from PySide6.QtCore import QEvent
         t = event.type()
+        _orbit_btns = (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
         if (t == QEvent.Type.MouseButtonPress
-                and event.button() == Qt.MouseButton.MiddleButton):
-            self._mid_last = event.position()
+                and event.button() in _orbit_btns):
+            self._orbit_last = event.position()
             return True
-        if t == QEvent.Type.MouseMove and self._mid_last is not None:
+        if t == QEvent.Type.MouseMove and self._orbit_last is not None:
             p = event.position()
-            dx = p.x() - self._mid_last.x()
-            dy = p.y() - self._mid_last.y()
-            self._mid_last = p
-            try:
-                self._cam.panAboutViewCenter(-dx * 0.35)
-                self._cam.tiltAboutViewCenter(-dy * 0.35)
-            except Exception:  # noqa: BLE001
-                pass
+            self._azimuth -= (p.x() - self._orbit_last.x()) * 0.3
+            self._elevation -= (p.y() - self._orbit_last.y()) * 0.3
+            self._orbit_last = p
+            self._update_camera()
             return True
         if (t == QEvent.Type.MouseButtonRelease
-                and event.button() == Qt.MouseButton.MiddleButton):
-            self._mid_last = None
+                and event.button() in _orbit_btns):
+            self._orbit_last = None
+            return True
+        if t == QEvent.Type.Wheel:
+            # positive delta = wheel up = zoom in (smaller distance)
+            step = 0.88 if event.angleDelta().y() > 0 else 1.0 / 0.88
+            self._distance = max(1.5, min(40.0, self._distance * step))
+            self._update_camera()
             return True
         return super().eventFilter(obj, event)
 
@@ -479,7 +504,7 @@ class _Texture3DView(QDialog):
         try:
             w = max(1, self._window.width())
             h = max(1, self._window.height())
-            self._cam.lens().setPerspectiveProjection(45.0, w / h, 0.1, 1000.0)
+            self._cam.lens().setPerspectiveProjection(45.0, w / h, 0.05, 1000.0)
         except Exception:  # noqa: BLE001
             pass
 
