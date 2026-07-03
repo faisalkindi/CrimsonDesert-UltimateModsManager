@@ -110,7 +110,8 @@ _FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you'
 Tip: a name ending in "info" is almost always a game-data table you can edit."""
 
 
-def _shape_records(records: dict, schema) -> tuple[list, list, int, float]:
+def _shape_records(records: dict, schema, positions: dict | None = None
+                   ) -> tuple[list, list, int, float]:
     """Turn parse_records output into (columns, rows, total, health).
 
     Columns are ``_key`` + ``_name`` + the schema's field names in order;
@@ -125,9 +126,21 @@ def _shape_records(records: dict, schema) -> tuple[list, list, int, float]:
     # (e.g. sequencerspawninfo) also list _key/_name among their schema
     # fields, which would render a redundant duplicate column — drop those.
     field_names = [f for f in field_names if f not in ("_key", "_name")]
-    cols = ["_key", "_name"] + field_names
+    pos_col = "world pos (X, Y, Z)"
+    cols = ["_key", "_name"] + ([pos_col] if positions else []) + field_names
     keys = sorted(records)[:_GRID_ROW_CAP]
-    rows = [[_cell(records[k].get(c)) for c in cols] for k in keys]
+
+    def _posval(k):
+        p = positions.get(k) if positions else None
+        return f"{p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}" if p else ""
+
+    rows = []
+    for k in keys:
+        row = [_cell(records[k].get("_key")), _cell(records[k].get("_name"))]
+        if positions:
+            row.append(_posval(k))
+        row += [_cell(records[k].get(c)) for c in field_names]
+        rows.append(row)
 
     suspect = 0
     sample = keys[:60]
@@ -211,10 +224,13 @@ class _PreviewWorker(QObject):
                 except Exception:  # noqa: BLE001 — fall back to a raw view
                     recs = {}
                 if recs:
+                    positions = game_index.decode_table_positions(
+                        table, body, header)
                     cols, rows, total, health = _shape_records(
-                        recs, sem.get_schema(table))
+                        recs, sem.get_schema(table), positions)
                     res.update(kind="table", table=table, cols=cols,
-                               rows=rows, total=total, health=health)
+                               rows=rows, total=total, health=health,
+                               has_pos=bool(positions))
                     return
 
         # 2) no game folder → metadata only
@@ -925,6 +941,9 @@ class GameDataPage(ToolPageBase):
             else:
                 note = ("\nfield columns are experimental (from CDUMM's patch "
                         "parser); _key and _name are authoritative")
+            if res.get("has_pos"):
+                note += ("\nworld pos (X, Y, Z) = decoded, region-validated "
+                         "map coordinates for mod-makers")
             self._pv_meta.setText(
                 f"data table “{res.get('table', '')}”  ·  {total:,} records"
                 f"{more}{note}\n{res.get('path', '')}")

@@ -362,6 +362,14 @@ def test_identify_binary_format_and_struct_label():
     assert gi.decode_struct(d)["format"] == "Pearl Abyss animation (PAR container)"
 
 
+def test_decode_table_positions_never_guesses():
+    # only tables with a validated offset are decoded; others return {} — the
+    # position offset is table-specific (never a blanket guess)
+    assert gi.decode_table_positions("iteminfo", b"body", b"header") == {}
+    assert gi.decode_table_positions("questinfo", b"", b"") == {}
+    assert "factionnodespawninfo" in gi._TABLE_POSITION_OFFSET
+
+
 # ── Wwise audio (.wem / .bnk) ───────────────────────────────────────
 
 def _wem(tag=0xFFFF, ch=1, sr=44100, bits=0, data=b"\x00" * 100):

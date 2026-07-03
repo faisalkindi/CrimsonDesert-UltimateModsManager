@@ -357,6 +357,55 @@ def decode_struct(data: bytes, max_words: int = 512) -> dict | None:
             "format": _identify_binary_format(data)}
 
 
+# Per-table record payload offset holding a world (X, Y, Z) float triplet,
+# VALIDATED individually before being added here (factionnodespawninfo's nodes
+# cluster correctly by region at +4). Never guess an offset — it differs per
+# table (the +4 that fits factionnodespawninfo yields nothing on
+# actionpointinfo / gimmick / sequencer tables). Extend as tables are RE'd.
+_TABLE_POSITION_OFFSET = {"factionnodespawninfo": 4}
+
+
+def decode_table_positions(table: str, body: bytes, header: bytes) -> dict:
+    """Best-effort per-record world position (X, Y, Z) for the tables whose
+    position offset has been reverse-engineered and validated (see
+    ``_TABLE_POSITION_OFFSET``). Returns ``{record_key: (x, y, z)}`` for records
+    that have a plausible triplet there, or ``{}`` for tables with no known
+    offset. Candidate data for map-makers — accurate for listed tables, absent
+    (never guessed) for the rest."""
+    import math
+    off = _TABLE_POSITION_OFFSET.get(table)
+    if off is None:
+        return {}
+    from cdumm.semantic import parser as sem
+    try:
+        key_size, offsets = sem.parse_pabgh_index(header, table)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not offsets:
+        return {}
+    ordered = sorted(offsets.items(), key=lambda kv: kv[1])
+    out: dict = {}
+    n = len(body)
+    for i, (key, start) in enumerate(ordered):
+        end = ordered[i + 1][1] if i + 1 < len(ordered) else n
+        if start >= n:
+            continue
+        rec = body[start:end]
+        try:
+            _eid, _name, pstart = sem._parse_entry_header(rec, 0, key_size)
+        except Exception:  # noqa: BLE001
+            pstart = key_size
+        payload = rec[pstart:]
+        if len(payload) < off + 12:
+            continue
+        x, y, z = struct.unpack_from("<fff", payload, off)
+        if (all(math.isfinite(v) for v in (x, y, z))
+                and any(0.5 < abs(v) < 1_000_000 for v in (x, y, z))
+                and not (abs(abs(x) - 1) < 1e-2 and abs(abs(z) - 1) < 1e-2)):
+            out[key] = (round(x, 1), round(y, 1), round(z, 1))
+    return out
+
+
 # ── Wwise audio (.wem / .bnk) ─────────────────────────────────────────
 # The game ships ALL sound through Wwise: .wem are the encoded media streams
 # (almost always Wwise Vorbis) and .bnk are SoundBanks. Windows can't play a

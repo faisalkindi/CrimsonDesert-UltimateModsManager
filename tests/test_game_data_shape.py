@@ -45,3 +45,20 @@ def test_shape_records_without_schema():
     cols, _rows, _total, health = _shape_records(
         {1: {"_key": 1, "_name": "x"}}, None)
     assert cols == ["_key", "_name"] and health == 0.0
+
+
+def test_shape_records_position_column():
+    from cdumm.gui.pages.game_data_page import _shape_records
+    schema = _schema("_isRandom")
+    records = {
+        1: {"_key": 1, "_name": "A", "_isRandom": 5},
+        2: {"_key": 2, "_name": "B", "_isRandom": 6},
+    }
+    positions = {1: (-11534.5, 530.4, -6126.3)}      # only key 1 has a position
+    cols, rows, total, _h = _shape_records(records, schema, positions)
+    assert cols == ["_key", "_name", "world pos (X, Y, Z)", "_isRandom"]
+    assert rows[0][2] == "-11534.5, 530.4, -6126.3"
+    assert rows[1][2] == ""                           # key 2 → blank, not guessed
+    # no positions → no extra column
+    cols2, _r, _t, _h2 = _shape_records(records, schema)
+    assert "world pos (X, Y, Z)" not in cols2
