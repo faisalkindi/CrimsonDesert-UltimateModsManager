@@ -339,6 +339,14 @@ class _Texture3DView(QDialog):
 
         self.setWindowTitle(title)
         self.resize(760, 700)
+        # A QDialog shows only a close button; make it a normal OS window with
+        # minimize / maximize / close like any other program.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint)
+        self._mid_last = None            # middle-mouse orbit anchor
 
         # Most portable way to get a QImage into a Qt3D texture across PySide6
         # builds: a temp PNG loaded by QTextureLoader (a painted-texture
@@ -349,6 +357,7 @@ class _Texture3DView(QDialog):
 
         self._window = _E.Qt3DWindow()
         self._window.defaultFrameGraph().setClearColor(QColor("#20222E"))
+        self._window.installEventFilter(self)     # middle-mouse orbit
         container = QWidget.createWindowContainer(self._window, self)
         container.setMinimumSize(420, 420)
         container.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -363,7 +372,8 @@ class _Texture3DView(QDialog):
             btn.clicked.connect(lambda _=False, s=shape: self._set_shape(s))
             bar.addWidget(btn)
         bar.addStretch(1)
-        bar.addWidget(CaptionLabel("Drag to orbit · scroll to zoom", self))
+        bar.addWidget(CaptionLabel(
+            "Left- or middle-drag to orbit · scroll to zoom", self))
         root_layout.addLayout(bar)
         root_layout.addWidget(container, 1)
 
@@ -421,6 +431,32 @@ class _Texture3DView(QDialog):
 
         self._window.setRootEntity(self._root)
         self._set_shape("plane")
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        """Middle-mouse drag orbits the camera around the asset (in addition to
+        the orbit controller's left-drag), the way 3D tools behave."""
+        from PySide6.QtCore import QEvent
+        t = event.type()
+        if (t == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.MiddleButton):
+            self._mid_last = event.position()
+            return True
+        if t == QEvent.Type.MouseMove and self._mid_last is not None:
+            p = event.position()
+            dx = p.x() - self._mid_last.x()
+            dy = p.y() - self._mid_last.y()
+            self._mid_last = p
+            try:
+                self._cam.panAboutViewCenter(-dx * 0.35)
+                self._cam.tiltAboutViewCenter(-dy * 0.35)
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        if (t == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.MiddleButton):
+            self._mid_last = None
+            return True
+        return super().eventFilter(obj, event)
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
