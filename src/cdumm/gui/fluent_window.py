@@ -904,6 +904,15 @@ class CdummWindow(FluentWindow):
     ) -> None:
         super().__init__()
 
+        # Disable the Windows 11 Mica backdrop. Mica tints the window from the
+        # desktop wallpaper and — because Windows dims inactive windows — makes
+        # the whole background visibly change every time the app gains or loses
+        # focus. Turning it off gives one steady, focus-independent background.
+        try:
+            self.setMicaEffectEnabled(False)
+        except Exception:  # noqa: BLE001 — older qfluentwidgets / non-Windows
+            pass
+
         # ── Window chrome ─────────────────────────────────────────────
         self.setWindowTitle(tr("app.name_short") + " v" + __version__)
         self.setMinimumSize(1000, 700)
