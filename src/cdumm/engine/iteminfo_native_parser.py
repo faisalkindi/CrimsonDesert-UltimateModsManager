@@ -297,6 +297,7 @@ def _find_next_record_start(
 def parse_iteminfo_from_bytes(
     data: bytes,
     record_offsets: "list[int] | None" = None,
+    fields=None,
 ) -> list[dict]:
     """Parse an entire iteminfo.pabgb body to a list of item dicts.
 
@@ -324,7 +325,7 @@ def parse_iteminfo_from_bytes(
                            else len(data))
                 r = _Reader(data, rec_start, rec_end=rec_end)
                 try:
-                    it = _read_item(r)
+                    it = _read_item(r, fields=fields)
                     if r.pos > rec_end:
                         raise ValueError(
                             f"record at 0x{rec_start:X} overran its index "
@@ -363,7 +364,7 @@ def parse_iteminfo_from_bytes(
             next_start = len(data)
         r = _Reader(data, rec_start, rec_end=next_start)
         try:
-            items.append(_read_item(r))
+            items.append(_read_item(r, fields=fields))
             pos = r.pos
         except Exception:
             # GitHub #219: undecodable record (1.12 "*_Flag_I" flags) —
@@ -382,6 +383,7 @@ def parse_iteminfo_from_bytes(
 def serialize_iteminfo(
     items: list[dict],
     offsets_out: dict[int, int] | None = None,
+    fields=None,
 ) -> bytes:
     """Inverse of parse_iteminfo_from_bytes. The byte output must be
     identical to the input when items haven't been modified.
@@ -393,7 +395,7 @@ def serialize_iteminfo(
     for it in items:
         if offsets_out is not None:
             offsets_out[it["key"]] = len(w.buf)
-        _write_item(w, it)
+        _write_item(w, it, fields=fields)
     return bytes(w.buf)
 
 
@@ -1977,9 +1979,84 @@ _ITEM_FIELDS = [
 LANTERN_EQ_TYPE = 0x97C2FAE8
 
 
-def _read_item(r: _Reader) -> dict:
+# ── CD 1.13 layout variant ───────────────────────────────────────────
+# CD 1.13 relocated _prefabDataList and _gimmickVisualPrefabDataList out
+# of their mid-record slot (right after _dropDefaultData) to the record
+# tail, and restructured them (GitHub #247). Dropping those two fields
+# here lets the parser decode every OTHER field and carry the relocated
+# tail block verbatim via ``_tail_slack`` — byte-exact round-trip, with
+# all non-prefab fields still editable. Records with further 1.13
+# changes (equipment: page/inspect/socket structs) fail this decode and
+# are carried opaque per-record, so the whole-table round-trip stays
+# byte-exact regardless. Verified against the live 1.13 iteminfo.pabgb:
+# the stackable items (arrows/consumables/materials — the stack-mod
+# targets) decode; equipment is carried opaque.
+_ITEM_FIELDS_CD113 = [
+    f for f in _ITEM_FIELDS
+    if f[0] not in ("prefab_data_list", "gimmick_visual_prefab_data_list")
+]
+
+# (label, fields) candidates, tried in order by detect_iteminfo_layout.
+_ITEM_LAYOUTS = (
+    ("default", None),                       # None -> _ITEM_FIELDS
+    ("cd113_prefab_relocated", _ITEM_FIELDS_CD113),
+)
+
+
+def _record_roundtrips(data: bytes, start: int, end: int, fields) -> bool:
+    """True if one record decodes with ``fields`` and re-serializes
+    byte-identical (tail bytes carried as _tail_slack)."""
+    try:
+        r = _Reader(data, start, rec_end=end)
+        it = _read_item(r, fields=fields)
+        if r.pos > end:
+            return False
+        if r.pos < end:
+            it["_tail_slack"] = bytes(data[r.pos:end])
+        w = _Writer()
+        _write_item(w, it, fields=fields)
+        return bytes(w.buf) == bytes(data[start:end])
+    except Exception:
+        return False
+
+
+def detect_iteminfo_layout(data: bytes, record_offsets):
+    """Pick the field layout (default vs the CD 1.13 relocated variant)
+    that round-trips the most sample records byte-exact. Returns a
+    fields list, or None for the default schema. Fast: samples a handful
+    of records, each bounded by its .pabgh record boundary.
+
+    A game patch that shifts the layout makes the default score 0 while
+    the matching variant scores > 0, so the parser self-selects without
+    a hardcoded version check. If no variant round-trips (a brand-new
+    layout), returns None and the caller's per-record opaque fallback
+    keeps the round-trip byte-exact anyway."""
+    if not record_offsets:
+        return None
+    starts = sorted(set(record_offsets))
+    if not starts or starts[0] != 0:
+        return None
+    n = len(starts)
+    idxs = sorted({i for i in (0, 1, 2, n // 4, n // 2, 3 * n // 4, n - 1)
+                   if 0 <= i < n})
+    best_fields, best_score = None, -1
+    for _label, fields in _ITEM_LAYOUTS:
+        score = 0
+        for i in idxs:
+            s = starts[i]
+            e = starts[i + 1] if i + 1 < len(starts) else len(data)
+            if _record_roundtrips(data, s, e, fields):
+                score += 1
+        if score > best_score:
+            best_score, best_fields = score, fields
+    return best_fields
+
+
+def _read_item(r: _Reader, fields=None) -> dict:
     out: dict = {}
-    for spec in _ITEM_FIELDS:
+    if fields is None:
+        fields = _ITEM_FIELDS
+    for spec in fields:
         name, kind = spec[0], spec[1]
         # Conditional 12-byte block before item_desc on lantern records.
         if name == "item_desc" and out.get("equip_type_info") == LANTERN_EQ_TYPE:
@@ -2155,7 +2232,7 @@ def _read_item(r: _Reader) -> dict:
     return out
 
 
-def _write_item(w: _Writer, it: dict) -> None:
+def _write_item(w: _Writer, it: dict, fields=None) -> None:
     # GitHub #219: records the parser couldn't decode (the 64 "*_Flag_I"
     # guild-flag items whose 1.12 post-gimmick layout isn't modelled yet)
     # are carried verbatim as opaque raw bytes so the whole-table round
@@ -2165,7 +2242,9 @@ def _write_item(w: _Writer, it: dict) -> None:
     if it.get("_opaque_record"):
         w.buf += it["bytes"]
         return
-    for spec in _ITEM_FIELDS:
+    if fields is None:
+        fields = _ITEM_FIELDS
+    for spec in fields:
         name, kind = spec[0], spec[1]
         # Symmetric lantern conditional: emit 12 bytes only when
         # equip_type_info matches. Read values from the record dict.
