@@ -6590,13 +6590,25 @@ class CdummWindow(FluentWindow):
 
         # ── macOS native branch ─────────────────────────────────────
         if IS_MACOS:
+            from cdumm.storage.game_finder import is_steam_install
             app_bundle = _find_app_bundle_above(self._game_dir)
             try:
-                if app_bundle is not None:
+                if is_steam_install(self._game_dir):
+                    # Steam install: hand the launch off THROUGH Steam so
+                    # the DRM / ownership check passes. `open <app>` starts
+                    # the bundle outside Steam's launch flow, and Crimson
+                    # Desert aborts with "Steam needs to be running" even
+                    # when the client is running (macOS Steam DRM). Mirrors
+                    # the Windows branch, which always routes Steam installs
+                    # through the rungameid URI.
+                    from cdumm.engine.game_monitor import get_steam_app_id
+                    app_id = get_steam_app_id(self._game_dir)
+                    subprocess.Popen(["open", f"steam://rungameid/{app_id}"])
+                elif app_bundle is not None:
+                    # Non-Steam (e.g. a standalone .app): launch directly.
                     subprocess.Popen(["open", str(app_bundle)])
                 else:
-                    # Steam URI works on macOS via the Steam client , 
-                    # falls back to the App ID lookup below.
+                    # Last resort: try the Steam URI via App ID lookup.
                     from cdumm.engine.game_monitor import get_steam_app_id
                     app_id = get_steam_app_id(self._game_dir)
                     subprocess.Popen(["open", f"steam://rungameid/{app_id}"])
