@@ -143,3 +143,48 @@ def test_create_mod_from_edits_surfaces_unknown_table(tmp_path):
     assert ("schema" in res.error.lower()
             or "totallyfaketable" in res.error.lower())
     assert db.connection.execute("SELECT COUNT(*) FROM mods").fetchone()[0] == 0
+
+
+# ── grid-editing helpers (is_editable_scalar_field / parse_scalar_value) ──
+
+from types import SimpleNamespace
+
+from cdumm.engine.format3_builder import (
+    is_editable_scalar_field, parse_scalar_value)
+
+
+def _spec(fmt):
+    return SimpleNamespace(name="f", struct_fmt=fmt)
+
+
+def test_is_editable_scalar_true_for_int_float():
+    assert is_editable_scalar_field(_spec("I"))
+    assert is_editable_scalar_field(_spec("<i"))
+    assert is_editable_scalar_field(_spec("f"))
+    assert is_editable_scalar_field(_spec("q"))
+
+
+def test_is_editable_scalar_false_for_variable_and_raw():
+    assert not is_editable_scalar_field(_spec(None))    # walker-driven / variable
+    assert not is_editable_scalar_field(_spec(""))
+    assert not is_editable_scalar_field(_spec("4B"))     # multi-byte raw blob
+    assert not is_editable_scalar_field(_spec("16s"))    # raw bytes
+
+
+def test_parse_scalar_int_decimal_and_hex():
+    assert parse_scalar_value(_spec("I"), "1500") == 1500
+    assert parse_scalar_value(_spec("I"), " 0x10 ") == 16
+    assert parse_scalar_value(_spec("i"), "-7") == -7
+
+
+def test_parse_scalar_float():
+    assert parse_scalar_value(_spec("f"), "2.5") == 2.5
+
+
+def test_parse_scalar_rejects_garbage_and_empty():
+    with pytest.raises(ValueError):
+        parse_scalar_value(_spec("I"), "abc")
+    with pytest.raises(ValueError):
+        parse_scalar_value(_spec("I"), "   ")
+    with pytest.raises(ValueError):
+        parse_scalar_value(_spec(None), "5")
