@@ -131,23 +131,35 @@ def test_apply_engine_emits_warning_on_skipped_patches():
 
 
 def test_apply_engine_warning_includes_skip_details():
-    """The warning text must include the skip count + at least
-    some per-patch details (label, expected vs actual)."""
-    src = (Path(__file__).resolve().parents[1]
-           / "src" / "cdumm" / "engine" / "apply_engine.py"
-           ).read_text(encoding="utf-8")
-    # Find the skip-surfacing block
-    anchor = src.find("if patch_skips:")
-    assert anchor != -1
-    # Look in the next ~30 lines
-    block = src[anchor:anchor + 1500]
-    assert "label" in block, (
-        "warning must reference the patch label so users know "
-        "which entries skipped")
-    assert "expected" in block.lower(), (
-        "warning must show the expected bytes so users can "
-        "diagnose game-version mismatch themselves")
-    assert "actual" in block.lower() or "got" in block.lower(), (
+    """The skip warning must carry per-patch details — label, expected
+    vs actual bytes, and reason — so a user can diagnose a game-version
+    mismatch themselves.
+
+    The formatting moved out of the ``if patch_skips:`` block into the
+    shared ``log_patch_skips`` helper (issue #222, so the same lines also
+    reach the log for saved bug reports). Assert on that helper's real
+    output instead of grepping apply_engine source: the old source-grep
+    silently went stale after the refactor because the text it looked for
+    now lives in the helper, not in the block, and it has been failing on
+    master's CI daily since then.
+    """
+    from cdumm.engine.apply_engine import log_patch_skips
+    lines, overflow = log_patch_skips([{
+        "label": "MyMod/iteminfo",
+        "expected": "DEADBEEF",
+        "actual": "0BADF00D",
+        "reason": "unresolvable offset",
+    }])
+    assert overflow == 0
+    blob = "\n".join(lines).lower()
+    assert "mymod/iteminfo" in blob, (
+        "warning must reference the patch label so users know which "
+        "entries skipped")
+    assert "deadbeef" in blob, (
+        "warning must show the expected bytes so users can diagnose "
+        "game-version mismatch themselves")
+    assert "0badf00d" in blob, (
         "warning must show the actual bytes for the same reason")
-    # And the JMM-parity 'X applied, Y skipped' shape
-    assert "skipped" in block.lower()
+    assert "expected" in blob and "got" in blob
+    assert "unresolvable offset" in blob, (
+        "warning must show the skip reason")
