@@ -93,7 +93,7 @@ def build_format3_json(
             "author": author,
             "description": description
             or f"{len(intents)} field edit(s) made with CDUMM's mod maker",
-            "note": "Format 3 — created with CDUMM's in-app mod maker",
+            "note": "Format 3 - created with CDUMM's in-app mod maker",
         },
         "format": 3,
         "target": targets[0],
