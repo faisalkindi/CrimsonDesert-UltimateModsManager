@@ -1854,7 +1854,21 @@ class GameDataPage(ToolPageBase):
                 self._pv_grid.setColumnWidth(c, 130)
 
     def _on_view_3d(self) -> None:
-        """Open the current texture on a rotatable sphere/cube (pop-up)."""
+        """Open the current texture on a rotatable sphere/cube (pop-up).
+
+        Qt3DWindow creates a native OpenGL window; doing that *inside* this
+        click handler triggers a COM input-synchronous crash
+        (0x8001010d / RPC_E_CANTCALLOUT_ININPUTSYNCCALL) in the packaged
+        build — a hard native crash the try/except below can't catch. Defer to
+        the next event-loop tick so the click event finishes dispatching first.
+        """
+        if self._pv_qimage is None or self._pv_qimage.isNull():
+            return
+        from PySide6.QtCore import QTimer
+        self._set_status("Opening 3D preview…", "")
+        QTimer.singleShot(0, self._open_3d_deferred)
+
+    def _open_3d_deferred(self) -> None:
         if self._pv_qimage is None or self._pv_qimage.isNull():
             return
         try:
@@ -1865,6 +1879,7 @@ class GameDataPage(ToolPageBase):
             return
         self._pv_3d_dlg = dlg          # keep a ref so it isn't GC'd
         dlg.show()
+        self._set_status("", "")
 
     def _on_save_image(self) -> None:
         """Save the decoded texture as a standard image the OS can open.
