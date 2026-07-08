@@ -157,6 +157,12 @@ a = Analysis(
         # codec + DDS plugin so the onefile build actually bundles them
         # (Pillow registers plugins lazily, which PyInstaller can miss).
         'PIL', 'PIL.Image', 'PIL.ImageFile', 'PIL.DdsImagePlugin',
+        # Qt3D for the Game Data texture 3D preview (sphere/cube). The
+        # PySide6 hook bundles the Qt3D DLLs + plugins once these are imported
+        # (and not excluded); QtOpenGL is what Qt3DRender renders through.
+        'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DExtras',
+        'PySide6.Qt3DInput', 'PySide6.Qt3DLogic', 'PySide6.Qt3DAnimation',
+        'PySide6.QtOpenGL',
         'cdumm.archive.pathc_handler',
         'cdumm.engine.mod_health_check',
         'cdumm.asi.asi_manager',
@@ -228,12 +234,15 @@ a = Analysis(
     excludes=[
         # PySide6 modules not used by CDUMM (only QtCore/QtGui/QtWidgets/QtSvg needed)
         'PySide6.QtWebEngine', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
-        'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DInput', 'PySide6.Qt3DExtras',
+        # Qt3D IS used — the Game Data texture 3D preview (sphere/cube). Do NOT
+        # exclude Qt3DCore/Render/Input/Extras or the preview reports
+        # "3D preview unavailable: No module named 'PySide6.Qt3DExtras'".
         'PySide6.QtCharts', 'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',
         'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtBluetooth',
         'PySide6.QtPositioning', 'PySide6.QtSensors', 'PySide6.QtSerialPort',
         'PySide6.QtRemoteObjects', 'PySide6.QtNfc',
-        'PySide6.QtOpenGL', 'PySide6.QtOpenGLWidgets',
+        # QtOpenGL kept (Qt3DRender renders through it); OpenGLWidgets unused.
+        'PySide6.QtOpenGLWidgets',
         'PySide6.QtNetwork',
         'PySide6.QtDataVisualization', 'PySide6.QtGraphs',
         'PySide6.QtAxContainer', 'PySide6.QtDesigner',
@@ -259,15 +268,17 @@ a = Analysis(
 
 # Strip large unused DLLs from binaries
 _dll_excludes = {
-    'opengl32sw.dll',        # ~20 MB software OpenGL (not needed)
-    'Qt6Network.dll',        # ~3 MB
+    # opengl32sw.dll kept — Qt3D's texture 3D preview software-renders
+    # through it when the host has no usable GPU OpenGL driver.
+    # Qt6Network.dll kept — Qt63DCore.dll links it, so stripping it broke the
+    # 3D preview with "DLL load failed while importing Qt3DExtras".
     'Qt6Pdf.dll',            # ~4 MB
     'Qt6Designer.dll',       # ~5 MB
     'Qt6Quick.dll',          # ~6 MB
     'Qt6Qml.dll',            # ~5 MB
     'Qt6ShaderTools.dll',    # ~4 MB
     'Qt6Quick3DRuntimeRender.dll',
-    'Qt6OpenGL.dll',         # ~1.9 MB (not used — no OpenGL rendering)
+    # Qt6OpenGL.dll kept — Qt3DRender (texture 3D preview) renders through it.
     'Qt6QmlModels.dll',      # ~0.95 MB
     'Qt6QmlMeta.dll',        # ~0.15 MB
     'Qt6QmlWorkerScript.dll',  # ~0.08 MB
