@@ -17,6 +17,7 @@ post-2026-04-29 game patch layout.
 """
 from __future__ import annotations
 import logging
+import struct
 from typing import TYPE_CHECKING, Optional
 
 from cdumm.engine.iteminfo_native_parser import (
@@ -250,6 +251,304 @@ def _resolve_path_target(
     return (cur, last_val)
 
 
+# ── Leading-field byte-patch fallback (unsupported game versions) ────
+#
+# When a game patch shifts the iteminfo record layout the full parser
+# doesn't model yet (e.g. CD 1.13 changed prefab_data_list — GitHub
+# #247), a full whole-table decode misaligns every record and the
+# apply stalls the 180s watchdog. But the record HEADER is stable
+# across every version seen: u32 key, length-prefixed string_key,
+# u8 is_blocked, u64 max_stack_count. Those fixed-offset leading
+# scalars can be patched directly in the record bytes without decoding
+# the rest — so stack-size mods (the overwhelmingly common iteminfo
+# Format 3 mod) keep working, safely, on versions we can't fully parse.
+# The patch is same-width, so record sizes and the .pabgh index are
+# untouched and every unrelated byte is preserved.
+_LEADING_SCALAR_FIELDS = {
+    # canonical_name: (struct_fmt, offset_added_to_string_key_len, width)
+    "is_blocked": ("<B", 8, 1),
+    "max_stack_count": ("<Q", 9, 8),
+}
+
+
+def _canon_field(name: str) -> str:
+    """Normalise a Format 3 field name to compare across the dialects
+    the writer accepts (snake_case, camelCase, _schemaCase)."""
+    return name.lstrip("_").replace("_", "").lower()
+
+
+_LEADING_BY_CANON = {_canon_field(k): k for k in _LEADING_SCALAR_FIELDS}
+
+
+def _iteminfo_record_starts(body: bytes, header: bytes):
+    """Return ``(by_key, by_name)`` mapping key/string_key -> record
+    start offset, read from the .pabgh index. Reads only each record's
+    key and string_key — no field decode — so it is layout-independent
+    and fast even when the full schema can't decode the version."""
+    from cdumm.semantic.parser import parse_pabgh_index
+    _, off = parse_pabgh_index(header, "iteminfo")
+    if not off:
+        return None, None
+    by_key: dict[int, int] = {}
+    by_name: dict[str, int] = {}
+    n = len(body)
+    for s in sorted(off.values()):
+        if s + 8 > n:
+            continue
+        key = struct.unpack_from("<I", body, s)[0]
+        by_key.setdefault(key, s)
+        sklen = struct.unpack_from("<I", body, s + 4)[0]
+        if s + 8 + sklen <= n:
+            name = body[s + 8:s + 8 + sklen].decode("utf-8", "replace")
+            if name:
+                by_name.setdefault(name, s)
+    return by_key, by_name
+
+
+def _schema_supports_version(body: bytes, header: bytes | None) -> bool:
+    """Fast probe: does the current ``_ITEM_FIELDS`` schema decode the
+    first few records cleanly? A game patch that shifts the layout makes
+    this False, and the caller uses the byte-patch fallback instead of
+    the full parse (which would misalign every record and stall the
+    watchdog). Fails fast — parses at most 5 records, each bounded by
+    its .pabgh record boundary."""
+    if header is None:
+        return True  # no index to frame with; let the full path decide
+    try:
+        from cdumm.engine.iteminfo_native_parser import parse_record_at
+        from cdumm.semantic.parser import parse_pabgh_index
+        _, off = parse_pabgh_index(header, "iteminfo")
+        starts = sorted(off.values())
+    except Exception:
+        return True
+    if not starts or starts[0] != 0:
+        return True
+    for i, s in enumerate(starts[:5]):
+        end = starts[i + 1] if i + 1 < len(starts) else len(body)
+        try:
+            parse_record_at(body, s, end)
+        except Exception:
+            return False
+    return True
+
+
+def _bytepatch_leading_fields(
+    vanilla_body: bytes,
+    vanilla_header: bytes | None,
+    intents: "list[Format3Intent]",
+) -> Optional[dict]:
+    """Whole-table writer fallback for game versions the parser schema
+    can't fully decode. Copies the table verbatim and patches only
+    fixed-offset leading scalar fields in place. Deep-field intents are
+    skipped with a clear reason. Returns a v2 whole-file change dict, or
+    None if nothing applied."""
+    if vanilla_header is None:
+        return None
+    by_key, by_name = _iteminfo_record_starts(vanilla_body, vanilla_header)
+    if by_key is None:
+        return None
+    buf = bytearray(vanilla_body)
+    n = len(buf)
+    applied = skipped_deep = skipped_key = skipped_op = 0
+    for intent in intents:
+        canon = _LEADING_BY_CANON.get(_canon_field(intent.field))
+        if canon is None:
+            skipped_deep += 1
+            continue
+        if intent.op != "set":
+            skipped_op += 1
+            continue
+        start = by_key.get(intent.key)
+        if start is None and intent.entry:
+            start = by_name.get(intent.entry)
+        if start is None:
+            skipped_key += 1
+            continue
+        sklen = struct.unpack_from("<I", buf, start + 4)[0]
+        fmt, base, width = _LEADING_SCALAR_FIELDS[canon]
+        pos = start + base + sklen
+        if pos + width > n:
+            skipped_key += 1
+            continue
+        try:
+            struct.pack_into(fmt, buf, pos, int(intent.new))
+            applied += 1
+        except (struct.error, ValueError, TypeError):
+            skipped_deep += 1
+    if skipped_deep:
+        logger.warning(
+            "iteminfo: %d intent(s) target fields that need full schema "
+            "support for this game version (not yet reverse-engineered); "
+            "only fixed-offset leading fields (%s) are byte-patchable "
+            "here, so those intents were skipped.",
+            skipped_deep, ", ".join(sorted(_LEADING_SCALAR_FIELDS)))
+    if applied == 0:
+        logger.warning(
+            "iteminfo byte-patch fallback: 0 of %d intent(s) applied "
+            "(%d deep-field, %d unknown key, %d non-'set' op).",
+            len(intents), skipped_deep, skipped_key, skipped_op)
+        return None
+    patched = bytes(buf)
+    if patched == vanilla_body:
+        return None
+    logger.info(
+        "iteminfo byte-patch fallback: %d leading-field intent(s) applied "
+        "on a game version the full schema can't decode.", applied)
+    tail = (f", {skipped_deep} deep-field skipped)" if skipped_deep else ")")
+    return {
+        "offset": 0,
+        "original": vanilla_body.hex(),
+        "patched": patched.hex(),
+        "label": f"iteminfo Format 3 intents (byte-patched, {applied} applied"
+                 + tail,
+    }
+
+
+def _build_change_relocated_layout(
+    vanilla_body: bytes,
+    vanilla_header: bytes | None,
+    intents: "list[Format3Intent]",
+) -> Optional[dict]:
+    """Whole-table writer for a game version whose layout the parser can
+    only decode via a relocated-field variant (e.g. CD 1.13 moved
+    prefab_data_list/gimmick_visual_prefab_data_list to the record tail).
+
+    Uses ``detect_iteminfo_layout`` to pick the variant, parses (records
+    that still don't decode are carried opaque, byte-exact), applies
+    intents to decoded records via normal dict edits and to opaque
+    records via a fixed-offset leading-scalar byte-patch, then
+    serializes. Falls back to the pure byte-patch writer if the variant
+    can't round-trip. Returns a v2 whole-file change dict or None."""
+    from cdumm.semantic.parser import parse_pabgh_index
+    from cdumm.engine.iteminfo_native_parser import (
+        detect_iteminfo_layout, parse_iteminfo_from_bytes,
+        serialize_iteminfo,
+    )
+    if vanilla_header is None:
+        return _bytepatch_leading_fields(vanilla_body, vanilla_header, intents)
+    _, off = parse_pabgh_index(vanilla_header, "iteminfo")
+    if not off:
+        return _bytepatch_leading_fields(vanilla_body, vanilla_header, intents)
+    record_offsets = sorted(off.values())
+    fields = detect_iteminfo_layout(vanilla_body, record_offsets)
+    if fields is None:
+        # No known relocated layout matched — safest is the raw
+        # leading-field byte-patch (never misdecodes).
+        return _bytepatch_leading_fields(vanilla_body, vanilla_header, intents)
+
+    items = parse_iteminfo_from_bytes(vanilla_body, record_offsets, fields=fields)
+    ident_offsets: dict[int, int] = {}
+    try:
+        ident = serialize_iteminfo(items, offsets_out=ident_offsets, fields=fields)
+    except Exception as e:  # noqa: BLE001
+        logger.error("iteminfo(1.13) identity serialize failed: %s", e)
+        return _bytepatch_leading_fields(vanilla_body, vanilla_header, intents)
+    if ident != vanilla_body:
+        logger.warning("iteminfo(1.13) relocated layout did not round-trip; "
+                       "falling back to leading-field byte-patch.")
+        return _bytepatch_leading_fields(vanilla_body, vanilla_header, intents)
+
+    by_key = {it["key"]: it for it in items}
+    by_name = {it["string_key"]: it for it in items
+               if isinstance(it.get("string_key"), str) and it.get("string_key")}
+    applied = decoded_edits = opaque_patches = 0
+    skipped_key = skipped_field = skipped_op = skipped_opaque = 0
+
+    for intent in intents:
+        item = by_key.get(intent.key)
+        if item is None and intent.entry:
+            item = by_name.get(intent.entry)
+        if item is None:
+            skipped_key += 1
+            continue
+        if intent.op != "set":
+            skipped_op += 1
+            continue
+
+        if item.get("_opaque_record"):
+            # Record carried verbatim (structure not decoded on this
+            # version). Only fixed-offset leading scalars are safely
+            # patchable in its raw bytes.
+            canon = _LEADING_BY_CANON.get(_canon_field(intent.field))
+            if canon is None:
+                skipped_opaque += 1
+                continue
+            b = bytearray(item["bytes"])
+            sklen = struct.unpack_from("<I", b, 4)[0]
+            fmt, base, width = _LEADING_SCALAR_FIELDS[canon]
+            pos = base + sklen
+            if pos + width > len(b):
+                skipped_field += 1
+                continue
+            try:
+                struct.pack_into(fmt, b, pos, int(intent.new))
+                item["bytes"] = bytes(b)
+                applied += 1
+                opaque_patches += 1
+            except (struct.error, ValueError, TypeError):
+                skipped_field += 1
+            continue
+
+        # Decoded record: normal dict edit with field resolution + shape gate.
+        if intent.field in UNWRITEABLE_KNOWN_FIELDS:
+            skipped_field += 1
+            continue
+        target_field = _resolve_field_name(intent.field, item)
+        if target_field is None:
+            if intent.field in SUPPORTED_FIELDS:
+                target_field = intent.field
+            else:
+                skipped_field += 1
+                continue
+        if not shape_matches(item.get(target_field), intent.new):
+            skipped_field += 1
+            continue
+        item[target_field] = intent.new
+        applied += 1
+        decoded_edits += 1
+
+    if applied == 0:
+        logger.warning(
+            "iteminfo(1.13): 0 of %d intent(s) applied "
+            "(%d unknown key, %d unwritable/opaque field, %d non-set).",
+            len(intents), skipped_key,
+            skipped_field + skipped_opaque, skipped_op)
+        return None
+
+    new_offsets: dict[int, int] = {}
+    try:
+        new_bytes = serialize_iteminfo(items, offsets_out=new_offsets, fields=fields)
+    except Exception as e:  # noqa: BLE001
+        logger.error("iteminfo(1.13) serialize failed after edits: %s", e)
+        return None
+    if new_bytes == vanilla_body:
+        return None
+
+    change = {
+        "offset": 0,
+        "original": vanilla_body.hex(),
+        "patched": new_bytes.hex(),
+        "label": (f"iteminfo Format 3 intents (1.13 relocated layout, "
+                  f"{applied} applied: {decoded_edits} decoded, "
+                  f"{opaque_patches} byte-patched)"),
+    }
+    if new_offsets != ident_offsets:
+        from cdumm.engine.pabgh_rewrite import rewrite_pabgh_offsets
+        new_header = rewrite_pabgh_offsets(vanilla_header, "iteminfo", new_offsets)
+        if new_header is None:
+            logger.error("iteminfo(1.13): record sizes changed but .pabgh "
+                         "rewrite failed; refusing change.")
+            return None
+        if new_header != vanilla_header:
+            change["_pabgh_companion"] = {
+                "offset": 0,
+                "original": vanilla_header.hex(),
+                "patched": new_header.hex(),
+                "label": "iteminfo .pabgh offsets (rebuilt for 1.13 edits)",
+            }
+    return change
+
+
 def build_iteminfo_intent_change(
     vanilla_body: bytes,
     intents: "list[Format3Intent]",
@@ -276,6 +575,22 @@ def build_iteminfo_intent_change(
     refuses (returns None) if the table size changed but the index
     cannot be rebuilt.
     """
+    # Version guard: if the current schema can't decode this game
+    # version's records (e.g. CD 1.13 shifted prefab_data_list — GitHub
+    # #247), a full whole-table parse misaligns every record and stalls
+    # the 180s apply watchdog. Fall back to the leading-field byte-patch
+    # writer, which handles the common stack-size mods safely without a
+    # full decode. Probe is fast (≤5 records, fails fast).
+    if not _schema_supports_version(vanilla_body, vanilla_header):
+        logger.warning(
+            "iteminfo: default parser schema does not match this game "
+            "version (record decode fails) — using the relocated-layout "
+            "writer (CD 1.13: prefab/gvp moved to record tail; GitHub "
+            "#247). Stackable items decode + edit fully; other items are "
+            "carried verbatim with leading-field byte-patch.")
+        return _build_change_relocated_layout(
+            vanilla_body, vanilla_header, intents)
+
     # With the .pabgh available, frame records from the authoritative
     # index instead of the sniff heuristic: the heuristic's key
     # ceiling silently swallows real records with large keys
