@@ -1627,6 +1627,15 @@ def _resolve_write_pos(
             break
     if spec is None or not spec.struct_fmt or not spec.stream_size:
         return None
+    # Honor the verified-only gate. A table may mark which fields have been
+    # validated against real record data (schemas/pabgb_type_overrides.json
+    # `_verified_fields`). Fields it doesn't vouch for render `(unverified)`
+    # in the grid because their real offset isn't proven — so a Format 3 mod
+    # must not write to them either, or the write could land on the wrong
+    # byte. Only affects tables that opt in; every other table is unchanged.
+    vf = getattr(schema, "verified_fields", None)
+    if vf is not None and target_name not in vf:
+        return None
     # Walk schema fields up to target. For each field, use its actual
     # binary footprint so variable-length fields (CString, etc.) are
     # consumed correctly. Pure stream_size summation breaks when any

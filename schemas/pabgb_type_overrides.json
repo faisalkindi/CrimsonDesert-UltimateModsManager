@@ -409,5 +409,13 @@
     "_callMercenaryCoolTime": {"type": "u64"},
     "_callMercenarySpawnDuration": {"type": "u64"},
     "_mercenaryCoolTimeType": {"type": "u8"}
+  },
+  "WantedInfo": {
+    "_meta_note": "Verified-only pass 2026-07-03. Only _increasePrice is validated: read as u64 at payload offset 0 (the default entry header consumes exactly key(2)+name_len(4, always 0)+null(1) = 7 bytes on every record, landing on the price). Values track the wanted tier — 30/50/100/500/1500 gold, consistent across all 5 key groups. _isBlocked/_useTargetPrice are all-zero in shipped data except one toggling flag byte whose name mapping can't be proven from the files alone (the field defs live only in the exe), so they are listed but gated as unverified rather than guessed. _stringKey (untyped in the base schema) stays dropped.",
+    "_ordered_fields": ["_increasePrice", "_isBlocked", "_useTargetPrice"],
+    "_verified_fields": ["_increasePrice"],
+    "_increasePrice": {"type": "u64"},
+    "_isBlocked": {"type": "u8"},
+    "_useTargetPrice": {"type": "u8"}
   }
 }
