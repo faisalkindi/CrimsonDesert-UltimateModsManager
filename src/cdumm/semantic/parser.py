@@ -680,6 +680,31 @@ def parse_records_display(table_name: str, body_bytes: bytes,
     return records
 
 
+def record_raw_bytes(table_name: str, body_bytes: bytes, header_bytes: bytes
+                     ) -> dict[int, bytes]:
+    """Return ``{record_key: raw entry bytes}`` for a PABGB table.
+
+    Same record boundaries the parsers use (sorted PABGH offsets), but hands
+    back the untouched bytes of each entry. Used by the gear-stat editor, which
+    locates + edits stats structurally inside the opaque equipment records that
+    the field decoder carries raw. Empty dict if the schema/index is missing.
+    """
+    if get_schema(table_name) is None:
+        return {}
+    _key_size, offsets = parse_pabgh_index(header_bytes, table_name)
+    if not offsets:
+        return {}
+    sorted_entries = sorted(offsets.items(), key=lambda x: x[1])
+    out: dict[int, bytes] = {}
+    for idx, (key, entry_offset) in enumerate(sorted_entries):
+        entry_end = (sorted_entries[idx + 1][1]
+                     if idx + 1 < len(sorted_entries) else len(body_bytes))
+        if entry_offset >= len(body_bytes):
+            continue
+        out[key] = body_bytes[entry_offset:entry_end]
+    return out
+
+
 def identify_table_from_path(entry_path: str) -> str | None:
     """Extract table name from a PAMT entry path.
 

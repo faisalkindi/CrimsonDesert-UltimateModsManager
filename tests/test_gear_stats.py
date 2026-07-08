@@ -17,6 +17,7 @@ from cdumm.engine.gear_stats import (
     build_stat_whitelist,
     edit_record_stats,
     is_gear_stat_field,
+    locate_all_gear_stats,
     locate_gear_stats,
     resolve_gear_stat_index,
 )
@@ -166,3 +167,26 @@ def test_resolve_by_stat_key_and_by_index():
     # unknown stat key / out-of-range index -> None
     assert resolve_gear_stat_index("gear_stat[1099999]", located) is None
     assert resolve_gear_stat_index("gear_stat[9]", located) is None
+
+
+# --- whole-table locate (GUI feed) ----------------------------------------
+
+def test_locate_all_builds_whitelist_and_maps_records():
+    # 1000002 recurs 10x across gear records -> whitelisted; a lone junk key
+    # in a non-gear record is dropped, so that record surfaces no stats.
+    gear = {}
+    for i in range(10):
+        blk = _esd([], [], [(1000002, 100 + i)], [])
+        gear[i] = b"\x00" * 8 + blk + b"\x00" * 8
+    gear[999] = b"\x11" * 64  # no stat block at all
+    got = locate_all_gear_stats(gear, min_freq=10)
+    assert set(got) == set(range(10))            # only records with stats
+    assert 999 not in got
+    assert [(g.stat, g.value) for g in got[3]] == [(1000002, 103)]
+
+
+def test_locate_all_empty_when_nothing_recurs():
+    # every candidate key is unique -> whitelist empty -> no records returned
+    recs = {i: b"\x00" * 8 + _esd([], [], [(1000000 + i, i)], [])
+            for i in range(5)}
+    assert locate_all_gear_stats(recs, min_freq=10) == {}
