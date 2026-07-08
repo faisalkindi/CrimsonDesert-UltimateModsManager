@@ -53,6 +53,52 @@ def _safe_filename(name: str) -> str:
     return stem or "cdumm_mod"
 
 
+# ── grid-editing helpers (used by the Game Data mod-maker UI) ────────
+
+_INT_FMT_CHARS = frozenset("bBhHiIlLqQnN")
+_FLOAT_FMT_CHARS = frozenset("efd")
+
+
+def is_editable_scalar_field(spec) -> bool:
+    """True only for a single fixed-width scalar field (int / float).
+
+    These are the fields the Format 3 writer packs directly by offset, so
+    they are the ones the in-app mod maker exposes for editing. Variable-length
+    fields (``CString``, ``CArray<...>``, ``COptional<...>``) and multi-byte raw
+    blobs (``struct_fmt`` like ``"4B"``/``"16s"``) return ``False``. ``spec`` is
+    duck-typed — any object with a ``struct_fmt`` attribute works (a
+    ``semantic.parser.FieldSpec``). A field with no ``struct_fmt`` is never
+    editable.
+    """
+    fmt = getattr(spec, "struct_fmt", None)
+    if not fmt:
+        return False
+    core = str(fmt).lstrip("<>=!@")
+    return len(core) == 1 and (core in _INT_FMT_CHARS or core in _FLOAT_FMT_CHARS)
+
+
+def parse_scalar_value(spec, text: str):
+    """Parse a user-typed cell value to the field's Python type.
+
+    Ints accept decimal or ``0x`` hex; floats accept decimal/scientific.
+    Raises ``ValueError`` on anything that doesn't fit, so the caller can
+    reject the edit and keep the grid honest.
+    """
+    fmt = str(getattr(spec, "struct_fmt", None) or "").lstrip("<>=!@")
+    ch = fmt[-1] if fmt else ""
+    t = (text or "").strip()
+    if t == "":
+        raise ValueError("empty value")
+    if ch in _FLOAT_FMT_CHARS:
+        return float(t)
+    if ch in _INT_FMT_CHARS:
+        tl = t.lower()
+        if tl.startswith(("0x", "+0x", "-0x")):
+            return int(t, 16)
+        return int(t)
+    raise ValueError(f"field is not a fixed-width scalar (struct_fmt={fmt!r})")
+
+
 def build_format3_json(
     edits: Iterable[FieldEdit],
     *,
@@ -93,7 +139,7 @@ def build_format3_json(
             "author": author,
             "description": description
             or f"{len(intents)} field edit(s) made with CDUMM's mod maker",
-            "note": "Format 3 - created with CDUMM's in-app mod maker",
+            "note": "Format 3 — created with CDUMM's in-app mod maker",
         },
         "format": 3,
         "target": targets[0],

@@ -746,6 +746,10 @@ class GameDataPage(ToolPageBase):
         self._pv_grid.setFont(_gf)
         self._pv_grid.verticalHeader().setDefaultSectionSize(30)
         self._pv_grid.setVisible(False)
+        # Mod maker: capture edits to verified cells (staged into a Format 3
+        # mod). Always connected; the handler no-ops unless the current
+        # preview is an editable table (self._pv_table is set).
+        self._pv_grid.itemChanged.connect(self._on_grid_cell_edited)
         pv.addWidget(self._pv_grid, 1)
 
         # Image view for textures (DDS decoded to PNG). Hidden until selected.
@@ -795,6 +799,24 @@ class GameDataPage(ToolPageBase):
         self._pv_extract.setEnabled(False)
         self._pv_extract.clicked.connect(self._extract_raw)
         pv.addWidget(self._pv_extract)
+
+        # ── Mod maker (Format 3) — shown only for a verified, editable table.
+        # Double-clicking a verified value stages an edit; these turn the
+        # staged edits into a Format 3 (.field.json) mod (import or export).
+        self._mm_status = CaptionLabel("", pane)
+        self._mm_status.setWordWrap(True)
+        self._mm_status.setVisible(False)
+        pv.addWidget(self._mm_status)
+        self._mm_make_btn = PushButton("Make mod from edits…", pane)
+        self._mm_make_btn.setVisible(False)
+        self._mm_make_btn.setEnabled(False)
+        self._mm_make_btn.clicked.connect(self._on_make_mod)
+        pv.addWidget(self._mm_make_btn)
+        self._mm_export_btn = PushButton("Export .field.json…", pane)
+        self._mm_export_btn.setVisible(False)
+        self._mm_export_btn.setEnabled(False)
+        self._mm_export_btn.clicked.connect(self._on_export_field_json)
+        pv.addWidget(self._mm_export_btn)
         split.addWidget(pane)
 
         split.setStretchFactor(0, 3)
@@ -806,6 +828,13 @@ class GameDataPage(ToolPageBase):
         self._pv_jobs: list = []         # live (thread, worker) — keep refs
         self._pv_qimage: QImage | None = None   # current texture, for 3D
         self._pv_3d_dlg = None                   # open 3D dialog (keep a ref)
+        # Mod-maker state (Format 3): the currently editable table, its
+        # columns, its schema, and the edits staged from the grid so far.
+        self._pv_table: str | None = None
+        self._pv_cols: list = []
+        self._pv_schema = None
+        self._mm_editable_cols: dict = {}        # grid col index -> FieldSpec
+        self._pending_edits: dict = {}           # (key, field) -> FieldEdit
         # stretch=1 makes this row absorb the page's spare vertical space
         # (the base layout's trailing addStretch() has factor 0, so it yields).
         root.insertWidget(root.count() - 1, split, 1)
@@ -1100,6 +1129,7 @@ class GameDataPage(ToolPageBase):
     def _on_preview_ready(self, res: dict) -> None:
         if res.get("gen") != self._pv_gen:
             return   # a newer selection superseded this result
+        self._reset_maker()   # clear any staged edits/controls from a prior asset
         # Image-only button; _show_image re-shows it, every other branch leaves
         # it hidden.
         self._pv_saveimg_btn.setVisible(False)
@@ -1134,6 +1164,8 @@ class GameDataPage(ToolPageBase):
                 f"{more}{note}\n{res.get('path', '')}")
             self._show_grid(res.get("cols", []), res.get("rows", []))
             self._pv_extract.setEnabled(True)
+            self._enable_table_editing(
+                res.get("table", ""), res.get("cols", []))
             return
 
         if kind == "image":
@@ -1306,6 +1338,223 @@ class GameDataPage(ToolPageBase):
             pm = pm.scaledToWidth(
                 avail, Qt.TransformationMode.SmoothTransformation)
         self._pv_image.setPixmap(pm)
+
+    # ── Mod maker (Format 3) ─────────────────────────────────────────
+    def _reset_maker(self) -> None:
+        """Clear staged edits + hide maker controls (called every preview)."""
+        self._pv_table = None
+        self._pv_cols = []
+        self._pv_schema = None
+        self._mm_editable_cols = {}
+        self._pending_edits = {}
+        for w in (getattr(self, "_mm_status", None),
+                  getattr(self, "_mm_make_btn", None),
+                  getattr(self, "_mm_export_btn", None)):
+            if w is not None:
+                w.setVisible(False)
+        grid = getattr(self, "_pv_grid", None)
+        if grid is not None:
+            try:
+                grid.setEditTriggers(grid.EditTrigger.NoEditTriggers)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _enable_table_editing(self, table: str, cols: list) -> None:
+        """Make verified fixed-width cells of the just-shown table editable
+        and reveal the maker controls. Stays read-only (no controls) when the
+        table has no curated/verified fixed-width fields — so a guessed byte
+        is never editable."""
+        self._pv_cols = list(cols)
+        try:
+            from cdumm.semantic import parser as sem
+            schema = sem.get_schema(table)
+        except Exception:  # noqa: BLE001
+            schema = None
+        editable = self._editable_columns(cols, schema)
+        grid = self._pv_grid
+        grid.blockSignals(True)
+        try:
+            for r in range(grid.rowCount()):
+                for c in range(grid.columnCount()):
+                    it = grid.item(r, c)
+                    if it is None:
+                        continue
+                    if c in editable and it.text() != "(unverified)":
+                        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+                        it.setData(Qt.ItemDataRole.UserRole, it.text())
+                    else:
+                        it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        finally:
+            grid.blockSignals(False)
+        if not editable:
+            grid.setEditTriggers(grid.EditTrigger.NoEditTriggers)
+            return
+        grid.setEditTriggers(grid.EditTrigger.DoubleClicked)
+        self._pv_table = table
+        self._pv_schema = schema
+        self._mm_editable_cols = editable
+        self._mm_status.setVisible(True)
+        self._mm_make_btn.setVisible(True)
+        self._mm_export_btn.setVisible(True)
+        self._refresh_maker_buttons()
+
+    def _editable_columns(self, cols: list, schema) -> dict:
+        """Map grid column index -> FieldSpec for columns a user may edit: a
+        verified (or un-gated) fixed-width scalar field that isn't in the
+        masked tail and isn't a metadata column (_key / _name / world pos)."""
+        from cdumm.engine.format3_builder import is_editable_scalar_field
+        out: dict = {}
+        if not schema:
+            return out
+        verified = getattr(schema, "verified_fields", None)
+        by_name = {f.name: f for f in schema.fields}
+        # Same masking _shape_records uses: the first field with no decodable
+        # width, and everything after it, can't be trusted byte-for-byte.
+        masked, hit = set(), False
+        for f in schema.fields:
+            if f.name in ("_key", "_name"):
+                continue
+            if not hit and hasattr(f, "field_type") and (
+                    not getattr(f, "struct_fmt", None)
+                    and not getattr(f, "type_descriptor", None)
+                    and f.field_type != "CString"):
+                hit = True
+            if hit:
+                masked.add(f.name)
+        for c, name in enumerate(cols):
+            if name in ("_key", "_name", "world pos (X, Y, Z)"):
+                continue
+            spec = by_name.get(name)
+            if spec is None or name in masked:
+                continue
+            # Only a curated table (verified set present) may be edited, and
+            # only its verified fields — never an unproven offset. An
+            # un-curated table (verified is None) exposes nothing to the maker.
+            if verified is None or name not in verified:
+                continue
+            if is_editable_scalar_field(spec):
+                out[c] = spec
+        return out
+
+    def _on_grid_cell_edited(self, item) -> None:
+        """Stage a verified-cell edit as a FieldEdit, validated against the
+        field type. Reverts the cell (to its original) on invalid input."""
+        if item is None or not self._pv_table:
+            return
+        c = item.column()
+        spec = self._mm_editable_cols.get(c)
+        if spec is None:
+            return
+        from cdumm.engine.format3_builder import FieldEdit, parse_scalar_value
+        grid = self._pv_grid
+        r = item.row()
+        key_item = grid.item(r, 0)
+        name_item = grid.item(r, 1)
+        try:
+            key = int(str(key_item.text()).strip()) if key_item else 0
+        except (ValueError, AttributeError):
+            key = 0
+        entry = name_item.text() if name_item else ""
+        field = self._pv_cols[c] if c < len(self._pv_cols) else spec.name
+        try:
+            new_val = parse_scalar_value(spec, item.text())
+        except (ValueError, TypeError):
+            bad = item.text()
+            orig = item.data(Qt.ItemDataRole.UserRole)
+            grid.blockSignals(True)
+            item.setText("" if orig is None else str(orig))
+            grid.blockSignals(False)
+            self._flash_maker(
+                f"“{bad}” isn't a valid value for {field}.", error=True)
+            return
+        self._pending_edits[(key, field)] = FieldEdit(
+            target=f"{self._pv_table}.pabgb", entry=entry, key=key,
+            field=field, new=new_val,
+            old=item.data(Qt.ItemDataRole.UserRole))
+        self._refresh_maker_buttons()
+
+    def _refresh_maker_buttons(self) -> None:
+        n = len(self._pending_edits)
+        self._mm_make_btn.setEnabled(n > 0)
+        self._mm_export_btn.setEnabled(n > 0)
+        self._mm_make_btn.setText(
+            f"Make mod from {n} edit(s)…" if n else "Make mod from edits…")
+        base = ("Editable table — double-click a verified value to change it, "
+                "then make or export a mod.")
+        self._mm_status.setText(
+            base if n == 0 else f"{n} pending edit(s).  {base}")
+
+    def _flash_maker(self, msg: str, error: bool = False) -> None:
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            fn = InfoBar.warning if error else InfoBar.success
+            fn("Mod maker", msg, duration=6000,
+               position=InfoBarPosition.TOP, parent=self)
+        except Exception:  # noqa: BLE001
+            if getattr(self, "_mm_status", None) is not None:
+                self._mm_status.setText(msg)
+
+    def _mm_prompt_name(self, purpose: str) -> "str | None":
+        from PySide6.QtWidgets import QInputDialog
+        default = f"{self._pv_table} edits" if self._pv_table else "My mod"
+        name, ok = QInputDialog.getText(self, purpose, "Mod name:", text=default)
+        name = (name or "").strip()
+        return name if (ok and name) else None
+
+    def _on_make_mod(self) -> None:
+        if not self._pending_edits:
+            return
+        if not (self._game_dir and self._db and self._snapshot
+                and self._deltas_dir):
+            self._flash_maker(
+                "Set your Crimson Desert game folder first (Settings), then "
+                "reopen this table.", error=True)
+            return
+        name = self._mm_prompt_name("Make mod from edits")
+        if not name:
+            return
+        from cdumm.engine.format3_builder import create_mod_from_edits
+        try:
+            res = create_mod_from_edits(
+                list(self._pending_edits.values()), title=name,
+                game_dir=self._game_dir, db=self._db,
+                snapshot=self._snapshot, deltas_dir=self._deltas_dir)
+        except Exception as e:  # noqa: BLE001
+            self._flash_maker(f"Couldn't create the mod: {e}", error=True)
+            return
+        if getattr(res, "error", None):
+            self._flash_maker(res.error, error=True)
+            return
+        n = len(self._pending_edits)
+        self._pending_edits = {}
+        self._refresh_maker_buttons()
+        self._flash_maker(
+            f"Created “{name}” from {n} edit(s) — enable it in the Mods tab, "
+            f"then Apply.", error=False)
+
+    def _on_export_field_json(self) -> None:
+        if not self._pending_edits:
+            return
+        name = self._mm_prompt_name("Export .field.json")
+        if not name:
+            return
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "Export Format 3 mod", f"{name}.field.json",
+            "Format 3 mod (*.field.json *.json)")
+        if not path:
+            return
+        from cdumm.engine.format3_builder import (build_format3_json,
+                                                  write_field_json)
+        try:
+            mod = build_format3_json(
+                list(self._pending_edits.values()), title=name)
+            write_field_json(mod, path)
+        except Exception as e:  # noqa: BLE001
+            self._flash_maker(f"Export failed: {e}", error=True)
+            return
+        self._flash_maker(
+            f"Exported {len(self._pending_edits)} edit(s) to "
+            f"{os.path.basename(path)}.", error=False)
 
     def _show_grid(self, cols: list, rows: list) -> None:
         self._pv_text.setVisible(False)
