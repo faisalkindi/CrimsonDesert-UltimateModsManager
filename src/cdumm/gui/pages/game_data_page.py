@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
-import sys
 import tempfile
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -1493,12 +1492,7 @@ class GameDataPage(ToolPageBase):
         self._pv_img_scroll.setVisible(True)
         self._pv_qimage = QImage.fromData(png, "PNG") if png else None
         _has_img = self._pv_qimage is not None and not self._pv_qimage.isNull()
-        # The Qt3D texture 3D preview hard-crashes the *packaged* build (native
-        # Qt3D/OpenGL COM crash that no Python guard can catch — module, DLLs,
-        # render plugins and deferred creation all bundled/tried, still
-        # crashes). It's a minor extra on top of the 2D preview, so hide it in
-        # frozen builds; devs running from source keep it.
-        self._pv_3d_btn.setVisible(_has_img and not getattr(sys, "frozen", False))
+        self._pv_3d_btn.setVisible(_has_img)
         self._pv_saveimg_btn.setVisible(_has_img)
         pm = QPixmap()
         if png:

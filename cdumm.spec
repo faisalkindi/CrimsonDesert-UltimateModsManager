@@ -62,11 +62,22 @@ _qflw_datas, _qflw_binaries, _qflw_hiddenimports = collect_all('qframelesswindow
 # (GitHub #175 / #178 / #179: CERTIFICATE_VERIFY_FAILED).
 _certifi_datas = collect_data_files('certifi')
 
+# Qt6ShaderTools.dll — Qt3D's default RHI render plugin (rhirenderer.dll, the
+# DirectX backend) links it. Without it the plugin fails to load and the
+# texture 3D preview hard-crashes in the frozen build. PySide6's hook doesn't
+# pull it when QtShaderTools isn't imported, so bundle the DLL explicitly next
+# to the other PySide6 Qt DLLs.
+import PySide6 as _pyside6
+_shadertools_binaries = []
+_st_dll = os.path.join(os.path.dirname(_pyside6.__file__), 'Qt6ShaderTools.dll')
+if os.path.isfile(_st_dll):
+    _shadertools_binaries.append((_st_dll, 'PySide6'))
+
 
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=_xxhash_binaries + _native_binaries + _crimson_rs_binaries + _qflw_binaries,
+    binaries=_xxhash_binaries + _native_binaries + _crimson_rs_binaries + _qflw_binaries + _shadertools_binaries,
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
            ('src/cdumm/translations', 'cdumm/translations'),
            ('schemas/pabgb_complete_schema.json', 'schemas'),
@@ -276,7 +287,7 @@ _dll_excludes = {
     'Qt6Designer.dll',       # ~5 MB
     'Qt6Quick.dll',          # ~6 MB
     'Qt6Qml.dll',            # ~5 MB
-    'Qt6ShaderTools.dll',    # ~4 MB
+    # Qt6ShaderTools.dll kept — Qt3D's RHI (DirectX) render plugin links it.
     'Qt6Quick3DRuntimeRender.dll',
     # Qt6OpenGL.dll kept — Qt3DRender (texture 3D preview) renders through it.
     'Qt6QmlModels.dll',      # ~0.95 MB
