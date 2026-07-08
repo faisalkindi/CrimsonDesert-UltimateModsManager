@@ -448,11 +448,12 @@ class ToolPageBase(SmoothScrollArea):
 
     def _apply_run_btn_style(self) -> None:
         from qfluentwidgets import setCustomStyleSheet
-        from cdumm.gui.accent import accent_shades
+        from cdumm.gui.accent import accent_shades, accent_fg
         base, hover, pressed = accent_shades()
+        fg = accent_fg()
         common = (
             "PrimaryPushButton {"
-            f"  background-color: {base}; color: white;"
+            f"  background-color: {base}; color: {fg};"
             "  border-radius: 12px; border: none; padding-bottom: 6px;"
             "}"
             f"PrimaryPushButton:hover {{ background-color: {hover}; }}"
@@ -1829,10 +1830,11 @@ class FixEverythingPage(ToolPageBase):
         self._quick_btn.setFont(qbf)
         def _style_quick_btn():
             from qfluentwidgets import setCustomStyleSheet
-            from cdumm.gui.accent import accent_shades
+            from cdumm.gui.accent import accent_shades, accent_fg
             base, hover, pressed = accent_shades()
+            fg = accent_fg()
             qss = (
-                f"PrimaryPushButton {{ background: {base}; color: white; "
+                f"PrimaryPushButton {{ background: {base}; color: {fg}; "
                 "border-radius: 12px; border: none; padding-bottom: 6px; }"
                 f"PrimaryPushButton:hover {{ background: {hover}; }}"
                 f"PrimaryPushButton:pressed {{ background: {pressed}; }}")
@@ -1890,10 +1892,11 @@ class FixEverythingPage(ToolPageBase):
         self._full_btn.setFont(fbf)
         def _style_full_btn():
             from qfluentwidgets import setCustomStyleSheet
-            from cdumm.gui.accent import accent_shades
+            from cdumm.gui.accent import accent_shades, accent_fg
             base, hover, pressed = accent_shades()
+            fg = accent_fg()
             common = (
-                f"PrimaryPushButton {{ background: {base}; color: white; "
+                f"PrimaryPushButton {{ background: {base}; color: {fg}; "
                 "border-radius: 12px; border: none; padding-bottom: 6px; }"
                 f"PrimaryPushButton:hover {{ background: {hover}; }}"
                 f"PrimaryPushButton:pressed {{ background: {pressed}; }}")

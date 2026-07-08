@@ -40,6 +40,28 @@ def accent_shades() -> tuple[str, str, str]:
     return c.name(), c.lighter(115).name(), c.darker(118).name()
 
 
+def _rel_luminance(c: QColor) -> float:
+    """WCAG relative luminance of a colour (0..1)."""
+    def _lin(v: int) -> float:
+        s = v / 255.0
+        return s / 12.92 if s <= 0.03928 else ((s + 0.055) / 1.055) ** 2.4
+    return (0.2126 * _lin(c.red()) + 0.7152 * _lin(c.green())
+            + 0.0722 * _lin(c.blue()))
+
+
+def accent_fg() -> str:
+    """Best-contrast text colour for text sitting *on* the accent.
+
+    White text on a bright accent (e.g. teal/lime) is hard to read, so we
+    switch to near-black once white's contrast drops off. A slight bias
+    keeps the familiar white-on-blue look for the default accent.
+    """
+    L = _rel_luminance(current_accent())
+    contrast_white = 1.05 / (L + 0.05)
+    contrast_black = (L + 0.05) / 0.05
+    return "#FFFFFF" if contrast_white * 1.1 >= contrast_black else "#141414"
+
+
 class _AccentBus(QObject):
     changed = Signal()
 
@@ -69,8 +91,9 @@ def style_primary_button(btn, radius: int = 20, padding: str = "0 28px") -> None
 
     def _apply() -> None:
         base, hover, pressed = accent_shades()
+        fg = accent_fg()
         qss = (
-            f"PrimaryPushButton {{ background: {base}; color: white; "
+            f"PrimaryPushButton {{ background: {base}; color: {fg}; "
             f"border-radius: {radius}px; border: none; padding: {padding}; }}"
             f"PrimaryPushButton:hover {{ background: {hover}; }}"
             f"PrimaryPushButton:pressed {{ background: {pressed}; }}"
@@ -91,8 +114,9 @@ def style_accent_pushbutton(btn, radius: int = 20, padding: str = "0 28px") -> N
 
     def _apply() -> None:
         base, hover, pressed = accent_shades()
+        fg = accent_fg()
         qss = (
-            f"PushButton {{ background: {base}; color: #FFFFFF; "
+            f"PushButton {{ background: {base}; color: {fg}; "
             f"border: 1px solid {base}; border-radius: {radius}px; "
             f"padding: {padding}; }}"
             f"PushButton:hover {{ background: {hover}; border-color: {hover}; }}"
