@@ -7,7 +7,13 @@
 #   https://github.com/NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS
 #   CrimsonGameMods/characterinfo_full_parser.py
 # Copyright (c) 2026 RicePaddySoftware
-# Minor adjustments for CDUMM import hygiene (no behavioural changes).
+# Re-ported for the 1.13.00 layout drift (every record was failing to
+# parse). CDUMM was still carrying the pre-1.13 fixed-offset tail walk;
+# this adopts upstream's adaptive bool-block scan and, critically,
+# stops discarding a record's already-successfully-read fields (name,
+# hash block: appearance/prefab/skeleton/skeletonVariation) just
+# because an unrelated field further into the record could not be
+# located.
 """CharacterInfo PABGB parser — extracts mount, NPC, and combat fields from
 characterinfo.pabgb using the IDA-decoded reader order (sub_141037900).
 
@@ -15,6 +21,28 @@ Parses the header + scalar fields + boolean block covering:
   - Mount fields: _vehicleInfo, _callMercenaryCoolTime, _callMercenarySpawnDuration
   - Combat fields: _isAttackable, _isAggroTargetable, _sendKillEventOnDead, _invincibility
   - NPC fields: _isEnableFriendly, and 40 other boolean flags
+
+As of game patch 1.13.00, the stretch of the record between the
+action-chart/skeleton hash block and the boolean-flags block no longer
+has a fixed byte length (Pearl Abyss appears to have inserted at least
+one new field there). The hash block itself -- covering upper/lower
+action chart, appearance, prefab path, skeleton name and skeleton
+variation -- is unaffected and still sits at the same fixed offsets
+relative to its own start. Rather than walk a fixed byte count to
+reach the boolean block (which now overshoots/undershoots and throws),
+we scan for it. If the scan fails, the record is still returned with
+every field parsed up to that point intact and ``_partial_parse`` set,
+instead of being discarded outright.
+
+``_flagC`` (GitHub #150's fifth field) sat at a fixed offset relative
+to the hash block in the pre-1.13 layout, but that offset is no longer
+reliable -- a byte-value spot check across all 1.13 vanilla records
+shows it is no longer a clean 0/1/2 enum for every entry. Rather than
+risk writing to the wrong byte for the records where it has drifted,
+``_flagC`` is no longer resolved here; the ``flag_c`` Format 3 field
+now consistently reports "could not locate field" instead of writing a
+plausible-looking but wrong offset. Re-deriving it properly is left for
+a follow-up.
 """
 
 import logging
@@ -68,11 +96,36 @@ def _read_locstr_with_hash(data, p):
     return hv, p
 
 
+def _find_bool_block(data, search_start, end):
+    """Scan for the bool block: 8+ consecutive bytes that are all 0 or 1.
+
+    Replaces a fixed byte-count walk, which broke on 1.13.00 when Pearl
+    Abyss changed the length of the stretch between the hash block and
+    the bool block. Starts searching from search_start (right after the
+    hash-fields block).
+    """
+    limit = min(end, search_start + 300)
+    for bp in range(search_start, limit - 8):
+        if all(data[bp + j] in (0, 1) for j in range(8)):
+            extended = data[bp:bp + 20] if bp + 20 <= end else data[bp:end]
+            if sum(1 for b in extended if b in (0, 1)) >= min(15, len(extended)):
+                return bp
+    return None
+
+
 def parse_entry(data, offset, end):
     """Parse one CharacterInfo entry through the boolean block.
 
     Returns dict with all parsed fields + byte offsets for in-place editing,
     or None on parse failure.
+
+    Only a parse failure *before* the hash block (name / header fields)
+    discards the whole record. A failure locating the bool block (which
+    sits past a stretch of the record whose length can vary by game
+    version) still returns every field read up to that point, with
+    ``_partial_parse`` set, so mods that only touch hash-block fields
+    (appearance, prefab path, skeleton, skeleton variation) keep working
+    even when the bool-block fields can't be found.
     """
     p = offset
     result = {}
@@ -122,8 +175,10 @@ def parse_entry(data, offset, end):
         # name-hash keys. The block sits at a record-dependent offset
         # (variable-length CStrings precede it), so it is located by
         # walking, not a fixed offset. Field positions verified against
-        # vanilla 1.07.00: the Damian record holds the exact hashes the
-        # Female Animations mod (GitHub #150) copies onto Kliff.
+        # vanilla 1.07.00 and re-verified byte-identical on 1.13.00: the
+        # Damian record holds the exact hashes the Female Animations mod
+        # (GitHub #150) copies onto Kliff. This block is unaffected by
+        # the 1.13.00 drift; only what follows it changed length.
         result['_upperActionChartPackageGroupName_offset'] = p
         result['_upperActionChartPackageGroupName_key'] = struct.unpack_from('<I', data, p)[0]
         result['_lowerActionChartPackageGroupName_offset'] = p + 4
@@ -136,57 +191,42 @@ def parse_entry(data, offset, end):
         result['_skeletonName_key'] = struct.unpack_from('<I', data, p + 20)[0]
         result['_skeletonVariationName_offset'] = p + 24
         result['_skeletonVariationName_key'] = struct.unpack_from('<I', data, p + 24)[0]
-        # _flagC: a u8 enum (only ever 0/1/2 across all 7027 vanilla
-        # records) 62 bytes past the block start, inside the post-block
-        # fixed-field run. Damian holds 2, the value #150 sets on Kliff.
-        if p + 63 <= len(data):
-            result['_flagC_offset'] = p + 62
-            result['_flagC'] = data[p + 62]
         p += 28
-        p += 4
-        p += 8
-        p += 4
-        p += 4
-        p += 4
-        p += 4
-        p += 4
-        p += 1
-        p += 1
 
-        p += 1
+        # Everything from here on drifted in 1.13.00 by a variable
+        # amount, so it gets its own try/except: a failure here must
+        # not throw away the hash-block fields already captured above.
+        try:
+            bool_start = _find_bool_block(data, p, end)
+            if bool_start is not None and bool_start + 40 <= end:
+                bool_fields = {}
+                for bi in range(40):
+                    bool_fields[bi] = data[bool_start + bi]
 
-        p += 1
+                result['_invincibility_offset'] = bool_start + 0
+                result['_invincibility'] = data[bool_start + 0]
 
-        p = _read_locstr(data, p)
+                result['_isAttackable_offset'] = bool_start + 1
+                result['_isAttackable'] = data[bool_start + 1]
 
-        p += 4
+                result['_isAggroTargetable_offset'] = bool_start + 2
+                result['_isAggroTargetable'] = data[bool_start + 2]
 
-        p += 1
-        p += 2
+                result['_isValid_offset'] = bool_start + 3
+                result['_isValid'] = data[bool_start + 3]
 
-        bool_start = p
-        bool_fields = {}
-        for bi in range(40):
-            bool_fields[bi] = data[p + bi]
+                result['_boolBlock'] = bool_fields
+                result['_parsed_bytes'] = (bool_start + 40) - offset
+            else:
+                result['_partial_parse'] = True
 
-        result['_isAttackable_offset'] = bool_start + 3
-        result['_isAttackable'] = data[bool_start + 3]
-
-        result['_isAggroTargetable_offset'] = bool_start + 4
-        result['_isAggroTargetable'] = data[bool_start + 4]
-
-        result['_sendKillEventOnDead_offset'] = bool_start + 17
-        result['_sendKillEventOnDead'] = data[bool_start + 17]
-
-        result['_invincibility_offset'] = bool_start + 20
-        result['_invincibility'] = data[bool_start + 20]
-
-        result['_boolBlock'] = bool_fields
-
-        p += 40
-
-        result['_parsed_bytes'] = p - offset
-        result['_entry_size'] = end - offset
+            result['_entry_size'] = end - offset
+        except (struct.error, IndexError) as e:
+            log.debug(
+                "Partial parse for %s (post-hash-block fields skipped): %s",
+                result.get('name', '?'), e)
+            result['_partial_parse'] = True
+            result['_entry_size'] = end - offset
 
     except (struct.error, IndexError) as e:
         log.debug("Parse error for %s at offset %d: %s", result.get('name', '?'), p, e)

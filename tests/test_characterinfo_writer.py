@@ -12,7 +12,9 @@ action-chart / skeleton block:
   lower_chart.group_lookup  block + 4   u32
   skeleton_name             block + 20  u32
   lookup_25                 block + 24  u32
-  flag_c                    block + 62  u8
+  flag_c                    block + 62  u8  (no longer resolved as of
+                                             the 1.13.00 re-port; see
+                                             characterinfo_full_parser)
 """
 from __future__ import annotations
 
@@ -88,7 +90,13 @@ def _vanilla_kwargs() -> dict:
                 prefab=55, skeleton=66, skelvar=77, flag_c=1)
 
 
-def test_writer_locates_and_patches_all_five_fields():
+def test_writer_locates_and_patches_the_four_hash_block_fields():
+    # As of the 1.13.00 re-port, flag_c is no longer resolved (its
+    # offset relative to the hash block is no longer reliable across
+    # all vanilla records post-1.13 -- see characterinfo_full_parser).
+    # The four hash-block fields (upper/lower chart, skeleton name,
+    # skeleton variation) are unaffected and still resolve and patch
+    # correctly.
     rec = _make_record(1, "Kliff", **_vanilla_kwargs())
     pabgb, pabgh = _make_table([rec])
     intents = [
@@ -99,7 +107,7 @@ def test_writer_locates_and_patches_all_five_fields():
         ("Kliff", 0, "flag_c", 2),
     ]
     changes = build_characterinfo_changes(pabgb, pabgh, intents)
-    assert len(changes) == 5
+    assert len(changes) == 4, "flag_c should be skipped, not written"
     patched = _apply(pabgb, changes)
     assert len(patched) == len(pabgb), "writes must not resize the record"
     # block starts at a known offset for this synthetic record; verify
@@ -113,7 +121,9 @@ def test_writer_locates_and_patches_all_five_fields():
     assert r["_lowerActionChartPackageGroupName_key"] == 3755051597
     assert r["_skeletonName_key"] == 2831867940
     assert r["_skeletonVariationName_key"] == 3511542393
-    assert r["_flagC"] == 2
+    # flag_c's vanilla value (1) must be untouched, since the intent
+    # was skipped rather than applied.
+    assert r.get("_flagC") is None, "flag_c is no longer resolved post-1.13"
 
 
 def test_writer_resolves_by_numeric_key_when_name_misses():
@@ -136,7 +146,7 @@ def test_writer_only_touches_targeted_records():
         _make_record(2, "Untouched", **_vanilla_kwargs()),
     ]
     pabgb, pabgh = _make_table(recs)
-    intents = [("Kliff", 0, "flag_c", 2)]
+    intents = [("Kliff", 0, "skeleton_name", 999)]
     changes = build_characterinfo_changes(pabgb, pabgh, intents)
     assert len(changes) == 1
     patched = _apply(pabgb, changes)
