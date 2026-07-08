@@ -903,30 +903,25 @@ class SettingsPage(SmoothScrollArea):
             self._config.set("interface_zoom", factor)
         from cdumm.gui.ui_scale import write_ui_scale
         write_ui_scale(factor)
-        # Reveal the inline "Restart now" button; the scale only applies on
-        # the next launch.
+        # Reveal the inline "Restart now" button, and drop a notification
+        # into the bell with a Restart-now action so the prompt persists
+        # until the user acts on it.
         self._zoom_restart_btn.show()
-        InfoBar.warning(
-            tr("settings.restart_required_title"),
-            tr("settings.restart_required"),
-            duration=5000, position=InfoBarPosition.TOP, parent=self.window())
-        logger.info("Interface zoom set to %s (restart required)", factor)
+        try:
+            from cdumm.gui.notifications import store, restart_app
+            store().add(
+                "info", tr("settings.restart_required_title"),
+                tr("settings.restart_required"),
+                action_label=tr("settings.restart_now"),
+                action_cb=restart_app)
+        except Exception as e:
+            logger.debug("zoom restart notification failed: %s", e)
+        logger.info("Interface zoom set to %s (restart pending)", factor)
 
     def _restart_app(self) -> None:
         """Relaunch CDUMM so a new interface-zoom scale takes effect."""
-        import sys
-        from PySide6.QtCore import QProcess
-        from PySide6.QtWidgets import QApplication
-        try:
-            if getattr(sys, "frozen", False):
-                # Frozen exe: argv[0] is the exe itself.
-                QProcess.startDetached(sys.executable, sys.argv[1:])
-            else:
-                QProcess.startDetached(sys.executable, sys.argv)
-        except Exception as e:
-            logger.warning("Restart failed: %s", e)
-            return
-        QApplication.quit()
+        from cdumm.gui.notifications import restart_app
+        restart_app()
 
     def _reapply_custom_styles(self) -> None:
         """Re-apply custom widget styles after qfluentwidgets theme update wipes them."""

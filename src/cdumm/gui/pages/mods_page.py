@@ -425,9 +425,16 @@ class ModsPage(QWidget):
         hero_icon.setFont(hif)
         hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         from qfluentwidgets import setCustomStyleSheet
-        setCustomStyleSheet(hero_icon,
-            "SubtitleLabel { color: #2878D0; }",
-            "SubtitleLabel { color: #5CB8F0; }")
+
+        def _style_hero():
+            from cdumm.gui.accent import accent_hex
+            c = accent_hex()
+            setCustomStyleSheet(hero_icon,
+                f"SubtitleLabel {{ color: {c}; }}",
+                f"SubtitleLabel {{ color: {c}; }}")
+        _style_hero()
+        from cdumm.gui.accent import bus as _hero_bus
+        _hero_bus().changed.connect(_style_hero)
         hero_layout.addWidget(hero_icon)
 
         hero_title = SubtitleLabel(tr("mods.drop_subtitle"), self._empty_hero)
