@@ -36,6 +36,7 @@ parser) so it stays fast and CI-testable with synthetic fixtures.
 """
 from __future__ import annotations
 
+import re
 import struct
 from collections import Counter
 from dataclasses import dataclass
@@ -184,6 +185,33 @@ def apply_stat_edit(record: bytes, value_offset: int, new_value: int) -> bytes:
     buf = bytearray(record)
     struct.pack_into("<q", buf, value_offset, new_value)
     return bytes(buf)
+
+
+# --- Format 3 field addressing -------------------------------------------
+# A gear-stat intent targets ``gear_stat[N]``. N is a STAT KEY when it's in
+# the stat-key band (first entry with that key wins -- how mod authors think:
+# "set defense to X"); otherwise it's a positional index into
+# ``locate_gear_stats`` order. Bracket form (no dot) so it passes the Format 3
+# nested-path validation gate unchanged.
+_GEAR_STAT_FIELD = re.compile(r"^gear_stat\[(\d+)\]$")
+
+
+def is_gear_stat_field(field: str) -> bool:
+    return bool(_GEAR_STAT_FIELD.match(field or ""))
+
+
+def resolve_gear_stat_index(field: str, located: list[GearStat]) -> int | None:
+    """Map a ``gear_stat[N]`` field to an index into ``located`` (or None)."""
+    m = _GEAR_STAT_FIELD.match(field or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n >= _STAT_KEY_MIN:                       # N is a stat key
+        for i, g in enumerate(located):
+            if g.stat == n:
+                return i
+        return None
+    return n if 0 <= n < len(located) else None  # N is a positional index
 
 
 def edit_record_stats(record: bytes, edits: dict[int, int],

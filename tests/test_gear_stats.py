@@ -16,7 +16,9 @@ from cdumm.engine.gear_stats import (
     apply_stat_edit,
     build_stat_whitelist,
     edit_record_stats,
+    is_gear_stat_field,
     locate_gear_stats,
+    resolve_gear_stat_index,
 )
 
 
@@ -143,3 +145,24 @@ def test_edit_record_stats_bad_index_raises():
     rec = b"\x00" * 12 + block
     with pytest.raises(KeyError):
         edit_record_stats(rec, {5: 1}, WL)
+
+
+# --- Format 3 field addressing --------------------------------------------
+
+def test_is_gear_stat_field():
+    assert is_gear_stat_field("gear_stat[1000002]")
+    assert is_gear_stat_field("gear_stat[0]")
+    assert not is_gear_stat_field("price_list[0].price.price")
+    assert not is_gear_stat_field("gear_stat")
+    assert not is_gear_stat_field("")
+
+
+def test_resolve_by_stat_key_and_by_index():
+    located = [GearStat(1000002, 10, 100), GearStat(1000003, 20, 200)]
+    # big number -> stat key (first match)
+    assert resolve_gear_stat_index("gear_stat[1000003]", located) == 1
+    # small number -> positional index
+    assert resolve_gear_stat_index("gear_stat[0]", located) == 0
+    # unknown stat key / out-of-range index -> None
+    assert resolve_gear_stat_index("gear_stat[1099999]", located) is None
+    assert resolve_gear_stat_index("gear_stat[9]", located) is None
