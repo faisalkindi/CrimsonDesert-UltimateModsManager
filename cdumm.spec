@@ -279,10 +279,13 @@ a = Analysis(
 
 # Strip large unused DLLs from binaries
 _dll_excludes = {
-    # opengl32sw.dll kept — Qt3D's texture 3D preview software-renders
-    # through it when the host has no usable GPU OpenGL driver.
-    # Qt6Network.dll kept — Qt63DCore.dll links it, so stripping it broke the
-    # 3D preview with "DLL load failed while importing Qt3DExtras".
+    # opengl32sw.dll (~20 MB software OpenGL) stripped — verified NOT loaded by
+    # the running app after using the 3D preview: Qt3D uses the DirectX RHI
+    # backend + hardware opengl32.dll, never the software renderer (every
+    # machine that runs Crimson Desert has a DirectX/GL-capable GPU).
+    'opengl32sw.dll',
+    # Qt6Network.dll kept — Qt63DCore.dll links it (loaded); stripping it broke
+    # the 3D preview with "DLL load failed while importing Qt3DExtras".
     'Qt6Pdf.dll',            # ~4 MB
     'Qt6Designer.dll',       # ~5 MB
     'Qt6Quick.dll',          # ~6 MB
