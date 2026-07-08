@@ -335,7 +335,10 @@ exe = EXE(
     name='CDUMM',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
+    # GNU strip on the windows-latest CI runner corrupts python313.dll (the exe
+    # then fails at launch: "Failed to load Python DLL ... Invalid access to
+    # memory location"). Strip only on posix, never on Windows.
+    strip=(os.name != 'nt'),
     # UPX disabled — heuristic AV engines (Bkav, CrowdStrike Falcon,
     # DeepInstinct, Fortinet) flag UPX-packed PyInstaller binaries
     # because real malware uses UPX too. Defender is fine either way,
