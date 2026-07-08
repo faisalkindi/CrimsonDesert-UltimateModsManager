@@ -19,6 +19,10 @@
 
 CDUMM ships frequent updates. The complete version history — every release back to the first commit — is in **[CHANGELOG.md](CHANGELOG.md)**; the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page has full notes and downloads (the in-app updater shows them too). Recent highlights, newest first:
 
+### v3.5 — the Game Data tab & in-app mod maker
+
+- **v3.5.0** — _July 8, 2026_ — **A built-in Game Data browser, and mod-making without a hex editor.** The new **Game Data** tab indexes the game's own files (~1.6M assets) and lets you search them, open any keyed data table as a decoded grid (only fields verified byte-for-byte show as values — a guessed byte never masquerades as fact), and preview DDS textures (with a rotatable 3D view) and Wwise audio. The headline: **make a mod straight from the grid** — edit a verified value (an item's price, a stack size…), hit _Make mod from edits_, and CDUMM writes a ready-to-share `.field.json`; no offsets or hex required. Also in 3.5: **item mods work again on game 1.13** — a version-adaptive `iteminfo` decoder re-aligns to the reshuffled 1.13 record layout, so stackable-item, price, stat and socket mods apply byte-exact again (Fat Stacks: 2,254 / 2,254 edits) and large iteminfo applies no longer stall the watchdog. Compound armor mods (Format 3 icons + model remaps in one package) install fully. (#242, #252, #248, #241)
+
 ### v3.4 series — game 1.12 support & one-click updates
 
 - **v3.4.2** — _June 30, 2026_ — **Text / string mods apply.** Mods like the Female Armor Module edit variable-length string entries that were silently getting skipped; CDUMM now rewrites the string in place by its key and rebuilds the table index (checked byte-for-byte against the whole vanilla string table). The "Missing directory" error when disabling a folder-adding mod is fixed and now names the mod responsible. (#224, #225)
@@ -79,6 +83,12 @@ Your original game files are **never modified**. Mods are applied through an ove
 ---
 
 ## Key Features
+
+### Game Data & Mod Making (v3.5)
+- **Browse the game's own data** — the **Game Data** tab indexes ~1.6M assets; search any of them and open a keyed data table as a decoded record grid.
+- **Make mods without a hex editor** — edit a verified value in the grid (an item's price, a stack size…) and _Make mod from edits_ writes a shareable `.field.json`. Only fields verified byte-for-byte are editable, so you can't corrupt a file by hand.
+- **Preview assets inline** — DDS textures (with a rotatable 3D view), Wwise audio (play / export to WAV), and text / structured formats, without leaving the app.
+- **Game 1.13 item modding** — a version-adaptive `iteminfo` decoder keeps stackable-item, price, stat and socket mods applying byte-exact after the 1.13 record-layout change.
 
 ### NexusMods Integration (v3.2)
 - **One-click sign-in** — Login with Nexus opens your browser, you confirm, done. No API keys to copy and paste. CDUMM never sees your password.
