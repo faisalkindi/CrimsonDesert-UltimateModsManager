@@ -119,6 +119,25 @@ def test_synth_bytes_parse_correctly(synth_schema):
     assert records[200]["_foo"] == 0xBBBB2222
 
 
+# ── record_raw_bytes — per-record slices for the gear-stat editor ───
+
+
+def test_record_raw_bytes_returns_exact_entry_slices(synth_schema):
+    from cdumm.semantic.parser import record_raw_bytes
+    entries = [
+        (1, "First", 100, 0xAAAA1111, 0x55),
+        (2, "Second", 200, 0xBBBB2222, 0x66),
+    ]
+    body, header = _build_pabgb_pair(entries)
+    raw = record_raw_bytes("synthtest", body, header)
+    assert set(raw) == {100, 200}
+    # each slice is byte-identical to the entry that was written
+    assert raw[100] == _build_entry(1, "First", 100, 0xAAAA1111, 0x55)
+    assert raw[200] == _build_entry(2, "Second", 200, 0xBBBB2222, 0x66)
+    # concatenated in offset order they reconstruct the whole body
+    assert raw[100] + raw[200] == body
+
+
 # ── apply_intents_to_pabgb_bytes — direct byte-level writer ─────────
 
 

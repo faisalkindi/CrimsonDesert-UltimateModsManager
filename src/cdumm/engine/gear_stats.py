@@ -230,3 +230,26 @@ def edit_record_stats(record: bytes, edits: dict[int, int],
                            f"({len(located)} located)")
         out = apply_stat_edit(out, located[idx].value_offset, new_value)
     return out
+
+
+def locate_all_gear_stats(records_bytes: "dict[int, bytes]",
+                          min_freq: int = MIN_STAT_FREQ
+                          ) -> "dict[int, list[GearStat]]":
+    """Locate editable gear stats across a whole table in one pass.
+
+    ``records_bytes`` maps record key -> raw record ``bytes`` (pass the opaque
+    equipment records). The adaptive whitelist is built from *all* of them, so
+    precision comes from the table itself with no version-specific constant.
+    Returns ``{record_key: [GearStat, ...]}`` containing only the records that
+    have at least one located stat, so a caller can offer a stat editor for
+    exactly those records.
+    """
+    whitelist = build_stat_whitelist(records_bytes.values(), min_freq=min_freq)
+    if not whitelist:
+        return {}
+    out: dict[int, list[GearStat]] = {}
+    for key, raw in records_bytes.items():
+        located = locate_gear_stats(raw, whitelist)
+        if located:
+            out[key] = located
+    return out
