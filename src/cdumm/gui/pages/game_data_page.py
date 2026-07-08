@@ -110,6 +110,29 @@ _FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you'
 Tip: a name ending in "info" is almost always a game-data table you can edit."""
 
 
+_MOD_HOWTO_GUIDE = """How to turn game data into a mod — no hex editor needed.
+
+1. Build the index (top of this tab), then click a keyed data table
+   (.pabgb) in the results — e.g. iteminfo for items/gear, storeinfo
+   for shops. It opens as a grid of records.
+
+2. Edit a value. Cells CDUMM has verified byte-exact are editable —
+   double-click one (for example an item's price) and type a new
+   number. Un-verified fields stay locked so you can't corrupt them.
+
+3. Gear stats (armour defence, weapon damage, AbyssGear enhancement)
+   live inside equipment records. Select an equipment row and click
+   "Edit gear stats…" to change them.
+
+4. Click "Make mod from edits…" to build the mod, or
+   "Export .field.json…" to save a shareable copy.
+
+5. Enable the new mod in the Mods tab, then Apply.
+
+Every edit is a same-width, byte-exact write: the file stays valid,
+the game still loads it, and you can disable the mod to revert."""
+
+
 def _shape_records(records: dict, schema, positions: dict | None = None
                    ) -> tuple[list, list, int, float]:
     """Turn parse_records output into (columns, rows, total, health).
@@ -267,9 +290,24 @@ class _PreviewWorker(QObject):
                         table, body, header)
                     cols, rows, total, health = _shape_records(
                         recs, sem.get_schema(table), positions)
+                    # Gear stats live inside iteminfo's opaque equipment
+                    # records (no grid columns); locate them so the pane can
+                    # offer a per-record stat editor. Best-effort — never let
+                    # it break the table view.
+                    gear = {}
+                    if table == "iteminfo":
+                        try:
+                            from cdumm.engine import gear_stats as _gs
+                            raw = sem.record_raw_bytes(table, body, header)
+                            gear = {
+                                k: [(g.stat, g.value) for g in stats]
+                                for k, stats in
+                                _gs.locate_all_gear_stats(raw).items()}
+                        except Exception:  # noqa: BLE001
+                            gear = {}
                     res.update(kind="table", table=table, cols=cols,
                                rows=rows, total=total, health=health,
-                               has_pos=bool(positions))
+                               has_pos=bool(positions), gear_stats=gear)
                     return
 
         # 2) no game folder → metadata only
@@ -354,6 +392,61 @@ class _VgmDownloadWorker(QObject):
         except Exception as ex:  # noqa: BLE001
             ok, msg = False, str(ex)
         self.done.emit(ok, msg)
+
+
+class _AudioDecodeWorker(QObject):
+    """Decode a Wwise .wem to a temp WAV via vgmstream off the UI thread.
+
+    vgmstream runs as a subprocess; doing that inline froze the window
+    ('not responding') until it finished. This runs it on a worker thread and
+    hands back the WAV path + real duration so the pane can play it and show a
+    live timer.
+    """
+
+    done = Signal(dict)   # {token, wav, dur, name} on success; {token, error}
+
+    def __init__(self, index_path, game_dir, path, data, name, token):
+        super().__init__()
+        self._index_path = index_path
+        self._game_dir = game_dir
+        self._path = path
+        self._data = data
+        self._name = name
+        self._token = token
+
+    def run(self) -> None:
+        import contextlib
+        import tempfile
+        import wave
+        res = {"token": self._token, "name": self._name}
+        data = self._data
+        try:
+            if data is None:                       # large asset — read on demand
+                con = sqlite3.connect(self._index_path)
+                try:
+                    data = game_index.extract_asset(
+                        con, self._path, self._game_dir)
+                finally:
+                    con.close()
+            fd, wav = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            if not game_index.convert_to_wav(data, wav):
+                with contextlib.suppress(OSError):
+                    os.unlink(wav)
+                res["error"] = ("Could not decode audio — is vgmstream "
+                                "installed?")
+                self.done.emit(res)
+                return
+            dur = 0.0
+            with contextlib.suppress(Exception):
+                with contextlib.closing(wave.open(wav, "rb")) as w:
+                    if w.getframerate():
+                        dur = w.getnframes() / float(w.getframerate())
+            res["wav"] = wav
+            res["dur"] = dur
+        except Exception as ex:  # noqa: BLE001
+            res["error"] = f"Read/decode failed: {ex}"
+        self.done.emit(res)
 
 
 class _Texture3DView(QDialog):
@@ -648,14 +741,31 @@ class GameDataPage(ToolPageBase):
         root.insertWidget(root.count() - 1, self._hits)
         root.insertSpacing(root.count() - 1, 8)
 
-        # Beginner-friendly file-type guide — a collapsible box so newcomers can
-        # learn what each format is without it taking over the page.
+        # ── Modding info row — three columns side by side ────────────────
+        # The "Largest keyed game-data tables" summary (filled after a build)
+        # sits next to two collapsible guides: what the file types mean, and
+        # how to turn game data into a mod. Grouping them here keeps the
+        # newcomer help beside the thing it explains.
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(12)
+
+        # Column 1 — the largest-tables card lands here in _on_done().
+        self._largest_col = QVBoxLayout()
+        self._largest_col.setContentsMargins(0, 0, 0, 0)
+        self._largest_col.setSpacing(0)
+        info_row.addLayout(self._largest_col, 3)
+
+        # Column 2 — "New to modding? What these file types mean".
+        types_col = QVBoxLayout()
+        types_col.setContentsMargins(0, 0, 0, 0)
+        types_col.setSpacing(6)
         self._guide_btn = PushButton(
             "📖  New to modding?  What these file types mean", self._container)
         self._guide_btn.setCheckable(True)
         self._guide_btn.clicked.connect(
             lambda: self._guide_box.setVisible(self._guide_btn.isChecked()))
-        root.insertWidget(root.count() - 1, self._guide_btn)
+        types_col.addWidget(self._guide_btn)
         self._guide_box = PlainTextEdit(self._container)
         self._guide_box.setReadOnly(True)
         self._guide_box.setPlainText(_FILE_TYPE_GUIDE)
@@ -664,7 +774,34 @@ class GameDataPage(ToolPageBase):
         self._guide_box.setFont(_gbf)
         self._guide_box.setFixedHeight(300)
         self._guide_box.setVisible(False)
-        root.insertWidget(root.count() - 1, self._guide_box)
+        types_col.addWidget(self._guide_box)
+        types_col.addStretch(1)
+        info_row.addLayout(types_col, 4)
+
+        # Column 3 — "How to make a mod from game data" (the same collapsible
+        # pattern, so the two guides read as a pair).
+        howto_col = QVBoxLayout()
+        howto_col.setContentsMargins(0, 0, 0, 0)
+        howto_col.setSpacing(6)
+        self._howto_btn = PushButton(
+            "🛠  How to make a mod from game data", self._container)
+        self._howto_btn.setCheckable(True)
+        self._howto_btn.clicked.connect(
+            lambda: self._howto_box.setVisible(self._howto_btn.isChecked()))
+        howto_col.addWidget(self._howto_btn)
+        self._howto_box = PlainTextEdit(self._container)
+        self._howto_box.setReadOnly(True)
+        self._howto_box.setPlainText(_MOD_HOWTO_GUIDE)
+        _hbf = self._howto_box.font()
+        _hbf.setPixelSize(13)
+        self._howto_box.setFont(_hbf)
+        self._howto_box.setFixedHeight(300)
+        self._howto_box.setVisible(False)
+        howto_col.addWidget(self._howto_box)
+        howto_col.addStretch(1)
+        info_row.addLayout(howto_col, 4)
+
+        root.insertLayout(root.count() - 1, info_row)
         root.insertSpacing(root.count() - 1, 8)
 
         # Results table (left) + live preview pane (right), in a draggable
@@ -750,6 +887,9 @@ class GameDataPage(ToolPageBase):
         # mod). Always connected; the handler no-ops unless the current
         # preview is an editable table (self._pv_table is set).
         self._pv_grid.itemChanged.connect(self._on_grid_cell_edited)
+        # Gear-stat editor: reveal the "Edit gear stats…" button only when the
+        # selected row is an equipment record with located stats.
+        self._pv_grid.itemSelectionChanged.connect(self._update_gear_button)
         pv.addWidget(self._pv_grid, 1)
 
         # Image view for textures (DDS decoded to PNG). Hidden until selected.
@@ -817,6 +957,14 @@ class GameDataPage(ToolPageBase):
         self._mm_export_btn.setEnabled(False)
         self._mm_export_btn.clicked.connect(self._on_export_field_json)
         pv.addWidget(self._mm_export_btn)
+        # Gear-stat editor: opaque equipment records (armor/weapon) don't decode
+        # into grid columns, so their stats are edited via a per-record dialog
+        # that stages the same Format 3 edits. Shown only when the selected
+        # iteminfo row is an equipment record with located stats.
+        self._mm_gear_btn = PushButton("Edit gear stats…", pane)
+        self._mm_gear_btn.setVisible(False)
+        self._mm_gear_btn.clicked.connect(self._on_edit_gear_stats)
+        pv.addWidget(self._mm_gear_btn)
         split.addWidget(pane)
 
         split.setStretchFactor(0, 3)
@@ -835,6 +983,9 @@ class GameDataPage(ToolPageBase):
         self._pv_schema = None
         self._mm_editable_cols: dict = {}        # grid col index -> FieldSpec
         self._pending_edits: dict = {}           # (key, field) -> FieldEdit
+        # Located gear stats for the current table: {record_key: [(stat, val)]}.
+        # Populated only for iteminfo (opaque equipment records).
+        self._gear_stats: dict = {}
         # stretch=1 makes this row absorb the page's spare vertical space
         # (the base layout's trailing addStretch() has factor 0, so it yields).
         root.insertWidget(root.count() - 1, split, 1)
@@ -967,9 +1118,19 @@ class GameDataPage(ToolPageBase):
                 for t in tables)
         except Exception as ex:  # noqa: BLE001
             detail = f"(could not read tables: {ex})"
-        card = self._add_result_card("Largest keyed game-data tables", detail)
+        # Drop the fresh card into the info row's left column (next to the
+        # help boxes). Clear any prior card first so a rebuild replaces it.
+        from cdumm.gui.pages.tool_page import _ResultCard
+        while self._largest_col.count():
+            old = self._largest_col.takeAt(0)
+            w = old.widget()
+            if w is not None:
+                w.deleteLater()
+        card = _ResultCard(
+            "Largest keyed game-data tables", detail, "", self._container)
         card.setMaximumWidth(600)   # hug the content instead of spanning the page
-        self._results_layout.setAlignment(card, Qt.AlignLeft)
+        self._largest_col.addWidget(card)
+        self._largest_col.addStretch(1)
         # refresh the viewer if a search is active
         self._on_search(self._search.text())
 
@@ -1166,6 +1327,8 @@ class GameDataPage(ToolPageBase):
             self._pv_extract.setEnabled(True)
             self._enable_table_editing(
                 res.get("table", ""), res.get("cols", []))
+            self._gear_stats = res.get("gear_stats") or {}
+            self._update_gear_button()
             return
 
         if kind == "image":
@@ -1347,9 +1510,11 @@ class GameDataPage(ToolPageBase):
         self._pv_schema = None
         self._mm_editable_cols = {}
         self._pending_edits = {}
+        self._gear_stats = {}
         for w in (getattr(self, "_mm_status", None),
                   getattr(self, "_mm_make_btn", None),
-                  getattr(self, "_mm_export_btn", None)):
+                  getattr(self, "_mm_export_btn", None),
+                  getattr(self, "_mm_gear_btn", None)):
             if w is not None:
                 w.setVisible(False)
         grid = getattr(self, "_pv_grid", None)
@@ -1556,6 +1721,112 @@ class GameDataPage(ToolPageBase):
             f"Exported {len(self._pending_edits)} edit(s) to "
             f"{os.path.basename(path)}.", error=False)
 
+    # ── gear-stat editor (opaque equipment records) ──────────────────
+    def _selected_record_key(self) -> "int | None":
+        """The record key of the currently selected grid row (col 0), or None."""
+        grid = self._pv_grid
+        r = grid.currentRow()
+        if r < 0:
+            return None
+        it = grid.item(r, 0)
+        try:
+            return int(str(it.text()).strip()) if it else None
+        except (ValueError, AttributeError):
+            return None
+
+    def _update_gear_button(self) -> None:
+        """Show 'Edit gear stats…' only when the selected row is an equipment
+        record with located stats."""
+        btn = getattr(self, "_mm_gear_btn", None)
+        if btn is None:
+            return
+        key = self._selected_record_key()
+        has = bool(self._gear_stats) and key in self._gear_stats
+        btn.setVisible(has)
+
+    def _on_edit_gear_stats(self) -> None:
+        """Open a per-record dialog to edit the located gear stats, staging
+        each change as a ``gear_stat[<statkey>]`` Format 3 edit."""
+        key = self._selected_record_key()
+        located = self._gear_stats.get(key) if key is not None else None
+        if not located:
+            self._flash_maker("Select an equipment row first.", error=True)
+            return
+        grid = self._pv_grid
+        r = grid.currentRow()
+        name_item = grid.item(r, 1)
+        entry = name_item.text() if name_item else ""
+        # Dedupe by stat key: a gear_stat[key] edit resolves to the FIRST
+        # located entry with that key, so expose each key once (first value)
+        # to keep what's shown identical to what's written.
+        seen: dict[int, int] = {}
+        for stat, value in located:
+            if stat not in seen:
+                seen[stat] = value
+        edits = self._prompt_gear_stats(entry or f"record {key}", seen)
+        if not edits:
+            return
+        from cdumm.engine.format3_builder import FieldEdit
+        target = f"{self._pv_table}.pabgb"
+        for stat, (old, new) in edits.items():
+            field = f"gear_stat[{stat}]"
+            self._pending_edits[(key, field)] = FieldEdit(
+                target=target, entry=entry, key=key, field=field,
+                new=new, old=old)
+        self._refresh_maker_buttons()
+        self._flash_maker(
+            f"Staged {len(edits)} stat edit(s) for “{entry or key}”.",
+            error=False)
+
+    def _prompt_gear_stats(self, title: str, stats: "dict[int, int]"
+                           ) -> "dict[int, tuple[int, int]]":
+        """Modal editor for one record's stats. Returns
+        ``{stat_key: (old, new)}`` for values the user actually changed and
+        that fit a signed 64-bit int. Empty dict on cancel or no change."""
+        from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout,
+                                       QLabel, QLineEdit, QVBoxLayout)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit gear stats — {title}")
+        outer = QVBoxLayout(dlg)
+        outer.addWidget(QLabel(
+            "Edit a stat's value (whole numbers). Blank or unchanged rows are "
+            "ignored.\nWrites are byte-exact, same-width overwrites."))
+        form = QFormLayout()
+        fields: dict[int, tuple[int, "QLineEdit"]] = {}
+        for stat, value in stats.items():
+            le = QLineEdit(str(value))
+            fields[stat] = (value, le)
+            form.addRow(f"stat {stat}", le)
+        outer.addLayout(form)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        outer.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return {}
+        out: dict[int, tuple[int, int]] = {}
+        for stat, (old, le) in fields.items():
+            txt = le.text().strip()
+            if not txt:
+                continue
+            try:
+                new = int(txt)
+            except ValueError:
+                self._flash_maker(
+                    f"“{txt}” isn't a whole number (stat {stat}) — skipped.",
+                    error=True)
+                continue
+            if not (-(2 ** 63) <= new < 2 ** 63):
+                self._flash_maker(
+                    f"Value for stat {stat} is out of range — skipped.",
+                    error=True)
+                continue
+            if new != old:
+                out[stat] = (old, new)
+        return out
+
     def _show_grid(self, cols: list, rows: list) -> None:
         self._pv_text.setVisible(False)
         self._pv_img_scroll.setVisible(False)
@@ -1691,13 +1962,52 @@ class GameDataPage(ToolPageBase):
         return wav
 
     def _on_play_audio(self) -> None:
+        """Decode the .wem off the UI thread (vgmstream is a subprocess and
+        froze the window if run inline), then play + show a live timer."""
         path = self._selected_path()
         if not path:
             return
-        wav = self._audio_wav(path)
-        if not wav:
-            return
+        self._play_token += 1
+        token = self._play_token
         name = self._preview_name or os.path.basename(path)
+        self._stop_playback()                 # halt any current sound + timer
+        self._pv_play_btn.setEnabled(False)
+        self._set_status(f"Decoding {name}…", "")
+        th = QThread(self)
+        w = _AudioDecodeWorker(
+            self._index_path,
+            str(self._game_dir) if self._game_dir else "",
+            path, self._preview_bytes, name, token)
+        w.moveToThread(th)
+        th.started.connect(w.run)
+        w.done.connect(self._on_audio_decoded)
+        w.done.connect(th.quit)
+        w.done.connect(w.deleteLater)
+        th.finished.connect(th.deleteLater)
+        job = (th, w)
+        self._pv_jobs.append(job)
+        th.finished.connect(
+            lambda job=job: job in self._pv_jobs and self._pv_jobs.remove(job))
+        th.start()
+
+    def _on_audio_decoded(self, res: dict) -> None:
+        if res.get("token") != self._play_token:
+            # a newer Play (or a different asset) superseded this — drop the
+            # stale temp WAV so decodes don't pile up in %TEMP%.
+            if res.get("wav"):
+                try:
+                    os.unlink(res["wav"])
+                except OSError:
+                    pass
+            return
+        self._pv_play_btn.setEnabled(True)
+        if res.get("error"):
+            self._set_status(res["error"], "#BF616A")
+            return
+        self._start_playback(
+            res.get("wav"), res.get("name", ""), res.get("dur", 0.0))
+
+    def _start_playback(self, wav: str, name: str, dur: float) -> None:
         try:                                   # winsound is Windows-only
             import winsound
             winsound.PlaySound(None, winsound.SND_PURGE)      # stop any prior
@@ -1705,31 +2015,45 @@ class GameDataPage(ToolPageBase):
         except Exception as ex:  # noqa: BLE001
             self._set_status(f"Playback failed: {ex}", "#BF616A")
             return
-        # Read the decoded WAV's real length so we can flip the status back
-        # to "finished" live when it ends (winsound gives no end callback).
-        dur = 0.0
-        try:
-            import contextlib
-            import wave
-            with contextlib.closing(wave.open(wav, "rb")) as w:
-                if w.getframerate():
-                    dur = w.getnframes() / float(w.getframerate())
-        except Exception:  # noqa: BLE001
-            pass
-        self._play_token += 1
-        token = self._play_token
-        tag = f"  ({dur:.1f}s)" if dur else ""
-        self._set_status(f"▶ Playing: {name}{tag}", "#2E7D32")
-        if dur > 0:
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(
-                int(dur * 1000) + 150,
-                lambda t=token, n=name: self._on_play_finished(t, n))
+        import time
+        from PySide6.QtCore import QTimer
+        self._play_name = name
+        self._play_dur = float(dur or 0.0)
+        self._play_started = time.monotonic()
+        if getattr(self, "_play_timer", None) is None:
+            self._play_timer = QTimer(self)
+            self._play_timer.setInterval(200)   # live countdown, 5×/second
+            self._play_timer.timeout.connect(self._tick_play)
+        self._play_timer.start()
+        self._tick_play()                       # paint the timer immediately
         # temp WAV is left for the async player; the OS reclaims %TEMP%.
 
-    def _on_play_finished(self, token: int, name: str) -> None:
-        if token == self._play_token:      # not superseded by a newer Play
+    def _tick_play(self) -> None:
+        import time
+        dur = getattr(self, "_play_dur", 0.0)
+        name = getattr(self, "_play_name", "")
+        elapsed = time.monotonic() - getattr(
+            self, "_play_started", time.monotonic())
+        if dur and elapsed >= dur:
+            self._stop_playback()
             self._set_status(f"Finished: {name}", "")
+            return
+        if dur:
+            self._set_status(
+                f"▶ {name}   {elapsed:0.1f} / {dur:0.1f}s", "#2E7D32")
+        else:
+            self._set_status(f"▶ {name}   {elapsed:0.1f}s", "#2E7D32")
+
+    def _stop_playback(self) -> None:
+        """Stop the async sound + the live timer (new Play, or playback end)."""
+        t = getattr(self, "_play_timer", None)
+        if t is not None:
+            t.stop()
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_export_wav(self) -> None:
         path = self._selected_path()
