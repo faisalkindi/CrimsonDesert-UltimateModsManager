@@ -186,6 +186,22 @@ class _Reader:
 
     def carray(self, elem_reader) -> list:
         n = self.u32()
+        # A real array can't have more elements than there are bytes left
+        # to read them from — every element is at least one byte wide. On a
+        # game-version layout shift the parse desyncs and this count comes
+        # out as garbage (millions/billions); without this guard the list
+        # comprehension spins building a giant list until it finally
+        # overruns, long enough to trip the apply watchdog and kill the
+        # whole run (GitHub #247, CD 1.13). Fail fast so the writer's
+        # parse-guard turns it into a clean "this game version isn't
+        # supported yet" skip instead of a hang. Never fires on valid data
+        # (a legitimate count is always <= remaining bytes).
+        remaining = len(self.data) - self.pos
+        if n > remaining:
+            raise ValueError(
+                f"iteminfo carray count {n} exceeds {remaining} remaining "
+                f"bytes at offset {self.pos}; likely a game-version layout "
+                f"shift the parser does not model yet")
         return [elem_reader(self) for _ in range(n)]
 
 
