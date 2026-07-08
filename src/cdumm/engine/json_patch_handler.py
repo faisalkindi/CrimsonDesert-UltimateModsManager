@@ -1133,7 +1133,15 @@ def _apply_byte_patches(data: bytearray, changes: list[dict],
                              record_key, change.get("entry"))
             if key is not None:
                 if key in record_offsets:
-                    rel = change.get("relative_offset")
+                    # record_offsets[key] is the record START. Prefer a
+                    # record-start-relative offset (record_rel_offset) so
+                    # name-less records resolve correctly; relative_offset /
+                    # rel_offset are name_end/payload-relative (correct only
+                    # for the entry-name path) and kept as a backward-compat
+                    # fallback.
+                    rel = change.get("record_rel_offset")
+                    if rel is None:
+                        rel = change.get("relative_offset")
                     if rel is None:
                         rel = change.get("rel_offset", 0)
                     try:

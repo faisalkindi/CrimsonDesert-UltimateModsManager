@@ -1204,6 +1204,16 @@ def _intents_to_v2_changes(
 
         out.append({
             "entry": entry_name or intent.entry,
+            # Name-less records (e.g. wantedinfo) have no entry name to anchor
+            # on, so also carry the numeric key + a record-START relative
+            # offset. The apply's record_key resolver adds record_rel_offset to
+            # the pabgh index offset (which is the record start), giving a
+            # drift-safe write even when `entry` is empty. Without this, a
+            # mod-maker edit to a name-less table resolved to nothing
+            # ("unresolvable offset") because neither an entry name nor a
+            # usable record_key was available.
+            "record_key": intent.key,
+            "record_rel_offset": abs_off - entry_off,
             "rel_offset": rel_offset,
             "original": original_bytes.hex(),
             "patched": new_bytes.hex(),
