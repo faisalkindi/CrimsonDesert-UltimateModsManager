@@ -17,11 +17,15 @@ import atexit
 import ctypes
 import glob
 import logging
+import ntpath
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 from typing import Callable
+
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +72,26 @@ atexit.register(_atexit_restore)
 def find_game_process() -> int | None:
     """Find CrimsonDesert.exe PID. Returns PID or None.
 
-    Windows-only — uses ``EnumProcesses`` from ``psapi.dll``. On macOS
-    and Linux the bisect / crash-monitor flow doesn't run (it needs
-    the Pearl Abyss crashpad ``.dmp`` infrastructure that only exists
-    on Windows), so return None and let callers short-circuit.
+    Windows uses ``EnumProcesses`` from ``psapi.dll``. On macOS / Linux
+    the game runs under Proton/Wine, so we scan ``psutil.process_iter``
+    and match by the executable **basename** — the process command line
+    carries the Windows-style path (e.g.
+    ``S:\\common\\Crimson Desert\\bin64\\CrimsonDesert.exe``) even on
+    Linux, so ``ntpath.basename`` is used to split it regardless of the
+    host OS (``os.path.basename`` wouldn't split backslashes on posix).
+    GitHub #195 / PR #201 (RoGreat): matching the basename — not a
+    hard-coded install path — is what makes this work on any machine.
     """
     if not _IS_WINDOWS:
+        target = GAME_EXE_NAME.lower()
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline")
+                if cmdline and ntpath.basename(cmdline[0]).lower() == target:
+                    return proc.info["pid"]
+            except (psutil.NoSuchProcess, psutil.AccessDenied,
+                    psutil.ZombieProcess, IndexError):
+                continue  # process vanished / not inspectable — skip it
         return None
     arr = (ctypes.c_ulong * 4096)()
     needed = ctypes.c_ulong()
@@ -101,17 +119,21 @@ def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
 
     If the process is already gone (can't open handle), returns
     :data:`PROCESS_GONE` as a sentinel to distinguish from "still
-    running" (None). Windows-only; non-Windows callers should not
-    reach this path because :func:`find_game_process` returns None
-    before this is invoked. If a non-Windows caller does reach here
-    (programming error elsewhere), raise NotImplementedError rather
-    than silently returning the same sentinel as a real "process gone"
-    — review feedback on PR #64 flagged the conflation as a footgun.
+    running" (None). On macOS / Linux the wait is done with
+    ``psutil.Process.wait`` (the game runs under Proton): a timeout
+    means still running (``None``); the process being gone / no longer
+    inspectable means :data:`PROCESS_GONE`. Only those specific psutil
+    errors are caught — a bare ``except`` would also swallow
+    ``KeyboardInterrupt`` / ``SystemExit`` (PR #201 review).
     """
     if not _IS_WINDOWS:
-        raise NotImplementedError(
-            "wait_for_exit is Windows-only; find_game_process() returns "
-            "None on macOS / Linux so this should never be called.")
+        try:
+            psutil.Process(pid).wait(timeout=timeout_ms / 1000)
+            return PROCESS_GONE          # exited within the timeout
+        except psutil.TimeoutExpired:
+            return None                  # still running
+        except psutil.Error:
+            return PROCESS_GONE          # NoSuchProcess / gone / inaccessible
     h = _k32.OpenProcess(0x00100400, False, pid)  # SYNCHRONIZE | PROCESS_QUERY_INFORMATION
     if not h:
         return PROCESS_GONE  # process already gone before we could open a handle
@@ -127,8 +149,13 @@ def wait_for_exit(pid: int, timeout_ms: int) -> int | None:
 
 
 def kill_process(pid: int) -> None:
-    """Terminate a process by PID. Windows-only."""
+    """Terminate a process by PID. Cross-platform: ``TerminateProcess``
+    on Windows, ``SIGTERM`` under Proton on macOS / Linux."""
     if not _IS_WINDOWS:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass  # already gone / not ours — nothing to kill
         return
     h = _k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
     if h:
