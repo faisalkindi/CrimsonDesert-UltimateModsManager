@@ -153,6 +153,10 @@ a = Analysis(
         'cdumm.engine.language',
         'cdumm.engine.compiled_merge',
         'cdumm.engine.texture_mod_handler',
+        # PIL DDS texture decode for the Game Data preview — name the core
+        # codec + DDS plugin so the onefile build actually bundles them
+        # (Pillow registers plugins lazily, which PyInstaller can miss).
+        'PIL', 'PIL.Image', 'PIL.ImageFile', 'PIL.DdsImagePlugin',
         'cdumm.archive.pathc_handler',
         'cdumm.engine.mod_health_check',
         'cdumm.asi.asi_manager',
@@ -239,9 +243,10 @@ a = Analysis(
         'PySide6.QtTest', 'PySide6.QtDBus', 'PySide6.QtConcurrent',
         # scipy/numpy — only needed for acrylic blur (disabled)
         'scipy', 'numpy', 'numpy.core', 'numpy.linalg',
-        # PIL/Pillow — not imported by CDUMM (colorthief dep, unused)
-        'PIL', 'PIL._imaging', 'PIL._avif', 'PIL._webp', 'PIL.Image',
-        'Pillow', 'colorthief',
+        # PIL/Pillow IS used — it decodes DDS textures for the Game Data
+        # preview, so it must be bundled (do NOT exclude it). Only colorthief
+        # (which merely pulls PIL in transitively) is unused.
+        'colorthief',
         # brotli — not used by CDUMM (transitive dep from py7zr)
         'brotli', '_brotli', 'brotlicffi',
         # cryptography used by privatebin for AES-GCM + PBKDF2. Keep minimal subset.
@@ -283,9 +288,11 @@ _dll_excludes = {
     'qtga.dll',              # ~0.04 MB
     'qwbmp.dll',             # ~0.04 MB
 }
-# Also filter out PIL/brotli/cryptography binary extensions
+# Also filter out brotli/cryptography binary extensions. Keep PIL's core
+# '_imaging' (DDS/BCn texture decode); only the AVIF/WebP/CMS codecs — which
+# CDUMM's DDS preview never touches — are dropped.
 _binary_name_excludes = {
-    '_avif', '_imaging', '_webp', '_imagingcms', '_brotli',
+    '_avif', '_webp', '_imagingcms', '_brotli',
     # '_rust' kept — cryptography uses it for AES-GCM in privatebin uploads
     '_ec_ws',      # Cryptodome elliptic curve (not used by CDUMM)
     '_ed448',      # Cryptodome Ed448

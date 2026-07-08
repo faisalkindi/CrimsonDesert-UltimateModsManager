@@ -16,6 +16,10 @@ dependencies = [
     "py7zr>=1.0",
     "xxhash>=3.4",
     "websocket-client>=1.7",
+    # Pillow decodes DDS textures (DXT/BC1-7) for the Game Data preview. Must
+    # be a real dependency AND bundled by the .spec, or shipped builds show
+    # every texture as "no visual decoder" hex.
+    "Pillow>=10.3",
 ]
 
 [project.optional-dependencies]
