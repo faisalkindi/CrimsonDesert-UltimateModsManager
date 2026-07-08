@@ -170,6 +170,15 @@ class SettingsPage(SmoothScrollArea):
             tr("settings.interface_zoom_desc"),
             self._personal_group,
         )
+        # "Restart now" button — hidden until the zoom is changed, since the
+        # scale factor only applies on the next launch.
+        self._zoom_restart_btn = PrimaryPushButton(tr("settings.restart_now"))
+        self._zoom_restart_btn.setFixedWidth(130)
+        self._zoom_restart_btn.clicked.connect(self._restart_app)
+        self._zoom_restart_btn.hide()
+        self._zoom_card.hBoxLayout.addWidget(
+            self._zoom_restart_btn, 0, Qt.AlignmentFlag.AlignRight)
+        self._zoom_card.hBoxLayout.addSpacing(10)
         self._zoom_combo = ComboBox()
         self._zoom_combo.addItems(["100%", "110%", "125%", "150%", "175%", "200%"])
         self._zoom_combo.setFixedWidth(140)
@@ -876,6 +885,10 @@ class SettingsPage(SmoothScrollArea):
             setThemeColor(hexstr)
             self._set_accent_swatch(hexstr)
             self._reapply_custom_styles()
+            # Restyle the hardcoded-blue main buttons across the app so the
+            # accent propagates to them too, live.
+            from cdumm.gui.accent import notify_changed
+            notify_changed()
             logger.info("Accent colour changed to %s", hexstr)
 
         dlg.colorChanged.connect(_apply)
@@ -890,11 +903,30 @@ class SettingsPage(SmoothScrollArea):
             self._config.set("interface_zoom", factor)
         from cdumm.gui.ui_scale import write_ui_scale
         write_ui_scale(factor)
+        # Reveal the inline "Restart now" button; the scale only applies on
+        # the next launch.
+        self._zoom_restart_btn.show()
         InfoBar.warning(
             tr("settings.restart_required_title"),
             tr("settings.restart_required"),
-            duration=6000, position=InfoBarPosition.TOP, parent=self.window())
+            duration=5000, position=InfoBarPosition.TOP, parent=self.window())
         logger.info("Interface zoom set to %s (restart required)", factor)
+
+    def _restart_app(self) -> None:
+        """Relaunch CDUMM so a new interface-zoom scale takes effect."""
+        import sys
+        from PySide6.QtCore import QProcess
+        from PySide6.QtWidgets import QApplication
+        try:
+            if getattr(sys, "frozen", False):
+                # Frozen exe: argv[0] is the exe itself.
+                QProcess.startDetached(sys.executable, sys.argv[1:])
+            else:
+                QProcess.startDetached(sys.executable, sys.argv)
+        except Exception as e:
+            logger.warning("Restart failed: %s", e)
+            return
+        QApplication.quit()
 
     def _reapply_custom_styles(self) -> None:
         """Re-apply custom widget styles after qfluentwidgets theme update wipes them."""

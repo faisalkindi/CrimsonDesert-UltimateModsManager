@@ -503,6 +503,7 @@
   "settings.interface_zoom_desc": "Scale the whole interface larger or smaller. Applied after a restart.",
   "settings.restart_required_title": "Restart required",
   "settings.restart_required": "Restart CDUMM to apply the new interface zoom.",
+  "settings.restart_now": "Restart now",
   "settings.language": "언어",
   "settings.language_desc": "표시 언어 변경",
   "settings.game": "게임",

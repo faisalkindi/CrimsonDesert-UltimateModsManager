@@ -330,6 +330,8 @@ class ToolPageBase(SmoothScrollArea):
         self._run_btn.setFixedWidth(360)
         self._run_btn.setFixedHeight(52)
         self._apply_run_btn_style()
+        from cdumm.gui.accent import bus as _accent_bus
+        _accent_bus().changed.connect(self._apply_run_btn_style)
         self._run_btn.clicked.connect(self._on_run_clicked)
         action_row.addWidget(self._run_btn, 0, Qt.AlignmentFlag.AlignCenter)
 
@@ -446,24 +448,18 @@ class ToolPageBase(SmoothScrollArea):
 
     def _apply_run_btn_style(self) -> None:
         from qfluentwidgets import setCustomStyleSheet
-        light = (
+        from cdumm.gui.accent import accent_shades
+        base, hover, pressed = accent_shades()
+        common = (
             "PrimaryPushButton {"
-            "  background-color: #2878D0; color: white;"
+            f"  background-color: {base}; color: white;"
             "  border-radius: 12px; border: none; padding-bottom: 6px;"
             "}"
-            "PrimaryPushButton:hover { background-color: #3388E0; }"
-            "PrimaryPushButton:pressed { background-color: #2060B0; }"
-            "PrimaryPushButton:disabled { background-color: #ccc; color: #999; }"
+            f"PrimaryPushButton:hover {{ background-color: {hover}; }}"
+            f"PrimaryPushButton:pressed {{ background-color: {pressed}; }}"
         )
-        dark = (
-            "PrimaryPushButton {"
-            "  background-color: #3A8FE0; color: white;"
-            "  border-radius: 12px; border: none; padding-bottom: 6px;"
-            "}"
-            "PrimaryPushButton:hover { background-color: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background-color: #2878D0; }"
-            "PrimaryPushButton:disabled { background-color: #333; color: #666; }"
-        )
+        light = common + "PrimaryPushButton:disabled { background-color: #ccc; color: #999; }"
+        dark = common + "PrimaryPushButton:disabled { background-color: #333; color: #666; }"
         setCustomStyleSheet(self._run_btn, light, dark)
         bf = self._run_btn.font()
         bf.setPixelSize(15)
@@ -1831,13 +1827,19 @@ class FixEverythingPage(ToolPageBase):
         qbf.setPixelSize(14)
         qbf.setWeight(QFont.Weight.Bold)
         self._quick_btn.setFont(qbf)
-        setCustomStyleSheet(self._quick_btn,
-            "PrimaryPushButton { background: #2878D0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #3388E0; }"
-            "PrimaryPushButton:pressed { background: #2060B0; }",
-            "PrimaryPushButton { background: #3A8FE0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background: #2878D0; }")
+        def _style_quick_btn():
+            from qfluentwidgets import setCustomStyleSheet
+            from cdumm.gui.accent import accent_shades
+            base, hover, pressed = accent_shades()
+            qss = (
+                f"PrimaryPushButton {{ background: {base}; color: white; "
+                "border-radius: 12px; border: none; padding-bottom: 6px; }"
+                f"PrimaryPushButton:hover {{ background: {hover}; }}"
+                f"PrimaryPushButton:pressed {{ background: {pressed}; }}")
+            setCustomStyleSheet(self._quick_btn, qss, qss)
+        _style_quick_btn()
+        from cdumm.gui.accent import bus as _abus_q
+        _abus_q().changed.connect(_style_quick_btn)
         self._quick_btn.clicked.connect(self._on_quick_fix)
         quick_layout.addWidget(self._quick_btn)
 
@@ -1886,15 +1888,23 @@ class FixEverythingPage(ToolPageBase):
         fbf.setPixelSize(14)
         fbf.setWeight(QFont.Weight.Bold)
         self._full_btn.setFont(fbf)
-        setCustomStyleSheet(self._full_btn,
-            "PrimaryPushButton { background: #2878D0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #3388E0; }"
-            "PrimaryPushButton:pressed { background: #2060B0; }"
-            "PrimaryPushButton:disabled { color: #4A5568; border: 1px solid #CBD5E0; border-radius: 12px; background: transparent; }",
-            "PrimaryPushButton { background: #3A8FE0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background: #2878D0; }"
-            "PrimaryPushButton:disabled { color: #9CA3AF; border: 1px solid #4A5568; border-radius: 12px; background: transparent; }")
+        def _style_full_btn():
+            from qfluentwidgets import setCustomStyleSheet
+            from cdumm.gui.accent import accent_shades
+            base, hover, pressed = accent_shades()
+            common = (
+                f"PrimaryPushButton {{ background: {base}; color: white; "
+                "border-radius: 12px; border: none; padding-bottom: 6px; }"
+                f"PrimaryPushButton:hover {{ background: {hover}; }}"
+                f"PrimaryPushButton:pressed {{ background: {pressed}; }}")
+            light = common + ("PrimaryPushButton:disabled { color: #4A5568; "
+                "border: 1px solid #CBD5E0; border-radius: 12px; background: transparent; }")
+            dark = common + ("PrimaryPushButton:disabled { color: #9CA3AF; "
+                "border: 1px solid #4A5568; border-radius: 12px; background: transparent; }")
+            setCustomStyleSheet(self._full_btn, light, dark)
+        _style_full_btn()
+        from cdumm.gui.accent import bus as _abus_f
+        _abus_f().changed.connect(_style_full_btn)
         self._full_btn.clicked.connect(self._on_full_fix)
         self._full_btn.setEnabled(False)
         full_layout.addWidget(self._full_btn)

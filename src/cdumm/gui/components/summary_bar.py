@@ -134,13 +134,8 @@ class SummaryBar(QWidget):
         af.setWeight(QFont.Weight.Bold)
         self._apply_btn.setFont(af)
         self._apply_btn.clicked.connect(self.apply_clicked)
-        setCustomStyleSheet(self._apply_btn,
-            "PrimaryPushButton { background: #2878D0; color: white; border-radius: 20px; border: none; padding: 0 28px; }"
-            "PrimaryPushButton:hover { background: #3388E0; }"
-            "PrimaryPushButton:pressed { background: #2060B0; }",
-            "PrimaryPushButton { background: #3A8FE0; color: white; border-radius: 20px; border: none; padding: 0 28px; }"
-            "PrimaryPushButton:hover { background: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background: #2878D0; }")
+        from cdumm.gui.accent import style_primary_button
+        style_primary_button(self._apply_btn, radius=20, padding="0 28px")
         root.addWidget(self._apply_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._revert_btn = _CenteredPushButton(tr("action_bar.revert_vanilla").strip())
@@ -172,13 +167,8 @@ class SummaryBar(QWidget):
         lf.setWeight(QFont.Weight.Bold)
         self._launch_btn.setFont(lf)
         self._launch_btn.clicked.connect(self.launch_clicked)
-        setCustomStyleSheet(self._launch_btn,
-            "PushButton { background: #2878D0; color: #FFFFFF; border: 1px solid #2878D0; border-radius: 20px; padding: 0 28px; }"
-            "PushButton:hover { background: #3A8AE0; border-color: #3A8AE0; }"
-            "PushButton:pressed { background: #1F68B8; border-color: #1F68B8; }",
-            "PushButton { background: #2878D0; color: #FFFFFF; border: 1px solid #3A8AE0; border-radius: 20px; padding: 0 28px; }"
-            "PushButton:hover { background: #3A8AE0; border-color: #5CA0F0; }"
-            "PushButton:pressed { background: #1F68B8; border-color: #2878D0; }")
+        from cdumm.gui.accent import style_accent_pushbutton
+        style_accent_pushbutton(self._launch_btn, radius=20, padding="0 28px")
         root.addWidget(self._launch_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Animation tracking — one slot per stat in _STAT_DEFS.
