@@ -333,10 +333,26 @@ def test_reflection_exts_gate_membership():
     # formats. Packed value-only files and third-party binaries whose noise is
     # identifier-shaped (.hkx Havok tags, .roadsector 'navigraphX' repeats)
     # must be excluded so they don't render a misleading outline.
-    for e in (".paseq", ".prefab", ".meshinfo", ".pae", ".paproj"):
+    for e in (".paseq", ".prefab", ".meshinfo", ".pae", ".paproj", ".pastage"):
         assert e in gi.REFLECTION_EXTS
     for e in (".hkx", ".roadsector", ".pabgh", ".paatt", ".paac", ".pabgb"):
         assert e not in gi.REFLECTION_EXTS
+
+
+def test_decode_reflection_rejects_punctuation_field_noise():
+    # A binary/video blob whose _-runs are punctuation garbage must NOT be
+    # mis-parsed as a reflection schema (the .mp4 false-positive: fields like
+    # "_.<yL", "_aKv(", "_6T5" are not real engine field names).
+    noise = (b"\x00Obj\x00_.<yL\x00Type\x00_aKv(\x00X\x00_/l!\x00"
+             b"Y\x00_6T5\x00Z\x00_[CC\x00W\x00")
+    assert gi.decode_reflection(noise) is None
+    # …but a clean object + _field/type stream still parses as a schema.
+    # (type names are >=4 chars so the ascii-run filter keeps them and the
+    # field/type alternation stays intact.)
+    good = (b"\x00Sequence\x00_isCameraJumped\x00bool\x00"
+            b"_raceIndex\x00Int4\x00_raceWin\x00Int4\x00_raceLose\x00Int4\x00")
+    r = gi.decode_reflection(good)
+    assert r is not None and r["nfields"] >= 3
 
 
 def test_decode_struct_typed_words_and_keys():

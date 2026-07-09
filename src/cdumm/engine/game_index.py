@@ -32,7 +32,8 @@ TABLE_EXTS = (".pabgb", ".pabgh")
 # extract_strings). Packed value-only formats (.pabgh/.paatt/.paac/…) and
 # third-party binaries (.hkx, .roadsector, …) embed NO name schema, so the
 # flat "names" outline must never be mined from them.
-REFLECTION_EXTS = (".pae", ".paseq", ".prefab", ".meshinfo", ".paproj")
+REFLECTION_EXTS = (".pae", ".paseq", ".prefab", ".meshinfo", ".paproj",
+                   ".pastage")
 
 
 def category_of(path: str) -> str:
@@ -599,8 +600,12 @@ def convert_to_wav(data: bytes, out_wav: str) -> bool:
     try:
         tmp.write(data)
         tmp.close()
+        # CREATE_NO_WINDOW (0x08000000) stops a console window flashing on
+        # screen every time vgmstream runs as a subprocess (e.g. on Play).
+        _flags = 0x08000000 if os.name == "nt" else 0
         subprocess.run([exe, "-o", out_wav, tmp.name],
-                       capture_output=True, timeout=60, check=False)
+                       capture_output=True, timeout=60, check=False,
+                       creationflags=_flags)
         return os.path.exists(out_wav) and os.path.getsize(out_wav) > 44
     except Exception:  # noqa: BLE001
         return False
@@ -662,6 +667,7 @@ def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
 
 
 _REFLECT_ID = re.compile(r"[A-Za-z][A-Za-z0-9]*$")   # class / type identifier
+_FIELD_ID = re.compile(r"_[A-Za-z][A-Za-z0-9_]*$")   # engine "_field" name
 
 
 def _raw_ascii_runs(data: bytes, min_len: int = 4, cap: int = 12000) -> list:
@@ -703,7 +709,7 @@ def decode_reflection(data: bytes, limit: int = 4000) -> dict | None:
     i, n = 0, len(ss)
     while i < n and len(fields) < limit:
         s = ss[i]
-        if s.startswith("_"):
+        if _FIELD_ID.match(s):
             fields.append((cur, s, ss[i + 1] if i + 1 < n else ""))
             i += 2
         else:
