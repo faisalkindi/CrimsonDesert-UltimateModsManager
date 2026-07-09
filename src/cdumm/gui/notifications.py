@@ -43,15 +43,31 @@ class Notification:
 
 def restart_app() -> None:
     """Relaunch CDUMM so new startup-time settings (e.g. interface zoom)
-    take effect. Frozen-exe aware; best-effort."""
+    take effect.
+
+    A PyInstaller one-file exe passes its extraction dir to child
+    processes via ``_MEI*`` / ``_PYI*`` environment variables. A naive
+    relaunch therefore makes the new instance reuse THIS process's ``_MEI``
+    dir — which the bootloader deletes as we exit — and the child crashes
+    with "No module named '_sqlite3'". Launch the child with those vars
+    stripped so it extracts its own fresh copy.
+    """
+    import os
+    import subprocess
     import sys
-    from PySide6.QtCore import QProcess
     from PySide6.QtWidgets import QApplication
     try:
-        if getattr(sys, "frozen", False):
-            QProcess.startDetached(sys.executable, sys.argv[1:])
-        else:
-            QProcess.startDetached(sys.executable, sys.argv)
+        args = ([sys.executable] + sys.argv[1:]
+                if getattr(sys, "frozen", False)
+                else [sys.executable] + sys.argv)
+        env = {k: v for k, v in os.environ.items()
+               if not (k.startswith("_MEI") or k.startswith("_PYI"))}
+        kwargs = {"close_fds": True, "env": env}
+        if os.name == "nt":
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the child
+            # fully outlives us.
+            kwargs["creationflags"] = 0x00000008 | 0x00000200
+        subprocess.Popen(args, **kwargs)
     except Exception as e:
         logger.warning("restart failed: %s", e)
         return
