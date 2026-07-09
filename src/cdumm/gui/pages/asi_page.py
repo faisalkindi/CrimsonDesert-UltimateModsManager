@@ -15,7 +15,6 @@ from pathlib import Path
 from PySide6.QtCore import QEasingCurve, QMimeData, Qt, Signal
 from PySide6.QtGui import QColor, QDrag, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -56,8 +55,8 @@ logger = logging.getLogger(__name__)
 
 _STATUS_COLORS = {
     "enabled": {
-        "light": {"bg": "#E8F5E9", "text": "#2E7D32", "border": "#A5D6A7"},
-        "dark":  {"bg": "#1A2E1A", "text": "#81C784", "border": "#2E5E2E"},
+        "light": {"bg": "#E3F7E6", "text": "#1B8A34", "border": "#8BD79A"},
+        "dark":  {"bg": "#16371C", "text": "#57DB84", "border": "#2F9E4C"},
     },
     "disabled": {
         "light": {"bg": "#F5F5F5", "text": "#757575", "border": "#E0E0E0"},
@@ -179,12 +178,13 @@ class AsiCard(CardWidget):
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(0)
 
-        # Col 0: Checkbox (fixed)
-        self._checkbox = QCheckBox()
+        # Col 0: Checkbox (fixed). A fluent CheckBox draws a real
+        # checkmark and fills with the theme accent when checked (matching
+        # the "Select all" box), so no custom indicator styling is needed.
+        self._checkbox = CheckBox()
         self._checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._checkbox.setFixedWidth(24)
         self._checkbox.setChecked(plugin.enabled)
-        self._apply_checkbox_style()
         self._checkbox.toggled.connect(self._on_toggled)
         root.addWidget(self._checkbox)
         root.addSpacing(8)
@@ -381,23 +381,12 @@ class AsiCard(CardWidget):
         super().changeEvent(event)
         if event.type() == event.Type.ApplicationPaletteChange:
             self._apply_flat_style()
-            self._apply_checkbox_style()
             self._apply_order_style()
             self._status_badge._apply_style()
             if hasattr(self, '_version_pill'):
                 self._apply_version_style()
 
     # -- Internal styles --
-
-    def _apply_checkbox_style(self) -> None:
-        dark = isDarkTheme()
-        checked_color = "#5CB8F0" if dark else "#2878D0"
-        unchecked_border = "#5A6270" if dark else "#9CA3AF"
-        self._checkbox.setStyleSheet(
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
-            f"QCheckBox::indicator:checked {{ background: {checked_color}; border: 2px solid {checked_color}; border-radius: 4px; }}"
-            f"QCheckBox::indicator:unchecked {{ background: transparent; border: 2px solid {unchecked_border}; border-radius: 4px; }}"
-        )
 
     def _apply_order_style(self) -> None:
         color = "#9CA3AF" if isDarkTheme() else "#6B7280"
@@ -692,13 +681,9 @@ class _AsiSummaryBar(QWidget):
         _rbf.setWeight(_QFont.Weight.Bold)
         self._refresh_btn.setFont(_rbf)
         self._refresh_btn.clicked.connect(self.refresh_clicked)
-        setCustomStyleSheet(self._refresh_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 17px; padding: 0 16px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }"
-            "PushButton:pressed { background: #D0E0F8; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 17px; padding: 0 16px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }"
-            "PushButton:pressed { background: #2A3C58; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._refresh_btn, radius=17,
+                          padding_css="padding: 0 16px; padding-bottom: 6px;")
         root.addWidget(self._refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def update_stats(self, total: int = 0, enabled: int = 0,
@@ -886,13 +871,9 @@ class AsiPluginsPage(QWidget):
         _nbf.setWeight(_QFont.Weight.Bold)
         self._new_folder_btn.setFont(_nbf)
         self._new_folder_btn.clicked.connect(self._on_new_folder)
-        setCustomStyleSheet(self._new_folder_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }"
-            "PushButton:pressed { background: #D0E0F8; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }"
-            "PushButton:pressed { background: #2A3C58; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._new_folder_btn, radius=16,
+                          padding_css="padding: 0 14px; padding-bottom: 6px;")
         select_row.addWidget(self._new_folder_btn)
         body.addLayout(select_row)
 

@@ -5,7 +5,6 @@ import logging
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QMimeData
 from PySide6.QtGui import QColor, QDrag, QFont, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
@@ -17,6 +16,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     CardWidget,
     CaptionLabel,
+    CheckBox,
     FluentIcon,
     IconWidget,
     StrongBodyLabel,
@@ -251,12 +251,13 @@ class ModCard(CardWidget):
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(0)
 
-        # Col 0: Checkbox (fixed)
-        self._checkbox = QCheckBox()
+        # Col 0: Checkbox (fixed). Fluent CheckBox draws a real checkmark and
+        # fills with the theme accent when checked (no custom indicator QSS,
+        # which would flatten it into a plain coloured square).
+        self._checkbox = CheckBox()
         self._checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._checkbox.setFixedWidth(26)
         self._checkbox.setChecked(enabled)
-        self._apply_checkbox_style()
         self._checkbox.toggled.connect(self._on_toggled)
         root.addWidget(self._checkbox)
         root.addSpacing(8)
@@ -577,22 +578,11 @@ class ModCard(CardWidget):
         super().changeEvent(event)
         if event.type() == event.Type.ApplicationPaletteChange:
             self._apply_flat_style()
-            self._apply_checkbox_style()
             self._apply_order_style()
             self._apply_version_style()
             self._status_badge._apply_style()
 
     # ── Internal ────────────────────────────────────────────────────────
-
-    def _apply_checkbox_style(self) -> None:
-        dark = isDarkTheme()
-        checked_color = "#5CB8F0" if dark else "#2878D0"
-        unchecked_border = "#5A6270" if dark else "#9CA3AF"
-        self._checkbox.setStyleSheet(
-            "QCheckBox::indicator { width: 18px; height: 18px; }"
-            f"QCheckBox::indicator:checked {{ background: {checked_color}; border: 2px solid {checked_color}; border-radius: 4px; }}"
-            f"QCheckBox::indicator:unchecked {{ background: transparent; border: 2px solid {unchecked_border}; border-radius: 4px; }}"
-        )
 
     def _apply_order_style(self) -> None:
         color = "#9CA3AF" if isDarkTheme() else "#6B7280"

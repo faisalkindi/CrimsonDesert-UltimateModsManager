@@ -203,9 +203,14 @@ class NotificationPanel(QWidget):
         items = _store.items()
         if not items:
             from qfluentwidgets import CaptionLabel
+            # Centre the empty-state text within the scroll region. Sandwich
+            # it between two stretches so it sits in the middle of the box
+            # instead of pinned to the top edge (where it looked like it was
+            # floating above the panel).
+            self._list_layout.insertStretch(0)
             empty = CaptionLabel("You're all caught up.", self._list_host)
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._list_layout.insertWidget(0, empty)
+            self._list_layout.insertWidget(1, empty)
             return
 
         for n in items:

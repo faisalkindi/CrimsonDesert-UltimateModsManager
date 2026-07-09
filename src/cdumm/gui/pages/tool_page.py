@@ -1056,11 +1056,9 @@ class FindCulpritPage(ToolPageBase):
         self._pause_btn.setFixedHeight(36)
         self._pause_btn.clicked.connect(self._on_pause_resume)
         self._pause_btn.hide()
-        _scs(self._pause_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 18px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 18px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._pause_btn, radius=18,
+                          padding_css="padding-bottom: 6px;")
 
         # Add buttons to the action row
         self._action_row.addWidget(self._stop_btn)

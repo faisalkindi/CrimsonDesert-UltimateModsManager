@@ -129,3 +129,35 @@ def style_accent_pushbutton(btn, radius: int = 20, padding: str = "0 28px") -> N
 
     _apply()
     _bus.changed.connect(_apply)
+
+
+def style_chip_button(btn, radius: int = 16,
+                      padding_css: str = "padding: 0 14px;") -> None:
+    """Style a light "chip" PushButton (secondary pills like New Folder /
+    Refresh) so its text, border and faint wash all track the theme accent
+    instead of a hardcoded ``#2878D0`` blue.
+
+    The wash is a translucent tint of the accent, so a single stylesheet
+    reads correctly over both the light and dark card backgrounds. Pass the
+    button's own ``padding_css`` fragment (property included) to preserve its
+    existing geometry.
+    """
+    from qfluentwidgets import setCustomStyleSheet
+
+    def _apply() -> None:
+        c = current_accent()
+        r, g, b = c.red(), c.green(), c.blue()
+        qss = (
+            f"PushButton {{ background: rgba({r},{g},{b},0.14); color: {c.name()}; "
+            f"border: 1px solid rgba({r},{g},{b},0.55); "
+            f"border-radius: {radius}px; {padding_css} }}"
+            f"PushButton:hover {{ background: rgba({r},{g},{b},0.22); }}"
+            f"PushButton:pressed {{ background: rgba({r},{g},{b},0.30); }}"
+        )
+        try:
+            setCustomStyleSheet(btn, qss, qss)
+        except Exception:
+            pass
+
+    _apply()
+    _bus.changed.connect(_apply)
