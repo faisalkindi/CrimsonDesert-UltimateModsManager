@@ -315,6 +315,19 @@ def test_extract_strings_pulls_field_names():
     assert gi.extract_strings(b"\x00\x01ab\x00", min_len=4) == []  # too short
 
 
+def test_extract_strings_drops_packed_noise():
+    # Packed value-only files (.pabgh/.paatt/...) hold no embedded names —
+    # their printable runs are random punctuation-laden noise. These must be
+    # rejected so packed files fall through to the struct/hex view instead of
+    # rendering a fake "field/type/object names" outline.
+    noise = b"\x00&N$0\x00;@g#\x00JJ<sR\x00WD\":\x00t^#H\x00]YRH\x00r7$P\x00"
+    assert gi.extract_strings(noise, min_len=4) == []
+    # …but genuine identifiers and asset paths still come through.
+    ok = b"\x00StaticMesh\x00_itemId\x00/Game/Weapons/Sword\x00"
+    got = gi.extract_strings(ok, min_len=4)
+    assert got == ["StaticMesh", "_itemId", "/Game/Weapons/Sword"]
+
+
 def test_decode_struct_typed_words_and_keys():
     import struct as _s
     # version=1, a record key (1,000,040), a negative int, and a float 2.0

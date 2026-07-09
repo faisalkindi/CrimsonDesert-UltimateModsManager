@@ -604,11 +604,34 @@ def convert_to_wav(data: bytes, out_wav: str) -> bool:
             pass
 
 
+_NAME_LIKE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")   # engine identifier
+
+
+def _is_name_like(s: str) -> bool:
+    """True only for strings shaped like an engine reflection name — a plain
+    identifier (``Sequence``, ``_isAccessLock``, ``bool``) or an asset-path
+    reference (contains ``/``).
+
+    Packed value-only formats (.paatt / .pabgh / .paac / …) embed no names —
+    their printable-ASCII runs are just random byte noise (``&N$0``, ``;@g#``,
+    ``JJ<sR``). Those must NOT be surfaced as a "names" outline, so anything
+    carrying punctuation or otherwise not identifier/path-shaped is rejected.
+    """
+    if _NAME_LIKE.match(s):
+        return True
+    return "/" in s and any(c.isalpha() for c in s)
+
+
 def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
-    """Printable-ASCII runs of at least ``min_len`` chars — the embedded
-    field / type / object names in the game's reflection-serialized binaries
-    (.paseq, .prefab, .meshinfo, ...). De-duplicated in encounter order and
-    capped to ``limit`` — a readable structure outline instead of raw hex."""
+    """Printable-ASCII runs of at least ``min_len`` chars that look like
+    engine names — the embedded field / type / object names in the game's
+    reflection-serialized binaries (.paseq, .prefab, .meshinfo, ...).
+    De-duplicated in encounter order and capped to ``limit`` — a readable
+    structure outline instead of raw hex.
+
+    Only ``_is_name_like`` runs are kept, so packed value-only files don't
+    masquerade their random ASCII noise as a structure outline.
+    """
     out: list = []
     seen: set = set()
     cur = bytearray()
@@ -618,7 +641,7 @@ def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
         else:
             if len(cur) >= min_len:
                 s = cur.decode("ascii")
-                if s not in seen:
+                if s not in seen and _is_name_like(s):
                     seen.add(s)
                     out.append(s)
                     if len(out) >= limit:
@@ -626,7 +649,7 @@ def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
             cur = bytearray()
     if len(cur) >= min_len and len(out) < limit:
         s = cur.decode("ascii")
-        if s not in seen:
+        if s not in seen and _is_name_like(s):
             out.append(s)
     return out
 
