@@ -314,19 +314,22 @@ class _PreviewWorker(QObject):
             res.update(kind="text", text=text[:self._text_cap],
                        truncated=len(text) >= self._text_cap)
             return
-        # Reflection-serialized binaries (.paseq/.prefab/.meshinfo/...) embed
-        # their field/type/object names as text — surface those as a readable
-        # outline instead of raw hex.
         # Verbose reflection binaries (.pae/.paseq/.prefab/.meshinfo/…) embed a
         # full field→type schema; surface it as a named table.
         refl = game_index.decode_reflection(data)
         if refl:
             res.update(kind="schema", **refl)
             return
-        strings = game_index.extract_strings(data)
-        if len(strings) >= 6:
-            res.update(kind="outline", strings=strings, nstr=len(strings))
-            return
+        # The flat name outline is only meaningful for those same verbose
+        # reflection formats. Packed value-only files (.pabgh/.paatt/…) and
+        # third-party binaries (.hkx, .roadsector, …) embed no name schema, so
+        # mining them yields misleading noise ("navigraphX" repeats, Havok type
+        # tags) — route everything else to the struct/hex view instead.
+        if game_index.ext_of(self._path) in game_index.REFLECTION_EXTS:
+            strings = game_index.extract_strings(data)
+            if len(strings) >= 6:
+                res.update(kind="outline", strings=strings, nstr=len(strings))
+                return
         # No embedded names, but a word-aligned struct (.paatt attribute
         # blocks, .pabgh key indexes) reads far better as a typed word
         # table than a raw hex wall.

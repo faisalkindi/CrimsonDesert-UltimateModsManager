@@ -328,6 +328,17 @@ def test_extract_strings_drops_packed_noise():
     assert got == ["StaticMesh", "_itemId", "/Game/Weapons/Sword"]
 
 
+def test_reflection_exts_gate_membership():
+    # The name outline is only mined from the game's verbose reflection
+    # formats. Packed value-only files and third-party binaries whose noise is
+    # identifier-shaped (.hkx Havok tags, .roadsector 'navigraphX' repeats)
+    # must be excluded so they don't render a misleading outline.
+    for e in (".paseq", ".prefab", ".meshinfo", ".pae", ".paproj"):
+        assert e in gi.REFLECTION_EXTS
+    for e in (".hkx", ".roadsector", ".pabgh", ".paatt", ".paac", ".pabgb"):
+        assert e not in gi.REFLECTION_EXTS
+
+
 def test_decode_struct_typed_words_and_keys():
     import struct as _s
     # version=1, a record key (1,000,040), a negative int, and a float 2.0

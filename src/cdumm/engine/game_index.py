@@ -27,6 +27,13 @@ from typing import Any, Callable, Iterable
 # Data-table blob (.pabgb) + schema/header (.pabgh) extensions.
 TABLE_EXTS = (".pabgb", ".pabgh")
 
+# The game's own verbose reflection-serialized formats — these embed a real
+# field / type / object name schema as text (readable via decode_reflection /
+# extract_strings). Packed value-only formats (.pabgh/.paatt/.paac/…) and
+# third-party binaries (.hkx, .roadsector, …) embed NO name schema, so the
+# flat "names" outline must never be mined from them.
+REFLECTION_EXTS = (".pae", ".paseq", ".prefab", ".meshinfo", ".paproj")
+
 
 def category_of(path: str) -> str:
     """First path segment, e.g. 'gamedata' for 'gamedata/iteminfo.pabgb'."""
