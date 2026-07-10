@@ -11,12 +11,14 @@ localization keys; localization is a follow-up.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import (QFont, QImage, QPixmap, QSyntaxHighlighter,
+                           QTextCharFormat)
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QScrollArea, QSizePolicy, QSplitter,
                                QTableWidgetItem, QVBoxLayout, QWidget)
@@ -151,6 +153,35 @@ _MOD_HOWTO_GUIDE = """How to turn game data into a mod — no hex editor needed.
 
 Every edit is a same-width, byte-exact write: the file stays valid,
 the game still loads it, and you can disable the mod to revert."""
+
+
+class _ExtHighlighter(QSyntaxHighlighter):
+    """Colour the file-type tokens (.dds, .pabgb, .pac_xml, ...) in the
+    "New to modding" guides so each entry reads as a scannable line rather
+    than one wall of grey text. The colour tracks the theme accent and
+    updates live when the accent picker changes (same bus as the buttons)."""
+
+    _RX = re.compile(r"\.[A-Za-z][A-Za-z0-9_]+")
+
+    def __init__(self, document) -> None:
+        super().__init__(document)
+        self._fmt = QTextCharFormat()
+        self._fmt.setFontWeight(QFont.Weight.Bold)
+        self._apply_accent()
+        from cdumm.gui import accent
+        accent.bus().changed.connect(self._on_accent)
+
+    def _apply_accent(self) -> None:
+        from cdumm.gui import accent
+        self._fmt.setForeground(accent.current_accent())
+
+    def _on_accent(self) -> None:
+        self._apply_accent()
+        self.rehighlight()
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802
+        for m in self._RX.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(), self._fmt)
 
 
 def _shape_records(records: dict, schema, positions: dict | None = None
@@ -802,6 +833,7 @@ class GameDataPage(ToolPageBase):
         self._guide_box = PlainTextEdit(self._container)
         self._guide_box.setReadOnly(True)
         self._guide_box.setPlainText(_FILE_TYPE_GUIDE)
+        self._guide_hl = _ExtHighlighter(self._guide_box.document())
         _gbf = self._guide_box.font()
         _gbf.setPixelSize(13)
         self._guide_box.setFont(_gbf)
@@ -825,6 +857,7 @@ class GameDataPage(ToolPageBase):
         self._howto_box = PlainTextEdit(self._container)
         self._howto_box.setReadOnly(True)
         self._howto_box.setPlainText(_MOD_HOWTO_GUIDE)
+        self._howto_hl = _ExtHighlighter(self._howto_box.document())
         _hbf = self._howto_box.font()
         _hbf.setPixelSize(13)
         self._howto_box.setFont(_hbf)
