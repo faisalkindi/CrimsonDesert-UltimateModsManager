@@ -245,6 +245,54 @@ def _parse_delete_intent(raw: dict, i: int, label: str) -> Format3Intent:
     )
 
 
+def _parse_new_record_intent(raw: dict, i: int, label: str) -> Format3Intent:
+    """Parse a ``new_record`` intent.
+
+    A new record has to be built from a known-good layout, so CDUMM's safe
+    form bases it on an existing record: supply ``source_key`` (or
+    ``template_key``) to copy, plus ``new_key``, an optional ``new_name``,
+    and ``patches``. That routes through the same append-only, self-checked
+    clone engine. Without a template key the intent still parses but is
+    skipped in validation with an actionable message (building a valid
+    record from a bare field list needs a per-table serializer CDUMM does
+    not have for most tables — cloning one that already works is the
+    community-recommended path anyway).
+    """
+    src = raw.get("source_key", raw.get("template_key"))
+    new_key = raw.get("new_key")
+    if isinstance(new_key, bool) or not isinstance(new_key, int):
+        raise ValueError(
+            f"{label} intent #{i} new_record needs an integer 'new_key'"
+        )
+    new_name = raw.get("new_name")
+    if new_name is not None and not isinstance(new_name, str):
+        raise ValueError(
+            f"{label} intent #{i} new_record 'new_name' must be a string"
+        )
+    raw_patches = raw.get("patches", [])
+    if not isinstance(raw_patches, list):
+        raise ValueError(
+            f"{label} intent #{i} new_record 'patches' must be a list"
+        )
+    patches: list[dict] = []
+    for j, p in enumerate(raw_patches):
+        if not isinstance(p, dict) or "field" not in p or "new" not in p:
+            raise ValueError(
+                f"{label} intent #{i} new_record patch #{j} must be an "
+                f"object with 'field' and 'new'"
+            )
+        patches.append({"field": str(p["field"]), "new": p["new"]})
+    clone: dict | None = None
+    if isinstance(src, int) and not isinstance(src, bool):
+        clone = {"source_key": src, "new_key": new_key, "patches": patches}
+        if new_name is not None:
+            clone["new_name"] = new_name
+    return Format3Intent(
+        entry="", key=new_key, field="", op="new_record",
+        new=None, old=None, match=None, clone=clone,
+    )
+
+
 def _parse_intents_block(
     raw_intents, label: str = "intents",
 ) -> list[Format3Intent]:
@@ -274,6 +322,9 @@ def _parse_intents_block(
             continue
         if raw.get("op") == "delete_record":
             intents.append(_parse_delete_intent(raw, i, label))
+            continue
+        if raw.get("op") == "new_record":
+            intents.append(_parse_new_record_intent(raw, i, label))
             continue
         # The newer skill .field.json variant drops 'op' since 'set'
         # is implicit. We default to 'set' when absent. GitHub #66.
@@ -590,6 +641,13 @@ def _partition_unsupported_op(
     """
     if intent.op in _SUPPORTED_OPS:
         return None
+    if intent.op == "array_append":
+        return (
+            "op 'array_append' (append one element to a list) isn't "
+            "supported yet: CDUMM's list writers replace the whole list, "
+            "so use a 'set' intent whose value is the full new list (the "
+            "record's current items plus your addition)."
+        )
     if intent.op in _V32_RESERVED_OPS:
         return (
             f"intent uses op {intent.op!r} which is reserved for "
@@ -758,6 +816,11 @@ def validate_intents(
                     mi,
                     f"delete_record needs a decoded schema for table "
                     f"'{table_name}', which CDUMM doesn't have yet"))
+            elif mi.op == "new_record":
+                result.skipped.append((
+                    mi,
+                    f"new_record needs a decoded schema for table "
+                    f"'{table_name}', which CDUMM doesn't have yet"))
             else:
                 kept.append(mi)
         intents = kept
@@ -810,6 +873,23 @@ def validate_intents(
         # clone_record is a record-creation op with its own validator; it
         # must be routed before the set-oriented op partition (which would
         # otherwise reject it as an unknown op).
+        if intent.op == "new_record":
+            if intent.clone is not None:
+                # Template-based new record -> validate like a clone.
+                reason = _classify_clone(
+                    intent, schema, field_specs, fs_entries, table_name)
+            else:
+                reason = (
+                    "new_record needs a 'source_key' (or 'template_key') "
+                    "to base the record on an existing one; building a "
+                    "record from a bare field template isn't supported "
+                    "yet. Use clone_record on a similar record instead."
+                )
+            if reason is None:
+                result.supported.append(intent)
+            else:
+                result.skipped.append((intent, reason))
+            continue
         if intent.op == "clone_record" or intent.clone is not None:
             reason = _classify_clone(
                 intent, schema, field_specs, fs_entries, table_name)

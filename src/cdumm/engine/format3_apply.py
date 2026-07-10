@@ -207,7 +207,7 @@ def _expand_match_intents(
 # safely returns None and is skipped here, never applied.
 
 
-_RECORD_OPS = ("clone_record", "delete_record")
+_RECORD_OPS = ("clone_record", "delete_record", "new_record")
 
 
 def _build_record_ops_change_for_target(
@@ -236,16 +236,16 @@ def _build_record_ops_change_for_target(
     n_applied = 0
     for intent in supported:
         op = getattr(intent, "op", "")
-        if op == "clone_record":
+        if op in ("clone_record", "new_record"):
             spec = getattr(intent, "clone", None)
             if not spec:
-                continue
+                continue  # new_record without a template; skipped upstream
             res = apply_clone_to_pabgb_bytes(tn, body, header, spec)
             if res is None:
                 logger.warning(
-                    "Format 3 clone_record on %s refused (source_key=%s, "
+                    "Format 3 %s on %s refused (source_key=%s, "
                     "new_key=%s); skipped, no bytes changed.",
-                    target, spec.get("source_key"), spec.get("new_key"))
+                    op, target, spec.get("source_key"), spec.get("new_key"))
                 continue
             body, header = res
             n_applied += 1
