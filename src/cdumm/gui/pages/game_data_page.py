@@ -17,11 +17,12 @@ import subprocess
 import tempfile
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import (QFont, QImage, QPixmap, QSyntaxHighlighter,
+from PySide6.QtGui import (QColor, QFont, QImage, QPixmap, QSyntaxHighlighter,
                            QTextCharFormat)
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QScrollArea, QSizePolicy, QSplitter,
                                QTableWidgetItem, QVBoxLayout, QWidget)
+from qfluentwidgets import TableItemDelegate, isDarkTheme
 
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
@@ -182,6 +183,124 @@ class _ExtHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text: str) -> None:  # noqa: N802
         for m in self._RX.finditer(text):
             self.setFormat(m.start(), m.end() - m.start(), self._fmt)
+
+
+def _human_size(n) -> str:
+    """Bytes -> a short human string (e.g. ``512 B``, ``763 KB``, ``4.8 MB``)."""
+    size = float(int(n))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.0f} {unit}" if size >= 100 else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{int(n)} B"
+
+
+# Broad file-type category -> colour, so the Type column reads at a glance
+# (audio vs texture vs table ...). Extensions not listed stay the default.
+_CAT_COLOUR = {
+    "table": "#5AD19A", "visual": "#4FA3FF", "anim": "#E0A85E",
+    "audio": "#B98BE0", "video": "#E06A8B", "world": "#4FC9C9", "text": "#9AA0A6",
+}
+_EXT_CAT = {
+    ".pabgb": "table", ".pabgh": "table",
+    ".wem": "audio", ".bnk": "audio", ".pasound": "audio",
+    ".mp4": "video",
+    ".dds": "visual", ".png": "visual", ".padxil": "visual", ".material": "visual",
+    ".technique": "visual", ".mi": "visual", ".pamt": "visual", ".pami": "visual",
+    ".pam": "visual", ".pamlod": "visual", ".pampg": "visual", ".meshinfo": "visual",
+    ".prefab": "visual", ".prefabdata_xml": "visual", ".spline": "visual",
+    ".spline2d": "visual", ".ies": "visual", ".ttf": "visual", ".impostor": "visual",
+    ".paa": "anim", ".paa_metabin": "anim", ".paac": "anim", ".paatt": "anim",
+    ".hkx": "anim", ".motionblending": "anim",
+    ".pae": "world", ".paseq": "world", ".paseqc": "world", ".pastage": "world",
+    ".paproj": "world", ".palevel": "world", ".levelinfo": "world", ".road": "world",
+    ".roadsector": "world", ".roadidx": "world", ".paschedule": "world",
+    ".paschedulepath": "world", ".binarygimmick": "world", ".pat": "world",
+    ".pbd": "world", ".uianiminit": "world",
+    ".xml": "text", ".pac": "text", ".pac_xml": "text", ".app_xml": "text",
+    ".html": "text", ".css": "text", ".thtml": "text", ".txt": "text",
+    ".dat": "text", ".binarystring": "text", ".paloc": "text",
+}
+
+
+def _type_colour(ext: str) -> "str | None":
+    """Hex colour for a file-type's category, or None if uncategorised."""
+    return _CAT_COLOUR.get(_EXT_CAT.get((ext or "").lower()))
+
+
+def _split_path(path: str) -> "tuple[str, str]":
+    """Return ``(folder, name)`` from a game asset path (handles / and \\)."""
+    sep = max(path.rfind("/"), path.rfind("\\"))
+    return (path[:sep], path[sep + 1:]) if sep >= 0 else ("", path)
+
+
+class _NumericItem(QTableWidgetItem):
+    """Table cell that SORTS by a numeric key while DISPLAYING formatted text,
+    so the Size column sorts by real byte count (not by its "763 KB" text)."""
+
+    def __init__(self, text: str, value: float) -> None:
+        super().__init__(text)
+        self._value = value
+
+    def __lt__(self, other) -> bool:
+        if isinstance(other, _NumericItem):
+            return self._value < other._value
+        return super().__lt__(other)
+
+
+class _ZebraDelegate(TableItemDelegate):
+    """Stronger alternating-row shading. qfluentwidgets' stock alternate band
+    is alpha 5/255 (near-invisible); pre-fill odd, non-selected rows with a
+    firmer translucent band, then let the base delegate paint hover / selection
+    / content on top. Keyed on the VISUAL row so it survives sorting, and it
+    skips selected rows so the selection highlight still shows."""
+
+    def paint(self, painter, option, index):  # noqa: N802
+        if (index.row() % 2) and index.row() not in self.selectedRows:
+            painter.save()
+            _c = 255 if isDarkTheme() else 0
+            painter.fillRect(option.rect, QColor(_c, _c, _c, 16))
+            painter.restore()
+        super().paint(painter, option, index)
+
+
+def _build_row_items(r) -> list:
+    """Build the five cells for one search result: Name (full path stashed in
+    UserRole for selection) - Folder (dimmed) - Archive - Type (category-
+    coloured) - Size (human text, numeric sort key, right-aligned, exact bytes
+    in the tooltip)."""
+    path = str(r["path"])
+    folder, name = _split_path(path)
+    ext = str(r["ext"])
+    size = int(r["orig_size"])
+
+    name_item = QTableWidgetItem(name)
+    name_item.setData(Qt.ItemDataRole.UserRole, path)
+    name_item.setToolTip(path)
+
+    folder_item = QTableWidgetItem(folder)
+    folder_item.setForeground(QColor("#9AA0A6"))
+    folder_item.setToolTip(path)
+
+    archive_item = QTableWidgetItem(str(r["archive"]))
+
+    type_item = QTableWidgetItem(ext)
+    type_item.setToolTip(ext)
+    _tc = _type_colour(ext)
+    if _tc:
+        type_item.setForeground(QColor(_tc))
+        _tfont = type_item.font()
+        _tfont.setBold(True)
+        type_item.setFont(_tfont)
+
+    size_item = _NumericItem(_human_size(size), size)
+    size_item.setTextAlignment(
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    size_item.setToolTip(f"{size:,} bytes")
+
+    return [name_item, folder_item, archive_item, type_item, size_item]
 
 
 def _shape_records(records: dict, schema, positions: dict | None = None
@@ -881,13 +1000,19 @@ class GameDataPage(ToolPageBase):
                             QSizePolicy.Policy.Expanding)
 
         self._table = TableWidget(split)
-        self._table.setColumnCount(4)
+        self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(
-            ["Path", "Archive", "Type", "Size (bytes)"])
+            ["Name", "Folder", "Archive", "Type", "Size"])
         self._table.verticalHeader().hide()
         self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(
             self._table.SelectionBehavior.SelectRows)
+        self._table.setSortingEnabled(True)          # click a header to sort
+        self._table.setAlternatingRowColors(True)    # zebra (via _ZebraDelegate)
+        self._table.setItemDelegate(_ZebraDelegate(self._table))
+        self._table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_menu)
         # Reserve a gutter for the vertical scrollbar so it sits beside the
         # rows instead of overlaying the last column (which caused mis-clicks
         # landing on a row instead of the scrollbar).
@@ -901,16 +1026,16 @@ class GameDataPage(ToolPageBase):
         _hf = _hdr.font()
         _hf.setPixelSize(15)
         _hdr.setFont(_hf)
-        # Path stretches to fill the slack; the other three get fixed widths.
-        # This keeps the columns spanning the full table width (so the vertical
-        # scrollbar hugs the last column) WITHOUT ResizeToContents, which
-        # re-measures every row on every update and can stall the UI thread.
-        _hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for _c in (1, 2, 3):
+        # Folder stretches to fill the slack; the rest get fixed widths, so the
+        # columns still span the full width (scrollbar hugs the last column)
+        # WITHOUT ResizeToContents, which re-measures every row and can stall.
+        _hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for _c in (0, 2, 3, 4):
             _hdr.setSectionResizeMode(_c, QHeaderView.ResizeMode.Interactive)
-        self._table.setColumnWidth(1, 90)
-        self._table.setColumnWidth(2, 140)
-        self._table.setColumnWidth(3, 130)
+        self._table.setColumnWidth(0, 260)   # Name
+        self._table.setColumnWidth(2, 80)    # Archive
+        self._table.setColumnWidth(3, 120)   # Type
+        self._table.setColumnWidth(4, 110)   # Size
         self._table.verticalHeader().setDefaultSectionSize(36)
         self._table.itemSelectionChanged.connect(self._on_asset_selected)
         split.addWidget(self._table)
@@ -1342,13 +1467,12 @@ class GameDataPage(ToolPageBase):
             f"{len(rows):,} match(es)"
             + (f" (showing first {limit:,} — narrow the search for more)"
                if capped else ""))
+        self._table.setSortingEnabled(False)   # bulk-fill, then re-enable
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(str(r["path"])))
-            self._table.setItem(i, 1, QTableWidgetItem(str(r["archive"])))
-            self._table.setItem(i, 2, QTableWidgetItem(str(r["ext"])))
-            self._table.setItem(
-                i, 3, QTableWidgetItem(f"{int(r['orig_size']):,}"))
+            for c, cell in enumerate(_build_row_items(r)):
+                self._table.setItem(i, c, cell)
+        self._table.setSortingEnabled(True)
 
     # ── preview pane ─────────────────────────────────────────────────
     _PREVIEW_TEXT_CAP = 200_000            # chars shown for text assets
@@ -1363,8 +1487,50 @@ class GameDataPage(ToolPageBase):
         items = self._table.selectedItems()
         if not items:
             return None
-        cell = self._table.item(items[0].row(), 0)
-        return cell.text() if cell else None
+        cell = self._table.item(items[0].row(), 0)   # Name cell carries the
+        if cell is None:                              # full path in UserRole
+            return None
+        full = cell.data(Qt.ItemDataRole.UserRole)
+        return str(full) if full else cell.text()
+
+    def _set_type_filter(self, ext: str) -> None:
+        """Point the Type dropdown at ``ext`` (re-runs the search)."""
+        exts = getattr(self, "_type_exts", [])
+        if ext in exts:
+            self._type_combo.setCurrentIndex(exts.index(ext))
+
+    def _on_table_menu(self, pos) -> None:
+        """Right-click a result row: copy its path / filename, or filter the
+        list to that file type."""
+        item = self._table.itemAt(pos)
+        if item is None:
+            return
+        name_cell = self._table.item(item.row(), 0)
+        full = name_cell.data(Qt.ItemDataRole.UserRole) if name_cell else None
+        if not full:
+            return
+        full = str(full)
+        _folder, name = _split_path(full)
+        type_cell = self._table.item(item.row(), 3)
+        ext = type_cell.text() if type_cell else ""
+        from PySide6.QtWidgets import QApplication
+        from qfluentwidgets import Action, RoundMenu
+        menu = RoundMenu(parent=self._table)
+        _act_path = Action("Copy path")
+        _act_path.triggered.connect(
+            lambda: QApplication.clipboard().setText(full))
+        menu.addAction(_act_path)
+        _act_name = Action("Copy filename")
+        _act_name.triggered.connect(
+            lambda: QApplication.clipboard().setText(name))
+        menu.addAction(_act_name)
+        if ext and ext in getattr(self, "_type_exts", []):
+            menu.addSeparator()
+            _act_filter = Action(f"Show only {ext}")
+            _act_filter.triggered.connect(
+                lambda e=ext: self._set_type_filter(e))
+            menu.addAction(_act_filter)
+        menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _on_asset_selected(self) -> None:
         """Kick off a background read of the clicked asset. The heavy work
