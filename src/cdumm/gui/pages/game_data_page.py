@@ -71,54 +71,54 @@ def _cell(v) -> str:
 _FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you're looking at, and which ones you actually edit to make a mod. Many are Pearl Abyss's own undocumented formats: where a meaning is inferred it's marked "~", and the genuinely opaque ones are named honestly at the bottom rather than guessed at.
 
 ━━ THE ONES MODDERS EDIT MOST ━━
-.pabgb / .pabgh   Game-data TABLES + their key index — items, NPCs (character), quests, skills, drops, gimmicks, spawns, stages. Stats and values live here; most gameplay mods edit these. Opens as a grid of records (the _key and _name columns are always reliable).
-.paz              The ARCHIVE everything is packed into (like a .zip). The mod manager reads/writes these for you — you rarely touch them by hand.
+.pabgb / .pabgh Game-data TABLES + their key index — items, NPCs (character), quests, skills, drops, gimmicks, spawns, stages. Stats and values live here; most gameplay mods edit these. Opens as a grid of records (the _key and _name columns are always reliable).
+.paz The ARCHIVE everything is packed into (like a .zip). The mod manager reads/writes these for you — you rarely touch them by hand.
 
 ━━ VISUALS ━━
-.dds / .png       TEXTURES / images — armour, faces, UI, the world map. .dds opens as an image (with a 3D view too).
-.padxil           Compiled SHADERS — "DXIL" is DirectX shader bytecode that draws surfaces. ~
-.material / .technique / .mi / .pamt   Material + shading setup: which shader, and its textures and parameters. ~
-.pami / .pam / .pamlod / .pampg   Model / MESH data + level-of-detail / streaming variants. ~
-.meshinfo         Mesh + collision / physics info for an object.
-.impostor         A flat "billboard" stand-in for a mesh seen from far away. ~
-.prefab / .prefabdata_xml   A placed "scene object" with its components and transform (and its data as XML).
-.spline / .spline2d   Curves / paths used to lay out geometry and routes. ~
-.ies              Light profiles (IES photometry) — how a lamp casts light. ~
-.ttf              A font file (TrueType).
+.dds / .png TEXTURES / images — armour, faces, UI, the world map. .dds opens as an image (with a 3D view too).
+.padxil Compiled SHADERS — "DXIL" is DirectX shader bytecode that draws surfaces. ~
+.material / .technique / .mi / .pamt Material + shading setup: which shader, and its textures and parameters. ~
+.pami / .pam / .pamlod / .pampg Model / MESH data + level-of-detail / streaming variants. ~
+.meshinfo Mesh + collision / physics info for an object.
+.impostor A flat "billboard" stand-in for a mesh seen from far away. ~
+.prefab / .prefabdata_xml A placed "scene object" with its components and transform (and its data as XML).
+.spline / .spline2d Curves / paths used to lay out geometry and routes. ~
+.ies Light profiles (IES photometry) — how a lamp casts light. ~
+.ttf A font file (TrueType).
 
 ━━ ANIMATION & COMBAT ━━
-.paa              ANIMATIONS (Pearl Abyss "PAR" clips) — character/creature motion.
-.paa_metabin      Metadata that rides alongside an animation.
-.paac / .paatt    ACTION CHARTS + their attribute blocks — the combat/animation logic (which move plays and its properties). ~
-.motionblending   How one animation blends into the next. ~
-.hkx              HAVOK data — ragdoll / physics / some animation (third-party format; shown as a structure outline).
+.paa ANIMATIONS (Pearl Abyss "PAR" clips) — character/creature motion.
+.paa_metabin Metadata that rides alongside an animation.
+.paac / .paatt ACTION CHARTS + their attribute blocks — the combat/animation logic (which move plays and its properties). ~
+.motionblending How one animation blends into the next. ~
+.hkx HAVOK data — ragdoll / physics / some animation (third-party format; shown as a structure outline).
 
 ━━ AUDIO ━━
-.wem              Wwise SOUND streams — SFX, voice, music. Windows can't play them raw; the previewer decodes them with vgmstream so you can hear + export them.
-.bnk              Wwise SOUNDBANK — a container of sounds + event data.
-.pasound          A sound definition / reference. ~
+.wem Wwise SOUND streams — SFX, voice, music. Windows can't play them raw; the previewer decodes them with vgmstream so you can hear + export them.
+.bnk Wwise SOUNDBANK — a container of sounds + event data.
+.pasound A sound definition / reference. ~
 
 ━━ VIDEO ━━
-.mp4              VIDEO clips — the in-game "advice" tutorials for gear, skills and items. Play them inline (Pause + seek) or extract to a file.
+.mp4 VIDEO clips — the in-game "advice" tutorials for gear, skills and items. Play them inline (Pause + seek) or extract to a file.
 
 ━━ EFFECTS · CUTSCENES · WORLD ━━
-.pae              Particle / EFFECT data — fire, sparks, auras.
-.paseq / .paseqc / .pastage   SEQUENCER / quest-STAGE timelines — cutscene + quest logic. .pastage opens as an editable field/type schema. ~
-.paproj / .paprojdesc   Projectile definitions — arrows, bombs, spells. ~
-.palevel / .levelinfo   Level / world data. ~
-.road / .roadsector / .roadidx   Roads + their sector / index data for AI navigation. ~
-.paschedule / .paschedulepath   NPC daily SCHEDULES + the paths they walk. ~
-.binarygimmick    Interactive "gimmicks" — levers, doors, traps, physics props. ~
-.linkedsceneobject / .questgaugecount   Scene-object links and quest counters. ~
-.pat / .pbd / .uianiminit   Other packed object / UI binaries. No names inside — shown as a typed word table. ~
+.pae Particle / EFFECT data — fire, sparks, auras.
+.paseq / .paseqc / .pastage SEQUENCER / quest-STAGE timelines — cutscene + quest logic. .pastage opens as an editable field/type schema. ~
+.paproj / .paprojdesc Projectile definitions — arrows, bombs, spells. ~
+.palevel / .levelinfo Level / world data. ~
+.road / .roadsector / .roadidx Roads + their sector / index data for AI navigation. ~
+.paschedule / .paschedulepath NPC daily SCHEDULES + the paths they walk. ~
+.binarygimmick Interactive "gimmicks" — levers, doors, traps, physics props. ~
+.linkedsceneobject / .questgaugecount Scene-object links and quest counters. ~
+.pat / .pbd / .uianiminit Other packed object / UI binaries. No names inside — shown as a typed word table. ~
 
 ━━ TEXT & CONFIG ━━
-.xml / .pac / .pac_xml / .app_xml / .html / .css / .thtml   Human-readable text, config, and UI (.pac is the packed twin of .pac_xml).
-.txt / .dat / .binarystring / .paloc   Plain text, loose data blobs, packed strings, and localisation. ~
+.xml / .pac / .pac_xml / .app_xml / .html / .css / .thtml Human-readable text, config, and UI (.pac is the packed twin of .pac_xml).
+.txt / .dat / .binarystring / .paloc Plain text, loose data blobs, packed strings, and localisation. ~
 
 ━━ OTHER PEARL ABYSS FORMATS (opaque — not editable by hand) ━━
 Value-only packed binaries with no field names inside. The previewer shows them as a typed word table (the raw bytes as unsigned / signed / float) so you can still patch by offset, but their layout isn't documented:
-.paccd  .imp  .parg  .seqmt  .paem  .pabc  .save  .pab  .pabv  .pcg  .pasg  .pashv  .papr  .ani  .pai  .pas  .pma  .paacdesc  .paasmt  .pamhc  .pappt  .pathc  .paschedulectx  .paseqh  .binarygimmickcacheddata  .binarygimmickframeevent
+.paccd .imp .parg .seqmt .paem .pabc .save .pab .pabv .pcg .pasg .pashv .papr .ani .pai .pas .pma .paacdesc .paasmt .pamhc .pappt .pathc .paschedulectx .paseqh .binarygimmickcacheddata .binarygimmickframeevent
 
 ━━ HOW THE PREVIEW DECIDES WHAT TO SHOW ━━
 • Text formats → shown as text.
