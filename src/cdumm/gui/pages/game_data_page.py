@@ -169,12 +169,18 @@ class _ExtHighlighter(QSyntaxHighlighter):
         self._fmt = QTextCharFormat()
         self._fmt.setFontWeight(QFont.Weight.Bold)
         self._apply_accent()
-        from cdumm.gui import accent
-        accent.bus().changed.connect(self._on_accent)
+        try:   # the accent module ships in a separate PR; degrade if absent
+            from cdumm.gui import accent
+            accent.bus().changed.connect(self._on_accent)
+        except Exception:
+            pass
 
     def _apply_accent(self) -> None:
-        from cdumm.gui import accent
-        self._fmt.setForeground(accent.current_accent())
+        try:
+            from cdumm.gui import accent
+            self._fmt.setForeground(accent.current_accent())
+        except Exception:   # no accent module in this build -> brand blue
+            self._fmt.setForeground(QColor("#2878D0"))
 
     def _on_accent(self) -> None:
         self._apply_accent()
