@@ -89,12 +89,16 @@ _FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you'
 .wem              Wwise SOUND streams — SFX, voice, music. Windows can't play them raw; the previewer decodes them with vgmstream so you can hear + export them.
 .bnk              Wwise SOUNDBANK — a container of sounds + event data.
 
+━━ VIDEO ━━
+.mp4              VIDEO clips — the in-game "advice" tutorials for gear, skills and items. Play them inline (Pause + seek) or extract to a file.
+
 ━━ EFFECTS · CUTSCENES · WORLD ━━
 .pae              Particle / EFFECT data — fire, sparks, auras.
-.paseq / .paseqc  SEQUENCER — timeline / cutscene data.
+.paseq / .paseqc / .pastage   SEQUENCER / quest-STAGE timelines — cutscene + quest logic. .pastage opens as an editable field/type schema. ~
 .paproj           Projectile definitions — arrows, bombs, spells. ~
 .palevel / .levelinfo    Level / world data. ~
 .road / .roadsector / .nav   Roads and AI navigation meshes. ~
+.pat / .pbd / .uianiminit   Other packed binaries (object/UI data). No names inside — shown as a typed word table. ~
 
 ━━ TEXT & CONFIG ━━
 .xml / .pac_xml / .app_xml / .html / .css / .thtml   Human-readable text, config, and UI.
@@ -103,9 +107,10 @@ _FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you'
 • Text formats → shown as text.
 • Textures → shown as an image (+ 3D).
 • Data tables (.pabgb) → a record grid.
-• Reflection formats (.pae / .paseq / .prefab / .meshinfo …) → a Field → Type schema table, using the engine's OWN names.
+• Reflection formats (.pae / .paseq / .pastage / .prefab / .meshinfo …) → a Field → Type schema table, using the engine's OWN names.
 • Audio (.wem / .bnk) → metadata + Play / Export-to-WAV.
-• Everything else (packed formats like .paatt / .paa / .pabgh) → a typed word table: the exact bytes shown as unsigned / signed / float. These formats carry no field names inside the file, so the values are shown accurately as raw numbers you can still patch by offset.
+• Video (.mp4) → plays inline with Pause + seek.
+• Everything else (packed formats like .paatt / .paa / .pabgh / .pat / .pbd / .uianiminit) → a typed word table: the exact bytes shown as unsigned / signed / float. These formats carry no field names inside the file, so the values are shown accurately as raw numbers you can still patch by offset.
 
 Tip: a name ending in "info" is almost always a game-data table you can edit."""
 
@@ -241,6 +246,7 @@ class _PreviewWorker(QObject):
         self._image_limit = image_limit
         self._text_cap = text_cap
         self._hex_cap = hex_cap
+        self._video_limit = 256 * 1024 * 1024  # mp4 clips are small; cap anyway
 
     def run(self) -> None:
         res = {"gen": self._gen, "path": self._path}
@@ -340,6 +346,15 @@ class _PreviewWorker(QObject):
                 res.update(kind="audio", audio=audio,
                            vgmstream=bool(game_index.find_vgmstream()))
                 return
+
+        # 3.6) Video clips (.mp4) → play inline via Qt Multimedia.
+        if self._path.lower().endswith(game_index.VIDEO_EXTS):
+            if orig > self._video_limit:
+                res.update(kind="toobig")
+                return
+            data = game_index.extract_asset(con, self._path, gd)
+            res.update(kind="video", data=data)
+            return
 
         # 4) too big for an inline byte preview
         if orig > self._byte_limit:
@@ -825,6 +840,11 @@ class GameDataPage(ToolPageBase):
         self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(
             self._table.SelectionBehavior.SelectRows)
+        # Reserve a gutter for the vertical scrollbar so it sits beside the
+        # rows instead of overlaying the last column (which caused mis-clicks
+        # landing on a row instead of the scrollbar).
+        self._table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         # Larger, more readable text + roomier rows.
         _tf = self._table.font()
         _tf.setPixelSize(15)
@@ -880,6 +900,8 @@ class GameDataPage(ToolPageBase):
         # semantic schemas. Hidden until a table is selected.
         self._pv_grid = TableWidget(pane)
         self._pv_grid.verticalHeader().hide()
+        self._pv_grid.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self._pv_grid.setEditTriggers(self._pv_grid.EditTrigger.NoEditTriggers)
         _gf = self._pv_grid.font()
         _gf.setPixelSize(13)
@@ -904,6 +926,46 @@ class GameDataPage(ToolPageBase):
         self._pv_img_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._pv_img_scroll.setVisible(False)
         pv.addWidget(self._pv_img_scroll, 1)
+
+        # Video view for .mp4 clips — plays inline via Qt Multimedia (FFmpeg
+        # backend). Guarded so the Game Data page still loads if a build ships
+        # without multimedia. Hidden until a video is selected.
+        self._video_ok = False
+        self._video_err = ""
+        self._pv_vtemp = None
+        try:
+            from PySide6.QtMultimediaWidgets import QVideoWidget
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            from PySide6.QtWidgets import QSlider
+            self._pv_video = QVideoWidget(pane)
+            self._pv_video.setMinimumHeight(240)
+            self._pv_video.setVisible(False)
+            pv.addWidget(self._pv_video, 1)
+            self._pv_player = QMediaPlayer(self)
+            self._pv_audio_out = QAudioOutput(self)
+            self._pv_player.setAudioOutput(self._pv_audio_out)
+            self._pv_player.setVideoOutput(self._pv_video)
+            self._pv_vrow = QWidget(pane)
+            _vr = QHBoxLayout(self._pv_vrow)
+            _vr.setContentsMargins(0, 0, 0, 0)
+            self._pv_vplay = PushButton("⏸  Pause", self._pv_vrow)
+            self._pv_vplay.clicked.connect(self._on_video_playpause)
+            _vr.addWidget(self._pv_vplay)
+            self._pv_vslider = QSlider(Qt.Orientation.Horizontal, self._pv_vrow)
+            self._pv_vslider.sliderMoved.connect(self._pv_player.setPosition)
+            _vr.addWidget(self._pv_vslider, 1)
+            self._pv_vrow.setVisible(False)
+            pv.addWidget(self._pv_vrow)
+            self._pv_player.durationChanged.connect(
+                lambda d: self._pv_vslider.setRange(0, max(0, d)))
+            self._pv_player.positionChanged.connect(self._on_video_pos)
+            self._video_ok = True
+        except Exception as _ve:  # noqa: BLE001
+            _cause = getattr(_ve, "__cause__", None) or getattr(_ve, "__context__", None)
+            self._video_err = str(_ve) + (f" | {_cause!r}" if _cause else "")
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "video preview unavailable: %s", self._video_err)
 
         # "View in 3D" — only shown for image previews; opens a pop-up with
         # the texture on a rotatable sphere/cube (Qt3D).
@@ -1294,6 +1356,7 @@ class GameDataPage(ToolPageBase):
         if res.get("gen") != self._pv_gen:
             return   # a newer selection superseded this result
         self._reset_maker()   # clear any staged edits/controls from a prior asset
+        self._stop_video()    # stop + hide any video playing from a prior asset
         # Image-only button; _show_image re-shows it, every other branch leaves
         # it hidden.
         self._pv_saveimg_btn.setVisible(False)
@@ -1342,6 +1405,14 @@ class GameDataPage(ToolPageBase):
                 + (f"  ·  {meta}" if meta else "")
                 + f"\n{res.get('path', '')}")
             self._show_image(img.get("png", b""))
+            self._pv_extract.setEnabled(True)
+            return
+
+        if kind == "video":
+            self._pv_meta.setText(
+                (f"video  ·  {meta}" if meta else "video")
+                + f"\n{res.get('path', '')}")
+            self._show_video(res)
             self._pv_extract.setEnabled(True)
             return
 
@@ -1404,6 +1475,77 @@ class GameDataPage(ToolPageBase):
             else self._pv_text.LineWrapMode.NoWrap)
         self._pv_text.setPlainText(text)
 
+    def _show_video(self, res: dict) -> None:
+        # Hide the other preview views, write the clip to a temp .mp4 and play.
+        self._pv_text.setVisible(False)
+        self._pv_grid.setVisible(False)
+        self._pv_img_scroll.setVisible(False)
+        self._pv_3d_btn.setVisible(False)
+        self._pv_saveimg_btn.setVisible(False)
+        self._pv_play_btn.setVisible(False)
+        self._pv_export_btn.setVisible(False)
+        self._pv_getvgm_btn.setVisible(False)
+        if not self._video_ok:
+            self._pv_text.setVisible(True)
+            _why = getattr(self, "_video_err", "")
+            self._pv_text.setPlainText(
+                "Video playback isn't available in this build. Use "
+                "“Extract raw file…” to save the .mp4 and open it in a player."
+                + (f"\n\n({_why})" if _why else ""))
+            return
+        import os as _os
+        import tempfile as _tf
+        from PySide6.QtCore import QUrl
+        try:
+            fd, tmp = _tf.mkstemp(suffix=".mp4", prefix="cdumm_vid_")
+            with _os.fdopen(fd, "wb") as fh:
+                fh.write(res.get("data", b""))
+            self._pv_vtemp = tmp
+            self._pv_video.setVisible(True)
+            self._pv_vrow.setVisible(True)
+            self._pv_vplay.setText("⏸  Pause")
+            self._pv_player.setSource(QUrl.fromLocalFile(tmp))
+            self._pv_player.play()
+        except Exception as e:  # noqa: BLE001
+            self._pv_text.setVisible(True)
+            self._pv_text.setPlainText(f"Could not play video: {e}")
+
+    def _stop_video(self) -> None:
+        """Stop playback, hide the video widgets and delete the temp clip.
+        Safe to call whether or not a video is showing (or supported)."""
+        if not getattr(self, "_video_ok", False):
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            self._pv_player.stop()
+            self._pv_player.setSource(QUrl())
+        except Exception:  # noqa: BLE001
+            pass
+        self._pv_video.setVisible(False)
+        self._pv_vrow.setVisible(False)
+        if getattr(self, "_pv_vtemp", None):
+            try:
+                import os as _os
+                _os.unlink(self._pv_vtemp)
+            except OSError:
+                pass
+            self._pv_vtemp = None
+
+    def _on_video_playpause(self) -> None:
+        if not getattr(self, "_video_ok", False):
+            return
+        from PySide6.QtMultimedia import QMediaPlayer as _MP
+        if self._pv_player.playbackState() == _MP.PlaybackState.PlayingState:
+            self._pv_player.pause()
+            self._pv_vplay.setText("▶  Play")
+        else:
+            self._pv_player.play()
+            self._pv_vplay.setText("⏸  Pause")
+
+    def _on_video_pos(self, pos: int) -> None:
+        if getattr(self, "_video_ok", False) and not self._pv_vslider.isSliderDown():
+            self._pv_vslider.setValue(pos)
+
     def _show_struct(self, res: dict) -> None:
         total = res.get("total_words", 0)
         shown = res.get("shown", 0)
@@ -1462,17 +1604,25 @@ class GameDataPage(ToolPageBase):
                     f"Chunks        {', '.join(a.get('chunks', []))}\n")
             playable = has_vgm
         else:  # .bnk SoundBank
+            _ns = a.get('embedded_streams', 0)
             body = ("Wwise SoundBank (.bnk)\n\n"
                     f"Bank version       {a.get('bank_version')}\n"
                     f"Sections           {', '.join(a.get('sections', []))}\n"
-                    f"Embedded streams   {a.get('embedded_streams', 0)}\n")
-            playable = False   # banks hold many subsongs — extract, don't play
+                    f"Embedded streams   {_ns}\n")
+            # A bank that carries embedded audio (DIDX/DATA) is playable —
+            # vgmstream decodes its first embedded sound. Banks with no streams
+            # (event / metadata only) have nothing to play.
+            playable = has_vgm and _ns > 0
         note = ("\nThe game ships all sound through Wwise: .wem are the encoded "
                 "streams (Wwise Vorbis) and .bnk are SoundBanks — Windows can't "
                 "play these directly.\n")
         if has_vgm:
-            note += ("Use ▶ Play to hear it or Export as WAV for a playable "
-                     "copy; Extract raw file saves the original .wem/.bnk.")
+            if a.get("kind") != "wem" and playable:
+                note += ("Use ▶ Play to hear the bank's first embedded sound or "
+                         "Export as WAV; Extract raw file saves the whole .bnk.")
+            else:
+                note += ("Use ▶ Play to hear it or Export as WAV for a playable "
+                         "copy; Extract raw file saves the original .wem/.bnk.")
         else:
             note += ("Playback needs vgmstream — drop vgmstream-cli.exe into the "
                      "app's tools/vgmstream folder. Extract raw file works now.")

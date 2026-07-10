@@ -35,6 +35,10 @@ TABLE_EXTS = (".pabgb", ".pabgh")
 REFLECTION_EXTS = (".pae", ".paseq", ".prefab", ".meshinfo", ".paproj",
                    ".pastage")
 
+# Video clips the game ships raw (UI advice / cutscene stingers). Played inline
+# in the Game Data preview via Qt Multimedia's FFmpeg backend.
+VIDEO_EXTS = (".mp4",)
+
 
 def category_of(path: str) -> str:
     """First path segment, e.g. 'gamedata' for 'gamedata/iteminfo.pabgb'."""
