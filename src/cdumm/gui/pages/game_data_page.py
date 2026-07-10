@@ -290,10 +290,10 @@ def _build_row_items(r) -> list:
     type_item.setToolTip(ext)
     _tc = _type_colour(ext)
     if _tc:
+        # Colour only — do NOT override the item font. A standalone item's
+        # font() is the default (not the table's 15px), so bolding it here
+        # rendered Type larger/heavier than every other column.
         type_item.setForeground(QColor(_tc))
-        _tfont = type_item.font()
-        _tfont.setBold(True)
-        type_item.setFont(_tfont)
 
     size_item = _NumericItem(_human_size(size), size)
     size_item.setTextAlignment(

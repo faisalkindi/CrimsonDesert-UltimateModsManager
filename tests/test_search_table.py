@@ -54,6 +54,7 @@ def test_build_row_items(qtbot):
     assert folder.text() == "character/npc"
     assert archive.text() == "0011"
     assert typ.text() == ".pabgb"
+    assert not typ.font().bold()   # Type must inherit the table font, not override it
 
     assert isinstance(size, _NumericItem)
     assert size.text() == "763 KB"                  # human-readable display
