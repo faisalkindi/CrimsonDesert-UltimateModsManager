@@ -641,13 +641,6 @@ def _partition_unsupported_op(
     """
     if intent.op in _SUPPORTED_OPS:
         return None
-    if intent.op == "array_append":
-        return (
-            "op 'array_append' (append one element to a list) isn't "
-            "supported yet: CDUMM's list writers replace the whole list, "
-            "so use a 'set' intent whose value is the full new list (the "
-            "record's current items plus your addition)."
-        )
     if intent.op in _V32_RESERVED_OPS:
         return (
             f"intent uses op {intent.op!r} which is reserved for "
@@ -772,6 +765,37 @@ def _classify_delete(intent: Format3Intent) -> str | None:
     return None
 
 
+# List fields whose parse->serialize round-trips byte-exact, so an
+# ``array_append`` can add one element while preserving every existing
+# element's bytes. dropsetinfo.drops is verified byte-exact on all 14,575
+# vanilla records. Add a (table, field) here only after proving the same.
+APPENDABLE_LIST_FIELDS = frozenset({("dropsetinfo", "drops")})
+
+
+def _classify_array_append(
+    intent: Format3Intent, table_name: str
+) -> str | None:
+    """Validate an ``array_append`` intent. Supported only for fields in
+    ``APPENDABLE_LIST_FIELDS`` (proven byte-exact list round-trip); every
+    other field gets an actionable skip pointing at ``set``."""
+    if (table_name, intent.field) not in APPENDABLE_LIST_FIELDS:
+        appendable = ", ".join(
+            f"{t}.{f}" for t, f in sorted(APPENDABLE_LIST_FIELDS))
+        return (
+            f"op 'array_append' isn't supported for field {intent.field!r} "
+            f"on '{table_name}' yet: CDUMM's list writers replace the whole "
+            f"list, so use a 'set' intent whose value is the full new list "
+            f"(the record's current items plus your addition). Appendable "
+            f"list fields so far: {appendable}."
+        )
+    if not isinstance(intent.new, dict):
+        return (
+            "array_append 'new' must be the element object to append "
+            "(a single drop object for dropsetinfo.drops)"
+        )
+    return None
+
+
 def validate_intents(
     target: str, intents: list[Format3Intent]
 ) -> Format3Validation:
@@ -780,6 +804,23 @@ def validate_intents(
     """
     result = Format3Validation()
     table_name = _table_name_from_target(target)
+
+    # array_append is classified up front so it works whether or not the
+    # table has a PABGB schema (dropsetinfo's drops list is writer-handled,
+    # not schema-driven). Supported only for proven-byte-exact list fields;
+    # everything else gets an actionable skip.
+    if any(i.op == "array_append" for i in intents):
+        kept_aa: list[Format3Intent] = []
+        for i in intents:
+            if i.op == "array_append":
+                reason = _classify_array_append(i, table_name)
+                if reason is None:
+                    result.supported.append(i)
+                else:
+                    result.skipped.append((i, reason))
+            else:
+                kept_aa.append(i)
+        intents = kept_aa
 
     if not has_schema(table_name):
         # Three routes accept intents on a no-PABGB-schema table:

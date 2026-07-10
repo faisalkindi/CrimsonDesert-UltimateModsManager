@@ -1846,6 +1846,18 @@ def _build_list_writer_change(
     """
     record_bytes = vanilla_body[entry_off:entry_end]
     if table_name == "dropsetinfo" and intent.field == "drops":
+        # array_append: add one drop, existing drops byte-preserved.
+        if getattr(intent, "op", "set") == "array_append":
+            from cdumm.engine.dropset_writer import build_drop_append_change
+            if not isinstance(intent.new, dict):
+                return None
+            return build_drop_append_change(
+                record_bytes,
+                intent_key=intent.key,
+                intent_entry=entry_name or intent.entry,
+                element_json=intent.new,
+            )
+        # op=set: replace the whole drops list.
         from cdumm.engine.dropset_writer import (
             build_drops_replacement_change,
         )

@@ -137,7 +137,7 @@ def test_validate_new_record_no_schema_skipped():
 # ── array_append recognition + actionable skip ──────────────────────
 
 
-def test_array_append_skipped_with_guidance(monkeypatch):
+def test_array_append_unsupported_field_skipped_with_guidance(monkeypatch):
     _inject(monkeypatch)
     i = _parse_intents_block(
         [{"op": "array_append", "entry": "x", "field": "_bar", "new": 1}])[0]
@@ -145,3 +145,21 @@ def test_array_append_skipped_with_guidance(monkeypatch):
     assert not v.supported
     reason = v.skipped[0][1]
     assert "array_append" in reason and "set" in reason
+
+
+def test_array_append_supported_on_dropset_drops():
+    # dropsetinfo.drops is the one proven byte-exact appendable list field.
+    i = _parse_intents_block([{
+        "op": "array_append", "entry": "DropSet_X", "key": 175001,
+        "field": "drops", "new": {"flag": 1, "item_key": 42, "rates": 1000}}])[0]
+    v = validate_intents("dropsetinfo.pabgb", [i])
+    assert i in v.supported, v.skipped
+
+
+def test_array_append_dropset_new_must_be_object():
+    i = _parse_intents_block([{
+        "op": "array_append", "entry": "DropSet_X", "key": 175001,
+        "field": "drops", "new": [1, 2, 3]}])[0]   # list, not a single obj
+    v = validate_intents("dropsetinfo.pabgb", [i])
+    assert not v.supported
+    assert "element object" in v.skipped[0][1]
