@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import MOD_FIXTURE_HOWTO, real_mod_fixture
+
 
 def _write(p: Path, body: dict) -> Path:
     p.write_text(json.dumps(body), encoding="utf-8")
@@ -242,8 +244,7 @@ def test_real_world_double_resource_buff_zip_imports(tmp_path):
     though apply will downstream-skip every intent (nested-indexed
     fields are deferred)."""
     import zipfile
-    zp = (Path(r"C:/Users/faisa/Downloads/Compressed")
-          / "Double Resource Buff Effect - Field JSON-2276-1-1777879568.zip")
+    zp = real_mod_fixture("Double Resource Buff Effect - Field JSON-2276-1-1777879568.zip")
     if not zp.exists():
         pytest.skip(f"Reference zip not present at {zp}")
 

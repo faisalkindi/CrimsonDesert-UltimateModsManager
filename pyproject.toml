@@ -11,6 +11,11 @@ dependencies = [
     "cryptography>=42.0",
     "privatebin>=0.3.0",
     "lxml>=5.0",
+    # Game Data texture preview: game_index.decode_image() decodes the
+    # game's DDS textures with Pillow. It was never declared, so it was
+    # absent from the exe (and from CI, where the one test covering it
+    # skipped on "No module named PIL") and the preview silently no-op'd.
+    "pillow>=10.0",
     "psutil>=5.9",
     "certifi>=2024.0",
     "py7zr>=1.0",

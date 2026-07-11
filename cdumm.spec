@@ -239,9 +239,15 @@ a = Analysis(
         'PySide6.QtTest', 'PySide6.QtDBus', 'PySide6.QtConcurrent',
         # scipy/numpy — only needed for acrylic blur (disabled)
         'scipy', 'numpy', 'numpy.core', 'numpy.linalg',
-        # PIL/Pillow — not imported by CDUMM (colorthief dep, unused)
-        'PIL', 'PIL._imaging', 'PIL._avif', 'PIL._webp', 'PIL.Image',
-        'Pillow', 'colorthief',
+        # NOTE: PIL/Pillow used to be excluded here as "unused (colorthief
+        # dep)". That stopped being true when the Game Data preview landed:
+        # game_index.decode_image() imports PIL to decode the game's DDS
+        # textures, and game_data_page.py calls it. Excluding Pillow made
+        # that import fail, decode_image returned None, and the texture
+        # preview was silently dead in every frozen build — while passing
+        # CI, because the one test covering it skipped on "No module named
+        # PIL". Pillow is now a real runtime dependency and must ship.
+        'colorthief',
         # brotli — not used by CDUMM (transitive dep from py7zr)
         'brotli', '_brotli', 'brotlicffi',
         # cryptography used by privatebin for AES-GCM + PBKDF2. Keep minimal subset.

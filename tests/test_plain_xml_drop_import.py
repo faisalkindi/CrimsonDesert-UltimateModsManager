@@ -17,6 +17,8 @@ import zipfile
 
 import pytest
 
+from tests.fixture_loaders import MOD_FIXTURE_HOWTO, real_mod_fixture
+
 
 def _fake_pamt_entry(target_name: str):
     """Stand-in for the real PazEntry returned by _find_pamt_entry."""
@@ -139,10 +141,7 @@ def test_real_standard_gamepad_layout_zip(tmp_path, monkeypatch):
     - Layout.txt readme as a sibling
     Skips when the fixture ZIP isn't downloaded into Downloads.
     """
-    real_zip = Path(
-        r"C:\Users\faisa\Downloads\Compressed"
-        r"\Standard Gamepad Layout-1489-2-0-2-1777549676.zip"
-    )
+    real_zip = real_mod_fixture("Standard Gamepad Layout-1489-2-0-2-1777549676.zip")
     if not real_zip.exists():
         pytest.skip(f"Real fixture ZIP not at {real_zip}")
 

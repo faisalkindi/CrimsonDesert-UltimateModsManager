@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_LIVE_BODY = Path(
-    "C:/Users/faisa/AppData/Local/Temp/iteminfo_postpatch.pabgb"
-)
+
+_LIVE_BODY = vanilla113_file("iteminfo.pabgb")
 
 
 def _have_live_fixture() -> bool:
@@ -35,6 +35,8 @@ def _have_live_fixture() -> bool:
     not _have_live_fixture(),
     reason="iteminfo_postpatch.pabgb fixture not present",
 )
+@pytest.mark.skip(
+    reason="pinned to the CONTENTS of a pre-1.13 extract: it selects specific candidate records that do not exist in the committed CD 1.13 table (next() raises StopIteration). Re-picking candidates would change what the test asserts, so it stays skipped rather than be quietly rewritten. The apply round-trip it covers is exercised on real 1.13 bytes by test_iteminfo_gear_stats.py and test_format3_array_append_iteminfo.py. Was previously skipped via a hardcoded C:/Users/faisa/... path.")
 def test_format3_max_stack_count_apply_round_trip():
     """Set max_stack_count on a real item via the full Format 3 path
     and verify the patched binary parses back with the intended value.
@@ -99,6 +101,8 @@ def test_format3_max_stack_count_apply_round_trip():
     not _have_live_fixture(),
     reason="iteminfo_postpatch.pabgb fixture not present",
 )
+@pytest.mark.skip(
+    reason="pinned to the CONTENTS of a pre-1.13 extract: it selects specific candidate records that do not exist in the committed CD 1.13 table (next() raises StopIteration). Re-picking candidates would change what the test asserts, so it stays skipped rather than be quietly rewritten. The apply round-trip it covers is exercised on real 1.13 bytes by test_iteminfo_gear_stats.py and test_format3_array_append_iteminfo.py. Was previously skipped via a hardcoded C:/Users/faisa/... path.")
 def test_format3_list_of_dict_apply_round_trip():
     """Set equip_passive_skill_list (a list-of-dict field) on a real
     item via the full Format 3 path and verify the patched binary
@@ -144,6 +148,8 @@ def test_format3_list_of_dict_apply_round_trip():
     not _have_live_fixture(),
     reason="iteminfo_postpatch.pabgb fixture not present",
 )
+@pytest.mark.skip(
+    reason="pinned to the CONTENTS of a pre-1.13 extract: it selects specific candidate records that do not exist in the committed CD 1.13 table (next() raises StopIteration). Re-picking candidates would change what the test asserts, so it stays skipped rather than be quietly rewritten. The apply round-trip it covers is exercised on real 1.13 bytes by test_iteminfo_gear_stats.py and test_format3_array_append_iteminfo.py. Was previously skipped via a hardcoded C:/Users/faisa/... path.")
 def test_format3_mixed_primitive_and_list_of_dict_apply():
     """Real production load shape: a single mod batches multiple
     intents on the same item, mixing primitive and list-of-dict
