@@ -371,6 +371,88 @@ def _expand_match_intents(
     return out
 
 
+def _expand_append_intents(
+    target: str,
+    vanilla_body: bytes,
+    vanilla_header: bytes,
+    intents: list[Format3Intent],
+) -> list[Format3Intent]:
+    """Translate iteminfo ``array_append`` intents into concrete ``set``
+    intents that carry the record's current list plus the new element.
+
+    Appending to a nested iteminfo list (a socket-material list, an item
+    tag list, …) is, mechanically, a nested ``set`` whose value is
+    ``current_list + [element]``. iteminfo round-trips byte-exact through
+    the whole-table writer, so this reuses that proven path rather than a
+    bespoke in-place list splice: the writer grows exactly the one record
+    and rebuilds the ``.pabgh`` index, same as any size-changing edit.
+
+    Runs BEFORE ``_expand_match_intents`` so an ``array_append`` that also
+    carries a ``match`` (append to every matched item — the socket-mod
+    shape) is resolved here, per matched record, instead of being forced
+    to a plain ``set`` by the match pass.
+
+    dropsetinfo's ``drops`` keeps its dedicated writer path; only iteminfo
+    is handled here. Non-append intents pass through untouched.
+    """
+    if not any(getattr(i, "op", "set") == "array_append" for i in intents):
+        return list(intents)
+    # _table_name_from_target returns the full path, not a bare table name
+    # (the same gotcha the match router hit), so normalise to the basename
+    # before comparing — otherwise the guard silently no-ops on a real
+    # target path and the append is never expanded.
+    tn = _table_name_from_target(target)
+    bare = tn.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+    if bare != "iteminfo":
+        return list(intents)
+
+    try:
+        records = _decode_records_for_match(
+            "iteminfo", vanilla_body, vanilla_header)
+    except Exception:  # noqa: BLE001 - decode must never break apply
+        logger.warning(
+            "Format 3 array_append: could not decode %s; those intents "
+            "produce 0 changes.", target, exc_info=True)
+        records = {}
+
+    out: list[Format3Intent] = []
+    for intent in intents:
+        if getattr(intent, "op", "set") != "array_append":
+            out.append(intent)
+            continue
+
+        match = getattr(intent, "match", None)
+        if match is not None:
+            keys = _match_record_keys(records, match) if records else []
+        else:
+            keys = [intent.key] if intent.key in records else []
+
+        appended = 0
+        for key in keys:
+            rec = records[key]
+            current = _lookup_record_field(rec, intent.field)
+            if not isinstance(current, list):
+                logger.warning(
+                    "Format 3 array_append: %s.%s on key=%s is not a list "
+                    "(got %s); skipping this record.",
+                    target, intent.field, key, type(current).__name__)
+                continue
+            out.append(Format3Intent(
+                entry=str(rec.get("_name", "")),
+                key=int(rec.get("_key", key)),
+                field=intent.field,
+                op="set",
+                new=list(current) + [intent.new],
+                old=None,
+                match=None,
+            ))
+            appended += 1
+        logger.info(
+            "Format 3 array_append on %s field %r expanded to %d record(s).",
+            target, intent.field, appended)
+    return out
+
+
 # ── clone_record: record creation ───────────────────────────────────
 #
 # ``clone_record`` copies an existing record to a new key + optional name
@@ -604,13 +686,22 @@ def expand_format3_into_aggregated(
                     continue
                 vanilla_body, vanilla_header = vanilla
 
+                # Expand any iteminfo 'array_append' intents into concrete
+                # 'set' intents (current list + element) first, so an
+                # append that also carries a 'match' is resolved per record
+                # before the match pass forces op='set'. No-op unless an
+                # array_append is present.
+                supported = _expand_append_intents(
+                    target, vanilla_body, vanilla_header,
+                    validation.supported)
+
                 # Expand any 'match' selector intents into concrete
                 # per-record 'set' intents now that the table bytes are
                 # available to decode. Non-match intents pass through
                 # untouched, so this is a no-op for the common case.
                 supported = _expand_match_intents(
                     target, vanilla_body, vanilla_header,
-                    validation.supported)
+                    supported)
                 if not supported:
                     # Every intent was a match selector that resolved to
                     # zero records (or the table wouldn't decode). Nothing

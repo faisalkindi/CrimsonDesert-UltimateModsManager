@@ -786,25 +786,47 @@ APPENDABLE_LIST_FIELDS = frozenset({("dropsetinfo", "drops")})
 def _classify_array_append(
     intent: Format3Intent, table_name: str
 ) -> str | None:
-    """Validate an ``array_append`` intent. Supported only for fields in
-    ``APPENDABLE_LIST_FIELDS`` (proven byte-exact list round-trip); every
-    other field gets an actionable skip pointing at ``set``."""
-    if (table_name, intent.field) not in APPENDABLE_LIST_FIELDS:
-        appendable = ", ".join(
-            f"{t}.{f}" for t, f in sorted(APPENDABLE_LIST_FIELDS))
-        return (
-            f"op 'array_append' isn't supported for field {intent.field!r} "
-            f"on '{table_name}' yet: CDUMM's list writers replace the whole "
-            f"list, so use a 'set' intent whose value is the full new list "
-            f"(the record's current items plus your addition). Appendable "
-            f"list fields so far: {appendable}."
-        )
-    if not isinstance(intent.new, dict):
-        return (
-            "array_append 'new' must be the element object to append "
-            "(a single drop object for dropsetinfo.drops)"
-        )
-    return None
+    """Validate an ``array_append`` intent.
+
+    Two supported shapes:
+      * a field in ``APPENDABLE_LIST_FIELDS`` (dedicated writer, proven
+        byte-exact list round-trip), where ``new`` is one element object;
+      * any nested list path on ``iteminfo``, which is expanded at apply
+        time into a ``set`` of ``current_list + [element]`` through the
+        byte-exact whole-table writer (``_expand_append_intents``). The
+        real "is this actually a list?" check happens there, once the
+        record is decoded — here we only require a nested path so a bare
+        scalar field can't slip through.
+
+    Anything else gets an actionable skip pointing at ``set``."""
+    if (table_name, intent.field) in APPENDABLE_LIST_FIELDS:
+        if not isinstance(intent.new, dict):
+            return (
+                "array_append 'new' must be the element object to append "
+                "(a single drop object for dropsetinfo.drops)"
+            )
+        return None
+
+    if table_name == "iteminfo":
+        if "." not in intent.field and "[" not in intent.field:
+            return (
+                f"array_append on iteminfo needs a nested list path (e.g. "
+                f"'drop_default_data.add_socket_material_item_list'), not a "
+                f"bare field like {intent.field!r}. Append targets a list "
+                f"inside a record; a top-level scalar isn't one."
+            )
+        return None
+
+    appendable = ", ".join(
+        f"{t}.{f}" for t, f in sorted(APPENDABLE_LIST_FIELDS))
+    return (
+        f"op 'array_append' isn't supported for field {intent.field!r} "
+        f"on '{table_name}' yet: CDUMM's list writers replace the whole "
+        f"list, so use a 'set' intent whose value is the full new list "
+        f"(the record's current items plus your addition). Appendable "
+        f"list fields so far: {appendable}; plus any nested list path on "
+        f"iteminfo."
+    )
 
 
 def validate_intents(

@@ -136,13 +136,35 @@ Append a single element to a list field without rewriting the whole list.
 Supported today for list fields whose format CDUMM can round-trip
 byte-exact, so existing elements are never disturbed:
 
-| Table          | Field   |
-|----------------|---------|
+| Table          | Field |
+|----------------|-------|
 | `dropsetinfo`  | `drops` |
+| `iteminfo`     | any **nested list path** (e.g. `drop_default_data.add_socket_material_item_list`) |
 
-For any other list field, `array_append` is skipped with a note to use a
-`set` intent whose value is the **full new list** (the current items plus
-your addition) — CDUMM's list writers replace the whole list.
+On `iteminfo`, an `array_append` is expanded to a `set` of
+`current_list + [element]` and applied through the byte-exact whole-table
+writer, so exactly one record grows and its `.pabgh` index is rebuilt —
+nothing else moves. The path must point at a list; a bare scalar field is
+refused with a note. `array_append` also composes with `match`, so you can
+append one element to **every** record matching a selector (e.g. add a
+socket-material entry to every item with `drop_default_data.use_socket == 1`)
+in a single intent.
+
+Example — add one socket-material entry to a specific item:
+
+```json
+{
+  "op": "array_append",
+  "entry": "Some_Helm",
+  "key": 14510,
+  "field": "drop_default_data.add_socket_material_item_list",
+  "new": { "item": 1000080, "value": 5000 }
+}
+```
+
+For any list field CDUMM can't yet round-trip byte-exact, `array_append`
+is skipped with a note to use a `set` intent whose value is the **full new
+list** (the current items plus your addition).
 
 ---
 
