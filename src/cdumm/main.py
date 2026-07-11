@@ -28,9 +28,22 @@ try:
     # (not copy) so a healthy launch that writes nothing fatal doesn't
     # resurrect a stale "previous crash" on the launch after.
     _trace_path = APP_DATA_DIR / "crash_trace.txt"
+    _prev_trace_path = APP_DATA_DIR / "crash_trace.prev.txt"
     try:
         if _trace_path.exists() and _trace_path.stat().st_size > 0:
-            os.replace(_trace_path, APP_DATA_DIR / "crash_trace.prev.txt")
+            try:
+                os.replace(_trace_path, _prev_trace_path)
+            except OSError:
+                # A rename fails outright (WinError 32) while ANY process
+                # still holds the file open — a hung prior instance whose
+                # faulthandler handle never closed, or an AV scanner mid-
+                # scan. Windows share semantics still allow the open("w")
+                # below to truncate it, so without this fallback the old
+                # trace would be destroyed anyway. Copy the bytes out
+                # instead, so the previous session's trace survives even
+                # when it can't be moved.
+                import shutil as _shutil
+                _shutil.copyfile(_trace_path, _prev_trace_path)
     except OSError:
         pass
     _fault_log = open(_trace_path, "w")
