@@ -20,7 +20,20 @@ APP_DATA_DIR = app_data_dir()
 _fault_log = None
 try:
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _fault_log = open(APP_DATA_DIR / "crash_trace.txt", "w")
+    # Preserve the previous session's trace before faulthandler truncates
+    # it. faulthandler opens crash_trace.txt with "w", so without this the
+    # prior session's native trace — the one a crash report actually needs
+    # — is destroyed at the very next launch, leaving the bug report with
+    # only the current session's harmless startup faulthandler output. Move
+    # (not copy) so a healthy launch that writes nothing fatal doesn't
+    # resurrect a stale "previous crash" on the launch after.
+    _trace_path = APP_DATA_DIR / "crash_trace.txt"
+    try:
+        if _trace_path.exists() and _trace_path.stat().st_size > 0:
+            os.replace(_trace_path, APP_DATA_DIR / "crash_trace.prev.txt")
+    except OSError:
+        pass
+    _fault_log = open(_trace_path, "w")
     faulthandler.enable(file=_fault_log)
 except Exception:
     # Cascading fallbacks so the process keeps booting even if

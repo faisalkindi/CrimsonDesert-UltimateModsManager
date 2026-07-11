@@ -177,6 +177,46 @@ def _is_relevant_log_line(ln: str) -> bool:
     return True
 
 
+def classify_crash_trace(text: str) -> str:
+    """Classify a faulthandler ``crash_trace`` dump.
+
+    Returns one of:
+
+    * ``"empty"``  — nothing was recorded.
+    * ``"benign"`` — the ONLY fault recorded is the known Windows splash
+      COM warning ``0x8001010d`` (``RPC_E_CANTCALLOUT_ININPUTSYNCCALL``)
+      raised inside ``gui/splash.py`` during ``show_splash``. Qt/DWM
+      raises this *continuable* exception the first time the frameless,
+      translucent splash composits; CDUMM catches it and starts
+      normally, but ``faulthandler`` still dumps it. It is NOT a crash
+      and must never be surfaced as one, or every bug report headlines a
+      phantom "previous session crashed".
+    * ``"crash"`` — anything else: a real fault, a benign fault with a
+      second fault stacked after it, or an unrecognised dump (fail safe
+      toward "crash" so genuine problems are always surfaced).
+    """
+    if not text or not text.strip():
+        return "empty"
+    # A hard fault is often reported as "Fatal Python error: ..." — that is
+    # never the benign splash case.
+    if "Fatal Python error" in text:
+        return "crash"
+    headers = [ln for ln in text.splitlines()
+               if "Windows fatal exception" in ln]
+    # Benign is exactly one exception dump. Zero (unknown format) or more
+    # than one (a real fault stacked after the splash warning) are not
+    # benign.
+    if len(headers) != 1:
+        return "crash"
+    if "0x8001010d" not in headers[0]:
+        return "crash"
+    # A single 0x8001010d dump is benign only when the crashing frame is
+    # the splash. If any other module is implicated, treat it as real.
+    if "show_splash" in text and "splash.py" in text:
+        return "benign"
+    return "crash"
+
+
 def _format_import_date(d: str | None) -> str:
     if not d:
         return "?"
@@ -875,24 +915,28 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
     body.append("")
 
     # ── Crash trace (if last session actually recorded a trace) ───────
-    # We only emit this section and flag it in the TL;DR when the trace
-    # file exists AND has non-whitespace content — an empty file left over
-    # from a previous session shouldn't claim there was a crash.
+    # Read the PRESERVED previous-session trace (main.py moves the prior
+    # crash_trace.txt to crash_trace.prev.txt before faulthandler truncates
+    # it for the current run). Fall back to the live file only when no
+    # preserved copy exists (e.g. first-ever launch). A benign splash-only
+    # 0x8001010d dump is classified out so it never headlines as a crash.
     if app_data_dir:
-        trace_path = app_data_dir / "crash_trace.txt"
+        trace_path = app_data_dir / "crash_trace.prev.txt"
+        if not trace_path.exists():
+            trace_path = app_data_dir / "crash_trace.txt"
         if trace_path.exists():
             try:
                 text = trace_path.read_text(encoding="utf-8", errors="replace")
             except Exception as e:
-                text = ""
                 body.append("--- CRASH TRACE (previous session) ---")
                 body.append(f"  Error reading crash trace: {e}")
                 body.append("")
                 tldr_flags.append(
-                    "crash_trace.txt exists but couldn't be read — check "
+                    "crash trace exists but couldn't be read — check "
                     "file permissions on the CDUMM app-data folder.")
             else:
-                if text.strip():
+                kind = classify_crash_trace(text)
+                if kind == "crash":
                     tldr_flags.append(
                         "Previous session crashed — crash trace is included "
                         "at the bottom of this report.")
@@ -903,6 +947,15 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                     for ll in text.splitlines():
                         body.append(f"  {ll}")
                     body.append("")
+                elif kind == "benign":
+                    # Known-harmless Windows splash COM warning. Note it as
+                    # an OK observation (not a red flag) so nobody chases a
+                    # phantom crash, and don't dump the scary trace.
+                    tldr_ok.append(
+                        "A non-fatal Windows splash warning "
+                        "(0x8001010d / RPC_E_CANTCALLOUT_ININPUTSYNCCALL) "
+                        "was recorded at the previous launch and safely "
+                        "ignored — the app started normally; not a crash.")
 
     # ── Assemble header + TL;DR + body ────────────────────────────────
     out: list[str] = []
