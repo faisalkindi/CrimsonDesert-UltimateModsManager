@@ -191,17 +191,22 @@ def _resolve_field_name(intent_field: str, item: dict) -> Optional[str]:
     return None
 
 
+def is_nested_path(field: str) -> bool:
+    """True when a Format 3 ``field`` addresses a nested target."""
+    return "." in field or "[" in field
+
+
 def _resolve_path_target(
     item: dict, path: str,
 ) -> Optional[tuple]:
     """Walk a Format 3 dotted/indexed path on a parsed ItemInfo dict.
 
     Path syntax: ``field``, ``field.subfield``, ``field[N]``,
-    ``field[N].subfield``, ``a.b[N].c.d``. Returns
-    ``(parent_container, final_segment)`` so the caller can do
-    ``parent[final_segment] = new_value`` (works whether parent is
-    a dict and segment is a key, or parent is a list and segment is
-    an int index).
+    ``field[N].subfield``, ``a.b[N].c.d``, and dotted integer indices
+    (``a.0.b``). Returns ``(parent_container, final_segment)`` so the
+    caller can do ``parent[final_segment] = new_value`` (works whether
+    parent is a dict and segment is a key, or parent is a list and
+    segment is an int index).
 
     Returns None if any segment fails to resolve (missing dict key,
     list index out of range, type mismatch).
@@ -210,16 +215,23 @@ def _resolve_path_target(
     target nested struct sub-fields. Bug confirmed 2026-05-08
     against gmVIP233 / niyaruza prefab_data_list[N].tribe_gender_list
     and floozo drop_default_data.X paths.
+
+    Dotted integer indices are accepted because the `match` selector
+    already accepts them, and a mod author has no way to guess that
+    `set` wanted `list[0].x` while `match` wanted `list.0.x`. One
+    dialect, both sides.
     """
     import re
-    # Tokenize: identifier OR [N]
+    # Tokenize: identifier | [N] | bare integer segment (a.0.b).
+    # Identifiers are tried first, so a name like `x2` stays a name.
     tokens: list[tuple[str, object]] = []
-    for m in re.finditer(r"([A-Za-z_]\w*)|\[(\d+)\]", path):
-        name, idx = m.groups()
+    for m in re.finditer(r"([A-Za-z_]\w*)|\[(\d+)\]|(\d+)", path):
+        name, br_idx, dot_idx = m.groups()
         if name is not None:
             tokens.append(("key", name))
         else:
-            tokens.append(("idx", int(idx)))
+            tokens.append(("idx", int(br_idx if br_idx is not None
+                                      else dot_idx)))
     if not tokens:
         return None
 
@@ -249,6 +261,36 @@ def _resolve_path_target(
             return (cur, resolved)
         return None
     return (cur, last_val)
+
+
+def apply_nested_intent(item: dict, field: str, new) -> str:
+    """Assign ``new`` at the nested ``field`` path on a decoded record.
+
+    Returns "ok", "unresolved", or "shape" so the caller can attribute
+    the skip. Shared by BOTH iteminfo writers on purpose: the default
+    (pre-1.13) path and the 1.13 relocated path must accept exactly the
+    same paths, or a mod works on one game version and silently no-ops
+    on the other. That divergence is precisely what kept gear stats
+    unwritable on 1.13 -- the relocated writer only ever did flat field
+    resolution, so every `sharpness_data.*` / `enchant_data_list[*].*`
+    intent was dropped as an "unwritable field" even though the record
+    decoded perfectly.
+    """
+    target = _resolve_path_target(item, field)
+    if target is None:
+        return "unresolved"
+    parent, last_seg = target
+    try:
+        existing = parent[last_seg]
+    except (KeyError, IndexError, TypeError):
+        existing = None
+    if not shape_matches(existing, new):
+        return "shape"
+    try:
+        parent[last_seg] = new
+    except (KeyError, IndexError, TypeError):
+        return "unresolved"
+    return "ok"
 
 
 # ── Leading-field byte-patch fallback (unsupported game versions) ────
@@ -493,6 +535,27 @@ def _build_change_relocated_layout(
         if intent.field in UNWRITEABLE_KNOWN_FIELDS:
             skipped_field += 1
             continue
+
+        # Nested path (dotted / indexed) -- e.g. the gear-stat paths
+        # sharpness_data.stat_list[0].change_mb and
+        # enchant_data_list[0].enchant_stat_data.stat_list_static[0].change_mb.
+        # This branch used to be missing here (it existed only in the
+        # default pre-1.13 writer), so on CD 1.13 -- the version the game
+        # actually ships -- every nested intent was counted as an
+        # "unwritable field" and dropped, even though the record decoded
+        # fine. Equipment stats were readable and silently un-editable.
+        if is_nested_path(intent.field):
+            outcome = apply_nested_intent(item, intent.field, intent.new)
+            if outcome == "ok":
+                applied += 1
+                decoded_edits += 1
+            else:
+                skipped_field += 1
+                logger.warning(
+                    "iteminfo(1.13): nested path %r on key=%d skipped (%s)",
+                    intent.field, intent.key, outcome)
+            continue
+
         target_field = _resolve_field_name(intent.field, item)
         if target_field is None:
             if intent.field in SUPPORTED_FIELDS:
@@ -737,39 +800,24 @@ def build_iteminfo_intent_change(
         # assignment target. Used for prefab_data_list[N].xxx,
         # drop_default_data.xxx, etc. The path-resolver returns
         # (parent_container, final_segment) for assignment.
-        if "." in intent.field or "[" in intent.field:
-            target = _resolve_path_target(item, intent.field)
-            if target is None:
+        if is_nested_path(intent.field):
+            outcome = apply_nested_intent(item, intent.field, intent.new)
+            if outcome == "ok":
+                applied += 1
+            elif outcome == "shape":
+                skipped_shape += 1
+                logger.warning(
+                    "iteminfo writer: nested path %r on key=%d has a "
+                    "new value whose shape (%s) does not match the "
+                    "existing value; skipping intent instead of "
+                    "letting serialization fail later",
+                    intent.field, intent.key, type(intent.new).__name__)
+            else:
                 skipped_field += 1
                 logger.warning(
                     "iteminfo writer: nested path %r did not resolve "
                     "for key=%d, skipping (segment missing or index "
                     "out of range)", intent.field, intent.key)
-                continue
-            parent, last_seg = target
-            try:
-                existing_nested = parent[last_seg]
-            except (KeyError, IndexError, TypeError):
-                existing_nested = None
-            if not shape_matches(existing_nested, intent.new):
-                skipped_shape += 1
-                logger.warning(
-                    "iteminfo writer: nested path %r on key=%d has a "
-                    "new value whose shape (%s) does not match the "
-                    "existing value (%s); skipping intent instead of "
-                    "letting serialization fail later",
-                    intent.field, intent.key,
-                    type(intent.new).__name__,
-                    type(existing_nested).__name__)
-                continue
-            try:
-                parent[last_seg] = intent.new
-                applied += 1
-            except (KeyError, IndexError, TypeError) as e:
-                logger.warning(
-                    "iteminfo writer: nested-path assignment on "
-                    "key=%d field=%r failed: %s",
-                    intent.key, intent.field, e)
             continue
 
         # Resolve field name: try direct (snake_case-no-prefix as the
