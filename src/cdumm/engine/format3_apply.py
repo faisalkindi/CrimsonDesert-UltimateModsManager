@@ -86,21 +86,80 @@ can't be extracted. apply_engine wires this to its existing
 # we only ever compare against trustworthy decoded values.
 
 
-def _lookup_record_field(rec: dict, field: str):
-    """Return ``rec``'s value for ``field``, trying the same four name
-    shapes the writer uses (exact / +underscore / snake→camel /
-    snake→camel +underscore). Returns ``None`` if no shape is present."""
-    if field in rec:
-        return rec[field]
-    cand = [field, f"_{field}"]
-    if "_" in field:
-        camel = _snake_to_camel(field)
-        if camel != field:
+_MISSING = object()
+"""Distinguishes "no such field" from a field whose value really is
+``None``. Matching treats both as no-match, but the traversal below must
+not confuse "the key isn't there" with "the key holds None"."""
+
+
+def _lookup_one(d: dict, name: str):
+    """One path segment: ``d``'s value for ``name``, trying the same four
+    name shapes the writer uses (exact / +underscore / snake→camel /
+    snake→camel +underscore). ``_MISSING`` if no shape is present."""
+    if name in d:
+        return d[name]
+    cand = [f"_{name}"]
+    if "_" in name:
+        camel = _snake_to_camel(name)
+        if camel != name:
             cand += [camel, f"_{camel}"]
     for n in cand:
-        if n in rec:
-            return rec[n]
-    return None
+        if n in d:
+            return d[n]
+    return _MISSING
+
+
+def _lookup_record_field(rec: dict, field: str):
+    """Return ``rec``'s value for ``field``. Returns ``None`` when the
+    field isn't present.
+
+    ``field`` may be a dotted path into nested structs and lists:
+
+        drop_default_data.use_socket
+        drop_default_data.add_socket_material_item_list.0.item
+        enchant_data_list.0.level
+
+    Each segment is resolved with the same four name shapes the rest of
+    the matcher uses, so nested fields behave exactly like flat ones (that
+    means snake_case in the mod resolving a camelCase record field, but
+    not the reverse -- same limitation flat fields already have).
+    A segment applied to a list must be an integer index (negatives count
+    from the end); anything else is a miss.
+
+    There is deliberately **no** "any element" list traversal. It would be
+    ambiguous against ``_match_value_equals``, where a list on the record
+    side already means "match this list exactly" — so
+    ``some_list.field == 5`` could mean "any element has field 5" or "the
+    extracted values equal 5", and silently picking one would make a mod
+    select records its author never intended. Index explicitly.
+    """
+    # A flat field wins outright, so a field whose real name happens to
+    # contain a dot still resolves before we try to read it as a path.
+    got = _lookup_one(rec, field)
+    if got is not _MISSING:
+        return got
+    if "." not in field:
+        return None
+
+    cur: object = rec
+    for seg in field.split("."):
+        if isinstance(cur, dict):
+            cur = _lookup_one(cur, seg)
+            if cur is _MISSING:
+                return None
+        elif isinstance(cur, (list, tuple)):
+            body = seg[1:] if seg.startswith("-") else seg
+            if not body.isdigit():
+                return None
+            idx = int(seg)
+            if not -len(cur) <= idx < len(cur):
+                return None
+            cur = cur[idx]
+        else:
+            # A scalar with path left to walk: the path is wrong for this
+            # record's shape.
+            return None
+    return cur
 
 
 def _match_value_equals(got, want) -> bool:
