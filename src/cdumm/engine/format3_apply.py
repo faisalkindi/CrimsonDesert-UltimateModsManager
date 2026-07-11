@@ -154,6 +154,81 @@ def _match_record_keys(records: dict, match: dict) -> list:
     return out
 
 
+def _decode_iteminfo_for_match(body: bytes, header: bytes) -> dict:
+    """Decode iteminfo with the *native* parser, in ``parse_records``'
+    ``{key: {field: value, _key, _name}}`` shape.
+
+    The generic ``parse_records`` walker only reaches ~5 iteminfo fields
+    before it stops, so a ``match`` on anything past them — including
+    ``equip_type_info`` and everything nested under ``drop_default_data``,
+    which is exactly what the socket mods select on (GitHub #272) — sees
+    ``None`` and quietly matches nothing. The native parser decodes all
+    116, so route iteminfo through it.
+
+    Returns ``{}`` on any failure, so the caller falls back to the
+    generic walker rather than losing the match entirely.
+    """
+    from cdumm.engine.iteminfo_native_parser import (
+        detect_iteminfo_layout, parse_iteminfo_from_bytes,
+    )
+    _key_size, off = parse_pabgh_index(header, "iteminfo")
+    if not off:
+        return {}
+    starts = sorted(off.values())
+    fields = detect_iteminfo_layout(body, starts)
+    items = parse_iteminfo_from_bytes(body, starts, fields=fields)
+
+    records: dict[int, dict] = {}
+    for it in items:
+        # Records the layout couldn't decode are carried opaque (all
+        # fields dropped). Matching on them would compare against
+        # nothing and silently select nothing, so leave them out and let
+        # the caller's fallback decide — never guess.
+        if it.get("_opaque_record"):
+            continue
+        key = it.get("key")
+        if key is None:
+            continue
+        rec = dict(it)
+        rec["_key"] = key
+        rec["_name"] = it.get("string_key", "")
+        records[key] = rec
+    return records
+
+
+def _decode_records_for_match(
+    table_name: str, body: bytes, header: bytes,
+) -> dict:
+    """Decode a table for ``match`` resolution, preferring the richest
+    decoder available for it.
+
+    ``table_name`` arrives from ``_table_name_from_target``, which only
+    strips the extension -- so a path-shaped target yields
+    ``gamedata/binary__/client/bin/iteminfo``, not ``iteminfo``. Take the
+    basename before deciding how to decode it. (``identify_table_from_path``
+    is no use here: it wants the extension that was already stripped.) The
+    original string is still what gets handed to ``parse_records``, so
+    nothing about the generic path changes.
+    """
+    bare = table_name.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+    if bare == "iteminfo":
+        try:
+            records = _decode_iteminfo_for_match(body, header)
+        except Exception:  # noqa: BLE001 - never break apply on a decode
+            logger.warning(
+                "Format 3 match: native iteminfo decode failed; falling "
+                "back to the generic walker (matches on fields past the "
+                "first few will find nothing).", exc_info=True)
+        else:
+            if records:
+                logger.info(
+                    "Format 3 match: decoded %d iteminfo records natively "
+                    "(%d fields available to match on).",
+                    len(records), len(next(iter(records.values()))))
+                return records
+    return parse_records(table_name, body, header)
+
+
 def _expand_match_intents(
     target: str,
     vanilla_body: bytes,
@@ -163,10 +238,11 @@ def _expand_match_intents(
     """Replace each ``match`` intent in ``intents`` with concrete
     per-record ``set`` intents; pass non-match intents through unchanged.
 
-    Decodes the target table once via ``parse_records`` and, for each
-    ``match`` intent, emits one ``Format3Intent`` per matched record
-    carrying that record's real ``_name``/``_key`` so the existing writer
-    resolves it exactly like a hand-authored single-record intent.
+    Decodes the target table once (natively for iteminfo, else via
+    ``parse_records``) and, for each ``match`` intent, emits one
+    ``Format3Intent`` per matched record carrying that record's real
+    ``_name``/``_key`` so the existing writer resolves it exactly like a
+    hand-authored single-record intent.
     """
     # ``getattr`` guard: some intent stand-ins (and any future
     # lightweight intent type) may not carry a ``match`` attribute at
@@ -176,7 +252,8 @@ def _expand_match_intents(
 
     table_name = _table_name_from_target(target)
     try:
-        records = parse_records(table_name, vanilla_body, vanilla_header)
+        records = _decode_records_for_match(
+            table_name, vanilla_body, vanilla_header)
     except Exception:  # noqa: BLE001 - decode must never break apply
         logger.warning(
             "Format 3 match: could not decode %s to resolve a match "
