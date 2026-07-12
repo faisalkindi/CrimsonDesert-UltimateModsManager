@@ -89,10 +89,17 @@ def test_unrecognised_nonempty_dump_is_crash():
 
 # ── Integration: the benign trace must not headline the bug report ──────
 
+#: The TL;DR flag the report raises for a real crash. #265 reworded this
+#: from "Previous session crashed" to name the source and the fault, so it
+#: is asserted through a constant rather than being retyped in each test.
+CRASH_FLAG = "Crash detected (previous session)"
+
+
 def test_bug_report_does_not_flag_benign_prev_trace(tmp_path: Path):
     (tmp_path / "crash_trace.prev.txt").write_text(BENIGN, encoding="utf-8")
     report = generate_bug_report(None, None, tmp_path)
-    assert "Previous session crashed" not in report
+    assert CRASH_FLAG not in report
+    assert "Crash detected" not in report
     assert "0x8001010d" in report  # the benign OK note names the code
     assert "not a crash" in report
 
@@ -101,7 +108,7 @@ def test_bug_report_flags_real_prev_trace(tmp_path: Path):
     (tmp_path / "crash_trace.prev.txt").write_text(
         REAL_ACCESS_VIOLATION, encoding="utf-8")
     report = generate_bug_report(None, None, tmp_path)
-    assert "Previous session crashed" in report
+    assert CRASH_FLAG in report
     assert "access violation" in report
 
 
@@ -113,5 +120,30 @@ def test_bug_report_prefers_preserved_prev_over_live(tmp_path: Path):
     (tmp_path / "crash_trace.prev.txt").write_text(
         REAL_ACCESS_VIOLATION, encoding="utf-8")
     report = generate_bug_report(None, None, tmp_path)
-    assert "Previous session crashed" in report
+    assert CRASH_FLAG in report
     assert "access violation" in report
+    # and it stopped at the prev trace rather than also reporting the live one
+    assert "Crash detected (this session)" not in report
+
+
+def test_benign_trace_is_not_a_crash_even_with_the_richer_reporting(
+        tmp_path: Path):
+    """The regression guard for the #265 <-> #273 merge.
+
+    #265 rewrote this section to name the fault and detect native crashes,
+    but gated the section on the trace file merely being non-empty. The
+    benign splash dump IS non-empty, so on its own #265 would have brought
+    back the phantom "crash" that #273 exists to remove — on every single
+    bug report, for every Windows user.
+
+    The merged code runs classify_crash_trace() FIRST and only then does the
+    richer reporting. This pins that ordering: a benign dump must produce no
+    crash flag, no CRASH TRACE section, and no native-fault note.
+    """
+    (tmp_path / "crash_trace.prev.txt").write_text(BENIGN, encoding="utf-8")
+    report = generate_bug_report(None, None, tmp_path)
+    assert "Crash detected" not in report
+    assert "--- CRASH TRACE" not in report
+    assert "native fault" not in report
+    # it is reported, but as a harmless observation
+    assert "not a crash" in report

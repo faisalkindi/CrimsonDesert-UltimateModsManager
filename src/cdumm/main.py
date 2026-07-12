@@ -1,6 +1,7 @@
 import atexit
 import faulthandler
 import os
+import shutil
 import sys
 import logging
 import threading
@@ -11,6 +12,44 @@ from cdumm.platform import IS_LINUX, IS_WINDOWS, app_data_dir
 
 APP_DATA_DIR = app_data_dir()
 
+
+def _preserve_prior_crash_trace(trace_path: Path) -> None:
+    """Move a previous session's crash trace aside before it is truncated.
+
+    faulthandler keeps ``trace_path`` open for the whole session and
+    rewrites it at fault time, so opening it ``"w"`` at startup wipes
+    whatever the PREVIOUS session's fatal fault recorded. Without this
+    rename the "CRASH TRACE (previous session)" bug-report section could
+    never fire for a real hard crash: the relaunch destroyed the evidence
+    before the user could generate a report. Move any non-empty prior
+    trace to ``<name>.prev<suffix>`` so it survives into the next session,
+    where the user actually clicks "generate bug report".
+
+    Best-effort: never raises, so a locked or unwritable file can't block
+    boot. ``os.replace`` overwrites an older ``.prev`` copy, so we always
+    keep the most recent previous session's trace.
+    """
+    try:
+        if not (trace_path.is_file() and trace_path.stat().st_size > 0):
+            return
+        prev = trace_path.with_name(
+            trace_path.stem + ".prev" + trace_path.suffix)
+        try:
+            os.replace(trace_path, prev)
+        except OSError:
+            # The rename fails outright (WinError 32) while ANY process
+            # still holds the file open — a hung prior instance whose
+            # faulthandler handle never closed, or an AV scanner mid-scan.
+            # Windows share semantics still let the caller's open("w")
+            # truncate it, so swallowing this would destroy the trace
+            # anyway — exactly the crash we most need the trace for. Copy
+            # the bytes out instead, so it survives even when it can't be
+            # moved.
+            shutil.copyfile(trace_path, prev)
+    except Exception:
+        pass
+
+
 # Enable faulthandler to dump C-level stack trace on segfault.
 # Defensive: if AppData is read-only / permissions fail (domolinixd1000
 # report: CDUMM.exe closes in 2-3s, can't even produce a bug report),
@@ -20,33 +59,8 @@ APP_DATA_DIR = app_data_dir()
 _fault_log = None
 try:
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    # Preserve the previous session's trace before faulthandler truncates
-    # it. faulthandler opens crash_trace.txt with "w", so without this the
-    # prior session's native trace — the one a crash report actually needs
-    # — is destroyed at the very next launch, leaving the bug report with
-    # only the current session's harmless startup faulthandler output. Move
-    # (not copy) so a healthy launch that writes nothing fatal doesn't
-    # resurrect a stale "previous crash" on the launch after.
-    _trace_path = APP_DATA_DIR / "crash_trace.txt"
-    _prev_trace_path = APP_DATA_DIR / "crash_trace.prev.txt"
-    try:
-        if _trace_path.exists() and _trace_path.stat().st_size > 0:
-            try:
-                os.replace(_trace_path, _prev_trace_path)
-            except OSError:
-                # A rename fails outright (WinError 32) while ANY process
-                # still holds the file open — a hung prior instance whose
-                # faulthandler handle never closed, or an AV scanner mid-
-                # scan. Windows share semantics still allow the open("w")
-                # below to truncate it, so without this fallback the old
-                # trace would be destroyed anyway. Copy the bytes out
-                # instead, so the previous session's trace survives even
-                # when it can't be moved.
-                import shutil as _shutil
-                _shutil.copyfile(_trace_path, _prev_trace_path)
-    except OSError:
-        pass
-    _fault_log = open(_trace_path, "w")
+    _preserve_prior_crash_trace(APP_DATA_DIR / "crash_trace.txt")
+    _fault_log = open(APP_DATA_DIR / "crash_trace.txt", "w")
     faulthandler.enable(file=_fault_log)
 except Exception:
     # Cascading fallbacks so the process keeps booting even if
@@ -54,8 +68,9 @@ except Exception:
     # breaks Python's stdlib open on some Windows configs.
     try:
         import tempfile as _tempfile
-        _fault_log = open(
-            Path(_tempfile.gettempdir()) / "cdumm_crash_trace.txt", "w")
+        _tmp_trace = Path(_tempfile.gettempdir()) / "cdumm_crash_trace.txt"
+        _preserve_prior_crash_trace(_tmp_trace)
+        _fault_log = open(_tmp_trace, "w")
         faulthandler.enable(file=_fault_log)
     except Exception:
         try:
