@@ -302,16 +302,24 @@ def _iteminfo_layout_roots(body: bytes, header: bytes) -> frozenset | None:
 def drop_intents_the_layout_cannot_carry(
     target: str, intents: list, body: bytes, header: bytes,
 ) -> tuple[list, list]:
-    """Refuse iteminfo nested paths whose ROOT this game's record lacks.
+    """Refuse iteminfo nested paths the DETECTED layout can't address.
 
     The validator accepts a nested path when its root exists in ANY layout
     CDUMM knows (#259 removed the hardcoded allowlist that was refusing
     ``price_list[0].price.price`` and every gear-stat path -- that rule is
     right and stays). But "any layout CDUMM knows" includes layouts the
-    installed game is not running: CD 1.13 dropped ``prefab_data_list`` and
-    ``gimmick_visual_prefab_data_list`` from the item record, so
+    installed game is not running. CDUMM's CD 1.13 layout does not expose
+    ``prefab_data_list`` / ``gimmick_visual_prefab_data_list``, so
     ``prefab_data_list[0].tribe_gender_list`` validates clean, resolves to
     nothing, and the mod silently changes nothing (#285).
+
+    Careful: this says the *decoder* can't address the field, NOT that the
+    game record lacks it. Every 1.13 record carries 76-139 bytes of tail
+    the layout never interprets (they round-trip because they're preserved
+    opaquely as ``_tail_slack``, which is exactly why the byte-exact
+    round-trip did not catch this). The prefab data is very likely in
+    there. Until it's decoded, refusing honestly is the correct behaviour
+    -- but do not tell users the field is gone.
 
     So the check has to happen HERE -- the apply path is the only place the
     game's own bytes are in hand. Scoping to the DETECTED layout, rather than
@@ -342,9 +350,10 @@ def drop_intents_the_layout_cannot_carry(
             continue
         dropped.append((
             intent,
-            f"field '{root}' is not present in this game version's item "
-            f"record, so there is nothing for CDUMM to write. The mod was "
-            f"most likely built for an older build of Crimson Desert."))
+            f"CDUMM cannot write '{root}' on this build of Crimson Desert: "
+            f"its decoder for this game version does not expose that field, "
+            f"so applying the intent would change nothing. Refused rather "
+            f"than reported as applied. (GitHub #285)"))
     return kept, dropped
 
 

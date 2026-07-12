@@ -7,8 +7,8 @@ The validator accepts a nested iteminfo path when its ROOT is a real field in
 ANY layout CDUMM knows. That rule is deliberate (#259): it is what removed the
 hardcoded allowlist that was refusing `price_list[0].price.price` and every
 gear-stat path. But "any layout CDUMM knows" includes layouts this game is not
-running. CD 1.13 dropped `prefab_data_list` and `gimmick_visual_prefab_data_list`
-from the item record, so:
+running. CDUMM's CD 1.13 layout does not expose `prefab_data_list` or
+`gimmick_visual_prefab_data_list`, so:
 
     prefab_data_list[0].tribe_gender_list   ->  validator: ACCEPTED
                                             ->  writer:    resolves nothing
@@ -41,9 +41,14 @@ from cdumm.engine.format3_handler import Format3Intent, validate_intents
 TARGET = "iteminfo.pabgb"
 HELM = 14510
 
-#: Dropped from the item record in CD 1.13. Present in the pre-1.13 layout,
+#: Not addressable by CDUMM's CD 1.13 layout. Present in the pre-1.13 layout,
 #: which is why the validator still vouches for them.
-GONE_IN_113 = ("prefab_data_list", "gimmick_visual_prefab_data_list")
+#:
+#: Deliberately NOT called "gone in 1.13" -- see #285. Every 1.13 record has
+#: 76-139 bytes of tail the layout never interprets; the prefab data is very
+#: likely in there, we just can't address it yet.
+NOT_ADDRESSABLE_113 = ("prefab_data_list", "gimmick_visual_prefab_data_list")
+GONE_IN_113 = NOT_ADDRESSABLE_113  # kept for the parametrize ids below
 
 #: Still in the record on CD 1.13 — must NOT be touched by this.
 STILL_HERE = (
@@ -80,13 +85,24 @@ def test_the_validator_still_accepts_these(root):
 
 
 @pytest.mark.parametrize("root", GONE_IN_113)
-def test_the_real_game_record_does_not_carry_them(table, root):
+def test_the_detected_layout_cannot_address_them(table, root):
+    """NOTE the wording. The 1.13 *layout* can't address these fields.
+
+    That is NOT the same as the game record lacking them, and an earlier
+    version of this file said it was. Every 1.13 record carries 76-139
+    bytes of tail that the layout never interprets -- preserved opaquely
+    as _tail_slack, which is precisely why the byte-exact round-trip did
+    not catch it. The prefab data is very probably in there (#285).
+
+    So this test pins what CDUMM can currently *address*, and the refusal
+    it drives must not claim the field is gone from the game."""
     body, header = table
     roots = _iteminfo_layout_roots(body, header)
     assert roots is not None
     assert root not in roots, (
-        f"{root} IS in the CD 1.13 layout — if that's true, this whole guard "
-        f"is unnecessary and the field should just be written")
+        f"{root} is now addressable in the CD 1.13 layout — if the tail has "
+        f"been decoded (#285), this guard should stop refusing it and the "
+        f"writer should just write it")
 
 
 # ── the fix ─────────────────────────────────────────────────────────────
@@ -102,7 +118,11 @@ def test_apply_refuses_them_and_says_why(table, root):
     _i, why = dropped[0]
     # the message must name the field and not be a generic shrug
     assert root in why
-    assert "not present in this game version" in why
+    assert "cannot write" in why.lower()
+    # ...and it must NOT claim the field is gone from the game. It isn't
+    # known to be: the 1.13 record has 76-139 bytes of undecoded tail.
+    assert "not present" not in why.lower()
+    assert "does not exist" not in why.lower()
 
 
 def test_the_fields_this_game_does_carry_are_untouched(table):
