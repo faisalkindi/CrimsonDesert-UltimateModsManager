@@ -1117,7 +1117,11 @@ def _diagnose_unsupported_intent(
                     or f.startswith("gimmick_visual_prefab_data_list[")
                     # GitHub #135: docking_child_data.<subfield> resolves
                     # via the iteminfo writer's nested-path walker.
-                    or f.startswith("docking_child_data.")):
+                    or f.startswith("docking_child_data.")
+                    # GitHub #259: price_list[N].price.price (an item's
+                    # sell/buy price) resolves via the same nested-path
+                    # walker. "Cheap Gold Bars" and other price mods.
+                    or f.startswith("price_list[")):
                 return None
         # GitHub #125 (Refinement Cost Reforged): multichangeinfo
         # fixed_material_data_list[N].item_info / .count are resolved

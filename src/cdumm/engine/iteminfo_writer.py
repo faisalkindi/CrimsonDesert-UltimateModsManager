@@ -536,14 +536,24 @@ def _build_change_relocated_layout(
             skipped_field += 1
             continue
 
-        # Nested path (dotted / indexed) -- e.g. the gear-stat paths
-        # sharpness_data.stat_list[0].change_mb and
+        # Nested path (dotted / indexed) -- e.g. the item-price path
+        # price_list[0].price.price (#259 "Cheap Gold Bars"), and the
+        # gear-stat paths sharpness_data.stat_list[0].change_mb and
         # enchant_data_list[0].enchant_stat_data.stat_list_static[0].change_mb.
+        #
         # This branch used to be missing here (it existed only in the
         # default pre-1.13 writer), so on CD 1.13 -- the version the game
         # actually ships -- every nested intent was counted as an
         # "unwritable field" and dropped, even though the record decoded
-        # fine. Equipment stats were readable and silently un-editable.
+        # fine. Item prices and equipment stats were readable and silently
+        # un-editable.
+        #
+        # #260 fixed that by copying the resolve/shape-gate/assign block in
+        # here inline. That works, but it is the SECOND copy of that logic,
+        # and having two copies is exactly how the two writers drifted apart
+        # in the first place. Both now call one shared helper, so they
+        # cannot. (Superseding #260's inline block is the whole reason this
+        # merge conflicts -- the behaviour is identical.)
         if is_nested_path(intent.field):
             outcome = apply_nested_intent(item, intent.field, intent.new)
             if outcome == "ok":
