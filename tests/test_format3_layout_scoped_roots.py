@@ -182,19 +182,32 @@ def test_flat_fields_and_other_tables_pass_straight_through(table):
 def test_an_undecodable_table_changes_nothing(table):
     """Fail open. If the layout can't be resolved we must not start refusing
     intents that would otherwise have applied — the guard is a safety net,
-    not a gate."""
-    intents = [_intent("prefab_data_list[0].tribe_gender_list", [1])]
+    not a gate.
+
+    Deliberately uses a root the layout CANNOT address, so the test can only
+    pass because of the fail-open path. With a now-writable root it would go
+    green either way and stop testing anything."""
+    root = NOT_ADDRESSABLE_113[0]
+    intents = [_intent(f"{root}[0].tribe_gender_list", [1])]
     kept, dropped = drop_intents_the_layout_cannot_carry(
-        TARGET, intents, b"", b"")
+        TARGET, intents, b"", b"")   # empty bytes -> layout unresolvable
     assert kept == intents and dropped == []
 
 
 def test_a_path_shaped_target_is_still_recognised_as_iteminfo(table):
     """`_table_name_from_target` returns the full path, not a bare table name
     — the exact gotcha that made `match` select zero records (#275) and
-    array_append no-op (#278). Third time it bites, so it is pinned."""
+    array_append no-op (#278). Third time it bites, so it is pinned.
+
+    Uses a root the 1.13 layout still can't address, so the assertion is
+    about the TARGET being recognised, not about which fields are writable.
+    (It used to use prefab_data_list — which #285 then made writable, so the
+    test started failing for a reason that had nothing to do with what it
+    was pinning. Pin one thing.)"""
     body, header = table
-    intents = [_intent("prefab_data_list[0].tribe_gender_list", [1])]
+    root = NOT_ADDRESSABLE_113[0]
+    intents = [_intent(f"{root}[0].tribe_gender_list", [1])]
     kept, dropped = drop_intents_the_layout_cannot_carry(
         "gamedata/binary__/client/bin/iteminfo.pabgb", intents, body, header)
-    assert kept == [] and len(dropped) == 1
+    assert kept == [] and len(dropped) == 1, (
+        "a path-shaped target must still be recognised as iteminfo")
