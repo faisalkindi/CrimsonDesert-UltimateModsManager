@@ -2098,6 +2098,65 @@ _ITEM_FIELDS_CD113 = [
 ]
 
 
+def _read_PrefabData_CD113(r: _Reader) -> dict:
+    """CD 1.13 merged PrefabData and GimmickVisualPrefabData into one struct
+    and moved the list to the END of the item record (GitHub #285).
+
+    That merge is why the pre-1.13 codecs never fit: the element carries
+    GVP's ``scale`` / ``animation_path_list`` AND PrefabData's
+    ``prefab_names`` / ``equip_slot_list`` / ``tribe_gender_list``.
+
+    ``equip_slot_list`` is a u16 array, not u32. That single fact is what
+    hid the whole field: an EMPTY u16 array and an EMPTY u32 array are the
+    same four zero bytes, so a u32 reading fits the 6272 records where the
+    list is empty and only desyncs on the 236 where it isn't. Ground truth
+    came from AerowynX's "Equip All V6", which ships the decoded values --
+    it says equip_slot_list [7] and [8] where the bytes read 0700 / 0800.
+    """
+    return {
+        "scale": [r.f32(), r.f32(), r.f32()],
+        "prefab_names": r.carray(_Reader.u32),
+        "animation_path_list": r.carray(_Reader.u32),
+        "equip_slot_list": r.carray(_Reader.u16),
+        "tribe_gender_list": r.carray(_Reader.u32),
+        "is_craft_material": r.u8(),
+        "unk_flag_b": r.u8(),
+        "unk_flag_c": r.u8(),
+    }
+
+
+def _write_PrefabData_CD113(w: _Writer, v: dict) -> None:
+    for f in v["scale"]:
+        w.f32(f)
+    w.carray(v["prefab_names"], _Writer.u32)
+    w.carray(v["animation_path_list"], _Writer.u32)
+    w.carray(v["equip_slot_list"], _Writer.u16)
+    w.carray(v["tribe_gender_list"], _Writer.u32)
+    w.u8(v["is_craft_material"])
+    w.u8(v["unk_flag_b"])
+    w.u8(v["unk_flag_c"])
+
+
+def _with_cd113_prefab_tail(fields):
+    """CD 1.13 relocated prefab_data_list to the end of the item record.
+
+    Without this the layout still round-trips byte-exact -- it just carries
+    the last 76-139 bytes of EVERY record as opaque ``_tail_slack`` and
+    reports the field as absent. A byte-exact round-trip proves the bytes
+    are preserved, not that they are understood; see tools/re/README.md.
+
+    The two trailing u8s are constant (255, 0) on all 6508 live records but
+    are read and written, not assumed, so a build that changes them still
+    round-trips.
+    """
+    return list(fields) + [
+        ("prefab_data_list", "carray",
+         _read_PrefabData_CD113, _write_PrefabData_CD113),
+        ("record_end_a", "u8"),
+        ("record_end_b", "u8"),
+    ]
+
+
 def _with_cd113_enchant(fields):
     """CD 1.13: swap in the 1.13 DropDefaultData and add the
     _enchantDataList that follows it. See _read_DropDefaultData_CD113 for
@@ -2116,7 +2175,8 @@ def _with_cd113_enchant(fields):
     return out
 
 
-_ITEM_FIELDS_CD113_ENCHANT = _with_cd113_enchant(_ITEM_FIELDS_CD113)
+_ITEM_FIELDS_CD113_ENCHANT = _with_cd113_prefab_tail(
+    _with_cd113_enchant(_ITEM_FIELDS_CD113))
 
 # (label, fields) candidates, tried in order by detect_iteminfo_layout.
 # Most specific first: the enchant variant decodes 6508/6508 on live 1.13,
