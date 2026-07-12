@@ -42,6 +42,7 @@ import logging
 import re
 import struct
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -1101,24 +1102,37 @@ def _diagnose_unsupported_intent(
         if tn == "buffinfo" and (field or "").startswith(
                 "buff_data_list["):
             return None
-        # iteminfo: the native writer's path resolver handles known
-        # nested-path shapes. Don't reject these at validation, the
-        # writer walks the parsed item dict and emits the change.
-        # Bug confirmed 2026-05-08 against
-        # gmVIP233's Marni_Devotee_PlateArmor_Helm
-        # (prefab_data_list[N].tribe_gender_list), niyaruza's
-        # kliff_Wears_Damiane_Armor (same path), and floozo's cloak
-        # (drop_default_data.add_socket_material_item_list,
-        # drop_default_data.use_socket).
-        if tn == "iteminfo":
-            f = field or ""
-            if (f.startswith("prefab_data_list[")
-                    or f.startswith("drop_default_data.")
-                    or f.startswith("gimmick_visual_prefab_data_list[")
-                    # GitHub #135: docking_child_data.<subfield> resolves
-                    # via the iteminfo writer's nested-path walker.
-                    or f.startswith("docking_child_data.")):
-                return None
+        # iteminfo: accept ANY nested path. The writer resolves it against
+        # the real parsed record (iteminfo_writer.apply_nested_intent) and
+        # reports "unresolved" / "shape" as a clean per-intent skip -- it
+        # cannot corrupt the table with a path it doesn't understand. So
+        # the validator has no business second-guessing which paths exist;
+        # only the decoded record knows that.
+        #
+        # This used to be an allowlist of prefixes (prefab_data_list[,
+        # drop_default_data., gimmick_visual_prefab_data_list[,
+        # docking_child_data.), which made every new nested path a
+        # code change and rejected mods the engine could already apply:
+        #
+        #   * GitHub #259 (Cheap Gold Bars): 'price_list[0].price.price'
+        #     was refused here with "author needs to add a field_schema
+        #     entry" -- advice the author could not act on, for a path the
+        #     writer has handled since the nested-path fix.
+        #   * Gear stats ('sharpness_data.stat_list[0].change_mb',
+        #     'enchant_data_list[0]...change_mb') were refused too, so the
+        #     whole gear-stat feature was dead end-to-end even though the
+        #     writer tests passed -- they called the writer directly and
+        #     never went through validation. The allowlist was the last
+        #     gate nobody was testing.
+        #
+        # Accepted on the ROOT field existing on an iteminfo record, not on
+        # an allowlist of full paths -- so a real root the writer can walk
+        # (price_list, sharpness_data, enchant_data_list, drop_default_data,
+        # prefab_data_list, docking_child_data, ...) is let through, while a
+        # genuine typo ('not_a_field.nope') still gets a real error at
+        # import rather than a silent "0 byte changes".
+        if tn == "iteminfo" and _iteminfo_nested_path_is_plausible(field):
+            return None
         # GitHub #125 (Refinement Cost Reforged): multichangeinfo
         # fixed_material_data_list[N].item_info / .count are resolved
         # by the multichangeinfo writer's element patcher at apply
@@ -1152,6 +1166,69 @@ def _diagnose_unsupported_intent(
             f"intents in the same mod still apply."
         )
     return None
+
+
+def _is_nested_field(field: str) -> bool:
+    """A path into a record's sub-structure, rather than a flat field.
+
+    Deliberately the same predicate the iteminfo writer uses
+    (``iteminfo_writer.is_nested_path``), and used by BOTH validator
+    gates -- the diagnose step and the early-accept. When those two
+    disagreed about what "nested" meant, an intent could pass one and be
+    refused by the other, which is exactly how 'price_list[0].price.price'
+    ended up rejected with a field_schema message (GitHub #259).
+    """
+    return "." in (field or "") or "[" in (field or "")
+
+
+def _nested_root(field: str) -> str:
+    """The record-level field a nested path starts from.
+
+    'price_list[0].price.price' -> 'price_list'
+    'sharpness_data.stat_list[0].change_mb' -> 'sharpness_data'
+    """
+    root = (field or "").split(".", 1)[0]
+    return root.split("[", 1)[0]
+
+
+@lru_cache(maxsize=1)
+def _iteminfo_root_fields() -> frozenset:
+    """Every top-level field name iteminfo can carry, across all layouts.
+
+    This is what lets the validator accept a nested path WITHOUT an
+    allowlist while still catching a genuine typo: 'price_list[0]...' has
+    a real root, 'not_a_field.nope' does not. Union across layouts because
+    a field can live in one game version's record and not another's
+    (prefab_data_list moved to the tail in CD 1.13).
+    """
+    from cdumm.engine import iteminfo_native_parser as _nat
+    names = {f[0] for f in _nat._ITEM_FIELDS}
+    for _label, fields in _nat._ITEM_LAYOUTS:
+        if fields:
+            names |= {f[0] for f in fields}
+    return frozenset(names)
+
+
+def _iteminfo_nested_path_is_plausible(field: str) -> bool:
+    """A nested iteminfo path the writer could plausibly resolve.
+
+    Accepts on the ROOT existing, not on an allowlist of full paths --
+    the decoded record is the only thing that knows whether the rest of
+    the path resolves, and the writer already refuses cleanly when it
+    doesn't (0 byte changes, never corruption). This keeps GitHub #259's
+    'price_list[0].price.price' and the gear-stat paths working without
+    a maintainer having to bless each new one, while a typo'd root still
+    gets a real error at import instead of a silent no-op.
+    """
+    if not _is_nested_field(field):
+        return False
+    root = _nested_root(field)
+    if root in _iteminfo_root_fields():
+        return True
+    # tolerate the underscored/camelCase engine dialect (_priceList)
+    norm = root.replace("_", "").lower()
+    return any(n.replace("_", "").lower() == norm
+               for n in _iteminfo_root_fields())
 
 
 def _classify_intent(
@@ -1232,47 +1309,51 @@ def _classify_intent(
     # Mirror the buffinfo early-accept above so these intents reach
     # the apply-time path-walker.
     if tn_norm == "iteminfo" and (
-        intent.field.startswith("prefab_data_list[")
-        or intent.field.startswith("drop_default_data.")
-        or intent.field.startswith("gimmick_visual_prefab_data_list[")
-        # GitHub #135 (Better Unique Gears): docking_child_data is an
-        # `optional` struct in the iteminfo schema, so the schema
-        # walker reports stream_size=0 and rejects it as
-        # variable-length. The iteminfo writer's nested-path resolver
-        # (iteminfo_writer.py _resolve_path_target) handles both the
-        # bare `docking_child_data` whole-struct set and the dotted
-        # `docking_child_data.<subfield>` form, so early-accept here
-        # lets those intents reach the writer. Extra struct keys the
-        # mod ships (inherit_summoner, summon_tag_name_hash) that the
-        # 1.07.00 binary does not carry are simply ignored by
-        # _write_DockingChildData. Verified the iteminfo round-trip is
-        # byte-perfect so the struct layout is correct.
-        or intent.field == "docking_child_data"
-        or intent.field.startswith("docking_child_data.")
-        # Faisal 2026-05-12 GitHub #99 (paloroycevincent-sketch /
-        # Combat God's Plate Gloves): the iteminfo native writer has
-        # explicit byte-perfect round-trip support for these three
-        # primitive fields (iteminfo_writer.py:228 comment, verified
-        # against all 6235 vanilla records), but the validator's
-        # schema-walker reachability check rejected them because a
-        # preceding variable-length field has no walker descriptor.
-        # The writer handles them via _resolve_field_name into the
-        # parsed item dict, so early-accept here bypasses the walker
-        # check and lets the apply path do its job.
+        # ANY nested path. The iteminfo writer resolves it against the
+        # real decoded record (apply_nested_intent) and reports
+        # "unresolved" / "shape" as a clean per-intent skip, so a path it
+        # doesn't understand produces "0 byte changes", never corruption.
+        # The decoded record is the only thing that knows which paths
+        # exist; the validator has no business guessing.
+        #
+        # This was an allowlist of prefixes, grown one bug report at a
+        # time (prefab_data_list[, drop_default_data.,
+        # gimmick_visual_prefab_data_list[, docking_child_data). Every
+        # new nested path a mod author used needed a code change, and
+        # until it landed the author got "add a field_schema entry" --
+        # advice they cannot act on, for a field the engine could already
+        # write. It cost us at least:
+        #
+        #   * GitHub #259 (Cheap Gold Bars): 'price_list[0].price.price'
+        #     rejected at import, twice, across two releases.
+        #   * Gear stats: 'sharpness_data.stat_list[0].change_mb' and
+        #     'enchant_data_list[0]...change_mb' were rejected here, so
+        #     the entire gear-stat feature was dead end-to-end while its
+        #     writer tests passed -- they called the writer directly and
+        #     never crossed this gate. An allowlist nobody tested is a
+        #     feature flag nobody knows is off.
+        _iteminfo_nested_path_is_plausible(intent.field)
+        # Flat fields the schema walker cannot reach (a preceding
+        # variable-length field has no descriptor) but the writer
+        # round-trips byte-exact via _resolve_field_name. These stay
+        # explicit: unlike nested paths, a bogus flat field should still
+        # get the schema check and a real error.
+        # Faisal 2026-05-12, GitHub #99 (Combat God's Plate Gloves).
         or intent.field in {
             "cooltime",
             "unk_post_cooltime_a",
             "unk_post_cooltime_b",
+            # GitHub #135 (Better Unique Gears): the BARE whole-struct set.
+            # `docking_child_data` is an `optional` struct, so the schema
+            # walker reports stream_size=0 and rejects it as variable-length,
+            # but the writer sets it wholesale. The dotted form
+            # (docking_child_data.<sub>) is covered by the nested-path rule
+            # above; this is the flat one, which is not.
+            "docking_child_data",
         }
         # GitHub #191 (AbyssGearUnlock, pinapana): equipable_hash is a
-        # primitive u32 the iteminfo writer round-trips byte-exact and
-        # resolves across separator/case variants (equipable_hash,
-        # _equipAbleHash) via _resolve_field_name. The schema walker
-        # cannot reach it (a preceding variable-length field has no
-        # descriptor), so every intent was skipped at import and the
-        # mod produced 0 byte changes even after the writer learned the
-        # field name. Early-accept the normalized name so the apply path
-        # reaches the writer, which round-trip-guards before committing.
+        # primitive u32 the writer round-trips byte-exact and resolves
+        # across separator/case variants (equipable_hash, _equipAbleHash).
         or intent.field.replace("_", "").lower() == "equipablehash"
     ):
         return None
