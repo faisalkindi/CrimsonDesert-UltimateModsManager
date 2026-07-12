@@ -880,12 +880,6 @@ def _classify_intent(
         # field name. Early-accept the normalized name so the apply path
         # reaches the writer, which round-trip-guards before committing.
         or intent.field.replace("_", "").lower() == "equipablehash"
-        # Gear stats (armor defense / weapon damage / AbyssGear values):
-        # gear_stat[<statkey>] targets an EnchantStatChange value inside the
-        # opaque equipment tail. The iteminfo writer locates it structurally
-        # and overwrites the i64 same-width (byte-exact); records that don't
-        # carry that stat drop cleanly at apply time.
-        or intent.field.startswith("gear_stat[")
     ):
         return None
 

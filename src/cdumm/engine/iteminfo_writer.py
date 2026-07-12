@@ -454,17 +454,6 @@ def _build_change_relocated_layout(
     applied = decoded_edits = opaque_patches = 0
     skipped_key = skipped_field = skipped_op = skipped_opaque = 0
 
-    # Gear stats (armor defense / weapon damage / AbyssGear values) live in
-    # EnchantStatData blocks inside the opaque equipment tail. A value is a
-    # same-width i64, so editing it is a byte-exact overwrite (gear_stats.py).
-    # Build the adaptive stat-key whitelist only when a gear-stat intent is
-    # present -- scanning every opaque record isn't free.
-    from cdumm.engine import gear_stats as _gs
-    _gear_wl = None
-    if any(_gs.is_gear_stat_field(i.field) for i in intents):
-        _gear_wl = _gs.build_stat_whitelist(
-            it["bytes"] for it in items if it.get("_opaque_record"))
-
     for intent in intents:
         item = by_key.get(intent.key)
         if item is None and intent.entry:
@@ -477,23 +466,6 @@ def _build_change_relocated_layout(
             continue
 
         if item.get("_opaque_record"):
-            # Gear stat (EnchantStatChange value) inside the opaque tail:
-            # locate structurally, overwrite the i64 same-width -> byte-exact.
-            if _gear_wl is not None and _gs.is_gear_stat_field(intent.field):
-                located = _gs.locate_gear_stats(item["bytes"], _gear_wl)
-                gidx = _gs.resolve_gear_stat_index(intent.field, located)
-                if gidx is None:
-                    skipped_field += 1
-                    continue
-                try:
-                    item["bytes"] = _gs.apply_stat_edit(
-                        item["bytes"], located[gidx].value_offset,
-                        int(intent.new))
-                    applied += 1
-                    opaque_patches += 1
-                except (ValueError, TypeError):
-                    skipped_field += 1
-                continue
             # Record carried verbatim (structure not decoded on this
             # version). Only fixed-offset leading scalars are safely
             # patchable in its raw bytes.
