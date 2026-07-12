@@ -1131,6 +1131,10 @@ def _diagnose_unsupported_intent(
         # prefab_data_list, docking_child_data, ...) is let through, while a
         # genuine typo ('not_a_field.nope') still gets a real error at
         # import rather than a silent "0 byte changes".
+        # (#260 added 'price_list[' to the prefix allowlist that used to live
+        # here. The rule above subsumes it -- price_list is a real iteminfo
+        # root, so it is accepted -- along with every other prefix that was
+        # on the list, and every one nobody had thought to add yet.)
         if tn == "iteminfo" and _iteminfo_nested_path_is_plausible(field):
             return None
         # GitHub #125 (Refinement Cost Reforged): multichangeinfo
