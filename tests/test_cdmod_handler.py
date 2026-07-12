@@ -167,3 +167,54 @@ def test_a_bogus_package_format_is_refused(tmp_path):
     p = _pkg(tmp_path, m, {"patches/semantic.json": SEMANTIC})
     with pytest.raises(CdmodError, match="unknown package format"):
         cdmod_to_format3(p)
+
+
+# ── routing ─────────────────────────────────────────────────────────────
+#
+# The translator being correct is worth nothing if nothing calls it. I
+# shipped exactly that: `.cdmod` was wired into detect_format(), which
+# LOOKS like the gate, and the real dispatch is a table in
+# worker_process.py keyed on detect_format()'s return value. Without an
+# entry there, a dropped .cdmod fell straight through to "unsupported file
+# format" and the translation code never ran.
+#
+# So pin the wiring, not just the function.
+
+def test_the_worker_dispatch_table_has_a_cdmod_entry():
+    import inspect
+
+    from cdumm import worker_process
+
+    src = inspect.getsource(worker_process)
+    assert '"cdmod":' in src, (
+        "detect_format() returns 'cdmod' but worker_process has no handler "
+        "for it, so a dropped .cdmod dies at 'unsupported file format' and "
+        "the translator is never called")
+    assert "import_from_cdmod" in src
+
+
+def test_the_importer_exists_and_takes_the_dispatch_signature():
+    import inspect
+
+    from cdumm.engine.import_handler import import_from_cdmod
+
+    params = list(inspect.signature(import_from_cdmod).parameters)
+    assert params[:5] == [
+        "cdmod_path", "game_dir", "db", "snapshot", "deltas_dir"]
+    assert "existing_mod_id" in params
+
+
+def test_an_untranslatable_cdmod_is_refused_at_import_not_imported_empty(
+        tmp_path):
+    """An empty mod would install clean and change nothing -- the exact
+    silent-no-op this whole area keeps producing. Refuse instead."""
+    from cdumm.engine.import_handler import import_from_cdmod
+
+    m = dict(MANIFEST, components=[{"type": "localization-patch",
+                                    "path": "patches/loc.json"}])
+    p = _pkg(tmp_path, m, {"patches/loc.json": {"x": 1}})
+
+    res = import_from_cdmod(p, tmp_path, None, None, tmp_path)
+    assert res.error, "an untranslatable .cdmod must surface an error"
+    assert "localization-patch" in res.error
+    assert not res.changed_files

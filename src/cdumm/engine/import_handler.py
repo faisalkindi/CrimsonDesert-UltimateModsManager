@@ -4474,6 +4474,47 @@ def _import_format3_bundle(
     return primary
 
 
+def import_from_cdmod(
+    cdmod_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager,
+    deltas_dir: Path, existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Importer for `.cdmod` (`crimson-mod-package`, GitHub #288).
+
+    The package's semantic-patch IS Format 3 under different key names, so
+    translate it and hand the result to the Format 3 importer rather than
+    growing a parallel apply path.
+
+    A `.cdmod` we cannot faithfully translate is REFUSED (CdmodError), not
+    imported as an empty mod: an empty mod would install clean and change
+    nothing, which is the failure mode of #259 / #275 / #278 / #285.
+    """
+    import tempfile
+
+    from cdumm.engine.cdmod_handler import CdmodError, cdmod_to_format3
+
+    try:
+        doc = cdmod_to_format3(cdmod_path)
+    except CdmodError as e:
+        logger.warning("cdmod import refused for %s: %s", cdmod_path.name, e)
+        res = ModImportResult(cdmod_path.name, mod_type="format3")
+        res.error = f"This .cdmod could not be imported: {e}"
+        return res
+
+    # Keep the original stem so prettify_mod_name / Nexus filename parsing
+    # still see the real name rather than a temp path.
+    stage = Path(tempfile.mkdtemp(prefix="cdumm_cdmod_"))
+    translated = stage / f"{cdmod_path.stem}.field.json"
+    translated.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    logger.info(
+        "cdmod: %s -> Format 3 (%d target(s), %d intent(s))",
+        cdmod_path.name, len(doc["targets"]),
+        sum(len(t["intents"]) for t in doc["targets"]))
+
+    return import_from_natt_format_3(
+        translated, game_dir, db, snapshot, deltas_dir,
+        existing_mod_id=existing_mod_id)
+
+
 def import_from_natt_format_3(
     json_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager, deltas_dir: Path,
     existing_mod_id: int | None = None,
