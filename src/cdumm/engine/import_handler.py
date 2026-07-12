@@ -418,6 +418,14 @@ def detect_format(path: Path) -> str:
     if path.is_dir():
         return "folder"
     suffix = path.suffix.lower()
+    if suffix == ".cdmod":
+        # `crimson-mod-package` (GitHub #288). It IS a zip, but must not be
+        # reported as one: a plain-zip import would extract it, find
+        # patches/semantic.json, fail to recognise it as Format 3 (it uses
+        # operations/path/selector/value, not intents/field/key/new) and
+        # import a mod that changes nothing. Give it its own branch so the
+        # translation is explicit -- see cdmod_handler.
+        return "cdmod"
     if suffix == ".zip":
         return "zip"
     if suffix == ".7z":
