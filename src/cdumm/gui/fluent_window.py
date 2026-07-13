@@ -1315,6 +1315,11 @@ class CdummWindow(FluentWindow):
             position=NavigationItemPosition.SCROLL,
         )
 
+        # Notification bell — a single global widget in the nav rail,
+        # sitting just above the bug-report item (no per-page widget).
+        from cdumm.gui.notifications import install_bell
+        install_bell(self)
+
         # Bottom navigation
         self.addSubInterface(
             self.bug_report_page, FluentIcon.FEEDBACK, tr("nav.bug_report"),

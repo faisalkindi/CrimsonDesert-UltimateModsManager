@@ -343,13 +343,9 @@ class ModsPage(QWidget):
         _nbf.setWeight(_QFont.Weight.Bold)
         self._new_folder_btn.setFont(_nbf)
         self._new_folder_btn.clicked.connect(self._on_new_folder)
-        setCustomStyleSheet(self._new_folder_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }"
-            "PushButton:pressed { background: #D0E0F8; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }"
-            "PushButton:pressed { background: #2A3C58; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._new_folder_btn, radius=16,
+                          padding_css="padding: 0 14px; padding-bottom: 6px;")
         select_row.addWidget(self._new_folder_btn)
 
         # Dedicated conflict-order view (Miki990 UX request). Opens a
@@ -425,9 +421,16 @@ class ModsPage(QWidget):
         hero_icon.setFont(hif)
         hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         from qfluentwidgets import setCustomStyleSheet
-        setCustomStyleSheet(hero_icon,
-            "SubtitleLabel { color: #2878D0; }",
-            "SubtitleLabel { color: #5CB8F0; }")
+
+        def _style_hero():
+            from cdumm.gui.accent import accent_hex
+            c = accent_hex()
+            setCustomStyleSheet(hero_icon,
+                f"SubtitleLabel {{ color: {c}; }}",
+                f"SubtitleLabel {{ color: {c}; }}")
+        _style_hero()
+        from cdumm.gui.accent import bus as _hero_bus
+        _hero_bus().changed.connect(_style_hero)
         hero_layout.addWidget(hero_icon)
 
         hero_title = SubtitleLabel(tr("mods.drop_subtitle"), self._empty_hero)

@@ -344,6 +344,18 @@ def main() -> int:
     # gets more frequent time slices during worker Python execution.
     sys.setswitchinterval(0.0005)
 
+    # Interface zoom (accessibility): apply the saved UI scale before the
+    # QApplication is constructed — Qt only reads QT_SCALE_FACTOR at that
+    # point. Stored in a sidecar file so we don't need the SQLite config
+    # this early in startup. An explicit user env override wins.
+    try:
+        from cdumm.gui.ui_scale import read_ui_scale
+        _ui_scale = read_ui_scale()
+        if _ui_scale != "1.0" and not os.environ.get("QT_SCALE_FACTOR"):
+            os.environ["QT_SCALE_FACTOR"] = _ui_scale
+    except Exception:
+        pass
+
     # Minimal import for QApplication — everything else is lazy
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QGuiApplication
@@ -587,6 +599,15 @@ def main() -> int:
         elif saved_theme == "dark":
             from qfluentwidgets import setTheme, Theme
             setTheme(Theme.DARK)
+
+    # Apply saved accent colour (overrides the default set at startup).
+    _saved_accent = config.get("accent_color")
+    if _saved_accent:
+        try:
+            from qfluentwidgets import setThemeColor
+            setThemeColor(_saved_accent)
+        except Exception:
+            pass
 
     # Set RTL layout direction for Arabic/Hebrew/etc.
     from cdumm.i18n import is_rtl
