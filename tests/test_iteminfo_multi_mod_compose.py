@@ -13,16 +13,48 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla110_file
 
-_VANILLA_ITEMINFO = Path(r"C:\Users\faisa\AppData\Local\Temp\iteminfo.pabgb")
-_VANILLA_PABGH = Path(r"C:\Users\faisa\AppData\Local\Temp\iteminfo.pabgh")
 
+_VANILLA_ITEMINFO = vanilla110_file("iteminfo.pabgb")
+_VANILLA_PABGH = vanilla110_file("iteminfo.pabgh")
+
+
+
+def _crimson_rs_can_parse_fixture() -> bool:
+    """The vendored crimson_rs Rust parser predates the committed
+    fixtures: it fails on BOTH CD 1.10 and CD 1.13 at offset 0x71
+    ("CArray count 15386081 exceeds remaining bytes"). It only ever
+    parsed one maintainer's 1.11-era extract, which is why this module
+    used to point at C:/Users/faisa/... and skip everywhere else.
+
+    Guard on the real capability rather than a machine-local path, so
+    this test re-enables itself the moment crimson_rs is refreshed --
+    and states the actual reason until then. CDUMM's own native parser
+    handles these tables (6508 records, 0 opaque on 1.13); the Rust
+    extension is the stale component here.
+    """
+    from cdumm.engine.crimson_rs_loader import get_crimson_rs
+    rs = get_crimson_rs()
+    if rs is None:
+        return False
+    try:
+        rs.parse_iteminfo_from_bytes(_VANILLA_ITEMINFO.read_bytes())
+        return True
+    except Exception:
+        return False
+
+
+_RS_REASON = ("vendored crimson_rs parser predates the committed fixtures "
+              "(fails CD 1.10 and 1.13 alike); CDUMM's native parser is "
+              "used everywhere else and is covered by its own tests")
 
 def _have() -> bool:
     return _VANILLA_ITEMINFO.exists() and _VANILLA_PABGH.exists()
 
 
-@pytest.mark.skipif(not _have(), reason="vanilla extracts not present")
+@pytest.mark.skipif(not _crimson_rs_can_parse_fixture(),
+                    reason=_RS_REASON)
 def test_two_iteminfo_mods_targeting_different_items_compose(tmp_path):
     """Mod A modifies item key X, Mod B modifies item key Y. Both
     are whole-table writers on iteminfo.pabgb. The apply pipeline
@@ -128,7 +160,8 @@ def test_two_iteminfo_mods_targeting_different_items_compose(tmp_path):
         f"Mod B's edit on item {target_b['key']} did NOT land")
 
 
-@pytest.mark.skipif(not _have(), reason="vanilla extracts not present")
+@pytest.mark.skipif(not _crimson_rs_can_parse_fixture(),
+                    reason=_RS_REASON)
 def test_lower_priority_number_wins_when_two_mods_edit_same_item(tmp_path):
     """CDUMM convention: lowest priority number wins. When mod A
     (priority=1, top) and mod B (priority=100) both set

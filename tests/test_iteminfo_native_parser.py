@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_LIVE_BODY = Path(
-    "C:/Users/faisa/AppData/Local/Temp/iteminfo_postpatch.pabgb"
-)
+
+_LIVE_BODY = vanilla113_file("iteminfo.pabgb")
 
 
 def _have_live_fixture() -> bool:
@@ -33,6 +33,8 @@ def _have_live_fixture() -> bool:
     not _have_live_fixture(),
     reason="iteminfo_postpatch.pabgb fixture not present",
 )
+@pytest.mark.skip(
+    reason="pins the default-layout parser API (parse_first_record_size / parse_record_at take no field list) against a table that is not in the module-default layout. Neither committed fixture is: CD 1.13 needs the cd113 layout, CD 1.10 has no layout that round-trips. The version-adaptive path these functions predate is covered by test_iteminfo_cd113_enchant.py and test_iteminfo_walk_real_game.py. Was previously skipped via a hardcoded C:/Users/faisa/... path, which hid this.")
 def test_native_parser_first_record_size_matches_pabgh_index():
     """Parse the first record from the live iteminfo. Its on-disk
     size must equal what the .pabgh index says (offset of record 1
@@ -59,6 +61,8 @@ def test_native_parser_first_record_size_matches_pabgh_index():
     not _have_live_fixture(),
     reason="iteminfo_postpatch.pabgb fixture not present",
 )
+@pytest.mark.skip(
+    reason="pins the default-layout parser API (parse_first_record_size / parse_record_at take no field list) against a table that is not in the module-default layout. Neither committed fixture is: CD 1.13 needs the cd113 layout, CD 1.10 has no layout that round-trips. The version-adaptive path these functions predate is covered by test_iteminfo_cd113_enchant.py and test_iteminfo_walk_real_game.py. Was previously skipped via a hardcoded C:/Users/faisa/... path, which hid this.")
 def test_native_parser_walks_every_record_to_correct_boundary():
     """For every entry in the .pabgh index, our parser's walked
     size must equal (next_offset - this_offset). One drift on any
@@ -102,12 +106,24 @@ def test_native_parser_round_trips_byte_identical():
     Format 3 list intent through this parser will corrupt the
     iteminfo binary."""
     from cdumm.engine.iteminfo_native_parser import (
-        parse_iteminfo_from_bytes, serialize_iteminfo,
+        detect_iteminfo_layout, parse_iteminfo_from_bytes, serialize_iteminfo,
     )
+    from cdumm.semantic.parser import parse_pabgh_index
 
     body = _LIVE_BODY.read_bytes()
-    items = parse_iteminfo_from_bytes(body)
-    re_encoded = serialize_iteminfo(items)
+    header = _LIVE_BODY.with_suffix(".pabgh").read_bytes()
+    _key_size, offsets = parse_pabgh_index(header, "iteminfo")
+    starts = sorted(offsets.values())
+
+    # Select the layout instead of assuming the module default. The default
+    # only ever matched one maintainer's 1.11-era extract; against any real
+    # committed table it desyncs (and, on a bad count, spins). This is the
+    # same detect step every non-test caller already does.
+    fields = detect_iteminfo_layout(body, starts)
+    assert fields is not None, "no iteminfo layout round-trips this fixture"
+
+    items = parse_iteminfo_from_bytes(body, starts, fields=fields)
+    re_encoded = serialize_iteminfo(items, fields=fields)
     if re_encoded != body:
         n = min(len(re_encoded), len(body))
         i = 0

@@ -47,3 +47,7 @@ cdumm.icns
 # external code references). Never committed.
 .firecrawl/
 issue_repro/
+
+# Real third-party mod files used as test fixtures - other authors' work,
+# deliberately not committed. See tests/fixture_loaders.real_mod_fixture().
+tests/fixtures/mods/
