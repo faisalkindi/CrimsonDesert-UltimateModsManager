@@ -52,6 +52,11 @@ SUPPORTED_FIELDS = {
     "transmutation_material_item_group_list",
     "multi_change_info_list",
     "gimmick_tag_list",
+    # CD 1.13 only: relocated to the end of the record and merged with
+    # GimmickVisualPrefabData (#285). The parser exposes it on the 1.13
+    # layout; on older layouts _resolve_field_name won't find it on the
+    # record, so this entry costs those builds nothing.
+    "prefab_data_list",
 }
 
 # Fields that mod authors target on iteminfo but the native parser's
@@ -151,6 +156,51 @@ def shape_matches(existing, new) -> bool:
         return isinstance(new, (bytes, bytearray))
     # None / unknown existing value: nothing to compare against.
     return True
+
+
+#: Keys the CD 1.13 merged prefab element carries on disk but that mods do
+#: NOT ship. They are not constant -- 44 elements have a non-(1,1,1) scale
+#: and 68 carry animation entries -- so they must be preserved from the
+#: record being edited, never defaulted. Defaults are only for elements a
+#: mod ADDS beyond the ones vanilla has.
+_PREFAB113_CARRIED = {
+    "scale": [1.0, 1.0, 1.0],
+    "animation_path_list": [],
+    "is_craft_material": 0,
+    "unk_flag_b": 0,
+    "unk_flag_c": 0,
+}
+
+
+def normalize_prefab_data_list(existing, new):
+    """Merge a mod's prefab_data_list onto the record's own, by index.
+
+    Mods (e.g. AerowynX's "Equip All V6") ship elements carrying only
+    ``prefab_names`` / ``equip_slot_list`` / ``tribe_gender_list`` /
+    ``is_craft_material``. CD 1.13 merged PrefabData with
+    GimmickVisualPrefabData, so the on-disk element ALSO has ``scale``,
+    ``animation_path_list`` and two more flag bytes (GitHub #285).
+
+    Assigning the mod's dicts straight in would explode in the serializer on
+    the missing keys -- and filling them with constants would quietly rewrite
+    the 44 elements whose scale isn't (1,1,1) and the 68 with animation
+    entries. So carry those fields over from the element at the same index
+    and let the mod own only the keys it actually set.
+    """
+    if not isinstance(new, list):
+        return new
+    base = existing if isinstance(existing, list) else []
+    out = []
+    for i, el in enumerate(new):
+        if not isinstance(el, dict):
+            return new                      # not our shape; let the gate skip
+        src = base[i] if i < len(base) and isinstance(base[i], dict) else {}
+        merged = dict(src) if src else dict(_PREFAB113_CARRIED)
+        for k, v in _PREFAB113_CARRIED.items():
+            merged.setdefault(k, v)
+        merged.update(el)                   # the mod's keys win
+        out.append(merged)
+    return out
 
 
 def _resolve_field_name(intent_field: str, item: dict) -> Optional[str]:
@@ -573,10 +623,14 @@ def _build_change_relocated_layout(
             else:
                 skipped_field += 1
                 continue
-        if not shape_matches(item.get(target_field), intent.new):
+        new_value = intent.new
+        if target_field == "prefab_data_list":
+            new_value = normalize_prefab_data_list(
+                item.get(target_field), new_value)
+        if not shape_matches(item.get(target_field), new_value):
             skipped_field += 1
             continue
-        item[target_field] = intent.new
+        item[target_field] = new_value
         applied += 1
         decoded_edits += 1
 

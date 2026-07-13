@@ -281,6 +281,82 @@ def _decode_iteminfo_for_match(body: bytes, header: bytes) -> dict:
     return records
 
 
+def _iteminfo_layout_roots(body: bytes, header: bytes) -> frozenset | None:
+    """Top-level field names of the iteminfo layout THIS game actually runs.
+
+    ``None`` if the layout can't be resolved -- callers must fail open, since
+    this is a safety net and not a gate.
+    """
+    from cdumm.engine.iteminfo_native_parser import detect_iteminfo_layout
+    try:
+        _key_size, off = parse_pabgh_index(header, "iteminfo")
+        if not off:
+            return None
+        fields = detect_iteminfo_layout(body, sorted(off.values()))
+        return frozenset(f[0] for f in fields)
+    except Exception:  # noqa: BLE001 - never break apply over a guard
+        logger.exception("iteminfo: could not resolve the layout's fields")
+        return None
+
+
+def drop_intents_the_layout_cannot_carry(
+    target: str, intents: list, body: bytes, header: bytes,
+) -> tuple[list, list]:
+    """Refuse iteminfo nested paths the DETECTED layout can't address.
+
+    The validator accepts a nested path when its root exists in ANY layout
+    CDUMM knows (#259 removed the hardcoded allowlist that was refusing
+    ``price_list[0].price.price`` and every gear-stat path -- that rule is
+    right and stays). But "any layout CDUMM knows" includes layouts the
+    installed game is not running. CDUMM's CD 1.13 layout does not expose
+    ``prefab_data_list`` / ``gimmick_visual_prefab_data_list``, so
+    ``prefab_data_list[0].tribe_gender_list`` validates clean, resolves to
+    nothing, and the mod silently changes nothing (#285).
+
+    Careful: this says the *decoder* can't address the field, NOT that the
+    game record lacks it. Every 1.13 record carries 76-139 bytes of tail
+    the layout never interprets (they round-trip because they're preserved
+    opaquely as ``_tail_slack``, which is exactly why the byte-exact
+    round-trip did not catch this). The prefab data is very likely in
+    there. Until it's decoded, refusing honestly is the correct behaviour
+    -- but do not tell users the field is gone.
+
+    So the check has to happen HERE -- the apply path is the only place the
+    game's own bytes are in hand. Scoping to the DETECTED layout, rather than
+    the newest one CDUMM knows, is what keeps this from becoming a false
+    refusal on a game version that really does carry the field.
+
+    Returns ``(kept, dropped)`` where ``dropped`` is ``[(intent, why), ...]``.
+    """
+    bare = _table_name_from_target(target)
+    bare = bare.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+    if bare != "iteminfo":
+        return list(intents), []
+
+    roots = _iteminfo_layout_roots(body, header)
+    if roots is None:
+        return list(intents), []
+
+    kept: list = []
+    dropped: list = []
+    for intent in intents:
+        field = getattr(intent, "field", "") or ""
+        if not ("." in field or "[" in field):
+            kept.append(intent)
+            continue
+        root = field.split(".", 1)[0].split("[", 1)[0]
+        if root in roots:
+            kept.append(intent)
+            continue
+        dropped.append((
+            intent,
+            f"CDUMM cannot write '{root}' on this build of Crimson Desert: "
+            f"its decoder for this game version does not expose that field, "
+            f"so applying the intent would change nothing. Refused rather "
+            f"than reported as applied. (GitHub #285)"))
+    return kept, dropped
+
+
 def _decode_records_for_match(
     table_name: str, body: bytes, header: bytes,
 ) -> dict:
@@ -712,6 +788,40 @@ def expand_format3_into_aggregated(
                         "Format 3 mod '%s' (id=%d): match selector(s) for "
                         "%s matched 0 records; 0 byte changes.",
                         mod_name, mod_id, target)
+                    continue
+
+                # The validator accepts a nested iteminfo path when its ROOT
+                # exists in ANY layout CDUMM knows -- but this game runs
+                # exactly one of them. Now that the real bytes are in hand,
+                # drop the intents whose root the installed record doesn't
+                # carry, and say so. Without this the mod imports clean,
+                # reports N intents "ready to apply", and then changes
+                # nothing (#285). No-op on a game version that does carry
+                # the field. Runs after expansion, so a 'match' that fans
+                # out into per-record sets on a dead root is refused too.
+                supported, layout_dropped = (
+                    drop_intents_the_layout_cannot_carry(
+                        target, supported, vanilla_body, vanilla_header))
+                if layout_dropped:
+                    reasons = sorted({why for _i, why in layout_dropped})
+                    logger.warning(
+                        "Format 3 mod '%s' (id=%d): %d intent(s) on %s "
+                        "target a field this game's item record does not "
+                        "carry; refused rather than silently applying "
+                        "nothing. %s",
+                        mod_name, mod_id, len(layout_dropped), target,
+                        reasons[0])
+                    if warnings_out is not None:
+                        for why in reasons:
+                            n = sum(1 for _i, w in layout_dropped if w == why)
+                            warnings_out.append(
+                                f"Format 3 mod '{mod_name}': {n} intent(s) "
+                                f"skipped on '{target}' - {why}")
+                if not supported:
+                    # Everything the mod wanted to write is absent from this
+                    # game's record. The warning above already named the
+                    # field, so just count it like other zero-change cases.
+                    n_mods_skipped += 1
                     continue
 
                 # Record ops (clone_record / delete_record) reshape the
