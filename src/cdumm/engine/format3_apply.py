@@ -38,6 +38,10 @@ import struct
 from pathlib import Path
 from typing import Callable
 
+# The writer's field-name resolver, shared on purpose: a `match` key must
+# accept exactly the spellings a `field` key accepts, and copying the rule
+# would let the two drift apart silently.
+from cdumm.engine.iteminfo_writer import _resolve_field_name
 from cdumm.engine.field_schema import (
     DTYPE_TABLE,
     FieldSchemaEntry,
@@ -46,6 +50,8 @@ from cdumm.engine.field_schema import (
 )
 from cdumm.engine.format3_handler import (
     Format3Intent,
+    _snake_to_camel,
+    _table_name_from_target,
     parse_format3_mod,
     parse_format3_mod_targets,
     validate_intents,
@@ -55,6 +61,7 @@ from cdumm.semantic.parser import (
     has_schema,
     identify_table_from_path,
     parse_pabgh_index,
+    parse_records,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,472 @@ VanillaExtractor = Callable[[str], "tuple[bytes, bytes] | None"]
 bytes for the vanilla version of that file, or None if the file
 can't be extracted. apply_engine wires this to its existing
 ``_get_vanilla_entry_content`` + ``_extract_sibling_entry`` helpers."""
+
+
+# ── 'match' selector expansion ───────────────────────────────────────
+#
+# A Format 3 intent may carry a ``match`` selector instead of a single
+# ``entry``/``key``: ``{"match": {field: value, ...}, "field": F,
+# "new": N}`` targets *every* record whose fields all equal the given
+# values (AND across conditions). We resolve that here, at apply time,
+# once the table's vanilla bytes are in hand: decode the table with the
+# same ``parse_records`` the diff/apply pipeline already uses, find the
+# matching record keys, and emit one ordinary per-record ``set`` intent
+# for each. Those flow through the existing, already-trusted writer path
+# (and its verified-field write gate) — so ``match`` adds no new
+# byte-writing code and cannot introduce a new corruption path. Matching
+# is gated in ``validate_intents`` to verified (or metadata) fields, so
+# we only ever compare against trustworthy decoded values.
+
+
+_MISSING = object()
+"""Distinguishes "no such field" from a field whose value really is
+``None``. Matching treats both as no-match, but the traversal below must
+not confuse "the key isn't there" with "the key holds None"."""
+
+
+def _lookup_one(d: dict, name: str):
+    """One path segment: ``d``'s value for ``name``. ``_MISSING`` if the
+    segment isn't present under any accepted spelling.
+
+    A ``match`` key must accept exactly the spellings the ``field`` key
+    accepts, or a mod half-works: the same name resolves for the write but
+    not for the selector, so the intent applies to nothing and reports no
+    error. So this bridges *both* directions:
+
+      * snake_case mod name -> camelCase record field, and
+      * camelCase mod name -> snake_case record field,
+
+    the second by delegating to the writer's ``_resolve_field_name``. That
+    is deliberately the *same function* the writer uses rather than a copy,
+    so the two can't drift -- it also carries the separator-insensitive
+    fallback (``_equipAbleHash`` -> ``equipable_hash``, GitHub #191), which
+    only accepts an unambiguous single match and so never silently picks
+    the wrong field.
+    """
+    if name in d:
+        return d[name]
+    # snake_case mod name -> camelCase record field.
+    cand = [f"_{name}"]
+    if "_" in name:
+        camel = _snake_to_camel(name)
+        if camel != name:
+            cand += [camel, f"_{camel}"]
+    for n in cand:
+        if n in d:
+            return d[n]
+    # camelCase mod name -> snake_case record field. The writer's resolver
+    # only takes this branch for underscore-prefixed names, so normalise to
+    # that shape; a bare `equipTypeInfo` then resolves like `_equipTypeInfo`.
+    key = _resolve_field_name(f"_{name.lstrip('_')}", d)
+    if key is not None:
+        return d[key]
+    return _MISSING
+
+
+def _lookup_record_field(rec: dict, field: str):
+    """Return ``rec``'s value for ``field``. Returns ``None`` when the
+    field isn't present.
+
+    ``field`` may be a dotted path into nested structs and lists:
+
+        drop_default_data.use_socket
+        drop_default_data.add_socket_material_item_list.0.item
+        enchant_data_list.0.level
+
+    Each segment is resolved with the same four name shapes the rest of
+    the matcher uses, so nested fields behave exactly like flat ones (that
+    means snake_case in the mod resolving a camelCase record field, but
+    not the reverse -- same limitation flat fields already have).
+    A segment applied to a list must be an integer index (negatives count
+    from the end); anything else is a miss.
+
+    There is deliberately **no** "any element" list traversal. It would be
+    ambiguous against ``_match_value_equals``, where a list on the record
+    side already means "match this list exactly" — so
+    ``some_list.field == 5`` could mean "any element has field 5" or "the
+    extracted values equal 5", and silently picking one would make a mod
+    select records its author never intended. Index explicitly.
+    """
+    # A flat field wins outright, so a field whose real name happens to
+    # contain a dot still resolves before we try to read it as a path.
+    got = _lookup_one(rec, field)
+    if got is not _MISSING:
+        return got
+    if "." not in field:
+        return None
+
+    cur: object = rec
+    for seg in field.split("."):
+        if isinstance(cur, dict):
+            cur = _lookup_one(cur, seg)
+            if cur is _MISSING:
+                return None
+        elif isinstance(cur, (list, tuple)):
+            body = seg[1:] if seg.startswith("-") else seg
+            if not body.isdigit():
+                return None
+            idx = int(seg)
+            if not -len(cur) <= idx < len(cur):
+                return None
+            cur = cur[idx]
+        else:
+            # A scalar with path left to walk: the path is wrong for this
+            # record's shape.
+            return None
+    return cur
+
+
+def _match_value_equals(got, want) -> bool:
+    """Type-tolerant equality between a decoded record value ``got`` and
+    a mod-authored JSON value ``want`` (e.g. JSON ``5`` vs decoded int,
+    or JSON ``"5"`` vs decoded ``5``).
+
+    A list/tuple on the mod side means **any-of** (SQL ``IN``): the record
+    matches when its value equals any one candidate. That lets a single
+    intent target a whole family of records — pinapana's Crazy ExtraSockets
+    (GitHub #272) selects 63 ``equip_type_info`` values in one intent
+    instead of 63 separate intents.
+
+    When the record's own value is *itself* a list, a list on the mod side
+    keeps exact-equality semantics instead, so a genuinely list-valued
+    field can still be matched whole and the two meanings never collide.
+    """
+    if got is None:
+        return False
+    if isinstance(want, (list, tuple)) and not isinstance(got, (list, tuple)):
+        return any(_match_value_equals(got, w) for w in want)
+    if got == want:
+        return True
+    # numeric tolerance (int vs float), excluding bool surprises.
+    if (isinstance(got, (int, float)) and not isinstance(got, bool)
+            and isinstance(want, (int, float)) and not isinstance(want, bool)):
+        try:
+            return float(got) == float(want)
+        except (TypeError, ValueError, OverflowError):
+            return False
+    # string-form tolerance ("5" == 5).
+    if isinstance(want, str) and not isinstance(got, str):
+        return str(got) == want
+    return False
+
+
+def _match_record_keys(records: dict, match: dict) -> list:
+    """Keys of every record in ``records`` whose fields all satisfy the
+    ``match`` conditions (AND). Preserves ``records`` iteration order."""
+    out = []
+    for key, rec in records.items():
+        if all(
+            _match_value_equals(
+                rec.get(mf) if mf in ("_name", "_key", "_entry_id")
+                else _lookup_record_field(rec, mf),
+                mv,
+            )
+            for mf, mv in match.items()
+        ):
+            out.append(key)
+    return out
+
+
+def _decode_iteminfo_for_match(body: bytes, header: bytes) -> dict:
+    """Decode iteminfo with the *native* parser, in ``parse_records``'
+    ``{key: {field: value, _key, _name}}`` shape.
+
+    The generic ``parse_records`` walker only reaches ~5 iteminfo fields
+    before it stops, so a ``match`` on anything past them — including
+    ``equip_type_info`` and everything nested under ``drop_default_data``,
+    which is exactly what the socket mods select on (GitHub #272) — sees
+    ``None`` and quietly matches nothing. The native parser decodes all
+    116, so route iteminfo through it.
+
+    Returns ``{}`` on any failure, so the caller falls back to the
+    generic walker rather than losing the match entirely.
+    """
+    from cdumm.engine.iteminfo_native_parser import (
+        detect_iteminfo_layout, parse_iteminfo_from_bytes,
+    )
+    _key_size, off = parse_pabgh_index(header, "iteminfo")
+    if not off:
+        return {}
+    starts = sorted(off.values())
+    fields = detect_iteminfo_layout(body, starts)
+    items = parse_iteminfo_from_bytes(body, starts, fields=fields)
+
+    records: dict[int, dict] = {}
+    for it in items:
+        # Records the layout couldn't decode are carried opaque (all
+        # fields dropped). Matching on them would compare against
+        # nothing and silently select nothing, so leave them out and let
+        # the caller's fallback decide — never guess.
+        if it.get("_opaque_record"):
+            continue
+        key = it.get("key")
+        if key is None:
+            continue
+        rec = dict(it)
+        rec["_key"] = key
+        rec["_name"] = it.get("string_key", "")
+        records[key] = rec
+    return records
+
+
+def _decode_records_for_match(
+    table_name: str, body: bytes, header: bytes,
+) -> dict:
+    """Decode a table for ``match`` resolution, preferring the richest
+    decoder available for it.
+
+    ``table_name`` arrives from ``_table_name_from_target``, which only
+    strips the extension -- so a path-shaped target yields
+    ``gamedata/binary__/client/bin/iteminfo``, not ``iteminfo``. Take the
+    basename before deciding how to decode it. (``identify_table_from_path``
+    is no use here: it wants the extension that was already stripped.) The
+    original string is still what gets handed to ``parse_records``, so
+    nothing about the generic path changes.
+    """
+    bare = table_name.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+    if bare == "iteminfo":
+        try:
+            records = _decode_iteminfo_for_match(body, header)
+        except Exception:  # noqa: BLE001 - never break apply on a decode
+            logger.warning(
+                "Format 3 match: native iteminfo decode failed; falling "
+                "back to the generic walker (matches on fields past the "
+                "first few will find nothing).", exc_info=True)
+        else:
+            if records:
+                logger.info(
+                    "Format 3 match: decoded %d iteminfo records natively "
+                    "(%d fields available to match on).",
+                    len(records), len(next(iter(records.values()))))
+                return records
+    return parse_records(table_name, body, header)
+
+
+def _expand_match_intents(
+    target: str,
+    vanilla_body: bytes,
+    vanilla_header: bytes,
+    intents: list[Format3Intent],
+) -> list[Format3Intent]:
+    """Replace each ``match`` intent in ``intents`` with concrete
+    per-record ``set`` intents; pass non-match intents through unchanged.
+
+    Decodes the target table once (natively for iteminfo, else via
+    ``parse_records``) and, for each ``match`` intent, emits one
+    ``Format3Intent`` per matched record carrying that record's real
+    ``_name``/``_key`` so the existing writer resolves it exactly like a
+    hand-authored single-record intent.
+    """
+    # ``getattr`` guard: some intent stand-ins (and any future
+    # lightweight intent type) may not carry a ``match`` attribute at
+    # all — those are, by definition, not match selectors.
+    if not any(getattr(i, "match", None) is not None for i in intents):
+        return list(intents)
+
+    table_name = _table_name_from_target(target)
+    try:
+        records = _decode_records_for_match(
+            table_name, vanilla_body, vanilla_header)
+    except Exception:  # noqa: BLE001 - decode must never break apply
+        logger.warning(
+            "Format 3 match: could not decode %s to resolve a match "
+            "selector; those intents produce 0 changes.", target,
+            exc_info=True)
+        records = {}
+
+    out: list[Format3Intent] = []
+    for intent in intents:
+        match = getattr(intent, "match", None)
+        if match is None:
+            out.append(intent)
+            continue
+        matched = _match_record_keys(records, match) if records else []
+        for key in matched:
+            rec = records[key]
+            out.append(Format3Intent(
+                entry=str(rec.get("_name", "")),
+                key=int(rec.get("_key", key)),
+                field=intent.field,
+                op="set",
+                new=intent.new,
+                old=getattr(intent, "old", None),
+                match=None,
+            ))
+        logger.info(
+            "Format 3 match on %s (%s == …) expanded to %d record(s) "
+            "for field %r.", target, ",".join(match), len(matched),
+            intent.field)
+    return out
+
+
+def _expand_append_intents(
+    target: str,
+    vanilla_body: bytes,
+    vanilla_header: bytes,
+    intents: list[Format3Intent],
+) -> list[Format3Intent]:
+    """Translate iteminfo ``array_append`` intents into concrete ``set``
+    intents that carry the record's current list plus the new element.
+
+    Appending to a nested iteminfo list (a socket-material list, an item
+    tag list, …) is, mechanically, a nested ``set`` whose value is
+    ``current_list + [element]``. iteminfo round-trips byte-exact through
+    the whole-table writer, so this reuses that proven path rather than a
+    bespoke in-place list splice: the writer grows exactly the one record
+    and rebuilds the ``.pabgh`` index, same as any size-changing edit.
+
+    Runs BEFORE ``_expand_match_intents`` so an ``array_append`` that also
+    carries a ``match`` (append to every matched item — the socket-mod
+    shape) is resolved here, per matched record, instead of being forced
+    to a plain ``set`` by the match pass.
+
+    dropsetinfo's ``drops`` keeps its dedicated writer path; only iteminfo
+    is handled here. Non-append intents pass through untouched.
+    """
+    if not any(getattr(i, "op", "set") == "array_append" for i in intents):
+        return list(intents)
+    # _table_name_from_target returns the full path, not a bare table name
+    # (the same gotcha the match router hit), so normalise to the basename
+    # before comparing — otherwise the guard silently no-ops on a real
+    # target path and the append is never expanded.
+    tn = _table_name_from_target(target)
+    bare = tn.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+    if bare != "iteminfo":
+        return list(intents)
+
+    try:
+        records = _decode_records_for_match(
+            "iteminfo", vanilla_body, vanilla_header)
+    except Exception:  # noqa: BLE001 - decode must never break apply
+        logger.warning(
+            "Format 3 array_append: could not decode %s; those intents "
+            "produce 0 changes.", target, exc_info=True)
+        records = {}
+
+    out: list[Format3Intent] = []
+    for intent in intents:
+        if getattr(intent, "op", "set") != "array_append":
+            out.append(intent)
+            continue
+
+        match = getattr(intent, "match", None)
+        if match is not None:
+            keys = _match_record_keys(records, match) if records else []
+        else:
+            keys = [intent.key] if intent.key in records else []
+
+        appended = 0
+        for key in keys:
+            rec = records[key]
+            current = _lookup_record_field(rec, intent.field)
+            if not isinstance(current, list):
+                logger.warning(
+                    "Format 3 array_append: %s.%s on key=%s is not a list "
+                    "(got %s); skipping this record.",
+                    target, intent.field, key, type(current).__name__)
+                continue
+            out.append(Format3Intent(
+                entry=str(rec.get("_name", "")),
+                key=int(rec.get("_key", key)),
+                field=intent.field,
+                op="set",
+                new=list(current) + [intent.new],
+                old=None,
+                match=None,
+            ))
+            appended += 1
+        logger.info(
+            "Format 3 array_append on %s field %r expanded to %d record(s).",
+            target, intent.field, appended)
+    return out
+
+
+# ── clone_record: record creation ───────────────────────────────────
+#
+# ``clone_record`` copies an existing record to a new key + optional name
+# and patches a few fields on the copy. Unlike ``set``/``match`` it grows
+# the table, so it emits a whole-table (body + .pabgh companion) change in
+# the same offset=0 shape the iteminfo/skill writers use. The record
+# creation itself lives in ``format3_handler.apply_clone_to_pabgb_bytes``,
+# which is append-only and parse-back self-checked — a clone it can't do
+# safely returns None and is skipped here, never applied.
+
+
+_RECORD_OPS = ("clone_record", "delete_record", "new_record")
+
+
+def _build_record_ops_change_for_target(
+    target: str,
+    vanilla_body: bytes,
+    vanilla_header: bytes,
+    supported: list[Format3Intent],
+) -> tuple[dict | None, dict | None, int]:
+    """Build one whole-table change for a target whose supported intents
+    include record-creation/deletion ops (``clone_record`` /
+    ``delete_record``).
+
+    Applies each record op sequentially in mod order (a refused op is
+    skipped with a warning, never aborting the rest), then applies any
+    remaining ``set`` intents on top. Returns ``(body_change,
+    companion_change | None, n_ops_applied)``, or ``(None, None, 0)`` when
+    nothing applied.
+    """
+    from cdumm.engine.format3_handler import (
+        apply_clone_to_pabgb_bytes,
+        apply_delete_to_pabgb_bytes,
+        apply_intents_to_pabgb_bytes,
+    )
+    tn = _table_name_from_target(target)
+    body, header = bytes(vanilla_body), bytes(vanilla_header)
+    n_applied = 0
+    for intent in supported:
+        op = getattr(intent, "op", "")
+        if op in ("clone_record", "new_record"):
+            spec = getattr(intent, "clone", None)
+            if not spec:
+                continue  # new_record without a template; skipped upstream
+            res = apply_clone_to_pabgb_bytes(tn, body, header, spec)
+            if res is None:
+                logger.warning(
+                    "Format 3 %s on %s refused (source_key=%s, "
+                    "new_key=%s); skipped, no bytes changed.",
+                    op, target, spec.get("source_key"), spec.get("new_key"))
+                continue
+            body, header = res
+            n_applied += 1
+        elif op == "delete_record":
+            res = apply_delete_to_pabgb_bytes(
+                tn, body, header, getattr(intent, "key", None))
+            if res is None:
+                logger.warning(
+                    "Format 3 delete_record on %s refused (key=%s not "
+                    "found / unsafe); skipped, no bytes changed.",
+                    target, getattr(intent, "key", None))
+                continue
+            body, header = res
+            n_applied += 1
+    if n_applied == 0:
+        return None, None, 0
+    # Apply remaining set intents (incl. match-expanded ones) on top of
+    # the reshaped bytes so a mixed mod composes into one change.
+    rest = [i for i in supported if getattr(i, "op", "") not in _RECORD_OPS]
+    if rest:
+        body = apply_intents_to_pabgb_bytes(tn, body, header, rest)
+    body_change = {
+        "offset": 0,
+        "original": bytes(vanilla_body).hex(),
+        "patched": bytes(body).hex(),
+        "label": f"record ops x{n_applied} ({tn})",
+    }
+    companion = None
+    if bytes(header) != bytes(vanilla_header):
+        companion = {
+            "offset": 0,
+            "original": bytes(vanilla_header).hex(),
+            "patched": bytes(header).hex(),
+        }
+    return body_change, companion, n_applied
 
 
 def expand_format3_into_aggregated(
@@ -213,14 +686,82 @@ def expand_format3_into_aggregated(
                     continue
                 vanilla_body, vanilla_header = vanilla
 
+                # Expand any iteminfo 'array_append' intents into concrete
+                # 'set' intents (current list + element) first, so an
+                # append that also carries a 'match' is resolved per record
+                # before the match pass forces op='set'. No-op unless an
+                # array_append is present.
+                supported = _expand_append_intents(
+                    target, vanilla_body, vanilla_header,
+                    validation.supported)
+
+                # Expand any 'match' selector intents into concrete
+                # per-record 'set' intents now that the table bytes are
+                # available to decode. Non-match intents pass through
+                # untouched, so this is a no-op for the common case.
+                supported = _expand_match_intents(
+                    target, vanilla_body, vanilla_header,
+                    supported)
+                if not supported:
+                    # Every intent was a match selector that resolved to
+                    # zero records (or the table wouldn't decode). Nothing
+                    # to write, but not an error , report like other
+                    # zero-change cases.
+                    n_mods_skipped += 1
+                    logger.debug(
+                        "Format 3 mod '%s' (id=%d): match selector(s) for "
+                        "%s matched 0 records; 0 byte changes.",
+                        mod_name, mod_id, target)
+                    continue
+
+                # Record ops (clone_record / delete_record) reshape the
+                # table, so they emit one whole-table body + .pabgh
+                # companion change, routed like the iteminfo/skill
+                # whole-table writers. Each op is parse-back self-checked
+                # in the engine, so one it can't do safely is skipped,
+                # never applied. Isolated to record-op-bearing mods; every
+                # other Format 3 flow below is unchanged.
+                if any(getattr(i, "op", "") in _RECORD_OPS
+                       for i in supported):
+                    body_change, companion, n_applied = (
+                        _build_record_ops_change_for_target(
+                            target, vanilla_body, vanilla_header, supported))
+                    if body_change is None:
+                        n_mods_skipped += 1
+                        logger.warning(
+                            "Format 3 mod '%s' (id=%d): record op(s) "
+                            "produced 0 changes for %s (all refused).",
+                            mod_name, mod_id, target)
+                        continue
+                    body_change["_target_file"] = target
+                    body_change["_source_mod_ids"] = [mod_id]
+                    aggregated.setdefault(target, []).append(body_change)
+                    if companion is not None:
+                        comp_target = target.replace(".pabgb", ".pabgh")
+                        companion["_target_file"] = comp_target
+                        companion["_source_mod_ids"] = [mod_id]
+                        aggregated.setdefault(
+                            comp_target, []).append(companion)
+                    n_mods_changed += 1
+                    files_touched.add(target)
+                    n_bytes_changed += len(body_change["patched"]) // 2
+                    if participating_mod_ids is not None:
+                        participating_mod_ids.add(mod_id)
+                    logger.info(
+                        "Format 3 record ops: applied %d op(s) from "
+                        "mod '%s' (id=%d) to %s%s",
+                        n_applied, mod_name, mod_id, target,
+                        " + .pabgh companion" if companion else "")
+                    continue
+
                 # Whole-table writer targets: defer dispatch to the
                 # post-loop phase so all mods' intents land in a single
                 # parse+serialize.
                 if target in _WHOLE_TABLE_TARGETS:
                     whole_table_intents.setdefault(target, []).extend(
-                        validation.supported)
+                        supported)
                     whole_table_intent_mods.setdefault(target, []).extend(
-                        [mod_name] * len(validation.supported))
+                        [mod_name] * len(supported))
                     whole_table_mod_names.setdefault(target, []).append(mod_name)
                     whole_table_mod_ids.setdefault(target, []).append(mod_id)
                     n_mods_changed += 1  # provisional; recounted below if no bytes
@@ -235,13 +776,13 @@ def expand_format3_into_aggregated(
                         "Format 3 batched %d supported intent(s) from mod "
                         "'%s' (id=%d) into whole-table writer queue for %s "
                         "(queue depth now %d)",
-                        len(validation.supported), mod_name, mod_id,
+                        len(supported), mod_name, mod_id,
                         target, len(whole_table_intents[target]))
                     continue
 
                 # Convert each supported intent into a v2-style change dict
                 changes = _intents_to_v2_changes(
-                    target, vanilla_body, vanilla_header, validation.supported)
+                    target, vanilla_body, vanilla_header, supported)
                 if not changes:
                     n_mods_skipped += 1
                     # Don't pollute aggregated with empty lists.
@@ -249,7 +790,7 @@ def expand_format3_into_aggregated(
                         "Format 3 mod '%s' (id=%d): all %d supported intents "
                         "resolved to zero changes (probably TID-not-found "
                         "or value out of range).",
-                        mod_name, mod_id, len(validation.supported))
+                        mod_name, mod_id, len(supported))
                     if warnings_out is not None:
                         warnings_out.append(
                             f"Format 3 mod '{mod_name}' produced 0 byte "
@@ -1571,6 +2112,18 @@ def _build_list_writer_change(
     """
     record_bytes = vanilla_body[entry_off:entry_end]
     if table_name == "dropsetinfo" and intent.field == "drops":
+        # array_append: add one drop, existing drops byte-preserved.
+        if getattr(intent, "op", "set") == "array_append":
+            from cdumm.engine.dropset_writer import build_drop_append_change
+            if not isinstance(intent.new, dict):
+                return None
+            return build_drop_append_change(
+                record_bytes,
+                intent_key=intent.key,
+                intent_entry=entry_name or intent.entry,
+                element_json=intent.new,
+            )
+        # op=set: replace the whole drops list.
         from cdumm.engine.dropset_writer import (
             build_drops_replacement_change,
         )

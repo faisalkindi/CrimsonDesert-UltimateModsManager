@@ -379,6 +379,86 @@ def build_drops_replacement_change(
     }
 
 
+def build_drop_append_change(
+    record_bytes: bytes,
+    intent_key: int,
+    intent_entry: str,
+    element_json: dict,
+) -> Optional[dict]:
+    """Append ONE drop (``element_json``) to a DropSet's drops list,
+    leaving every existing drop byte-for-byte intact.
+
+    Returns a v2-style change dict (same shape as
+    ``build_drops_replacement_change``), or ``None`` when it can't be done
+    safely. Safety is guaranteed two ways: (1) the record must round-trip
+    byte-exact (``serialize(parse(record)) == record``) before we touch
+    it, and (2) after appending, removing the new drop must re-serialize
+    back to the exact original bytes — proving the existing drops (and any
+    trailer) are preserved. Verified: dropset round-trips byte-exact on
+    all 14,575 vanilla records.
+    """
+    try:
+        ds = parse_dropset_record(record_bytes)
+    except Exception:
+        return None
+    if ds.key != intent_key:
+        return None
+    if not isinstance(element_json, dict):
+        return None
+    # (1) this record must round-trip byte-exact, else re-serializing the
+    # existing drops could drift them.
+    try:
+        if serialize_dropset_record(ds) != record_bytes:
+            return None
+    except Exception:
+        return None
+
+    template = ds.drops[0] if ds.drops else None
+    try:
+        new_drop = _drop_dict_to_item_drop(element_json, template)
+    except (ValueError, KeyError, TypeError) as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "dropset writer: build_drop_append_change bad element for "
+            "entry=%r key=%d: %s", intent_entry, intent_key, e)
+        return None
+
+    ds.drops.append(new_drop)
+    try:
+        new_record = serialize_dropset_record(ds)
+    except (ValueError, KeyError, TypeError):
+        return None
+
+    name_bytes = ds.name.encode("latin-1", errors="replace")
+    header_len = 4 + 4 + len(name_bytes)
+    if record_bytes[:header_len] != new_record[:header_len]:
+        return None
+
+    # (2) self-check: dropping the appended drop must reproduce the exact
+    # original bytes -> existing drops + trailer are byte-preserved.
+    ds.drops.pop()
+    try:
+        if serialize_dropset_record(ds) != record_bytes:
+            return None
+    except Exception:
+        return None
+    # and the new record must decode to exactly one more drop.
+    try:
+        back = parse_dropset_record(new_record)
+    except Exception:
+        return None
+    if len(back.drops) != len(ds.drops) + 1:
+        return None
+
+    return {
+        "entry": ds.name or intent_entry,
+        "rel_offset": 0,
+        "original": record_bytes[header_len:].hex(),
+        "patched": new_record[header_len:].hex(),
+        "label": f"{ds.name or intent_entry}.drops[+append]",
+    }
+
+
 def serialize_dropset_record(ds: DropSet) -> bytes:
     """Encode a DropSet back to its on-disk bytes."""
     buf = bytearray()
