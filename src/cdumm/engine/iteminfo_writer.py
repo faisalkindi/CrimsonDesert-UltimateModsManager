@@ -582,12 +582,23 @@ def build_iteminfo_intent_change(
     # writer, which handles the common stack-size mods safely without a
     # full decode. Probe is fast (≤5 records, fails fast).
     if not _schema_supports_version(vanilla_body, vanilla_header):
-        logger.warning(
-            "iteminfo: default parser schema does not match this game "
-            "version (record decode fails) — using the relocated-layout "
-            "writer (CD 1.13: prefab/gvp moved to record tail; GitHub "
-            "#247). Stackable items decode + edit fully; other items are "
-            "carried verbatim with leading-field byte-patch.")
+        # INFO, not WARNING. On CD 1.13 -- which is what everyone is playing
+        # -- this is the NORMAL path, not a problem. Logging it as a warning
+        # meant every 1.13 user found a scary line in their bug report about
+        # a "schema mismatch" while their mod was applying perfectly. Srimk1
+        # reported exactly that on GitHub #259 after the storeinfo fix landed:
+        # his 14/14 shops applied, and he still filed a bug because of this
+        # line. A warning should mean "something needs your attention".
+        #
+        # The old wording was also stale: it claimed only stackable items
+        # decode and the rest are "carried verbatim". Since #285 the whole
+        # record decodes -- prefab data included -- so that caveat is simply
+        # untrue now, and repeating it would be telling users their mods are
+        # half-applied when they aren't.
+        logger.info(
+            "iteminfo: using the CD 1.13 record layout (the July patch moved "
+            "the prefab list to the end of the record). This is expected on "
+            "1.13 and every field decodes; nothing is being skipped.")
         return _build_change_relocated_layout(
             vanilla_body, vanilla_header, intents)
 
