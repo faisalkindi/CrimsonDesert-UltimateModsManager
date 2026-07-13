@@ -1,5 +1,7 @@
 """Changelog data and patch notes dialog for CDUMM."""
 
+import re
+
 from PySide6.QtWidgets import QTextBrowser
 
 from qfluentwidgets import (
@@ -1353,6 +1355,40 @@ CHANGELOG = [
 ]
 
 
+# A note usually opens with a bold headline ("<b>Sockets work again.</b>")
+# followed by several sentences of detail. Rendered as one run of text they
+# read as a single unbroken blob, which is what the dialog looked like.
+# Split the headline onto its own line and let the detail follow beneath it.
+_LEAD_IN = re.compile(r"^\s*<b>(?P<head>.*?)</b>\s*(?P<body>.*)$", re.DOTALL)
+
+
+def _render_note(note: str) -> str:
+    """One changelog note as a headline line + an indented detail line.
+
+    Falls back to the note verbatim when it has no bold lead-in, so notes
+    that are a single plain sentence still render normally.
+    """
+    m = _LEAD_IN.match(note)
+    if not m:
+        return f'<div style="margin-bottom: 20px;">{note}</div>'
+    head = m.group("head").strip()
+    body = m.group("body").strip()
+    # Qt's rich-text engine ignores margin-bottom on <li>, so the separation
+    # BETWEEN notes has to live on the last block INSIDE each one -- otherwise
+    # items end up packed tighter than the gap within a single item, which
+    # reads backwards. Keep the headline tight to its own detail, and put the
+    # breathing room after the detail.
+    out = (f'<div style="font-weight: 600; margin-top: 0; '
+           f'margin-bottom: 1px;">{head}</div>')
+    if body:
+        # No inline colour: the QTextBrowser stylesheet owns the theme-aware
+        # foreground, and an inline `color:` here is exactly what once made
+        # the notes unreadable in light mode.
+        out += (f'<div style="margin-top: 0; margin-bottom: 20px;">'
+                f'{body}</div>')
+    return out
+
+
 def get_changelog_html(versions: list[dict] | None = None) -> str:
     """Generate HTML changelog from version data.
 
@@ -1361,17 +1397,32 @@ def get_changelog_html(versions: list[dict] | None = None) -> str:
     stylesheet (dark text on light theme, light text on dark theme).
     Inline ``color:`` declarations override that stylesheet, which
     is what caused the unreadable washed-out bullets in light mode.
+
+    Spacing matters as much as content here: the notes are long, and with
+    3px between items and no line-height they rendered as one continuous
+    wall of text (reported 2026-07-12). Each note now gets a headline line,
+    a detail line, generous leading, and real separation from its neighbour.
     """
     entries = versions or CHANGELOG
     lines = ['<div style="font-family: Segoe UI, sans-serif;">']
-    for entry in entries:
+    for i, entry in enumerate(entries):
+        if i:
+            # Visual break between releases when showing the full history.
+            lines.append(
+                '<hr style="border: 0; border-top: 1px solid #3A4150; '
+                'margin: 26px 0 22px 0;" />')
         lines.append(
-            f'<h3 style="color: #D4A43C; margin-bottom: 4px;">'
+            f'<h3 style="color: #D4A43C; margin-top: 0; margin-bottom: 14px;">'
             f'v{entry["version"]} &mdash; {entry["date"]}</h3>'
         )
-        lines.append('<ul style="margin-top: 2px; margin-bottom: 16px;">')
+        # line-height is a Qt-rich-text-supported property and is what turns
+        # the dense paragraphs into something readable.
+        lines.append(
+            '<ul style="margin-top: 0; margin-bottom: 8px; '
+            'line-height: 150%;">')
         for note in entry["notes"]:
-            lines.append(f'<li style="margin-bottom: 3px;">{note}</li>')
+            lines.append(
+                f'<li style="line-height: 150%;">{_render_note(note)}</li>')
         lines.append('</ul>')
     lines.append('</div>')
     return "\n".join(lines)
@@ -1408,15 +1459,16 @@ class PatchNotesDialog(MessageBoxBase):
         from qfluentwidgets import isDarkTheme
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.setMinimumHeight(350)
         if isDarkTheme():
             browser.setStyleSheet(
                 "QTextBrowser { background: #1C2028; color: #E2E8F0; "
-                "border: 1px solid #2D3340; border-radius: 6px; padding: 8px; }")
+                "border: 1px solid #2D3340; border-radius: 6px; "
+                "padding: 16px; }")
         else:
             browser.setStyleSheet(
                 "QTextBrowser { background: #FAFBFC; color: #1A202C; "
-                "border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; }")
+                "border: 1px solid #E2E8F0; border-radius: 6px; "
+                "padding: 16px; }")
         if latest_only:
             browser.setHtml(get_latest_notes_html())
         else:
@@ -1427,4 +1479,25 @@ class PatchNotesDialog(MessageBoxBase):
         self.yesButton.setText(tr("main.close"))
         self.cancelButton.hide()
 
-        self.widget.setMinimumWidth(560)
+        # Scale with the window rather than sitting at a fixed 560x350 sliver.
+        # Same approach devCKVargas asked for on the preset picker (#184): a
+        # floor so it stays usable on a small window, a share of the parent so
+        # a big monitor gets a big dialog, and a ceiling so the lines don't
+        # stretch to an unreadable length on an ultrawide.
+        w, h = self._sized_to(parent)
+        self.widget.setMinimumWidth(w)
+        browser.setMinimumHeight(h)
+
+    @staticmethod
+    def _sized_to(parent) -> tuple[int, int]:
+        """(width, height) for the dialog, given the parent window.
+
+        Pure and static so the sizing rule is testable without a window.
+        """
+        floor_w, floor_h = 760, 460
+        ceil_w, ceil_h = 1040, 760
+        pw = parent.width() if parent is not None else 0
+        ph = parent.height() if parent is not None else 0
+        width = max(floor_w, min(ceil_w, int(pw * 0.66))) if pw else floor_w
+        height = max(floor_h, min(ceil_h, int(ph * 0.58))) if ph else floor_h
+        return width, height
