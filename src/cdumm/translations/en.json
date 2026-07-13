@@ -635,7 +635,7 @@
   "about.license_desc": "This software is free and open source. You may redistribute and/or modify it under the terms of the GPLv3 as published by the Free Software Foundation.",
   "about.credits": "Credits",
   "about.credits_dev": "Developed by kindiboy",
-  "about.credits_detail": "Built with PySide6 and QFluentWidgets. German translation by HaZt.",
+  "about.credits_detail": "Built with PySide6 and QFluentWidgets. Contributors: AgentKush (Game Data browser and in-app mod maker), DarthGigi (macOS support), Andy Hunne (Linux support), Evan Prohaska (iteminfo 1.13 decoding). Translations: German by HaZt, Portuguese by Carlos_G.",
   "nav.activity": "Activity",
   "nav.settings": "Settings",
   "nav.verify_state": "Verify State",

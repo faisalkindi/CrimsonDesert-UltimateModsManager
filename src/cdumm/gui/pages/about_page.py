@@ -214,6 +214,8 @@ class AboutPage(SmoothScrollArea):
         self._credits_dev = BodyLabel(tr("about.credits_dev"), credits_card)
         credits_layout.addWidget(self._credits_dev)
         self._credits_detail = CaptionLabel(tr("about.credits_detail"), credits_card)
+        # Contributor list is long; wrap it instead of clipping at the card edge.
+        self._credits_detail.setWordWrap(True)
         credits_layout.addWidget(self._credits_detail)
         self._layout.addWidget(credits_card)
 
