@@ -10,6 +10,7 @@ localization keys; localization is a follow-up.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
@@ -27,6 +28,8 @@ from qfluentwidgets import TableItemDelegate, isDarkTheme
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
 from cdumm.platform import IS_MACOS, IS_WINDOWS
+
+logger = logging.getLogger(__name__)
 
 
 class _GameIndexWorker(QObject):
@@ -394,6 +397,36 @@ def _shape_records(records: dict, schema, positions: dict | None = None
     return cols, rows, len(records), health
 
 
+def _locate_gear_stats(table: str, body: bytes, header: bytes) -> dict:
+    """``{item_key: [GearStat, ...]}`` for iteminfo, ``{}`` for anything else.
+
+    Gear stats (armour defence, weapon damage, enhancement values) live in
+    nested blocks that the display decoder flattens away, so they get no
+    grid columns and have to be edited through their own dialog. They come
+    from the native 1.13 decode — every stat at its exact path, nothing
+    scanned or inferred.
+
+    Best-effort: a table view must never fail because the stat locator did.
+    """
+    if table != "iteminfo":
+        return {}
+    try:
+        from cdumm.engine.gear_stat_view import locate_all_gear_stats
+        from cdumm.engine.iteminfo_native_parser import (
+            detect_iteminfo_layout, parse_iteminfo_from_bytes)
+        n = int.from_bytes(header[:2], "little")
+        starts = sorted(
+            int.from_bytes(header[2 + i * 8 + 4:2 + i * 8 + 8], "little")
+            for i in range(n))
+        items = parse_iteminfo_from_bytes(
+            body, starts, fields=detect_iteminfo_layout(body, starts))
+        return locate_all_gear_stats(
+            {it["key"]: it for it in items if "key" in it})
+    except Exception:  # noqa: BLE001 — never break the table view
+        logger.exception("gear-stat locator failed on %s", table)
+        return {}
+
+
 class _PreviewWorker(QObject):
     """Reads + decodes one asset off the UI thread so a large table or
     texture can never freeze the app. Emits exactly one ``ready`` dict
@@ -465,7 +498,9 @@ class _PreviewWorker(QObject):
                         recs, sem.get_schema(table), positions)
                     res.update(kind="table", table=table, cols=cols,
                                rows=rows, total=total, health=health,
-                               has_pos=bool(positions))
+                               has_pos=bool(positions),
+                               gear_stats=_locate_gear_stats(
+                                   table, body, header))
                     return
 
         # 2) no game folder → metadata only
@@ -1072,6 +1107,9 @@ class GameDataPage(ToolPageBase):
         # mod). Always connected; the handler no-ops unless the current
         # preview is an editable table (self._pv_table is set).
         self._pv_grid.itemChanged.connect(self._on_grid_cell_edited)
+        # Gear-stat editor: the button only appears when the selected row is
+        # an item that actually carries stats.
+        self._pv_grid.itemSelectionChanged.connect(self._update_gear_button)
         pv.addWidget(self._pv_grid, 1)
 
         # Image view for textures (DDS decoded to PNG). Hidden until selected.
@@ -1179,6 +1217,12 @@ class GameDataPage(ToolPageBase):
         self._mm_export_btn.setEnabled(False)
         self._mm_export_btn.clicked.connect(self._on_export_field_json)
         pv.addWidget(self._mm_export_btn)
+        # Gear stats sit in nested blocks that the grid flattens away, so
+        # they get their own dialog. Shown only for rows that have them.
+        self._mm_gear_btn = PushButton("Edit gear stats…", pane)
+        self._mm_gear_btn.setVisible(False)
+        self._mm_gear_btn.clicked.connect(self._on_edit_gear_stats)
+        pv.addWidget(self._mm_gear_btn)
         split.addWidget(pane)
 
         split.setStretchFactor(0, 3)
@@ -1197,6 +1241,12 @@ class GameDataPage(ToolPageBase):
         self._pv_schema = None
         self._mm_editable_cols: dict = {}        # grid col index -> FieldSpec
         self._pending_edits: dict = {}           # (key, field) -> FieldEdit
+        # Gear stats for the current table: {item_key: [GearStat, ...]}.
+        # Populated for iteminfo only; empty for every other table.
+        self._gear_stats: dict = {}
+        # Stat id -> name, read from the game's own statusinfo table. Loaded
+        # once, lazily, the first time the editor is opened.
+        self._stat_names: dict | None = None
         # stretch=1 makes this row absorb the page's spare vertical space
         # (the base layout's trailing addStretch() has factor 0, so it yields).
         root.insertWidget(root.count() - 1, split, 1)
@@ -1585,6 +1635,8 @@ class GameDataPage(ToolPageBase):
             self._pv_extract.setEnabled(True)
             self._enable_table_editing(
                 res.get("table", ""), res.get("cols", []))
+            self._gear_stats = res.get("gear_stats") or {}
+            self._update_gear_button()
             return
 
         if kind == "image":
@@ -1853,9 +1905,11 @@ class GameDataPage(ToolPageBase):
         self._pv_schema = None
         self._mm_editable_cols = {}
         self._pending_edits = {}
+        self._gear_stats = {}
         for w in (getattr(self, "_mm_status", None),
                   getattr(self, "_mm_make_btn", None),
-                  getattr(self, "_mm_export_btn", None)):
+                  getattr(self, "_mm_export_btn", None),
+                  getattr(self, "_mm_gear_btn", None)):
             if w is not None:
                 w.setVisible(False)
         grid = getattr(self, "_pv_grid", None)
@@ -2061,6 +2115,150 @@ class GameDataPage(ToolPageBase):
         self._flash_maker(
             f"Exported {len(self._pending_edits)} edit(s) to "
             f"{os.path.basename(path)}.", error=False)
+
+    # ── gear-stat editor ─────────────────────────────────────────────
+    def _selected_record_key(self) -> "int | None":
+        """Record key of the selected grid row (column 0), or None."""
+        grid = self._pv_grid
+        r = grid.currentRow()
+        if r < 0:
+            return None
+        cell = grid.item(r, 0)
+        try:
+            return int(str(cell.text()).strip()) if cell else None
+        except (ValueError, AttributeError):
+            return None
+
+    def _update_gear_button(self) -> None:
+        """Show 'Edit gear stats…' only for a row that actually has stats."""
+        btn = getattr(self, "_mm_gear_btn", None)
+        if btn is None:
+            return
+        key = self._selected_record_key()
+        btn.setVisible(key is not None and key in self._gear_stats)
+
+    def _get_stat_names(self) -> dict:
+        """Stat id -> name, from the game's own statusinfo table.
+
+        Read from the installed game rather than a hardcoded map, because a
+        hardcoded map is exactly what rots when the game patches. Falls back
+        to the CD 1.13 snapshot when the game isn't reachable.
+        """
+        if self._stat_names is None:
+            from cdumm.engine.stat_names import load_stat_names
+            try:
+                self._stat_names = load_stat_names()
+            except Exception:  # noqa: BLE001 — names are a nicety, not the data
+                logger.exception("could not read stat names from the game")
+                self._stat_names = {}
+        return self._stat_names
+
+    def _on_edit_gear_stats(self) -> None:
+        """Edit the selected item's gear stats, staging each change as a
+        Format 3 edit on that stat's exact nested path."""
+        key = self._selected_record_key()
+        stats = self._gear_stats.get(key) if key is not None else None
+        if not stats:
+            self._flash_maker("Select an item that has gear stats first.",
+                              error=True)
+            return
+        grid = self._pv_grid
+        name_cell = grid.item(grid.currentRow(), 1)
+        entry = name_cell.text() if name_cell else ""
+
+        edits = self._prompt_gear_stats(entry or f"item {key}", stats)
+        if not edits:
+            return
+        from cdumm.engine.format3_builder import FieldEdit
+        target = f"{self._pv_table}.pabgb"
+        for stat, new in edits:
+            # Keyed by path, so each tier is its own edit. The old editor
+            # keyed by stat id and could only ever write one of them.
+            self._pending_edits[(key, stat.path)] = FieldEdit(
+                target=target, entry=entry, key=key, field=stat.path,
+                new=new, old=stat.value)
+        self._refresh_maker_buttons()
+        self._flash_maker(
+            f"Staged {len(edits)} stat edit(s) for “{entry or key}”.",
+            error=False)
+
+    def _prompt_gear_stats(self, title: str, stats: list) -> list:
+        """Modal editor for one item's stats. Returns ``[(GearStat, new)]``
+        for the values the user actually changed.
+
+        Every occurrence gets its own row — base and each enhancement tier —
+        because they are separate values in the file. Editing one does not
+        touch the others, and the dialog says so rather than hiding it.
+        """
+        from PySide6.QtWidgets import (QAbstractItemView, QDialog,
+                                       QDialogButtonBox, QHeaderView, QLabel,
+                                       QTableWidget, QTableWidgetItem,
+                                       QVBoxLayout)
+        from cdumm.engine.stat_names import stat_label
+
+        names = self._get_stat_names()
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit gear stats — {title}")
+        dlg.resize(560, 460)
+        outer = QVBoxLayout(dlg)
+        blurb = QLabel(
+            "Each row is a separate value in the game file. “Base” is the "
+            "item as dropped; each “Enhance +N” is what it becomes at that "
+            "upgrade level.\n"
+            "Changing one row changes only that row — edit every tier if you "
+            "want the change to hold as the item is upgraded.")
+        blurb.setWordWrap(True)
+        outer.addWidget(blurb)
+
+        tbl = QTableWidget(len(stats), 3, dlg)
+        tbl.setHorizontalHeaderLabels(["Stat", "Where", "Value"])
+        tbl.verticalHeader().hide()
+        tbl.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for row, s in enumerate(stats):
+            for col, text in ((0, stat_label(s.stat, names)), (1, s.where)):
+                cell = QTableWidgetItem(text)
+                cell.setFlags(Qt.ItemFlag.ItemIsEnabled)   # read-only
+                tbl.setItem(row, col, cell)
+            val = QTableWidgetItem(str(s.value))
+            val.setData(Qt.ItemDataRole.UserRole, s.value)
+            tbl.setItem(row, 2, val)
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        outer.addWidget(tbl, 1)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        outer.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+
+        out = []
+        for row, s in enumerate(stats):
+            cell = tbl.item(row, 2)
+            text = (cell.text() if cell else "").strip()
+            if not text:
+                continue
+            try:
+                new = int(text)
+            except ValueError:
+                self._flash_maker(
+                    f"“{text}” isn't a whole number "
+                    f"({stat_label(s.stat, names)}, {s.where}) — skipped.",
+                    error=True)
+                continue
+            if not (-(2 ** 63) <= new < 2 ** 63):
+                self._flash_maker(
+                    f"{stat_label(s.stat, names)} ({s.where}) is out of "
+                    f"range — skipped.", error=True)
+                continue
+            if new != s.value:
+                out.append((s, new))
+        return out
 
     def _show_grid(self, cols: list, rows: list) -> None:
         self._pv_text.setVisible(False)
