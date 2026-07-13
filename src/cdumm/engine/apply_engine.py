@@ -360,6 +360,17 @@ def _rewrite_mount_error_with_mod_names(
     )
 
 
+def _normalize_target(name: str) -> str:
+    """Compare a Format 3 `target` with a Format 2 `game_file` fairly.
+
+    One ships ``gamedata/binary__/client/bin/iteminfo.pabgb`` and the other
+    ``gamedata/iteminfo.pabgb``. Comparing them raw silently never matches --
+    the exact path-vs-bare-name trap that made `match` select zero records
+    (#275) and array_append no-op (#278). Compare on the bare table name.
+    """
+    return (str(name or "").replace("\\", "/").rsplit("/", 1)[-1].lower())
+
+
 def aggregate_json_mods_into_synthetic_patches(
     db, overlay_priority_tiebreak: bool = True,
 ) -> tuple[dict, list[dict]]:
@@ -406,6 +417,51 @@ def aggregate_json_mods_into_synthetic_patches(
     per_mod_summary: list[dict] = []
 
     from pathlib import Path as _Path
+
+    # ── Byte offsets vs a rebuilt table (GitHub #293) ──────────────────
+    #
+    # A Format 3 mod does not patch bytes: CDUMM parses the whole table,
+    # edits records, and RE-SERIALIZES it. Records change size, so every
+    # byte offset after the first edited record MOVES.
+    #
+    # A Format 2 mod patches fixed offsets. Applied against a table that a
+    # Format 3 mod has rebuilt, those offsets no longer point where the
+    # author measured them -- the write lands in the middle of some other
+    # record. The result is a structurally invalid table and the game will
+    # not start. falobos76 hit exactly this (GitHub #191): pinapana's
+    # socket mods (Format 3, iteminfo) plus any of three offset mods that
+    # also patch iteminfo -> crash on startup. Each works alone.
+    #
+    # CDUMM already knew which tables get rebuilt -- `f3_target_files` was
+    # collected and then used ONLY for a display label. Nothing guarded on
+    # it. So: find them first, and refuse the unsafe combination rather
+    # than corrupt the file. An honest refusal beats a broken install the
+    # user only discovers when the game won't launch.
+    f3_rebuilt: dict[str, str] = {}      # {game_file: mod that rebuilds it}
+    for _mid, _mname, _src, _dis, _pri, _cv in rows:
+        _p = _Path(_src)
+        if not _p.exists():
+            continue
+        try:
+            _d = _json.loads(_p.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if _d.get("format") != 3:
+            continue
+        try:
+            from cdumm.engine.format3_handler import (
+                parse_format3_mod_targets as _pf3)
+            for _tgt, _ints in _pf3(_p):
+                if _ints:
+                    f3_rebuilt.setdefault(
+                        _normalize_target(_tgt), _mname or f"mod {_mid}")
+        except Exception:  # noqa: BLE001 - never break apply over the guard
+            logger.exception(
+                "aggregate: could not read Format 3 targets for mod %s; "
+                "the byte-offset guard cannot protect its tables", _mid)
+
+    refused_offset_mods: list[dict] = []
+
     for mod_id, mod_name, json_source, disabled_raw, priority, cv_raw in rows:
         jp_path = _Path(json_source)
         if not jp_path.exists():
@@ -464,6 +520,27 @@ def aggregate_json_mods_into_synthetic_patches(
         for patch in data.get("patches", []):
             game_file = patch.get("game_file")
             if not game_file:
+                continue
+
+            # GitHub #293: this mod patches fixed byte offsets in a table
+            # that a Format 3 mod rebuilds. Those offsets are stale the
+            # moment the table is re-serialized. Refuse rather than write
+            # into the middle of some other record and hand the user a game
+            # that won't start.
+            rebuilder = f3_rebuilt.get(_normalize_target(game_file))
+            if rebuilder:
+                logger.warning(
+                    "REFUSED: %r patches %s at fixed byte offsets, but %r "
+                    "rebuilds that table (Format 3). The offsets no longer "
+                    "point where the author measured them, so applying both "
+                    "would corrupt the file. Skipping the byte-offset mod.",
+                    mod_name, game_file, rebuilder)
+                refused_offset_mods.append({
+                    "mod_id": mod_id,
+                    "mod_name": mod_name,
+                    "game_file": game_file,
+                    "rebuilt_by": rebuilder,
+                })
                 continue
             all_changes = patch.get("changes", [])
             # Apply custom values BEFORE the disabled filter so both
@@ -560,6 +637,11 @@ def aggregate_json_mods_into_synthetic_patches(
             for gf, changes in aggregated.items()
         ],
     }
+    if refused_offset_mods:
+        # Carried so the apply path / bug report can name the combination
+        # instead of the user discovering it when the game won't launch.
+        # Consumers read "patches"; an extra key is inert to them.
+        synth_patch_data["_refused_offset_mods"] = refused_offset_mods
     return synth_patch_data, per_mod_summary
 
 
