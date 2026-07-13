@@ -524,25 +524,25 @@ def aggregate_json_mods_into_synthetic_patches(
 
             # GitHub #293: this mod patches fixed byte offsets in a table
             # that a Format 3 mod rebuilds. Those offsets are stale the
-            # moment the table is re-serialized. Refuse rather than write
-            # into the middle of some other record and hand the user a game
-            # that won't start.
+            # moment the table is re-serialized.
+            #
+            # #294 refused the mod outright here. #296 can do better --
+            # work out where those bytes MOVED to and rewrite the offsets --
+            # but that needs the rebuilt table, which doesn't exist yet:
+            # expand_format3_into_aggregated() runs later. So tag the
+            # changes now and re-anchor them once the rebuild is in hand
+            # (_reanchor_offsets_onto_rebuilds, below). Anything that can't
+            # be re-anchored is still refused, which is the whole point.
             rebuilder = f3_rebuilt.get(_normalize_target(game_file))
-            if rebuilder:
-                logger.warning(
-                    "REFUSED: %r patches %s at fixed byte offsets, but %r "
-                    "rebuilds that table (Format 3). The offsets no longer "
-                    "point where the author measured them, so applying both "
-                    "would corrupt the file. Skipping the byte-offset mod.",
-                    mod_name, game_file, rebuilder)
-                refused_offset_mods.append({
-                    "mod_id": mod_id,
-                    "mod_name": mod_name,
-                    "game_file": game_file,
-                    "rebuilt_by": rebuilder,
-                })
-                continue
             all_changes = patch.get("changes", [])
+            if rebuilder:
+                logger.info(
+                    "%r patches %s at fixed byte offsets and %r rebuilds "
+                    "that table (Format 3) — the offsets will be re-anchored "
+                    "onto the rebuilt table (#296).",
+                    mod_name, game_file, rebuilder)
+                all_changes = [
+                    {**c, "_needs_reanchor": rebuilder} for c in all_changes]
             # Apply custom values BEFORE the disabled filter so both
             # operations key by ORIGINAL patch index. Earlier this
             # ran custom_values on the already-filtered list, which
@@ -848,6 +848,10 @@ def _expand_format3_into_synth_data(
             "Format 3 aggregator: bare-basename normalisation failed "
             "(%s); falling through with original keys", _e_norm)
 
+    # The Format 3 rebuild now exists in `aggregated`, so the byte-offset
+    # changes tagged during aggregation can finally be moved onto it (#296).
+    _reanchor_offsets_onto_rebuilds(aggregated, synth_data)
+
     new_keys = set(aggregated.keys()) - pre_keys
     if new_keys or any(len(aggregated[k]) != len(
             next((p["changes"] for p in synth_data.get("patches", [])
@@ -860,6 +864,74 @@ def _expand_format3_into_synth_data(
              "changes": aggregated[gf]}
             for gf in aggregated
         ]
+
+
+def _reanchor_offsets_onto_rebuilds(
+    aggregated: dict[str, list[dict]], synth_data: dict,
+) -> None:
+    """Move byte-offset changes onto the table a Format 3 mod rebuilt.
+
+    GitHub #293. Without this, #296's re-anchor module is dead code: it was
+    shipped with its tests but never called, so falobos76's mods would still
+    be REFUSED by #294 rather than made to work. (Same mistake as #288 —
+    a translator nothing called. Wiring is not a detail.)
+
+    Refuses, rather than guesses, in the two cases that matter:
+      * the rebuild didn't materialise (Format 3 expansion failed) — the
+        offsets are still stale, so they must not be written;
+      * a change can't be re-anchored because the Format 3 mod changed the
+        very bytes it patches — the two mods genuinely disagree.
+    """
+    from cdumm.engine.offset_reanchor import (
+        reanchor_changes, whole_table_change,
+    )
+
+    refused: list[dict] = list(synth_data.get("_refused_offset_mods") or [])
+
+    def _refuse(change: dict, game_file: str, why: str) -> None:
+        refused.append({
+            "mod_id": change.get("_source_mod_id"),
+            "mod_name": change.get("_source_mod_name") or "a byte-offset mod",
+            "game_file": game_file,
+            "rebuilt_by": change.get("_needs_reanchor"),
+            "reason": why,
+        })
+
+    for game_file, changes in list(aggregated.items()):
+        tagged = [c for c in changes if c.get("_needs_reanchor")]
+        if not tagged:
+            continue
+
+        if whole_table_change(changes) is None:
+            # A Format 3 mod claims this table but produced no rebuilt body
+            # (extraction failed, zero supported intents, ...). The offsets
+            # are stale and there is nothing to re-anchor them onto.
+            logger.warning(
+                "REFUSED: %d byte-offset change(s) on %s — %r rebuilds this "
+                "table but its rebuild is not present, so the offsets cannot "
+                "be re-anchored and would write to the wrong bytes.",
+                len(tagged), game_file, tagged[0].get("_needs_reanchor"))
+            for c in tagged:
+                _refuse(c, game_file, "the Format 3 rebuild is missing")
+            aggregated[game_file] = [
+                c for c in changes if not c.get("_needs_reanchor")]
+            continue
+
+        kept, dropped = reanchor_changes(changes)
+        for c in dropped:
+            _refuse(c, game_file,
+                    c.get("_refuse_reason") or "could not be re-anchored")
+        moved = sum(1 for c in kept if "_reanchored_from" in c)
+        logger.info(
+            "offset re-anchor on %s: %d change(s) moved onto the rebuilt "
+            "table, %d refused", game_file, moved, len(dropped))
+        aggregated[game_file] = [
+            {k: v for k, v in c.items() if k != "_needs_reanchor"}
+            for c in kept
+        ]
+
+    if refused:
+        synth_data["_refused_offset_mods"] = refused
 
 
 def collect_enabled_json_targets(db) -> set[str]:

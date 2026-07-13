@@ -16,8 +16,17 @@ CDUMM already knew which tables get rebuilt -- `f3_target_files` was
 collected and then used ONLY for a display label. Nothing guarded on it.
 
 This is worse than the silent no-ops of #259/#275/#278/#285: it doesn't
-merely fail to apply, it CORRUPTS. So the bar is that the unsafe
-combination is refused, loudly, naming both mods.
+merely fail to apply, it CORRUPTS.
+
+#294 refused the combination outright. #296 does better: it works out where
+those bytes MOVED to and rewrites the offsets, so both mods apply. But the
+re-anchor needs the rebuilt table, which only exists after
+``expand_format3_into_aggregated`` runs -- so the aggregator TAGS the
+changes and ``_reanchor_offsets_onto_rebuilds`` moves them afterwards.
+
+The refusal is still there, as the fallback it should always have been:
+  * the Format 3 rebuild never materialised -> the offsets are still stale;
+  * a change can't be re-anchored -> the two mods disagree about those bytes.
 """
 from __future__ import annotations
 
@@ -26,7 +35,8 @@ import json
 import pytest
 
 from cdumm.engine.apply_engine import (
-    _normalize_target, aggregate_json_mods_into_synthetic_patches,
+    _normalize_target, _reanchor_offsets_onto_rebuilds,
+    aggregate_json_mods_into_synthetic_patches,
 )
 
 
@@ -75,10 +85,12 @@ FORMAT3_MOD = {
 }
 
 
-# ── the guard ───────────────────────────────────────────────────────────
+# ── stage 1: the aggregator TAGS, it no longer refuses ──────────────────
 
-def test_offset_mod_is_refused_when_a_format3_mod_rebuilds_the_table(
-        tmp_path):
+def test_the_offset_changes_are_tagged_for_reanchoring(tmp_path):
+    """They must survive aggregation. #294 dropped them here, which made
+    #296's re-anchor unreachable -- the module was shipped, tested, and
+    never called by anything."""
     db = _FakeDB([
         _row(1, "Armor Five Sockets", _write(tmp_path, "f3.json", FORMAT3_MOD)),
         _row(2, "Mission Efficiency x20",
@@ -87,29 +99,104 @@ def test_offset_mod_is_refused_when_a_format3_mod_rebuilds_the_table(
 
     synth, _summary = aggregate_json_mods_into_synthetic_patches(db)
 
-    # the offset mod contributed NOTHING -- it was refused, not applied
-    assert synth["patches"] == [], (
-        "a byte-offset patch was aggregated against a table that a Format 3 "
-        "mod rebuilds; its offsets are stale and this corrupts the file")
+    assert len(synth["patches"]) == 1
+    changes = synth["patches"][0]["changes"]
+    assert len(changes) == 1
+    assert changes[0]["_needs_reanchor"] == "Armor Five Sockets", (
+        "the change must carry WHICH mod rebuilds the table, so the "
+        "re-anchor stage can name it if it has to refuse")
+    assert not synth.get("_refused_offset_mods"), (
+        "nothing is refused yet -- that's decided after the rebuild exists")
 
-    refused = synth.get("_refused_offset_mods") or []
+
+# ── stage 2: re-anchor onto the rebuilt table (the fix) ─────────────────
+
+def _tagged(offset, original, patched):
+    return {"offset": offset, "original": original, "patched": patched,
+            "_needs_reanchor": "Armor Five Sockets",
+            "_source_mod_name": "Mission Efficiency x20"}
+
+
+def test_offsets_are_moved_onto_the_rebuilt_table(tmp_path):
+    """The whole point: both mods apply. A record before the patch grew by
+    4 bytes, so the patch sits 4 bytes later in the rebuilt table."""
+    vanilla = bytes(range(64)) * 4
+    rebuilt = vanilla[:16] + b"\xaa\xaa\xaa\xaa" + vanilla[16:]
+    off = 100
+    orig = vanilla[off:off + 2]
+
+    aggregated = {"gamedata/iteminfo.pabgb": [
+        {"offset": 0, "original": vanilla.hex(), "patched": rebuilt.hex()},
+        _tagged(off, orig.hex(), "ffff"),
+    ]}
+    synth: dict = {}
+
+    _reanchor_offsets_onto_rebuilds(aggregated, synth)
+
+    kept = aggregated["gamedata/iteminfo.pabgb"]
+    moved = [c for c in kept if "_reanchored_from" in c]
+    assert len(moved) == 1
+    assert moved[0]["offset"] == off + 4, "offset must follow the bytes"
+    assert moved[0]["_reanchored_from"] == off
+    assert rebuilt[moved[0]["offset"]:moved[0]["offset"] + 2] == orig, (
+        "the re-anchored offset must land on the author's exact bytes")
+    assert "_needs_reanchor" not in moved[0], "the tag is consumed"
+    assert not synth.get("_refused_offset_mods")
+
+
+def test_a_missing_rebuild_is_refused_not_written_blind(tmp_path):
+    """A Format 3 mod claimed this table but produced no rebuilt body (its
+    extraction failed). The offsets are STILL stale. Writing them would be
+    exactly the corruption #293 reported."""
+    aggregated = {"gamedata/iteminfo.pabgb": [_tagged(100, "6400", "ffff")]}
+    synth: dict = {}
+
+    _reanchor_offsets_onto_rebuilds(aggregated, synth)
+
+    assert aggregated["gamedata/iteminfo.pabgb"] == [], "not applied"
+    refused = synth["_refused_offset_mods"]
     assert len(refused) == 1
-    r = refused[0]
-    assert r["mod_name"] == "Mission Efficiency x20"
-    assert r["rebuilt_by"] == "Armor Five Sockets"   # names BOTH mods
-    assert "iteminfo" in r["game_file"]
+    assert refused[0]["mod_name"] == "Mission Efficiency x20"
+    assert refused[0]["rebuilt_by"] == "Armor Five Sockets"  # names BOTH
+    assert "rebuild is missing" in refused[0]["reason"]
 
 
-def test_the_format3_mod_itself_is_untouched(tmp_path):
-    """The guard drops the unsafe offset write, not the Format 3 mod."""
-    db = _FakeDB([
-        _row(1, "Armor Five Sockets", _write(tmp_path, "f3.json", FORMAT3_MOD)),
-        _row(2, "Offset Mod", _write(tmp_path, "off.json", OFFSET_MOD)),
-    ])
-    synth, _s = aggregate_json_mods_into_synthetic_patches(db)
-    # Format 3 mods never go through this byte aggregator at all -- they have
-    # no "patches" key. Nothing here should have swallowed them.
-    assert "_refused_offset_mods" in synth
+def test_a_change_the_format3_mod_overwrote_is_refused(tmp_path):
+    """Genuine disagreement: the Format 3 mod changed the very bytes the
+    offset mod patches. There is no right answer, so we don't invent one."""
+    vanilla = bytes(range(64)) * 4
+    off = 100
+    orig = vanilla[off:off + 2]
+    # the rebuild rewrites those same two bytes
+    rebuilt = vanilla[:off] + b"\x77\x77" + vanilla[off + 2:]
+
+    aggregated = {"gamedata/iteminfo.pabgb": [
+        {"offset": 0, "original": vanilla.hex(), "patched": rebuilt.hex()},
+        _tagged(off, orig.hex(), "ffff"),
+    ]}
+    synth: dict = {}
+
+    _reanchor_offsets_onto_rebuilds(aggregated, synth)
+
+    kept = aggregated["gamedata/iteminfo.pabgb"]
+    assert all("_needs_reanchor" not in c for c in kept)
+    assert len(kept) == 1, "only the Format 3 rebuild survives"
+    assert synth["_refused_offset_mods"], "the disagreement must be surfaced"
+
+
+def test_untagged_changes_are_left_completely_alone(tmp_path):
+    """No Format 3 mod on this table -> nothing to re-anchor -> don't touch
+    it. An over-eager fix is its own bug."""
+    aggregated = {"gamedata/skill.pabgb": [
+        {"offset": 100, "original": "00", "patched": "01"},
+    ]}
+    synth: dict = {}
+
+    _reanchor_offsets_onto_rebuilds(aggregated, synth)
+
+    assert aggregated["gamedata/skill.pabgb"] == [
+        {"offset": 100, "original": "00", "patched": "01"}]
+    assert not synth.get("_refused_offset_mods")
 
 
 # ── no false refusals ───────────────────────────────────────────────────

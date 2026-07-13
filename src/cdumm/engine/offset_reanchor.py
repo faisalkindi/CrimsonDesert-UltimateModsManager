@@ -150,6 +150,36 @@ def reanchor_offset(vanilla: bytes, rebuilt: bytes, offset: int,
         f"{_CTX_MAX}-byte context")
 
 
+def whole_table_change(changes: list[dict]) -> dict | None:
+    """The Format 3 rebuild among a file's changes, or None.
+
+    Not "the big one" -- a size threshold is a magic number that breaks on
+    small tables. The rebuild is the change at offset 0 that SPANS PAST
+    every other change: it replaces the whole body, so by definition it
+    covers them all.
+
+    Public because the apply path must know whether the rebuild actually
+    materialised: if a Format 3 mod was SUPPOSED to rebuild this table but
+    its expansion failed, the byte offsets are still stale and must be
+    refused (#294) rather than written blind.
+    """
+    def _olen(c) -> int:
+        return len(c.get("original") or "") // 2
+
+    others_end = max(
+        (int(c["offset"]) + _olen(c) for c in changes
+         if isinstance(c.get("offset"), int) and c.get("offset") != 0),
+        default=0)
+    if others_end == 0:
+        return None
+    for c in changes:
+        if c.get("offset") != 0 or not c.get("patched"):
+            continue
+        if _olen(c) > 0 and _olen(c) >= others_end:
+            return c
+    return None
+
+
 def reanchor_changes(changes: list[dict]) -> tuple[list[dict], list[dict]]:
     """Re-anchor a file's byte-offset changes onto its Format 3 rebuild.
 
@@ -161,26 +191,8 @@ def reanchor_changes(changes: list[dict]) -> tuple[list[dict], list[dict]]:
     Returns ``(kept, refused)``. ``kept`` carries rewritten offsets; the ones
     that could not be re-anchored are in ``refused`` and have been removed.
     """
-    def _olen(c) -> int:
-        return len(c.get("original") or "") // 2
-
-    # Which change is the Format 3 rebuild? Not "the big one" -- a size
-    # threshold is a magic number that breaks on small tables. The rebuild is
-    # the change at offset 0 that SPANS PAST every other change: it replaces
-    # the whole body, so by definition it covers them all.
-    others_end = max(
-        (int(c["offset"]) + _olen(c) for c in changes
-         if isinstance(c.get("offset"), int) and c.get("offset") != 0),
-        default=0)
-
-    whole = None
-    for c in changes:
-        if c.get("offset") != 0 or not c.get("patched"):
-            continue
-        if _olen(c) > 0 and _olen(c) >= others_end:
-            whole = c
-            break
-    if whole is None or others_end == 0:
+    whole = whole_table_change(changes)
+    if whole is None:
         return changes, []          # no rebuild, or nothing to re-anchor
 
     try:
