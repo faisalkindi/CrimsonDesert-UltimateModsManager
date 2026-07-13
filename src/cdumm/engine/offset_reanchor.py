@@ -6,10 +6,16 @@ instead of corrupting the game. This makes it WORK.
 THE PROBLEM
 
 A Format 3 mod doesn't patch bytes: CDUMM parses the whole table, edits
-records and re-serializes it. Records change size, so every byte offset
-after the first edited record moves. A Format 2 mod's fixed offsets then
-point into the middle of some other record -- the table is invalid and the
-game won't start.
+records and re-serializes it. Records change size, so every byte offset after
+the first edited record moves. A Format 2 mod's fixed offsets then point into
+the middle of some other record -- the table is invalid and the game won't
+start.
+
+Measured on falobos76's actual files (his socket mods + mod 2714 "Infinite
+Durability Only", against the live CD 1.13 iteminfo table):
+
+    231 of his byte-offset changes anchor correctly in vanilla
+    229 of those 231 would write to the WRONG bytes after the rebuild
 
 THE FIX, WITHOUT NEEDING TO UNDERSTAND THE TABLE
 
@@ -18,29 +24,29 @@ The Format 3 whole-table change already carries both halves:
     {"offset": 0, "original": <entire vanilla body>,
                   "patched":  <entire rebuilt body>}
 
-and a record the Format 3 mod did NOT touch is byte-identical in both. So we
-don't need the schema, the record index, or any per-table knowledge: take the
-CONTEXT around the old offset in vanilla and find it in the rebuilt table.
+and a record the Format 3 mod did NOT touch is byte-identical in both. So no
+schema, no record index, no per-table knowledge is needed: locate the patch by
+the bytes AROUND it.
 
-    vanilla:  ... [ctx_before][target bytes][ctx_after] ...
-    rebuilt:  ......... [ctx_before][target bytes][ctx_after] ...
-                        ^ new offset
+What makes this safe rather than clever:
 
-Three things make this safe rather than clever:
+  1. The patch's ``original`` must be present at the old offset in VANILLA,
+     or the mod was built for a different game version and was already broken
+     before any Format 3 mod touched anything.
+  2. Context is taken BEFORE the patch only. A window running past it would
+     break on a LATER edit and falsely refuse a patch that never moved.
+  3. Displacement is BOUNDED by the table's total size delta -- records only
+     shift because earlier records grew or shrank. Exactly one candidate may
+     fall inside that bound, or we refuse.
+  4. The ``original`` bytes must be present at the NEW offset. A remap that
+     doesn't land on the bytes the author measured is not a remap.
 
-  1. The window must match EXACTLY ONCE. Zero matches means the bytes moved
-     or changed; several means the anchor is ambiguous. Either way we refuse
-     -- we never "pick the first one".
-  2. The patch's own ``original`` bytes must be present at the old offset in
-     vanilla. If they aren't, the mod was built for a different game version
-     and was already broken before any of this.
-  3. The ``original`` bytes must be present at the NEW offset in rebuilt. A
-     remap that doesn't land on the bytes the author measured is not a remap.
+Refused, correctly: a record whose BYTES the Format 3 mod changed. The two
+mods genuinely disagree about them, and silently picking one is the same bug
+class as #259 / #275 / #278 / #285.
 
-If a Format 3 mod edited the very record a byte patch points into, the window
-won't match and we refuse THAT patch -- which is correct: the two mods really
-do disagree about those bytes, and silently picking one would be the same
-class of bug we keep fixing.
+NOT refused: a record that merely GREW while the patched bytes stayed put. A
+guard that over-fires is its own bug.
 """
 from __future__ import annotations
 
@@ -48,24 +54,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#: Bytes of context either side of the patched span used to locate it in the
-#: rebuilt table. Long enough to be unique in a multi-MB table; if it isn't,
-#: we widen rather than guess.
+#: Bytes of context BEFORE the patch used to locate it in the rebuilt table.
+#: Widened (never guessed) when a window is ambiguous.
 _CTX = 48
-_CTX_MAX = 512
+_CTX_MAX = 4096
 
 
 class ReanchorRefused(Exception):
     """This patch cannot be re-anchored safely. Do not apply it."""
 
 
-def _unique_find(hay: bytes, needle: bytes) -> int:
-    first = hay.find(needle)
-    if first < 0:
-        return -1
-    if hay.find(needle, first + 1) >= 0:
-        return -2          # ambiguous
-    return first
+def _find_all(hay: bytes, needle: bytes, limit: int = 64) -> list[int]:
+    out: list[int] = []
+    i = hay.find(needle)
+    while i >= 0 and len(out) < limit:
+        out.append(i)
+        i = hay.find(needle, i + 1)
+    return out
 
 
 def reanchor_offset(vanilla: bytes, rebuilt: bytes, offset: int,
@@ -80,65 +85,81 @@ def reanchor_offset(vanilla: bytes, rebuilt: bytes, offset: int,
             f"offset {offset} + {len(original)} bytes runs past the end of "
             f"the vanilla table ({len(vanilla)} bytes)")
 
-    # (2) does the patch even anchor in vanilla?
+    # (1) does the patch even anchor in vanilla?
     if vanilla[offset:end] != original:
         raise ReanchorRefused(
             f"the bytes at offset {offset} are not the ones this mod expects "
             f"(it was built for a different game version)")
 
-    # unchanged tables need no remap at all
     if vanilla == rebuilt:
         return offset
 
-    # Fast path: if everything UP TO the patch is byte-identical, no earlier
-    # record grew or shrank, so the offset cannot have moved. This is most
-    # patches, and it avoids searching a 6 MB buffer for them.
+    # Fast path: everything UP TO the patch is byte-identical, so no earlier
+    # record grew or shrank and the offset cannot have moved. Most patches
+    # take this path, and it avoids searching a 6 MB buffer for them.
     if len(rebuilt) >= end and vanilla[:end] == rebuilt[:end]:
         return offset
 
-    # Context is taken BEFORE the patch only, never after.
+    # (3) An offset cannot move further than the table's total size change.
     #
-    # A window that ran past the patch would break on a LATER edit: the bytes
-    # ahead of an untouched record can change, and then a patch that never
-    # moved at all gets falsely refused. Bytes BEFORE it cannot contain a
-    # later edit by definition -- and if an EARLIER edit lands inside that
-    # context, the window won't match and we refuse, which is exactly right:
-    # a Format 3 mod rewrote the very record this patch points into, so the
-    # two mods genuinely disagree.
+    # Game tables are repetitive -- item records look much like one another --
+    # so a context window legitimately matches in several places. The first
+    # version of this refused 76 of the 231 changes in falobos76's real mod
+    # for that reason alone: he'd have lost a third of his mod to "ambiguous".
+    #
+    # But displacement is bounded. Records shift only because earlier records
+    # changed size, so |new - old| can never exceed the whole table's size
+    # delta -- 160 bytes on his data, while the spurious matches are megabytes
+    # away. Use the bound to discriminate, and still require exactly ONE
+    # candidate inside it so we are never choosing between plausible answers.
+    bound = abs(len(rebuilt) - len(vanilla))
+
     ctx = _CTX
     while ctx <= _CTX_MAX:
         lo = max(0, offset - ctx)
-        window = vanilla[lo:end]
-        found = _unique_find(rebuilt, window)
-        if found >= 0:
-            new_off = found + (offset - lo)
-            # (3) the remap must land on the author's bytes
-            if rebuilt[new_off:new_off + len(original)] != original:
-                raise ReanchorRefused(
-                    "re-anchored offset does not carry the expected bytes")
-            return new_off
-        if found == -1:
+        window = vanilla[lo:end]          # (2) backward context only
+        hits = _find_all(rebuilt, window)
+
+        if not hits:
             raise ReanchorRefused(
                 "the surrounding bytes no longer exist in the rebuilt table "
                 "-- a Format 3 mod has changed this same record, so the two "
                 "mods genuinely disagree about it")
-        ctx *= 2           # ambiguous: widen the context, don't guess
+
+        cands = [h + (offset - lo) for h in hits]
+        near = [c for c in cands if abs(c - offset) <= bound]
+
+        if len(near) == 1:
+            new_off = near[0]
+            # (4) the remap must land on the author's bytes
+            if rebuilt[new_off:new_off + len(original)] != original:
+                raise ReanchorRefused(
+                    "the re-anchored offset does not carry the expected bytes")
+            return new_off
+
+        if not near and len(cands) == 1:
+            raise ReanchorRefused(
+                f"the only anchor is {abs(cands[0] - offset)} bytes away, but "
+                f"the table only changed size by {bound} -- refusing to move "
+                f"a patch further than the table can have shifted")
+
+        ctx *= 2          # still ambiguous: widen the context, never guess
 
     raise ReanchorRefused(
-        "could not find a unique anchor even with a 512-byte context")
+        f"could not find a single anchor within {bound} bytes even with a "
+        f"{_CTX_MAX}-byte context")
 
 
 def reanchor_changes(changes: list[dict]) -> tuple[list[dict], list[dict]]:
     """Re-anchor a file's byte-offset changes onto its Format 3 rebuild.
 
-    ``changes`` is one game_file's aggregated list, which may contain:
-      * a Format 3 whole-table change: offset 0, original == the whole
-        vanilla body, patched == the whole rebuilt body;
-      * byte-offset changes in vanilla coordinates.
+    ``changes`` is one game_file's aggregated list, which may contain a
+    Format 3 whole-table change (offset 0, original == the whole vanilla body,
+    patched == the whole rebuilt body) plus byte-offset changes in vanilla
+    coordinates.
 
-    Returns ``(changes, refused)``. Offsets are rewritten IN PLACE on the
-    returned list; ``refused`` holds the ones that could not be re-anchored,
-    already removed.
+    Returns ``(kept, refused)``. ``kept`` carries rewritten offsets; the ones
+    that could not be re-anchored are in ``refused`` and have been removed.
     """
     def _olen(c) -> int:
         return len(c.get("original") or "") // 2
@@ -146,8 +167,7 @@ def reanchor_changes(changes: list[dict]) -> tuple[list[dict], list[dict]]:
     # Which change is the Format 3 rebuild? Not "the big one" -- a size
     # threshold is a magic number that breaks on small tables. The rebuild is
     # the change at offset 0 that SPANS PAST every other change: it replaces
-    # the whole body, so by definition it covers them all. That's a statement
-    # about what the change IS, not about how big it happens to be.
+    # the whole body, so by definition it covers them all.
     others_end = max(
         (int(c["offset"]) + _olen(c) for c in changes
          if isinstance(c.get("offset"), int) and c.get("offset") != 0),
@@ -157,17 +177,17 @@ def reanchor_changes(changes: list[dict]) -> tuple[list[dict], list[dict]]:
     for c in changes:
         if c.get("offset") != 0 or not c.get("patched"):
             continue
-        if _olen(c) >= others_end and _olen(c) > 0:
+        if _olen(c) > 0 and _olen(c) >= others_end:
             whole = c
             break
     if whole is None or others_end == 0:
-        return changes, []           # no rebuild (or nothing to re-anchor)
+        return changes, []          # no rebuild, or nothing to re-anchor
 
     try:
         vanilla = bytes.fromhex(whole["original"])
         rebuilt = bytes.fromhex(whole["patched"])
     except ValueError:
-        return changes, []           # not hex we can read; leave it alone
+        return changes, []          # not hex we can read; leave it alone
 
     kept: list[dict] = []
     refused: list[dict] = []
@@ -200,9 +220,15 @@ def reanchor_changes(changes: list[dict]) -> tuple[list[dict], list[dict]]:
 
         if new_off != off:
             logger.info(
-                "offset re-anchored: %d -> %d (the table was rebuilt by a "
-                "Format 3 mod)", off, new_off)
+                "offset re-anchored: %d -> %d (a Format 3 mod rebuilt this "
+                "table)", off, new_off)
             c = {**c, "offset": new_off, "_reanchored_from": off}
         kept.append(c)
+
+    if refused:
+        logger.warning(
+            "offset re-anchor: %d of %d change(s) could not be moved onto the "
+            "rebuilt table and were dropped rather than applied to the wrong "
+            "bytes", len(refused), len(refused) + len(kept) - 1)
 
     return kept, refused
