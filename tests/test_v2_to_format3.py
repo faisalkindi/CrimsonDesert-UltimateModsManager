@@ -20,10 +20,18 @@ from cdumm.engine.v2_to_format3 import (
 from cdumm.semantic.parser import parse_pabgh_index
 from tests.fixture_loaders import has_vanilla113, load_vanilla113
 
-pytestmark = pytest.mark.skipif(
-    not (has_vanilla113("iteminfo.pabgb")
-         and has_vanilla113("iteminfo.pabgh")),
-    reason="CD 1.13 iteminfo fixture not present")
+#: `slow`: every test here parses and re-serializes the whole 6,508-record
+#: item table (11m42s for this file locally, and the marker's own docs warn
+#: 150-530s per test on CI hardware). The fast per-PR job has a 22-minute
+#: cap it has blown before -- which is exactly why this marker exists.
+#: Caught in QC: these were unmarked, and would have run in the fast job.
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not (has_vanilla113("iteminfo.pabgb")
+             and has_vanilla113("iteminfo.pabgh")),
+        reason="CD 1.13 iteminfo fixture not present"),
+]
 
 
 @pytest.fixture(scope="module")
