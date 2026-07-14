@@ -2450,11 +2450,19 @@ class ModsPage(QWidget):
             parent=self.window())
 
     def _on_convert_format3_failed(self, message: str) -> None:
-        from qfluentwidgets import InfoBar, InfoBarPosition
-        InfoBar.error(
-            title=tr("mod_context.convert_format3_failed_title"),
-            content=message, duration=-1,      # sticky: the user must read it
-            position=InfoBarPosition.TOP, parent=self.window())
+        # A conversion failure carries a multi-line reason the user MUST read:
+        # which change couldn't be named to an item+field, or that the mod is
+        # stale for this game version. A transient InfoBar toast rendered that
+        # blank on falobos76's setup (#191: "white and transparent") -- a
+        # paragraph of must-read text doesn't belong in a toast, and a modal
+        # dialog paints reliably where the translucent InfoBar didn't. Guard
+        # against an empty message so the dialog is never itself blank.
+        from qfluentwidgets import MessageBox
+        title = tr("mod_context.convert_format3_failed_title")
+        text = (message or "").strip() or title
+        box = MessageBox(title, text, self.window())
+        box.cancelButton.hide()
+        box.exec()
 
     def _ctx_open_nexus(self, nexus_id: int) -> None:
         import webbrowser
