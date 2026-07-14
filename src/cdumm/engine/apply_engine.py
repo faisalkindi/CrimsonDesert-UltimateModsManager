@@ -866,6 +866,100 @@ def _expand_format3_into_synth_data(
         ]
 
 
+def _rebuilt_header_for(
+    aggregated: dict[str, list[dict]], vanilla_header: bytes,
+) -> bytes:
+    """The .pabgh index that frames the REBUILT body.
+
+    When a Format 3 mod grows records, the whole-table writer emits a companion
+    change that replaces the whole .pabgh (offset 0, ``original`` == the vanilla
+    header). That rebuilt header is what frames the rebuilt body; vanilla's no
+    longer does. Find it by its vanilla-header ``original`` -- which is unique
+    across the whole apply set, so no path-normalisation guessing is needed --
+    and fall back to vanilla when no record changed size (no companion emitted).
+    """
+    vh = vanilla_header.hex()
+    for changes in aggregated.values():
+        for c in changes:
+            if (c.get("offset") == 0 and c.get("original") == vh
+                    and c.get("patched")):
+                try:
+                    return bytes.fromhex(c["patched"])
+                except ValueError:
+                    pass
+    return vanilla_header
+
+
+def _rescue_refused_as_fields(
+    whole: dict, dropped: list[dict],
+    aggregated: dict[str, list[dict]], game_file: str,
+) -> bytes | None:
+    """Name refused byte offsets by item+field and fold them into the rebuild.
+
+    GitHub #50 (falobos76). #296 re-anchors offsets that merely MOVED; it
+    refuses the ones whose record a Format 3 mod rewrote, because a byte offset
+    can no longer say which item it meant once the surrounding bytes are gone.
+    But CDUMM can: each refused change's ``original`` still matches VANILLA, so
+    resolve it to (item, field) there -- the only table it anchors in -- and
+    re-apply it as a field edit on top of the rebuilt table. Durability and
+    sockets on the same armor then both land.
+
+    All-or-nothing: if any refused change can't be named (opaque record, lands
+    between fields, non-scalar, or built for another game version), the whole
+    rescue is abandoned and the caller keeps them refused. A partial rescue
+    would silently drop what it couldn't name -- the #285-class guess this
+    project refuses to make.
+
+    Returns the new rebuilt-body bytes on success, or None to keep refusing.
+    """
+    f3 = whole.get("_f3_rebuild") or {}
+    if f3.get("table") != "iteminfo":
+        return None                 # only iteminfo has a v2->field decoder
+    header_hex = f3.get("header")
+    if not header_hex:
+        return None
+    try:
+        vanilla_body = bytes.fromhex(whole["original"])
+        rebuilt_body = bytes.fromhex(whole["patched"])
+        vanilla_header = bytes.fromhex(header_hex)
+    except (KeyError, ValueError):
+        return None
+
+    from cdumm.engine.v2_to_format3 import ConversionRefused, convert_iteminfo
+    try:
+        rep = convert_iteminfo(dropped, vanilla_body, vanilla_header)
+    except ConversionRefused:
+        return None                 # stale for this version -> can't name it
+    if rep.unconverted or not rep.intents:
+        return None                 # couldn't name every one -> all-or-nothing
+
+    from cdumm.engine.format3_handler import Format3Intent
+    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
+    intents = [
+        Format3Intent(entry=i["entry"], key=i["key"], field=i["field"],
+                      op=i["op"], new=i["new"], old=None)
+        for i in rep.intents
+    ]
+
+    # The field edits go ON TOP of the rebuilt body, which the socket mod's
+    # rebuilt .pabgh frames (a socket add moves record offsets), not vanilla's.
+    rebuilt_header = _rebuilt_header_for(aggregated, vanilla_header)
+    change = build_iteminfo_intent_change(
+        rebuilt_body, intents, vanilla_header=rebuilt_header)
+    if change is None:
+        return None
+    new_body = bytes.fromhex(change["patched"])
+
+    # A rescued field edit is a fixed-size scalar `set`; it must NOT resize a
+    # record. If it did, the companion .pabgh offsets and the already
+    # re-anchored offsets would move under us -- refuse the fold rather than
+    # corrupt them. (The converter only emits scalar sets, so this is a guard
+    # against a future non-scalar path, not an expected branch.)
+    if len(new_body) != len(rebuilt_body) or change.get("_pabgh_companion"):
+        return None
+    return new_body
+
+
 def _reanchor_offsets_onto_rebuilds(
     aggregated: dict[str, list[dict]], synth_data: dict,
 ) -> None:
@@ -902,7 +996,8 @@ def _reanchor_offsets_onto_rebuilds(
         if not tagged:
             continue
 
-        if whole_table_change(changes) is None:
+        whole = whole_table_change(changes)
+        if whole is None:
             # A Format 3 mod claims this table but produced no rebuilt body
             # (extraction failed, zero supported intents, ...). The offsets
             # are stale and there is nothing to re-anchor them onto.
@@ -918,6 +1013,27 @@ def _reanchor_offsets_onto_rebuilds(
             continue
 
         kept, dropped = reanchor_changes(changes)
+
+        # #50: a REFUSED offset means a Format 3 mod rewrote that record, so
+        # the offset no longer says which item it meant -- but its `original`
+        # still matches vanilla, where CDUMM can name the item and field and
+        # re-apply the change as a field edit on top of the rebuilt table
+        # instead of dropping it. Mutating `whole["patched"]` in place is safe:
+        # `whole` is the same object reanchor kept, and the rescue is a
+        # fixed-size scalar fold, so the offsets already re-anchored onto it do
+        # not move.
+        if dropped:
+            rescued = _rescue_refused_as_fields(
+                whole, dropped, aggregated, game_file)
+            if rescued is not None:
+                whole["patched"] = rescued.hex()
+                logger.info(
+                    "offset re-anchor on %s: %d refused change(s) rescued as "
+                    "field edits folded into the rebuilt table (both the "
+                    "Format 3 mod and the byte-offset mod now apply)",
+                    game_file, len(dropped))
+                dropped = []
+
         for c in dropped:
             _refuse(c, game_file,
                     c.get("_refuse_reason") or "could not be re-anchored")
