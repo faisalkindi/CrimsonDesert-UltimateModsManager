@@ -21,7 +21,6 @@ Marked ``slow`` (see the module-level ``pytestmark`` below).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -138,7 +137,6 @@ def test_name_corruption_refuses_rebuild_safely():
     untouched. Before the pre-flight existed, the rebuild emitted a
     table 2 bytes off vanilla in this scenario, and the old test
     only asserted self-consistency, so it never noticed."""
-    import struct
     from cdumm.engine.iteminfo_native_parser import parse_first_record_size
     from cdumm.engine.json_patch_handler import _apply_byte_patches
 

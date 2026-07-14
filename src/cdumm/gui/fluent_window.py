@@ -10,7 +10,6 @@ from cdumm.platform import (
     IS_WINDOWS,
     app_data_dir as _resolve_app_data_dir,
     open_path,
-    subprocess_no_window_kwargs,
     worker_command,
 )
 
@@ -1726,7 +1725,7 @@ class CdummWindow(FluentWindow):
         if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
             from qfluentwidgets import (
                 MessageBoxBase, SubtitleLabel, BodyLabel, CaptionLabel,
-                CardWidget, StrongBodyLabel, setCustomStyleSheet,
+                CardWidget, StrongBodyLabel,
             )
             from PySide6.QtGui import QFont
             from PySide6.QtWidgets import QVBoxLayout
@@ -2478,7 +2477,8 @@ class CdummWindow(FluentWindow):
         # so a concurrent ``--nxm`` launcher that appends in the window
         # between our read and unlink doesn't have its URL dropped on
         # the floor. ``os.replace`` is atomic on both Windows and POSIX.
-        import os, time as _time
+        import os
+        import time as _time
         processing = self._app_data_dir / f".pending_nxm.processing.{os.getpid()}.{int(_time.time() * 1000)}"
         try:
             os.replace(pending, processing)
@@ -2725,7 +2725,9 @@ class CdummWindow(FluentWindow):
         import threading
 
         def _worker():
-            import tempfile, urllib.request, urllib.parse
+            import tempfile
+            import urllib.request
+            import urllib.parse
             from cdumm.engine.nexus_api import (
                 get_download_link, NexusPremiumRequired,
                 NexusAuthError, NexusRateLimited,
@@ -3881,7 +3883,7 @@ class CdummWindow(FluentWindow):
                             with zipfile.ZipFile(bp) as zf:
                                 for n in zf.namelist():
                                     if n.lower().endswith('.json'):
-                                        import tempfile, json as _jj
+                                        import tempfile
                                         tmp_j = Path(tempfile.mktemp(suffix='.json'))
                                         tmp_j.write_bytes(zf.read(n))
                                         json_data = detect_json_patch(tmp_j)
@@ -4171,7 +4173,7 @@ class CdummWindow(FluentWindow):
                     MessageBoxBase, SingleDirectionScrollArea,
                     SubtitleLabel, CaptionLabel,
                 )
-                from PySide6.QtWidgets import QRadioButton, QFrame
+                from PySide6.QtWidgets import QRadioButton
                 from PySide6.QtGui import QFont as _QF
 
                 class _VariantDialog(MessageBoxBase):
@@ -4254,7 +4256,8 @@ class CdummWindow(FluentWindow):
         # ── 5. Preset picker ──────────────────────────────────────────
         try:
             from cdumm.gui.preset_picker import find_json_presets, PresetPickerDialog
-            import tempfile, zipfile
+            import tempfile
+            import zipfile
             check_path = path
             tmp_extract = None
             if path.is_file() and path.suffix.lower() in ('.zip', '.7z'):
@@ -4956,7 +4959,8 @@ class CdummWindow(FluentWindow):
                 dialog = TogglePickerDialog(json_data, self)
                 if dialog.exec() and dialog.selected_data:
                     # Write filtered JSON to temp
-                    import tempfile, json
+                    import tempfile
+                    import json
                     tmp = tempfile.NamedTemporaryFile(
                         suffix=".json", prefix="cdumm_toggle_",
                         delete=False, mode="w", encoding="utf-8")
@@ -6757,7 +6761,7 @@ class CdummWindow(FluentWindow):
                 title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             self._hide_for_game_launch()
-        except Exception as e:
+        except Exception:
             if steam:
                 # Could not reach Steam. Spawning the bare exe here
                 # would silently fail under Themida + Denuvo and the
@@ -8027,7 +8031,8 @@ class CdummWindow(FluentWindow):
         """
         if not self._db or not self._game_dir or not self._vanilla_dir:
             return
-        import shutil, os
+        import shutil
+        import os
         from cdumm.engine.json_target_scanner import enabled_json_target_archives
         MAX_SYNC_SIZE = 10 * 1024 * 1024  # 10MB, PAMT/PAPGT/PATHC are all <14MB
         try:

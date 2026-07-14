@@ -488,7 +488,6 @@ def test_override_file_with_utf8_bom_loads_correctly(tmp_path, monkeypatch):
     silently disabled overrides.
     """
     import json
-    import logging
     from cdumm.semantic import parser as parser_mod
 
     schema_path = tmp_path / "pabgb_complete_schema.json"

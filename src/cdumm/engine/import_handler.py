@@ -462,7 +462,7 @@ import json
 import re
 
 from cdumm.engine.crimson_browser_handler import detect_crimson_browser, convert_to_paz_mod
-from cdumm.engine.json_patch_handler import detect_json_patch, convert_json_patch_to_paz, import_json_fast
+from cdumm.engine.json_patch_handler import detect_json_patch, import_json_fast
 from cdumm.engine.texture_mod_handler import detect_texture_mod, convert_texture_mod
 
 # Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt, meta/0.pathc
@@ -1196,8 +1196,7 @@ def _try_paz_entry_import(
 
     Returns True if successful, False to fall back to byte-level deltas.
     """
-    from cdumm.archive.paz_parse import parse_pamt
-    from cdumm.archive.paz_crypto import lz4_decompress, decrypt
+    from cdumm.archive.paz_crypto import lz4_decompress
     from cdumm.engine.delta_engine import save_entry_delta
     from cdumm.engine.json_patch_handler import _extract_from_paz
     import sys as _sys

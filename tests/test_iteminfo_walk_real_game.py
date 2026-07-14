@@ -356,7 +356,6 @@ def test_vehicleinfo_horse_canCallInSafeZone_reads_as_one():
     Horse=1 in vanilla"). Verifies schema correctly identifies
     Horse's flag value.
     """
-    import struct
     paths = _find_vanilla_pair("vehicleinfo")
     if paths is None:
         pytest.skip("vehicleinfo fixture not available")

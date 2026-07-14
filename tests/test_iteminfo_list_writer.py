@@ -10,7 +10,6 @@ can intercept these intents, apply them in-memory, and produce the
 new bytes for the apply pipeline.
 """
 from __future__ import annotations
-from pathlib import Path
 
 import pytest
 

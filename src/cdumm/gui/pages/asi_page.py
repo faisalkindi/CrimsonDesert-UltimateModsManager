@@ -8,7 +8,6 @@ right-click context menu, and Ctrl+Click/Shift+Click selection.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from pathlib import Path
 

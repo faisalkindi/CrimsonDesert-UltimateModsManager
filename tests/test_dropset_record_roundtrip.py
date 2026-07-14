@@ -12,7 +12,6 @@ from the upstream layout and the mods won't apply correctly.
 """
 from __future__ import annotations
 import struct
-from pathlib import Path
 
 import pytest
 

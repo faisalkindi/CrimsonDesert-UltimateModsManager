@@ -222,7 +222,8 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
     # Per-mod timing instrumentation. ``perf_counter`` for accuracy
     # (monotonic, sub-microsecond resolution). Emitted via stderr so
     # the GUI's _on_stderr handler logs it without parsing as JSON.
-    import time as _time, sys as _sys
+    import time as _time
+    import sys as _sys
     batch_start = _time.perf_counter()
     timings: list[tuple[str, float, str]] = []  # (mod_name, duration_s, fmt)
 
@@ -395,8 +396,7 @@ def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
     from cdumm.engine.snapshot_manager import SnapshotManager
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
-        import_from_json_patch, import_from_bsdiff, import_from_script,
-        import_from_rar, import_from_natt_format_3, set_import_progress_cb,
+        import_from_json_patch, import_from_rar, import_from_natt_format_3, set_import_progress_cb,
     )
 
     game_dir = Path(game_dir)
@@ -485,7 +485,6 @@ def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
 
 def _run_apply(game_dir: str, vanilla_dir: str, db_path: str,
                force_outdated: str = "0") -> None:
-    from cdumm.storage.database import Database
     from cdumm.engine.apply_engine import ApplyWorker
 
     worker = ApplyWorker(
@@ -510,7 +509,6 @@ def _run_apply(game_dir: str, vanilla_dir: str, db_path: str,
 # ── Revert ────────────────────────────────────────────────────────────
 
 def _run_revert(game_dir: str, vanilla_dir: str, db_path: str) -> None:
-    from cdumm.storage.database import Database
     from cdumm.engine.apply_engine import RevertWorker
 
     worker = RevertWorker(

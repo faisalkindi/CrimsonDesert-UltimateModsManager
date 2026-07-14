@@ -7,7 +7,6 @@ Mirrors test_dropset_apply_end_to_end but for iteminfo's whole-
 table writer path.
 """
 from __future__ import annotations
-from pathlib import Path
 
 import pytest
 

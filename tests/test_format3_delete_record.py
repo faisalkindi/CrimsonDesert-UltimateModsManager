@@ -14,7 +14,6 @@ import pytest
 
 from cdumm.engine.format3_apply import _build_record_ops_change_for_target
 from cdumm.engine.format3_handler import (
-    Format3Intent,
     _parse_intents_block,
     apply_delete_to_pabgb_bytes,
     validate_intents,

@@ -32,7 +32,6 @@ Single-line wire-up in apply_engine.py is the next commit.
 """
 from __future__ import annotations
 
-import json
 import logging
 import struct
 from pathlib import Path
@@ -44,7 +43,6 @@ from typing import Callable
 from cdumm.engine.iteminfo_writer import _resolve_field_name
 from cdumm.engine.field_schema import (
     DTYPE_TABLE,
-    FieldSchemaEntry,
     load_field_schema,
     locate_field,
 )
@@ -52,7 +50,6 @@ from cdumm.engine.format3_handler import (
     Format3Intent,
     _snake_to_camel,
     _table_name_from_target,
-    parse_format3_mod,
     parse_format3_mod_targets,
     validate_intents,
 )

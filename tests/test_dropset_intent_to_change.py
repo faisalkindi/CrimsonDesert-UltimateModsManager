@@ -10,7 +10,6 @@ dropsetinfo.pabgb. CDUMM's primitive-only writer skips them with a
 """
 from __future__ import annotations
 import struct
-from pathlib import Path
 
 import pytest
 

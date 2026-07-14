@@ -6,7 +6,6 @@ Format 3 mods targeting skill.pabgb with `_useResourceStatList`
 were skipped at validation time. Now writable.
 """
 from __future__ import annotations
-from pathlib import Path
 
 import pytest
 

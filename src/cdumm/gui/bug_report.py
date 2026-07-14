@@ -10,14 +10,11 @@ from pathlib import Path
 
 from cdumm.platform import IS_WINDOWS
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
     QTextEdit,
-    QVBoxLayout,
-    QWidget,
 )
 
 from qfluentwidgets import (

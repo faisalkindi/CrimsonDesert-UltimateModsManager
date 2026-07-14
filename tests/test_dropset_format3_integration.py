@@ -7,8 +7,6 @@ CDUMM. Without this, the writer is reachable from tests but not
 from real mod imports.
 """
 from __future__ import annotations
-import struct
-from pathlib import Path
 
 import pytest
 

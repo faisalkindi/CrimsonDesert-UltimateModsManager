@@ -18,7 +18,6 @@ from qfluentwidgets import (
     GroupHeaderCardWidget,
     HyperlinkButton,
     IconInfoBadge,
-    InfoBadge,
     InfoBar,
     InfoBarPosition,
     InfoLevel,

@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixture_loaders import MOD_FIXTURE_HOWTO, real_mod_fixture
+from tests.fixture_loaders import real_mod_fixture
 
 
 def _write(p: Path, body: dict) -> Path:

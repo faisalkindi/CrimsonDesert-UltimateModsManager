@@ -122,7 +122,6 @@ class AboutPage(SmoothScrollArea):
         # ``_update_tag`` tracks which state the label is in so a
         # language switch can re-render the right text (None = up to date).
         self._update_tag: str | None = None
-        from PySide6.QtGui import QFont as _QF
         self._update_status = StrongBodyLabel(tr("about.up_to_date"), header_card)
         usf = self._update_status.font()
         usf.setPixelSize(13)

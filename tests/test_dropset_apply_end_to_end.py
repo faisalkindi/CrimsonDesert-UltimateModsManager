@@ -8,8 +8,6 @@ cumulative-shift cascade work together for variable-length list
 rewriting.
 """
 from __future__ import annotations
-import json
-import struct
 from pathlib import Path
 
 import pytest

@@ -7,7 +7,6 @@ drag-drop import overlay, and search/filter controls.
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QObject, Qt, Signal
@@ -1484,7 +1483,7 @@ class ModsPage(QWidget):
             if sp and sp.exists() and sp.is_dir():
                 try:
                     from cdumm.gui.preset_picker import (
-                        find_json_presets, find_folder_variants)
+                        find_json_presets)
                     presets = find_json_presets(sp)
                     leaves = _flatten_folder_variants(sp)
                     # Folder-variant branch — only when there are no JSON

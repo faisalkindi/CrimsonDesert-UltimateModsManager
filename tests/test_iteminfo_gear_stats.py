@@ -21,7 +21,6 @@ that. Both are accepted on both sides now, and pinned here.
 """
 from __future__ import annotations
 
-import pytest
 
 from tests.fixture_loaders import load_vanilla113
 

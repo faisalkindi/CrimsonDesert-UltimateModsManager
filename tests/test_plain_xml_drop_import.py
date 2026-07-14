@@ -12,12 +12,11 @@ Source: RockNBeard's Nexus comment 2026-04-30 about "Standard
 Gamepad Layout" mod 1489 (file 1777549676).
 """
 from __future__ import annotations
-from pathlib import Path
 import zipfile
 
 import pytest
 
-from tests.fixture_loaders import MOD_FIXTURE_HOWTO, real_mod_fixture
+from tests.fixture_loaders import real_mod_fixture
 
 
 def _fake_pamt_entry(target_name: str):

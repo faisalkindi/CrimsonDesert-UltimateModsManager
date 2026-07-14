@@ -11,14 +11,12 @@ import math
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEventLoop, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QEasingCurve, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -424,7 +422,7 @@ class ToolPageBase(SmoothScrollArea):
         desc_color = "#8B95A5" if isDarkTheme() else "#6B7585"
         from qfluentwidgets import setCustomStyleSheet
         setCustomStyleSheet(self._desc_label,
-            f"BodyLabel{{color:#6B7585;}}", f"BodyLabel{{color:#8B95A5;}}")
+            "BodyLabel{color:#6B7585;}", "BodyLabel{color:#8B95A5;}")
 
     def _apply_run_btn_style(self) -> None:
         from qfluentwidgets import setCustomStyleSheet
@@ -648,7 +646,6 @@ class VerifyStatePage(ToolPageBase):
         self._set_running(True)
 
         # Run in a separate process via QProcess (no GIL contention)
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 
@@ -850,7 +847,6 @@ class CheckModsPage(ToolPageBase):
         self._clear_results()
         self._set_running(True)
 
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 
@@ -1111,7 +1107,6 @@ class FindCulpritPage(ToolPageBase):
 
     def _refresh_press_play_status(self) -> None:
         """Detect if Press Play ASI is installed and enabled."""
-        from qfluentwidgets import setCustomStyleSheet
         if not self._game_dir:
             return
 
@@ -1489,7 +1484,6 @@ class InspectModPage(ToolPageBase):
         filename = Path(path).name
         self._set_status(tr("tools.inspect.analyzing", name=filename))
 
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 
@@ -1579,7 +1573,6 @@ class InspectModPage(ToolPageBase):
 
     def _add_diagnostic_card(self, report: str, filename: str) -> None:
         """Parse diagnostic report into individual result cards."""
-        from PySide6.QtWidgets import QApplication, QHBoxLayout
         from qfluentwidgets import PushButton, InfoBar, InfoBarPosition
 
         # Parse the report into sections and show as individual cards
@@ -1786,7 +1779,6 @@ class FixEverythingPage(ToolPageBase):
         qbf.setWeight(QFont.Weight.Bold)
         self._quick_btn.setFont(qbf)
         def _style_quick_btn():
-            from qfluentwidgets import setCustomStyleSheet
             from cdumm.gui.accent import accent_shades, accent_fg
             base, hover, pressed = accent_shades()
             fg = accent_fg()
@@ -1848,7 +1840,6 @@ class FixEverythingPage(ToolPageBase):
         fbf.setWeight(QFont.Weight.Bold)
         self._full_btn.setFont(fbf)
         def _style_full_btn():
-            from qfluentwidgets import setCustomStyleSheet
             from cdumm.gui.accent import accent_shades, accent_fg
             base, hover, pressed = accent_shades()
             fg = accent_fg()
@@ -1939,7 +1930,6 @@ class FixEverythingPage(ToolPageBase):
         self._clear_results()
         self._set_running(True)
 
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 

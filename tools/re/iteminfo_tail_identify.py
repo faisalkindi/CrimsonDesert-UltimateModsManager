@@ -7,8 +7,8 @@ hashes in the 1.13 tail element's first list. That settles identity
 without guessing from the shape.
 """
 from __future__ import annotations
-import struct, sys
-from collections import Counter
+import struct
+import sys
 
 sys.path.insert(0, "src"); sys.path.insert(0, ".")
 from tests.fixture_loaders import load_vanilla110, load_vanilla113

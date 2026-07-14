@@ -14,7 +14,6 @@ and silently skips. Net effect: primitive intent is lost.
 Test pins the FAILURE mode so the fix is verifiable.
 """
 from __future__ import annotations
-from pathlib import Path
 
 import pytest
 

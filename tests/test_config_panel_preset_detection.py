@@ -1,7 +1,7 @@
 """Tests for detect_preset_groups in config_panel."""
 from cdumm.gui.components.config_panel import detect_preset_groups
 
-from tests.fixture_loaders import MOD_FIXTURE_HOWTO, real_mod_fixture
+from tests.fixture_loaders import real_mod_fixture
 
 
 def _patches(*labels):
@@ -70,7 +70,6 @@ def test_real_mod_1103_and_regen():
     must be detected as an 11-preset selector with 531 patches per tag.
     Skips if the file isn't on disk (e.g. CI)."""
     import json
-    from pathlib import Path
     p = real_mod_fixture("JSON Stamina - Spirit Adjuster And Regen-1103-1-4-1777707454/Stamina Spirit Adjuster + Regen.json")
     if not p.exists():
         import pytest

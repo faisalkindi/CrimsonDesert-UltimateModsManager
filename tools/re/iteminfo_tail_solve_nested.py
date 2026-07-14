@@ -9,7 +9,8 @@ the WHOLE tail consume exactly and re-serialize byte-exact -- on every one
 of the 236 records that currently fail. Then intersect.
 """
 from __future__ import annotations
-import struct, sys
+import struct
+import sys
 from itertools import product
 
 sys.path.insert(0, "src"); sys.path.insert(0, ".")

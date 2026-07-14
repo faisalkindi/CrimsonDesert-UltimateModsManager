@@ -14,7 +14,6 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     FluentIcon,
-    PillPushButton,
     PushButton,
     SearchLineEdit,
     SmoothScrollArea,

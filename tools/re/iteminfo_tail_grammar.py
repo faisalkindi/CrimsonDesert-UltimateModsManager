@@ -4,8 +4,8 @@ Judged ONLY by: consumes the tail to zero remaining bytes AND re-serializes
 byte-identical, on all 6508 records. Nothing else counts.
 """
 from __future__ import annotations
-import struct, sys
-from collections import Counter
+import struct
+import sys
 
 sys.path.insert(0, "src"); sys.path.insert(0, ".")
 from tests.fixture_loaders import load_vanilla113

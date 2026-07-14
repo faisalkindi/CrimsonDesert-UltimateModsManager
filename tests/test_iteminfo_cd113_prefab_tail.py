@@ -173,7 +173,8 @@ def test_edited_record_reparses_with_zero_slack(v113):
 
 def test_cd110_is_untouched():
     body, _offs, starts, fields = _table(load_vanilla110)
-    lbl = next((l for l, f in P._ITEM_LAYOUTS if f is fields), "default")
+    lbl = next((name for name, f in P._ITEM_LAYOUTS if f is fields),
+               "default")
     assert lbl == "default", (
         f"CD 1.10 now selects {lbl!r}; the 1.13 tail must not be applied to "
         f"builds that don't have it")

@@ -229,7 +229,7 @@ def _dirs_losing_pamt(deferred_file_deletions: "list[Path]") -> "set[str]":
 from cdumm.archive.papgt_manager import PapgtManager
 from cdumm.archive.transactional_io import TransactionalIO
 from cdumm.engine.delta_engine import (
-    SPARSE_MAGIC, apply_delta, apply_delta_from_file, load_delta,
+    SPARSE_MAGIC, apply_delta_from_file,
 )
 from cdumm.storage.database import Database
 
@@ -2644,7 +2644,7 @@ class ApplyWorker(QObject):
             # from the snapshot but aren't managed by an enabled mod.
             if not file_deltas:  # only when reverting everything
                 try:
-                    from cdumm.engine.snapshot_manager import hash_file, hash_matches
+                    from cdumm.engine.snapshot_manager import hash_matches
                     snap_cursor = self._db.connection.execute(
                         "SELECT file_path, file_hash, file_size FROM snapshots")
                     already_staged = set(txn.staged_files()) if hasattr(txn, 'staged_files') else set()
@@ -3202,7 +3202,7 @@ class ApplyWorker(QObject):
         ENTR deltas are applied first (different entries compose perfectly),
         then byte-level deltas on top for backward compatibility.
         """
-        from cdumm.engine.delta_engine import ENTRY_MAGIC, load_entry_delta
+        from cdumm.engine.delta_engine import load_entry_delta
 
         # Check for JSON patch merge opportunities BEFORE byte-level composition.
         # If multiple mods have json_patches for the same game file, merge them
@@ -4300,7 +4300,6 @@ class ApplyWorker(QObject):
         # Group byte-range deltas by approximate region (same file, overlapping ranges).
         # Skip FULL_COPY deltas — they replace the entire file and are handled
         # correctly by _compose_file's standard full_replace logic.
-        from collections import defaultdict
         range_deltas = []
         for d in deltas:
             if d["delta_path"] in already_files:
@@ -4638,7 +4637,6 @@ class ApplyWorker(QObject):
             if vanilla_bytes:
                 snap_hash, snap_size = snap_map[rel]
                 # Only restore if file actually differs from vanilla
-                import hashlib
                 if len(vanilla_bytes) == snap_size:
                     game_bytes = game_file.read_bytes()
                     if game_bytes != vanilla_bytes:
@@ -4730,7 +4728,6 @@ class ApplyWorker(QObject):
         try:
             pathc = read_pathc(vanilla_pathc)
             import bisect
-            import struct as _st
 
             updated = 0
             added = 0
