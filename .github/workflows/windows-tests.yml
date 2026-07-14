@@ -29,13 +29,17 @@ concurrency:
 jobs:
   lint:
     name: lint (ruff)
-    # CI never ran ruff at all, so lint findings only surfaced when someone
-    # happened to run it locally. This job lints the files a PR actually
-    # TOUCHES rather than the whole tree: apply_engine.py alone carries 18
-    # pre-existing findings, and failing every PR on debt it didn't create
-    # teaches people to ignore the linter -- which is worse than not having
-    # one. New code is held to a clean bar; the backlog gets paid down
-    # separately.
+    # CI never ran ruff at all, so findings only surfaced if someone happened
+    # to run it locally.
+    #
+    # It gates on files a PR ADDS, and only REPORTS on files it modifies.
+    # That asymmetry is deliberate: the repo carries ~100 pre-existing
+    # findings (apply_engine.py alone has 11, and a dozen more sit in files
+    # any real change has to touch). Failing a PR on debt it did not create
+    # teaches people to ignore the linter, which is worse than not having
+    # one. New code is held to a clean bar; the backlog is visible in the log
+    # and gets paid down deliberately, not by ambushing whoever edits the
+    # file next.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -49,22 +53,35 @@ jobs:
           python-version: '3.13'
       - name: Install ruff
         run: python -m pip install ruff
-      - name: Lint the files this change touches
+      - name: New files must be clean (gate)
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git fetch --no-tags --depth=50 origin "${GITHUB_BASE_REF}"
+            base="origin/${GITHUB_BASE_REF}"
+          else
+            base="HEAD~1"
+          fi
+          added=$(git diff --name-only --diff-filter=A "${base}"...HEAD -- '*.py' || true)
+          if [ -z "${added}" ]; then
+            echo "no new Python files"; exit 0
+          fi
+          echo "linting new files:"; echo "${added}"
+          ruff check ${added}
+      - name: Pre-existing debt in touched files (report only)
+        if: always()
         shell: bash
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             base="origin/${GITHUB_BASE_REF}"
-            git fetch --no-tags --depth=50 origin "${GITHUB_BASE_REF}"
           else
             base="HEAD~1"
           fi
-          files=$(git diff --name-only --diff-filter=ACMR "${base}"...HEAD -- '*.py' || true)
-          if [ -z "${files}" ]; then
-            echo "no Python files changed"
-            exit 0
+          touched=$(git diff --name-only --diff-filter=M "${base}"...HEAD -- '*.py' || true)
+          if [ -z "${touched}" ]; then
+            echo "no modified Python files"; exit 0
           fi
-          echo "linting:"; echo "${files}"
-          ruff check ${files}
+          ruff check ${touched} || true
 
   test:
     name: fast tests

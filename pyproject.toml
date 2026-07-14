@@ -42,6 +42,14 @@ where = ["src"]
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint.per-file-ignores]
+# tools/re/* are reverse-engineering PROBES, not shipped code: dense
+# one-liners that were used to derive the CD 1.13 record tail grammar and are
+# kept as the reference for how it was derived (see tools/re/README.md).
+# Reformatting them to lint rules would obscure the thing they exist to show.
+# They ship in no build and import nothing from the app.
+"tools/re/*.py" = ["E701", "E702", "E741"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
