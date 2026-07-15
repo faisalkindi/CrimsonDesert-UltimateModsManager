@@ -67,6 +67,11 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_OPS = frozenset({"set"})
 
+# statusinfo stat_level_data[N] path (DIRECT SPEED .cdmod stat mods). The
+# statusinfo_writer bounds N to 0..15 and refuses non-rate records; this
+# only needs to recognise the shape so the intent reaches that writer.
+_STATUSINFO_SLD_RE = re.compile(r"^stat_level_data\[\d+\]$")
+
 
 _raw_schema_cache: dict[str, dict] | None = None
 
@@ -1409,6 +1414,19 @@ def _classify_intent(
     # the writer re-checks before committing.
     if tn_norm == "stringinfo" and intent.field.lstrip("_").lower() == (
             "buffer") and isinstance(getattr(intent, "new", None), str):
+        return None
+
+    # statusinfo (DIRECT SPEED .cdmod stat mods): stat_level_data[N] is an
+    # int64 per-level element on the four rate records. statusinfo's PABGB
+    # schema is positional and has no such array, so the generic walker
+    # can't resolve it; the clean-room statusinfo writer
+    # (statusinfo_writer.build_statusinfo_changes) locates the record by key
+    # and writes the element in place. The value must be an int, and the
+    # writer refuses any record that isn't a 212-byte rate record and any
+    # index outside 0..15 -- both dropped cleanly at apply time with a
+    # logged warning, mirroring the multichangeinfo/stringinfo early-accept.
+    if tn_norm == "statusinfo" and _STATUSINFO_SLD_RE.match(intent.field) \
+            and isinstance(getattr(intent, "new", None), int):
         return None
 
     # GitHub #150 (Female Animations) + #192 (mesh swap): characterinfo's

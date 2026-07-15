@@ -675,9 +675,15 @@ def expand_format3_into_aggregated(
     # variable-length _buffer string per record (records change length)
     # and rebuilds the companion stringinfo.pabgh offsets in one pass
     # (GitHub #224 Female Armor Module).
+    # statusinfo.pabgb is whole-table so its stat_level_data writer parses
+    # the .pabgh record index once and batches every DIRECT SPEED element
+    # write in one pass. The writes are length-preserving (no .pabgh
+    # rebuild), but the table still routes here so the writer -- not the
+    # generic schema walker (statusinfo has no CDUMM schema) -- handles it.
     _WHOLE_TABLE_TARGETS = {
         "iteminfo.pabgb", "skill.pabgb", "multichangeinfo.pabgb",
-        "storeinfo.pabgb", "equipslotinfo.pabgb", "stringinfo.pabgb"}
+        "storeinfo.pabgb", "equipslotinfo.pabgb", "stringinfo.pabgb",
+        "statusinfo.pabgb"}
     whole_table_intents: dict[str, list] = {}
     whole_table_mod_names: dict[str, list[str]] = {}
     # Per-INTENT mod attribution, index-aligned with
@@ -1118,6 +1124,77 @@ def expand_format3_into_aggregated(
                     len(batched), len(contributing_mods), len(pabgb_changes),
                     ", + pabgh offset rebuild"
                     if pabgh_change is not None else "")
+                continue
+
+            # statusinfo.pabgb (DIRECT SPEED stat mods): stat_level_data[i]
+            # int64 element writes on the four rate records. Length-
+            # preserving, so NO companion .pabgh rebuild. The writer refuses
+            # any record that isn't a 212-byte rate record, so it can never
+            # corrupt a regular stat that has no stat_level_data array.
+            if target == "statusinfo.pabgb":
+                from cdumm.engine.statusinfo_writer import (
+                    build_statusinfo_changes,
+                )
+                try:
+                    pabgb_changes, dropped = build_statusinfo_changes(
+                        vanilla_body, vanilla_header, batched)
+                except Exception as e:
+                    logger.error(
+                        "Format 3 statusinfo writer crashed on %d "
+                        "intent(s): %s", len(batched), e, exc_info=True)
+                    pabgb_changes, dropped = [], []
+                if dropped:
+                    drop_lines = []
+                    for _it, _reason in dropped[:5]:
+                        _label = (getattr(_it, "entry", "")
+                                  or f"key={getattr(_it, 'key', '?')}")
+                        drop_lines.append(
+                            f"{_label}.{getattr(_it, 'field', '?')}: "
+                            f"{_reason}")
+                    more_n = len(dropped) - len(drop_lines)
+                    logger.warning(
+                        "Format 3 statusinfo writer refused %d of %d "
+                        "intent(s): %s", len(dropped), len(batched),
+                        "; ".join(f"{getattr(i, 'field', '?')} ({r})"
+                                  for i, r in dropped))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3: {len(dropped)} statusinfo intent(s) "
+                            f"skipped: " + "; ".join(drop_lines)
+                            + (f"; and {more_n} more (see log)"
+                               if more_n > 0 else ""))
+                if not pabgb_changes:
+                    logger.warning(
+                        "Format 3 statusinfo: %d intent(s) from %d mod(s) "
+                        "produced 0 record changes",
+                        len(batched), len(contributing_mods))
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            f"Format 3 mod(s) "
+                            f"{', '.join(repr(n) for n in contributing_mods)} "
+                            f"produced 0 byte changes for 'statusinfo.pabgb'. "
+                            f"The targeted stat key may be missing from this "
+                            f"game version, the record may not be a rate stat "
+                            f"(only MoveSpeedRate, AttackSpeedRate, "
+                            f"CriticalRate and DHIT carry stat_level_data), or "
+                            f"every element already held the requested value.")
+                    continue
+                contrib_ids = list(whole_table_mod_ids.get(target, []))
+                for c in pabgb_changes:
+                    c["_target_file"] = target
+                    if contrib_ids:
+                        c["_source_mod_ids"] = list(contrib_ids)
+                aggregated.setdefault(target, []).extend(pabgb_changes)
+                if participating_mod_ids is not None:
+                    for mid in contrib_ids:
+                        participating_mod_ids.add(mid)
+                for c in pabgb_changes:
+                    n_bytes_changed += len(c.get("patched", "")) // 2
+                logger.info(
+                    "Format 3 statusinfo writer: applied %d intent(s) "
+                    "across %d mod(s), %d record change(s)",
+                    len(batched) - len(dropped), len(contributing_mods),
+                    len(pabgb_changes))
                 continue
 
             # storeinfo.pabgb (GitHub #183) and equipslotinfo.pabgb
