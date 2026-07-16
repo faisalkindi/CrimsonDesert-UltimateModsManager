@@ -372,23 +372,34 @@ def _load_vanilla_table(game_dir: Path, name: str) -> bytes:
                 pass
         return _extract_from_paz(entry, str(paz))
 
-    # Prefer CDUMM's cached vanilla index. After a game update its offsets no
-    # longer line up with the .paz body (the bodies live in the game install
-    # and Steam just replaced them), so extraction throws a raw decompression
-    # error. Catch it and fall back to the game's own current index, which is
-    # correct for the freshly-installed build -- turning a cryptic LZ4 crash
-    # into either a working read or a clear, actionable message.
+    # CDUMM caches a vanilla PAMT index in CDMods/vanilla, but the .paz bodies
+    # live in the game install. After a game update Steam rewrites those .paz
+    # files, so the cached index points at the wrong bytes. For a compressed
+    # table that throws a raw LZ4 error; for an uncompressed one (many .pabgh)
+    # it silently returns garbage. Detect staleness up front by comparing the
+    # cached entry against the game's own current index: if they disagree on
+    # where the data lives, the cache is stale (the game moved on) and the
+    # live index is authoritative for the installed build. This fixes both
+    # the crash and the silent-wrong-bytes case.
     cached = (_find_pamt_entry(name, vanilla_dir)
               if vanilla_dir.exists() else None)
+    live = _find_pamt_entry(name, game_dir)
+    if (cached is not None and live is not None
+            and (getattr(cached, "offset", None), getattr(cached, "comp_size", None))
+            != (getattr(live, "offset", None), getattr(live, "comp_size", None))):
+        logger.info(
+            "vanilla-cached index for %s disagrees with the live game index "
+            "(game updated since the backup); using the live index", name)
+        cached = None
+
     if cached is not None:
         try:
             return _extract(cached)
         except Exception:
             logger.info(
-                "vanilla-cached index stale for %s (game updated since the "
-                "backup?); falling back to the live game index", name)
+                "vanilla-cached index stale for %s; falling back to the live "
+                "game index", name)
 
-    live = _find_pamt_entry(name, game_dir)
     if live is None:
         raise ConversionRefused(
             f"{name} could not be found in your game's archives")

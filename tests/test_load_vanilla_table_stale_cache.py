@@ -15,15 +15,21 @@ from cdumm.engine.v2_to_format3 import ConversionRefused
 
 
 class _Entry:
-    def __init__(self, tag, game):
+    def __init__(self, tag, game, offset=0, comp_size=0):
         # paz_file under game_dir so the remap branch is a no-op.
         self.paz_file = str(game / f"{tag}.paz")
+        self.offset = offset
+        self.comp_size = comp_size
 
 
-def _setup(monkeypatch, game, *, cached_ok, live_ok, live_present=True):
+def _setup(monkeypatch, game, *, cached_ok, live_ok, live_present=True,
+           offsets_agree=True):
     (game / "CDMods" / "vanilla").mkdir(parents=True, exist_ok=True)
-    cached = _Entry("cached", game)
-    live = _Entry("live", game) if live_present else None
+    # When offsets disagree the cache is stale (game moved); the code skips it
+    # up front without needing an extraction error (the silent-wrong case).
+    cached = _Entry("cached", game, offset=100)
+    live = (_Entry("live", game, offset=100 if offsets_agree else 999)
+            if live_present else None)
 
     def fake_find(name, d):
         return cached if "vanilla" in str(d).replace("\\", "/") else live
@@ -49,6 +55,16 @@ def test_falls_back_to_live_index_when_cache_stale(monkeypatch, tmp_path):
     # cached extraction throws (stale after a game update) -> use live index.
     _setup(monkeypatch, tmp_path, cached_ok=False, live_ok=True)
     assert v2._load_vanilla_table(tmp_path, "iteminfo.pabgb") == b"LIVE"
+
+
+def test_skips_cache_when_offsets_disagree_even_if_it_would_decode(
+        monkeypatch, tmp_path):
+    # The silent-wrong case: an uncompressed table (many .pabgh) decodes
+    # without error at the stale offset but returns garbage. The offset
+    # mismatch must make the code use the live index anyway.
+    _setup(monkeypatch, tmp_path, cached_ok=True, live_ok=True,
+           offsets_agree=False)
+    assert v2._load_vanilla_table(tmp_path, "iteminfo.pabgh") == b"LIVE"
 
 
 def test_clear_error_when_both_fail(monkeypatch, tmp_path):
