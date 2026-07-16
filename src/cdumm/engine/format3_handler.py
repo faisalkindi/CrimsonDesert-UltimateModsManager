@@ -349,14 +349,17 @@ def _parse_intents_block(
         # the apply path resolves records by decoding the table. ``field``
         # and ``new`` are always required.
         raw_match = raw.get("match")
-        if raw_match is not None and (
-            not isinstance(raw_match, dict) or not raw_match
-        ):
+        if raw_match is not None and not isinstance(raw_match, dict):
             raise ValueError(
                 f"{label} intent #{i} has an invalid 'match' selector; "
-                f"'match' must be a non-empty object of field:value "
-                f"conditions"
+                f"'match' must be an object of field:value conditions "
+                f"(an empty object {{}} matches every record in the table)"
             )
+        # An empty ``match: {}`` is DMM Mod Builder's "apply to every record"
+        # selector (e.g. infinite durability on all items). It is valid --
+        # the apply path's _match_record_keys treats a no-condition match as
+        # "all records" (all([]) is True) -- so accept it here rather than
+        # rejecting the whole mod.
         required_keys = (
             ("field",) if raw_match is not None else ("entry", "field")
         )
@@ -699,8 +702,12 @@ def _classify_match_selector(
     """
     match = intent.match or {}
     vf = getattr(schema, "verified_fields", None)
+    # DMM Mod Builder names the identity match fields ``key``/``string_key``;
+    # they resolve to CDUMM's ``_key``/``_name`` metadata (see
+    # format3_apply._DMM_MATCH_FIELD_ALIASES), which are always safe to match.
+    _dmm_aliases = {"key": "_key", "string_key": "_name"}
     for mf in match:
-        if mf in _MATCH_META_FIELDS:
+        if _dmm_aliases.get(mf, mf) in _MATCH_META_FIELDS:
             continue
         resolved = _resolve_schema_field_name(mf, field_specs)
         if resolved is None:

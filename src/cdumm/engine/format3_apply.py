@@ -202,6 +202,14 @@ def _match_value_equals(got, want) -> bool:
     """
     if got is None:
         return False
+    # DMM Mod Builder emits operator objects for match conditions; the one it
+    # uses is ``{"$in": [...]}`` (any-of), e.g. ``{"key": {"$in": [1, 4, 6]}}``.
+    # Treat it exactly like the bare-list any-of below.
+    if isinstance(want, dict) and len(want) == 1 and "$in" in want:
+        cands = want["$in"]
+        if isinstance(cands, (list, tuple)):
+            return any(_match_value_equals(got, w) for w in cands)
+        return _match_value_equals(got, cands)
     if isinstance(want, (list, tuple)) and not isinstance(got, (list, tuple)):
         return any(_match_value_equals(got, w) for w in want)
     if got == want:
@@ -219,19 +227,31 @@ def _match_value_equals(got, want) -> bool:
     return False
 
 
+# DMM Mod Builder names the record-identity match fields ``key`` and
+# ``string_key``; CDUMM's decoded records carry them as ``_key`` and ``_name``.
+# Alias them so a DMM selector like ``{"string_key": "Riding_Dragon_1"}`` or
+# ``{"key": {"$in": [1, 4, 6]}}`` resolves against the record metadata.
+_DMM_MATCH_FIELD_ALIASES = {"key": "_key", "string_key": "_name"}
+_MATCH_META = ("_name", "_key", "_entry_id")
+
+
 def _match_record_keys(records: dict, match: dict) -> list:
     """Keys of every record in ``records`` whose fields all satisfy the
-    ``match`` conditions (AND). Preserves ``records`` iteration order."""
+    ``match`` conditions (AND). Preserves ``records`` iteration order.
+    An empty ``match`` matches every record (all([]) is True)."""
+    def _read(key, rec, mf):
+        amf = _DMM_MATCH_FIELD_ALIASES.get(mf, mf)
+        if amf == "_key":
+            # the record id is the dict key; some decoders also stamp _key.
+            return rec.get("_key", key)
+        if amf in _MATCH_META:
+            return rec.get(amf)
+        return _lookup_record_field(rec, mf)
+
     out = []
     for key, rec in records.items():
-        if all(
-            _match_value_equals(
-                rec.get(mf) if mf in ("_name", "_key", "_entry_id")
-                else _lookup_record_field(rec, mf),
-                mv,
-            )
-            for mf, mv in match.items()
-        ):
+        if all(_match_value_equals(_read(key, rec, mf), mv)
+               for mf, mv in match.items()):
             out.append(key)
     return out
 
