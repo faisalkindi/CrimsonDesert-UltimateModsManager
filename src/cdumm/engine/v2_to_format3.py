@@ -362,21 +362,44 @@ def _load_vanilla_table(game_dir: Path, name: str) -> bytes:
         _extract_from_paz, _find_pamt_entry,
     )
     vanilla_dir = game_dir / "CDMods" / "vanilla"
-    entry = None
-    if vanilla_dir.exists():
-        entry = _find_pamt_entry(name, vanilla_dir)
-    if entry is None:
-        entry = _find_pamt_entry(name, game_dir)
-    if entry is None:
+
+    def _extract(entry):
+        paz = Path(entry.paz_file)
+        if not paz.exists() and vanilla_dir.exists():
+            try:
+                paz = game_dir / paz.relative_to(vanilla_dir)
+            except ValueError:
+                pass
+        return _extract_from_paz(entry, str(paz))
+
+    # Prefer CDUMM's cached vanilla index. After a game update its offsets no
+    # longer line up with the .paz body (the bodies live in the game install
+    # and Steam just replaced them), so extraction throws a raw decompression
+    # error. Catch it and fall back to the game's own current index, which is
+    # correct for the freshly-installed build -- turning a cryptic LZ4 crash
+    # into either a working read or a clear, actionable message.
+    cached = (_find_pamt_entry(name, vanilla_dir)
+              if vanilla_dir.exists() else None)
+    if cached is not None:
+        try:
+            return _extract(cached)
+        except Exception:
+            logger.info(
+                "vanilla-cached index stale for %s (game updated since the "
+                "backup?); falling back to the live game index", name)
+
+    live = _find_pamt_entry(name, game_dir)
+    if live is None:
         raise ConversionRefused(
             f"{name} could not be found in your game's archives")
-    paz = Path(entry.paz_file)
-    if not paz.exists() and vanilla_dir.exists():
-        try:
-            paz = game_dir / paz.relative_to(vanilla_dir)
-        except ValueError:
-            pass
-    return _extract_from_paz(entry, str(paz))
+    try:
+        return _extract(live)
+    except Exception as e:
+        raise ConversionRefused(
+            f"CDUMM couldn't read the vanilla '{name}' from your game files. "
+            f"Its saved vanilla copy is out of date -- this usually happens "
+            f"right after a game update. Run Settings → Fix Everything "
+            f"to refresh CDUMM's vanilla backup, then try again.") from e
 
 
 def convert_mod_file(
