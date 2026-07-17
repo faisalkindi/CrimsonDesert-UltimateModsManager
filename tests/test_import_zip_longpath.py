@@ -15,8 +15,6 @@ import io
 import os
 import zipfile
 
-import pytest
-
 from cdumm.engine.import_handler import _extractall_collapsing_wrapper
 
 
