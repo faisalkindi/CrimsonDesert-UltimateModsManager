@@ -3005,6 +3005,16 @@ def _import_from_extracted(
         # through to the generic "no recognized format" error.
         f3_pack = _scan_format3_variant_pack(tmp_path)
         if f3_pack:
+            # Import as ONE switchable mod (first enabled, rest on the cog)
+            # instead of dead-ending — same outcome the GUI picker gives,
+            # on every path incl. 7z/rar and re-import (#191). mod_name is
+            # already the archive-derived display name; wrap it as a source
+            # so the multi-variant mod is named for the archive.
+            mv = _import_format3_variant_pack_as_multi(
+                f3_pack, Path(mod_name), game_dir, db, deltas_dir,
+                existing_mod_id=existing_mod_id)
+            if mv is not None:
+                return mv
             ids = ", ".join(vid for _, vid in f3_pack)
             result.error = (
                 f"This archive contains {len(f3_pack)} variants of "
@@ -3488,6 +3498,15 @@ def import_from_zip(
             # "import one at a time" guidance.
             f3_pack = _scan_format3_variant_pack(tmp_path)
             if f3_pack:
+                # Import as ONE switchable mod (first variant enabled, the
+                # rest on the cog) instead of dead-ending — same outcome the
+                # GUI picker gives, but on every path (#191). Falls back to
+                # the old guidance only if the multi-variant import can't run.
+                mv = _import_format3_variant_pack_as_multi(
+                    f3_pack, zip_path, game_dir, db, deltas_dir,
+                    existing_mod_id=existing_mod_id)
+                if mv is not None:
+                    return _with_asi(mv)
                 ids = ", ".join(vid for _, vid in f3_pack)
                 result.error = (
                     f"This zip contains {len(f3_pack)} variants of "
@@ -4539,6 +4558,63 @@ def _import_format3_bundle(
         note += f" {len(failed)} could not be imported: {shown}."
     primary.info = f"{primary.info}\n{note}" if primary.info else note
     return primary
+
+
+def _import_format3_variant_pack_as_multi(
+    pack: "list[tuple[Path, str]]", source: Path, game_dir: Path,
+    db: Database, deltas_dir: Path, existing_mod_id: int | None = None,
+) -> "ModImportResult | None":
+    """Import a Format 3 variant pack (e.g. Fat Stacks: fat_stacks_2x …
+    _999999) as ONE switchable mod — the first variant enabled, the rest
+    reachable from the mod's cog — instead of dead-ending with a "drop it
+    on the main window to pick a variant" error.
+
+    The GUI's folder-variant picker already produces this outcome for
+    drag-drop. But a variant pack reaching the engine another way — a
+    re-import from source, a programmatic/CLI import, or a drop whose
+    pre-extract for the picker failed — used to hit that hard error and
+    the user got nothing. This backstops every path with the same result
+    the picker gives. GitHub #191 (falobos76 / Fat Stacks).
+
+    Returns a populated ModImportResult on success, or None so the caller
+    can fall back to its previous behaviour.
+    """
+    import json as _json
+    # Stable order so the enabled-by-default variant is deterministic.
+    ordered = sorted(pack, key=lambda t: t[0].name.lower())
+    presets: list[tuple[Path, dict]] = []
+    for jp, _vid in ordered:
+        try:
+            with open(jp, "r", encoding="utf-8-sig") as f:
+                presets.append((jp, _json.load(f)))
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            logger.warning(
+                "variant pack: skipping unreadable %s (%s)", jp.name, e)
+    if len(presets) < 2:
+        return None
+    try:
+        from cdumm.engine.variant_handler import import_multi_variant
+        mods_dir = deltas_dir.parent / "mods"
+        mods_dir.mkdir(parents=True, exist_ok=True)
+        mv = import_multi_variant(
+            presets, source, game_dir, mods_dir, db,
+            existing_mod_id=existing_mod_id,
+            initial_selection={presets[0][0]})
+    except Exception as e:  # noqa: BLE001 — fall back to the caller's error
+        logger.error(
+            "variant-pack multi-import failed (%s); caller falls back", e,
+            exc_info=True)
+        return None
+    if not mv:
+        return None
+    result = ModImportResult(mv.get("mod_name") or source.stem or "variant pack")
+    result.mod_id = int(mv["mod_id"])
+    n = len(mv.get("variants") or presets)
+    result.info = (
+        f"This archive holds {n} versions of one mod (for example, "
+        f"different stack sizes). CDUMM imported it as a single mod with "
+        f"one version enabled — use the mod's cog to switch to another.")
+    return result
 
 
 def import_from_cdmod(
