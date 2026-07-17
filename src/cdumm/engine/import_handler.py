@@ -55,6 +55,69 @@ def _open_zip_utf8(zip_path) -> "zipfile.ZipFile":
     except UnicodeDecodeError:
         return zipfile.ZipFile(zip_path)
 
+
+def _extractall_collapsing_wrapper(zf: "zipfile.ZipFile", dest) -> None:
+    """Extract a zip to ``dest``, collapsing a single redundant top-level
+    wrapper directory so long member paths don't blow past Windows'
+    260-char MAX_PATH.
+
+    DMM's Mod Builder exports each mod as ``ModName/ModName.json`` inside
+    ``ModName.zip`` — the json nested in a folder of the same (~100-char)
+    name. Under the extraction-staging path that doubled name pushes the
+    full path past 260 characters, so ``extractall`` fails with
+    ``[Errno 2] No such file or directory`` while importing the *bare*
+    json works fine (falobos76, GitHub #191). Collapsing the wrapper keeps
+    every extracted path short enough for the rest of the import pipeline,
+    which walks and reads these files with ordinary (non-extended) paths.
+
+    Only a single top-level *directory* is stripped, and only when it is
+    NOT a 4-digit PAZ dir (``0036/`` and friends carry meaning and must
+    survive). Zips that don't match this shape extract exactly as before.
+    """
+    tops: set[str] = set()
+    has_subpaths = False
+    for name in zf.namelist():
+        p = name.replace("\\", "/").lstrip("/")
+        if not p:
+            continue
+        parts = p.split("/", 1)
+        tops.add(parts[0])
+        if len(parts) > 1 and parts[1]:
+            has_subpaths = True
+
+    strip = None
+    if len(tops) == 1 and has_subpaths:
+        top = next(iter(tops))
+        is_paz_dir = top.isdigit() and len(top) == 4
+        if not is_paz_dir:
+            strip = top + "/"
+
+    if strip is None:
+        zf.extractall(dest)
+        return
+
+    logger.info(
+        "Import: collapsing redundant top-level folder %r to keep "
+        "extraction paths under the Windows 260-char limit (#191).", strip)
+    dest_abs = os.path.abspath(dest)
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        rel = info.filename.replace("\\", "/").lstrip("/")
+        if rel.startswith(strip):
+            rel = rel[len(strip):]
+        if not rel:
+            continue
+        out = os.path.normpath(os.path.join(dest_abs, *rel.split("/")))
+        # Path-traversal guard: never write outside dest.
+        if out != dest_abs and not out.startswith(dest_abs + os.sep):
+            logger.warning("Skipping unsafe zip member path: %r", info.filename)
+            continue
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with zf.open(info) as src, open(out, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 import time
 
 # Thread-local progress callback for import operations.
@@ -3111,7 +3174,7 @@ def import_from_zip(
         tmp_path = Path(tmp)
         try:
             with _open_zip_utf8(zip_path) as zf:
-                zf.extractall(tmp_path)
+                _extractall_collapsing_wrapper(zf, tmp_path)
         except zipfile.BadZipFile as e:
             result.error = f"Invalid zip file: {e}"
             return result
