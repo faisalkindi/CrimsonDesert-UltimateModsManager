@@ -165,6 +165,20 @@ class _Reader:
     def cstring(self) -> str:
         """Length-prefixed UTF-8 string (no trailing nul)."""
         n = self.u32()
+        # Same bound as carray: a string cannot be longer than the bytes left
+        # in its record. Without it, a speculative/optional read on a garbage
+        # length prefix (seen up to 2 GB during layout detection) slices and
+        # decodes up to the whole 5.9 MB buffer with errors="replace" BEFORE
+        # the trial backtracks. Measured on the real 1.13 table: 2.6k such
+        # reads decode ~15 GB and cost ~20s of the ~26s parse (GitHub #49).
+        # Valid strings always fit, so this never fires on real data and the
+        # parse output is byte-identical -- only the doomed trials fail faster.
+        remaining = (self.rec_end or len(self.data)) - self.pos
+        if n > remaining:
+            raise ValueError(
+                f"iteminfo cstring length {n} exceeds {remaining} remaining "
+                f"bytes at offset {self.pos}; likely a game-version layout "
+                f"shift the parser does not model yet")
         s = self.data[self.pos:self.pos + n].decode("utf-8", errors="replace")
         self.pos += n
         return s
@@ -172,6 +186,12 @@ class _Reader:
     def cstring_raw(self) -> bytes:
         """Same as cstring but return raw bytes (handles non-UTF-8)."""
         n = self.u32()
+        remaining = (self.rec_end or len(self.data)) - self.pos
+        if n > remaining:
+            raise ValueError(
+                f"iteminfo cstring length {n} exceeds {remaining} remaining "
+                f"bytes at offset {self.pos}; likely a game-version layout "
+                f"shift the parser does not model yet")
         b = self.data[self.pos:self.pos + n]
         self.pos += n
         return b
@@ -196,7 +216,14 @@ class _Reader:
         # parse-guard turns it into a clean "this game version isn't
         # supported yet" skip instead of a hang. Never fires on valid data
         # (a legitimate count is always <= remaining bytes).
-        remaining = len(self.data) - self.pos
+        # Bound by the *record*, not the whole body, when the boundary is
+        # known. A count can never exceed the bytes left in its own record,
+        # so this rejects a desynced count immediately instead of letting
+        # it allocate a list of ~500k dicts first (the body bound is 5.9MB,
+        # which is far too loose to catch anything in time). Matters most
+        # while detect_iteminfo_layout is speculatively trying layouts that
+        # do not fit: without this, every rejected candidate stalls.
+        remaining = (self.rec_end or len(self.data)) - self.pos
         if n > remaining:
             raise ValueError(
                 f"iteminfo carray count {n} exceeds {remaining} remaining "
@@ -415,16 +442,23 @@ def serialize_iteminfo(
     return bytes(w.buf)
 
 
-def parse_first_record_size(data: bytes) -> int:
+def parse_first_record_size(data: bytes, fields=None) -> int:
     """Parse the first record and return its byte size. Used by the
-    test suite as a faster check than full-file round-trip."""
+    test suite as a faster check than full-file round-trip.
+
+    ``fields`` takes the layout ``detect_iteminfo_layout`` selected. Without
+    it these helpers assumed the module default -- which matched exactly one
+    maintainer's 1.11-era extract and desyncs on every committed table. Two
+    boundary tests were permanently skipped for that reason; the invariant
+    they pin is real, so the API grew a layout instead of the tests dying.
+    """
     r = _Reader(data, 0)
-    _read_item(r)
+    _read_item(r, fields=fields)
     return r.pos
 
 
 def parse_record_at(
-    data: bytes, offset: int, rec_end: int | None = None
+    data: bytes, offset: int, rec_end: int | None = None, fields=None
 ) -> int:
     """Parse one record starting at ``offset`` and return the cursor
     position after the record. Test helper for boundary checks.
@@ -433,9 +467,11 @@ def parse_record_at(
     threaded through the reader so forward-walk fallbacks cap their
     needle search at the record boundary instead of latching onto the
     next record's GVP entry.
+
+    ``fields`` is the layout for this game version (see above).
     """
     r = _Reader(data, offset, rec_end=rec_end)
-    _read_item(r)
+    _read_item(r, fields=fields)
     return r.pos
 
 
@@ -1658,6 +1694,84 @@ def _write_DropDefaultData(w: _Writer, v: dict) -> None:
     w.u8(v["use_socket"])
 
 
+# ── CD 1.13: DropDefaultData / EnchantData ──────────────────────────────
+# Two coupled changes land here, and they are only correct together.
+#
+# 1. ``SubItem`` gained tag 17 as a *None* sentinel, which carries no u32
+#    payload (14 stayed a sentinel too).
+# 2. ``ItemInfo`` grew ``_enchantDataList`` immediately after
+#    _dropDefaultData -- a u32 count, then one EnchantData per enchant
+#    tier (levels 0..N-1; 11 tiers on most equipment, 0 on non-equipment).
+#
+# The pre-1.13 reader spends its 7 bytes as
+#     tag(1) + u32 value(4) + svc(1) + use(1)
+# where the truth is
+#     tag(1) + svc(1) + use(1) + u32 enchant count(4).
+# Identical width. That is why non-equipment -- whose enchant count is 0,
+# so those four bytes are zero either way -- round-tripped byte-exact and
+# never looked broken, while equipment (count is almost always 11) walked
+# straight off the rails. It also explains why "fix the SubItem sentinel"
+# alone destroyed non-equipment in testing: it dropped the u32 without
+# putting the enchant count back.
+#
+# Verified against the live 1.13 iteminfo.pabgb: 6508/6508 records decode
+# and re-serialize byte-identical, with the level ladder (0,1,2,...,N-1)
+# holding on every one of the 1047 multi-tier records.
+_SUBITEM_NONE_TAGS_CD113 = (14, 17)
+
+
+def _read_SubItem_CD113(r: _Reader) -> dict:
+    type_id = r.u8()
+    value = None if type_id in _SUBITEM_NONE_TAGS_CD113 else r.u32()
+    return {"type_id": type_id, "value": value}
+
+
+def _write_SubItem_CD113(w: _Writer, v: dict) -> None:
+    w.u8(v["type_id"])
+    if v["type_id"] not in _SUBITEM_NONE_TAGS_CD113:
+        w.u32(v["value"])
+
+
+def _read_DropDefaultData_CD113(r: _Reader) -> dict:
+    return {
+        "drop_enchant_level": r.u16(),
+        "socket_item_list": r.carray(_Reader.u32),
+        "add_socket_material_item_list": r.carray(_read_SocketMaterialItem),
+        "default_sub_item": _read_SubItem_CD113(r),
+        "socket_valid_count": r.u8(),
+        "use_socket": r.u8(),
+    }
+
+
+def _write_DropDefaultData_CD113(w: _Writer, v: dict) -> None:
+    w.u16(v["drop_enchant_level"])
+    w.carray(v["socket_item_list"], _Writer.u32)
+    w.carray(v["add_socket_material_item_list"], _write_SocketMaterialItem)
+    _write_SubItem_CD113(w, v["default_sub_item"])
+    w.u8(v["socket_valid_count"])
+    w.u8(v["use_socket"])
+
+
+def _read_EnchantData_CD113(r: _Reader) -> dict:
+    """Pre-1.13 EnchantData plus the u32 CD 1.12 added to it."""
+    v = _read_EnchantData(r)
+    v["item_effect_info"] = r.u32()
+    return v
+
+
+def _write_EnchantData_CD113(w: _Writer, v: dict) -> None:
+    _write_EnchantData(w, v)
+    w.u32(v["item_effect_info"])
+
+
+def _read_enchant_data_list_CD113(r: _Reader) -> list:
+    return r.carray(_read_EnchantData_CD113)
+
+
+def _write_enchant_data_list_CD113(w: _Writer, v: list) -> None:
+    w.carray(v, _write_EnchantData_CD113)
+
+
 def _read_SealableItemInfo(r: _Reader) -> dict:
     """SealableItemInfo: u8 type_tag + u32 item_key + u64 unknown0 + variant value."""
     type_tag = r.u8()
@@ -2012,10 +2126,95 @@ _ITEM_FIELDS_CD113 = [
     if f[0] not in ("prefab_data_list", "gimmick_visual_prefab_data_list")
 ]
 
+
+def _read_PrefabData_CD113(r: _Reader) -> dict:
+    """CD 1.13 merged PrefabData and GimmickVisualPrefabData into one struct
+    and moved the list to the END of the item record (GitHub #285).
+
+    That merge is why the pre-1.13 codecs never fit: the element carries
+    GVP's ``scale`` / ``animation_path_list`` AND PrefabData's
+    ``prefab_names`` / ``equip_slot_list`` / ``tribe_gender_list``.
+
+    ``equip_slot_list`` is a u16 array, not u32. That single fact is what
+    hid the whole field: an EMPTY u16 array and an EMPTY u32 array are the
+    same four zero bytes, so a u32 reading fits the 6272 records where the
+    list is empty and only desyncs on the 236 where it isn't. Ground truth
+    came from AerowynX's "Equip All V6", which ships the decoded values --
+    it says equip_slot_list [7] and [8] where the bytes read 0700 / 0800.
+    """
+    return {
+        "scale": [r.f32(), r.f32(), r.f32()],
+        "prefab_names": r.carray(_Reader.u32),
+        "animation_path_list": r.carray(_Reader.u32),
+        "equip_slot_list": r.carray(_Reader.u16),
+        "tribe_gender_list": r.carray(_Reader.u32),
+        "is_craft_material": r.u8(),
+        "unk_flag_b": r.u8(),
+        "unk_flag_c": r.u8(),
+    }
+
+
+def _write_PrefabData_CD113(w: _Writer, v: dict) -> None:
+    for f in v["scale"]:
+        w.f32(f)
+    w.carray(v["prefab_names"], _Writer.u32)
+    w.carray(v["animation_path_list"], _Writer.u32)
+    w.carray(v["equip_slot_list"], _Writer.u16)
+    w.carray(v["tribe_gender_list"], _Writer.u32)
+    w.u8(v["is_craft_material"])
+    w.u8(v["unk_flag_b"])
+    w.u8(v["unk_flag_c"])
+
+
+def _with_cd113_prefab_tail(fields):
+    """CD 1.13 relocated prefab_data_list to the end of the item record.
+
+    Without this the layout still round-trips byte-exact -- it just carries
+    the last 76-139 bytes of EVERY record as opaque ``_tail_slack`` and
+    reports the field as absent. A byte-exact round-trip proves the bytes
+    are preserved, not that they are understood; see tools/re/README.md.
+
+    The two trailing u8s are constant (255, 0) on all 6508 live records but
+    are read and written, not assumed, so a build that changes them still
+    round-trips.
+    """
+    return list(fields) + [
+        ("prefab_data_list", "carray",
+         _read_PrefabData_CD113, _write_PrefabData_CD113),
+        ("record_end_a", "u8"),
+        ("record_end_b", "u8"),
+    ]
+
+
+def _with_cd113_enchant(fields):
+    """CD 1.13: swap in the 1.13 DropDefaultData and add the
+    _enchantDataList that follows it. See _read_DropDefaultData_CD113 for
+    why the two changes are inseparable."""
+    out = []
+    for spec in fields:
+        if spec[0] == "drop_default_data":
+            out.append(("drop_default_data", "struct",
+                        _read_DropDefaultData_CD113,
+                        _write_DropDefaultData_CD113))
+            out.append(("enchant_data_list", "struct",
+                        _read_enchant_data_list_CD113,
+                        _write_enchant_data_list_CD113))
+        else:
+            out.append(spec)
+    return out
+
+
+_ITEM_FIELDS_CD113_ENCHANT = _with_cd113_prefab_tail(
+    _with_cd113_enchant(_ITEM_FIELDS_CD113))
+
 # (label, fields) candidates, tried in order by detect_iteminfo_layout.
+# Most specific first: the enchant variant decodes 6508/6508 on live 1.13,
+# where the plain relocated variant only manages the 3167 non-equipment
+# records and carries all equipment opaque.
 _ITEM_LAYOUTS = (
     ("default", None),                       # None -> _ITEM_FIELDS
     ("cd113_prefab_relocated", _ITEM_FIELDS_CD113),
+    ("cd113_enchant", _ITEM_FIELDS_CD113_ENCHANT),
 )
 
 
@@ -2055,7 +2254,7 @@ def detect_iteminfo_layout(data: bytes, record_offsets):
     n = len(starts)
     idxs = sorted({i for i in (0, 1, 2, n // 4, n // 2, 3 * n // 4, n - 1)
                    if 0 <= i < n})
-    best_fields, best_score = None, -1
+    best_fields, best_score = None, 0
     for _label, fields in _ITEM_LAYOUTS:
         score = 0
         for i in idxs:
@@ -2063,9 +2262,49 @@ def detect_iteminfo_layout(data: bytes, record_offsets):
             e = starts[i + 1] if i + 1 < len(starts) else len(data)
             if _record_roundtrips(data, s, e, fields):
                 score += 1
-        if score > best_score:
+        # >= so a *more specific* layout wins a tie. _ITEM_LAYOUTS is
+        # ordered least- to most-specific, and a more specific layout can
+        # only round-trip a superset of records -- so a tie means it is at
+        # least as good. Without this, a sample that happened to draw only
+        # non-equipment records would score cd113_prefab_relocated and
+        # cd113_enchant equally, lock in the former, and silently carry all
+        # 3151 equipment records opaque.
+        #
+        # The score > 0 guard keeps a layout from being *claimed* on a
+        # table where nothing round-trips at all: that stays None, and the
+        # caller's per-record opaque fallback handles it.
+        if score > 0 and score >= best_score:
             best_score, best_fields = score, fields
     return best_fields
+
+
+def _reorder_equip_tail(fields, record):
+    """Effective field order for the equipment tail of one record.
+
+    For the ``default_sub_item.type_id == 0`` shape, ``item_charge_type`` (a u8)
+    sits BEFORE ``cooltime``, not after ``unk_post_cooltime_b``. Return ``fields``
+    with the ``item_charge_type`` spec moved to just before ``cooltime`` for that
+    shape; otherwise return ``fields`` unchanged.
+
+    Empirically derived on the real 1.13 table (thief gloves / falobos76 #191):
+    every type_id==0 record reads a sensible cooltime ONLY in this order
+    (390/390) and every other record ONLY in the flat order (6118/6118).
+    Confirmed byte-exact and against DMM + the gloves mod (item 1001250,
+    cooltime 1,800,000). The writer and the converter's field-span walker both
+    call this so read, write and span attribution stay in one order.
+    """
+    dsi = record.get("default_sub_item")
+    if not isinstance(dsi, dict) or dsi.get("type_id", 15) != 0:
+        return fields
+    names = [f[0] for f in fields]
+    if "cooltime" not in names or "item_charge_type" not in names:
+        return fields
+    if names.index("item_charge_type") < names.index("cooltime"):
+        return fields                       # already reordered (defensive)
+    ict = next(f for f in fields if f[0] == "item_charge_type")
+    out = [f for f in fields if f[0] != "item_charge_type"]
+    out.insert([f[0] for f in out].index("cooltime"), ict)
+    return out
 
 
 def _read_item(r: _Reader, fields=None) -> dict:
@@ -2074,6 +2313,17 @@ def _read_item(r: _Reader, fields=None) -> dict:
         fields = _ITEM_FIELDS
     for spec in fields:
         name, kind = spec[0], spec[1]
+        # Cooltime reorder (thief gloves / falobos76 #191): mirror of
+        # _reorder_equip_tail for the read path, which can't reorder up front
+        # because type_id isn't known until default_sub_item is read. For the
+        # type_id==0 shape, item_charge_type (u8) precedes cooltime -- read it
+        # here and skip its later slot so the bytes consumed match what
+        # _write_item (which DOES reorder) emits.
+        if (out.get("default_sub_item") or {}).get("type_id", 15) == 0:
+            if name == "cooltime":
+                out["item_charge_type"] = r.u8()
+            elif name == "item_charge_type":
+                continue
         # Conditional 12-byte block before item_desc on lantern records.
         if name == "item_desc" and out.get("equip_type_info") == LANTERN_EQ_TYPE:
             out["lantern_unk_a"] = r.u32()
@@ -2260,6 +2510,11 @@ def _write_item(w: _Writer, it: dict, fields=None) -> None:
         return
     if fields is None:
         fields = _ITEM_FIELDS
+    # Cooltime reorder (thief gloves / falobos76 #191): item_charge_type sits
+    # before cooltime for the type_id==0 shape. Reorder the field list so a
+    # full-record write emits that order; a single-field call from
+    # _field_spans is a no-op here (both fields aren't present together).
+    fields = _reorder_equip_tail(fields, it)
     for spec in fields:
         name, kind = spec[0], spec[1]
         # Symmetric lantern conditional: emit 12 bytes only when

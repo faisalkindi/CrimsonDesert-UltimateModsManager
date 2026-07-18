@@ -27,6 +27,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  lint:
+    name: lint (ruff)
+    # CI never ran ruff at all, so findings only surfaced if someone happened
+    # to run it locally.
+    #
+    # It gates on files a PR ADDS, and only REPORTS on files it modifies.
+    # That asymmetry is deliberate: the repo carries ~100 pre-existing
+    # findings (apply_engine.py alone has 11, and a dozen more sit in files
+    # any real change has to touch). Failing a PR on debt it did not create
+    # teaches people to ignore the linter, which is worse than not having
+    # one. New code is held to a clean bar; the backlog is visible in the log
+    # and gets paid down deliberately, not by ambushing whoever edits the
+    # file next.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install ruff
+        run: python -m pip install ruff
+      - name: New files must be clean (gate)
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git fetch --no-tags --depth=50 origin "${GITHUB_BASE_REF}"
+            base="origin/${GITHUB_BASE_REF}"
+          else
+            base="HEAD~1"
+          fi
+          added=$(git diff --name-only --diff-filter=A "${base}"...HEAD -- '*.py' || true)
+          if [ -z "${added}" ]; then
+            echo "no new Python files"; exit 0
+          fi
+          echo "linting new files:"; echo "${added}"
+          ruff check ${added}
+      - name: Pre-existing debt in touched files (report only)
+        if: always()
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            base="origin/${GITHUB_BASE_REF}"
+          else
+            base="HEAD~1"
+          fi
+          touched=$(git diff --name-only --diff-filter=M "${base}"...HEAD -- '*.py' || true)
+          if [ -z "${touched}" ]; then
+            echo "no modified Python files"; exit 0
+          fi
+          ruff check ${touched} || true
+
   test:
     name: fast tests
     # All ~1,900 fast tests run as ONE pytest-xdist job. Sharding them across
@@ -55,10 +111,19 @@ jobs:
 
   slow-tests:
     name: slow integration tests
-    # Heavy full-table round-trips. Run on master, nightly, and on demand
-    # -- not on every PR, to keep PR feedback fast. Trigger manually on a
-    # PR that touches the iteminfo parser/writer.
-    if: github.event_name == 'schedule' || github.event_name == 'push'
+    # Heavy full-table round-trips against the REAL 1.13 game table.
+    #
+    # These used to skip on pull requests (schedule/push only), which meant a
+    # PR could be merged green having never touched the real table -- and the
+    # real table is where this project's worst bugs live: #285 (76-139 bytes
+    # per record carried through undecoded), #293 (byte offsets written into
+    # the middle of another record, corrupting the file). A gate that cannot
+    # catch the class of bug that actually ships is not a gate.
+    #
+    # They now run on PRs too. Fast feedback is unaffected: this job runs in
+    # PARALLEL with the ~4-minute fast job, so a green tick still arrives
+    # quickly; only the merge signal waits. Runner minutes are a cheaper
+    # currency than a corrupted save.
     runs-on: windows-latest
     timeout-minutes: 35
     steps:

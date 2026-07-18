@@ -159,6 +159,10 @@ a = Analysis(
         'cdumm.engine.language',
         'cdumm.engine.compiled_merge',
         'cdumm.engine.texture_mod_handler',
+        # PIL DDS texture decode for the Game Data preview — name the core
+        # codec + DDS plugin so the build actually bundles them (Pillow
+        # registers plugins lazily, which PyInstaller can miss).
+        'PIL', 'PIL.Image', 'PIL.ImageFile', 'PIL.DdsImagePlugin',
         'cdumm.archive.pathc_handler',
         'cdumm.engine.mod_health_check',
         # Imported by the GUI even though the page is hidden on macOS , 
@@ -248,9 +252,10 @@ a = Analysis(
         'PySide6.QtTest', 'PySide6.QtDBus', 'PySide6.QtConcurrent',
         # scipy/numpy, only needed for acrylic blur (disabled)
         'scipy', 'numpy', 'numpy.core', 'numpy.linalg',
-        # PIL/Pillow, not imported by CDUMM (colorthief dep, unused)
-        'PIL', 'PIL._imaging', 'PIL._avif', 'PIL._webp', 'PIL.Image',
-        'Pillow', 'colorthief',
+        # PIL/Pillow IS used — it decodes DDS textures for the Game Data
+        # preview, so it must be bundled (do NOT exclude it). Only colorthief
+        # (which merely pulls PIL in transitively) is unused.
+        'colorthief',
         # brotli, not used by CDUMM (transitive dep from py7zr)
         'brotli', '_brotli', 'brotlicffi',
         # cryptography used by privatebin for AES-GCM + PBKDF2. Keep minimal subset.

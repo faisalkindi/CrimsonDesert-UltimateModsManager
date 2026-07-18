@@ -55,13 +55,33 @@ def test_check_show_update_notes_skips_dialog_on_fresh_install():
     stamp the version (so it is quiet on subsequent launches) but
     the dialog stays hidden."""
     body = _function_body(_src(), "_check_show_update_notes")
-    # Some condition must short-circuit the dialog when last_ver
-    # is falsy (None / empty string).
+    # Some condition must short-circuit the dialog when there is no prior
+    # seen-state (fresh install). The gate now keys on a notes signature, so
+    # "no prior state" means neither the signature nor the legacy version
+    # stamp is set.
     assert (re.search(r"if not last_ver", body)
             or re.search(r"last_ver is None", body)
-            or re.search(r"last_ver == [\"']{2}", body)), (
-        "must skip the dialog branch when there is no prior "
-        "last_seen_version (fresh install case)")
+            or re.search(r"last_ver == [\"']{2}", body)
+            or re.search(r"not last_sig and not last_ver", body)), (
+        "must skip the dialog branch when there is no prior seen-state "
+        "(fresh install case)")
+
+
+def test_check_show_update_notes_keys_on_notes_signature_not_version_alone():
+    """A community rebuild ships under the SAME version with updated notes.
+    Gating on the version string alone left those updated notes unseen in the
+    shipped exe (#191: "stale patch notes"). The gate must key on a signature
+    of the newest changelog entry so a same-version rebuild's updated notes
+    still show. This pins the fix so a refactor can't silently revert it."""
+    body = _function_body(_src(), "_check_show_update_notes")
+    assert "last_seen_notes_sig" in body, (
+        "gate must persist a signature of the latest notes, not just the "
+        "version string")
+    assert ("hashlib" in body or "sha256" in body), (
+        "the signature must be a hash of the newest changelog entry")
+    assert "CHANGELOG" in body and "notes" in body, (
+        "the signature must cover the newest entry's notes, so changed notes "
+        "under the same version re-show the dialog")
 
 
 def test_dialog_failure_does_not_crash_launch():

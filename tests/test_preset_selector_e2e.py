@@ -3,16 +3,13 @@ preset selector after Phase 1 lands."""
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import real_mod_fixture
 
-_MOD_1103_PATH = Path(
-    "C:/Users/faisa/Downloads/Compressed/"
-    "JSON Stamina - Spirit Adjuster And Regen-1103-1-4-1777707454/"
-    "Stamina Spirit Adjuster + Regen.json"
-)
+
+_MOD_1103_PATH = real_mod_fixture("JSON Stamina - Spirit Adjuster And Regen-1103-1-4-1777707454/Stamina Spirit Adjuster + Regen.json")
 
 
 @pytest.fixture

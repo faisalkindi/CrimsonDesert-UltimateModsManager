@@ -11,14 +11,12 @@ import math
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEventLoop, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QEasingCurve, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -37,31 +35,11 @@ from qfluentwidgets import (
 )
 
 from cdumm.i18n import tr
-from cdumm.platform import IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
 # Module-level lock: only one tool can run at a time
 _active_tool = None
-
-
-def _bisect_windows_only_message(is_windows: bool) -> str | None:
-    """User-facing reason the Find-Culprit bisection is unavailable on
-    this platform, or None when it can run.
-
-    The bisection (FindCulpritPage -> _AutoBisectWorker ->
-    game_monitor.launch_and_test) classifies each round as crash-vs-
-    stable from the CrimsonDesert.exe process table and the Pearl Abyss
-    crashpad ``.dmp`` files, both Windows-only. On Linux / macOS
-    ``find_game_process()`` always returns None, so ``launch_and_test``
-    waits the full launch timeout and then reports "process not found,
-    treating as crash" EVERY round, fingering an innocent mod. Disable
-    the feature there, like the ASI plugins section. GitHub #195
-    (RoGreat).
-    """
-    if is_windows:
-        return None
-    return tr("tools.culprit.windows_only")
 
 
 # ======================================================================
@@ -330,6 +308,8 @@ class ToolPageBase(SmoothScrollArea):
         self._run_btn.setFixedWidth(360)
         self._run_btn.setFixedHeight(52)
         self._apply_run_btn_style()
+        from cdumm.gui.accent import bus as _accent_bus
+        _accent_bus().changed.connect(self._apply_run_btn_style)
         self._run_btn.clicked.connect(self._on_run_clicked)
         action_row.addWidget(self._run_btn, 0, Qt.AlignmentFlag.AlignCenter)
 
@@ -442,28 +422,23 @@ class ToolPageBase(SmoothScrollArea):
         desc_color = "#8B95A5" if isDarkTheme() else "#6B7585"
         from qfluentwidgets import setCustomStyleSheet
         setCustomStyleSheet(self._desc_label,
-            f"BodyLabel{{color:#6B7585;}}", f"BodyLabel{{color:#8B95A5;}}")
+            "BodyLabel{color:#6B7585;}", "BodyLabel{color:#8B95A5;}")
 
     def _apply_run_btn_style(self) -> None:
         from qfluentwidgets import setCustomStyleSheet
-        light = (
+        from cdumm.gui.accent import accent_shades, accent_fg
+        base, hover, pressed = accent_shades()
+        fg = accent_fg()
+        common = (
             "PrimaryPushButton {"
-            "  background-color: #2878D0; color: white;"
+            f"  background-color: {base}; color: {fg};"
             "  border-radius: 12px; border: none; padding-bottom: 6px;"
             "}"
-            "PrimaryPushButton:hover { background-color: #3388E0; }"
-            "PrimaryPushButton:pressed { background-color: #2060B0; }"
-            "PrimaryPushButton:disabled { background-color: #ccc; color: #999; }"
+            f"PrimaryPushButton:hover {{ background-color: {hover}; }}"
+            f"PrimaryPushButton:pressed {{ background-color: {pressed}; }}"
         )
-        dark = (
-            "PrimaryPushButton {"
-            "  background-color: #3A8FE0; color: white;"
-            "  border-radius: 12px; border: none; padding-bottom: 6px;"
-            "}"
-            "PrimaryPushButton:hover { background-color: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background-color: #2878D0; }"
-            "PrimaryPushButton:disabled { background-color: #333; color: #666; }"
-        )
+        light = common + "PrimaryPushButton:disabled { background-color: #ccc; color: #999; }"
+        dark = common + "PrimaryPushButton:disabled { background-color: #333; color: #666; }"
         setCustomStyleSheet(self._run_btn, light, dark)
         bf = self._run_btn.font()
         bf.setPixelSize(15)
@@ -671,7 +646,6 @@ class VerifyStatePage(ToolPageBase):
         self._set_running(True)
 
         # Run in a separate process via QProcess (no GIL contention)
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 
@@ -873,7 +847,6 @@ class CheckModsPage(ToolPageBase):
         self._clear_results()
         self._set_running(True)
 
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 
@@ -1059,29 +1032,13 @@ class FindCulpritPage(ToolPageBase):
         self._pause_btn.setFixedHeight(36)
         self._pause_btn.clicked.connect(self._on_pause_resume)
         self._pause_btn.hide()
-        _scs(self._pause_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 18px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 18px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._pause_btn, radius=18,
+                          padding_css="padding-bottom: 6px;")
 
         # Add buttons to the action row
         self._action_row.addWidget(self._stop_btn)
         self._action_row.addWidget(self._pause_btn)
-
-        # GitHub #195 (RoGreat): the bisection is Windows-only (crash
-        # detection needs the CrimsonDesert.exe process table + Pearl
-        # Abyss crashpad .dmp files). On Linux/macOS it would report a
-        # false crash every round, so disable Start and explain why,
-        # mirroring how the ASI plugins page handles unsupported hosts.
-        unsupported = _bisect_windows_only_message(IS_WINDOWS)
-        if unsupported is not None:
-            self._run_btn.setEnabled(False)
-            self._set_status(unsupported, "#E65100")
-            # The Press Play pitch only makes sense for live bisection
-            # runs, which can't happen here — hide it to avoid confusion.
-            self._pp_note.hide()
-            self._press_play_card.hide()
 
     def set_managers(self, **kwargs) -> None:
         super().set_managers(**kwargs)
@@ -1150,7 +1107,6 @@ class FindCulpritPage(ToolPageBase):
 
     def _refresh_press_play_status(self) -> None:
         """Detect if Press Play ASI is installed and enabled."""
-        from qfluentwidgets import setCustomStyleSheet
         if not self._game_dir:
             return
 
@@ -1258,13 +1214,6 @@ class FindCulpritPage(ToolPageBase):
             self._set_status(tr("tools.culprit.paused"), "#EBCB8B")
 
     def _on_run_clicked(self) -> None:
-        # GitHub #195: hard guard so the Windows-only bisection can never
-        # start on Linux/macOS, even if a state-reset path re-enabled the
-        # button. Checked before _can_run so it short-circuits cleanly.
-        unsupported = _bisect_windows_only_message(IS_WINDOWS)
-        if unsupported is not None:
-            self._set_status(unsupported, "#E65100")
-            return
         if not self._can_run():
             return
         if self._auto_running:
@@ -1535,7 +1484,6 @@ class InspectModPage(ToolPageBase):
         filename = Path(path).name
         self._set_status(tr("tools.inspect.analyzing", name=filename))
 
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 
@@ -1625,7 +1573,6 @@ class InspectModPage(ToolPageBase):
 
     def _add_diagnostic_card(self, report: str, filename: str) -> None:
         """Parse diagnostic report into individual result cards."""
-        from PySide6.QtWidgets import QApplication, QHBoxLayout
         from qfluentwidgets import PushButton, InfoBar, InfoBarPosition
 
         # Parse the report into sections and show as individual cards
@@ -1831,13 +1778,19 @@ class FixEverythingPage(ToolPageBase):
         qbf.setPixelSize(14)
         qbf.setWeight(QFont.Weight.Bold)
         self._quick_btn.setFont(qbf)
-        setCustomStyleSheet(self._quick_btn,
-            "PrimaryPushButton { background: #2878D0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #3388E0; }"
-            "PrimaryPushButton:pressed { background: #2060B0; }",
-            "PrimaryPushButton { background: #3A8FE0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background: #2878D0; }")
+        def _style_quick_btn():
+            from cdumm.gui.accent import accent_shades, accent_fg
+            base, hover, pressed = accent_shades()
+            fg = accent_fg()
+            qss = (
+                f"PrimaryPushButton {{ background: {base}; color: {fg}; "
+                "border-radius: 12px; border: none; padding-bottom: 6px; }"
+                f"PrimaryPushButton:hover {{ background: {hover}; }}"
+                f"PrimaryPushButton:pressed {{ background: {pressed}; }}")
+            setCustomStyleSheet(self._quick_btn, qss, qss)
+        _style_quick_btn()
+        from cdumm.gui.accent import bus as _abus_q
+        _abus_q().changed.connect(_style_quick_btn)
         self._quick_btn.clicked.connect(self._on_quick_fix)
         quick_layout.addWidget(self._quick_btn)
 
@@ -1886,15 +1839,23 @@ class FixEverythingPage(ToolPageBase):
         fbf.setPixelSize(14)
         fbf.setWeight(QFont.Weight.Bold)
         self._full_btn.setFont(fbf)
-        setCustomStyleSheet(self._full_btn,
-            "PrimaryPushButton { background: #2878D0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #3388E0; }"
-            "PrimaryPushButton:pressed { background: #2060B0; }"
-            "PrimaryPushButton:disabled { color: #4A5568; border: 1px solid #CBD5E0; border-radius: 12px; background: transparent; }",
-            "PrimaryPushButton { background: #3A8FE0; color: white; border-radius: 12px; border: none; padding-bottom: 6px; }"
-            "PrimaryPushButton:hover { background: #4DA0F0; }"
-            "PrimaryPushButton:pressed { background: #2878D0; }"
-            "PrimaryPushButton:disabled { color: #9CA3AF; border: 1px solid #4A5568; border-radius: 12px; background: transparent; }")
+        def _style_full_btn():
+            from cdumm.gui.accent import accent_shades, accent_fg
+            base, hover, pressed = accent_shades()
+            fg = accent_fg()
+            common = (
+                f"PrimaryPushButton {{ background: {base}; color: {fg}; "
+                "border-radius: 12px; border: none; padding-bottom: 6px; }"
+                f"PrimaryPushButton:hover {{ background: {hover}; }}"
+                f"PrimaryPushButton:pressed {{ background: {pressed}; }}")
+            light = common + ("PrimaryPushButton:disabled { color: #4A5568; "
+                "border: 1px solid #CBD5E0; border-radius: 12px; background: transparent; }")
+            dark = common + ("PrimaryPushButton:disabled { color: #9CA3AF; "
+                "border: 1px solid #4A5568; border-radius: 12px; background: transparent; }")
+            setCustomStyleSheet(self._full_btn, light, dark)
+        _style_full_btn()
+        from cdumm.gui.accent import bus as _abus_f
+        _abus_f().changed.connect(_style_full_btn)
         self._full_btn.clicked.connect(self._on_full_fix)
         self._full_btn.setEnabled(False)
         full_layout.addWidget(self._full_btn)
@@ -1969,7 +1930,6 @@ class FixEverythingPage(ToolPageBase):
         self._clear_results()
         self._set_running(True)
 
-        import sys
         import json as _json
         from PySide6.QtCore import QProcess
 

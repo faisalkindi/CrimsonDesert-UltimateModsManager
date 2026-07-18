@@ -6,13 +6,14 @@ Format 3 mods targeting skill.pabgb with `_useResourceStatList`
 were skipped at validation time. Now writable.
 """
 from __future__ import annotations
-from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_VANILLA_PABGB = Path(r"C:\Users\faisa\AppData\Local\Temp\skill.pabgb")
-_VANILLA_PABGH = Path(r"C:\Users\faisa\AppData\Local\Temp\skill.pabgh")
+
+_VANILLA_PABGB = vanilla113_file("skill.pabgb")
+_VANILLA_PABGH = vanilla113_file("skill.pabgh")
 
 
 def _have_inputs() -> bool:

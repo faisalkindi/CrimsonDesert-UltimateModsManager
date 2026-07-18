@@ -85,10 +85,21 @@ SUBSTRUCT_DEFS: dict[str, list[tuple[str, str]]] = {
         ("equip_slot_name_key", "u32"),
         ("equip_slot_name_index_list", "CArray<u8>"),
     ],
+    # Post-1.0.4.1 layout: fixed 14 bytes, no inner list. The pre-1.0.4.1
+    # shape modelled here before (u32 icon_path + u8 check_exist_sealed_data
+    # + CArray<u32> gimmick_state_list) has not matched a shipped table for
+    # a long time -- it bailed the walk on ~99.9% of records of BOTH the
+    # 1.10 fixture and the live 1.13 table. It went unnoticed because the
+    # only test that exercises this walk looks for its fixture in
+    # tests/fixtures/iteminfo/, while the fixture is committed at
+    # tests/fixtures/vanilla110/ -- so it always skipped.
+    # Matches _read_ItemIconData in iteminfo_native_parser, which
+    # round-trips both versions byte-exact.
     "ItemIconData": [
         ("icon_path", "u32"),
-        ("check_exist_sealed_data", "u8"),
-        ("gimmick_state_list", "CArray<u32>"),
+        ("unk_a", "u32"),
+        ("unk_b", "u32"),
+        ("unk_c", "u16"),
     ],
     "PassiveSkillLevel": [
         ("skill", "u32"),
@@ -134,6 +145,10 @@ SUBSTRUCT_DEFS: dict[str, list[tuple[str, str]]] = {
         ("enchant_stat_data", "EnchantStatData"),
         ("buy_price_list", "CArray<ItemPriceInfo>"),
         ("equip_buffs", "CArray<EquipmentBuff>"),
+        # CD 1.12 added a u32 here (_itemEffectInfo). Verified byte-exact
+        # on the live 1.13 table -- see _read_EnchantData_CD113 in
+        # iteminfo_native_parser, which is this shape plus this u32.
+        ("item_effect_info", "u32"),
     ],
     "GimmickVisualPrefabData": [
         ("tag_name_hash", "u32"),
@@ -374,7 +389,23 @@ TAGGED_VARIANT_DEFS: dict[str, dict] = {
             0: "u32",   # ItemKey
             3: "u32",   # CharacterKey
             9: "u32",   # GimmickInfoKey
-            14: "",     # None - no payload
+            # "None" sentinels. The tag number for None has drifted with
+            # the game: CD 1.10 ships 16, CD 1.13 ships 17 (measured --
+            # 6415/6483 records on the 1.10 fixture carry tag 16, and
+            # 6504/6508 on the live 1.13 table carry tag 17). 14 is kept
+            # from crimson-rs for older tables. Listing them all is safe:
+            # a tag simply never appears in a table that predates it.
+            #
+            # Modelling 16/17 as payload-bearing (the old default: any tag
+            # but 14 consumes a u32) is what stalled the walk inside
+            # DropDefaultData. The tell is in the "values" it produced on
+            # 1.10 -- 65536 (0x00010000), 65792 (0x00010100), 131072
+            # (0x00020000): not data, but [svc][use][count_lo][count_hi]
+            # read as one little-endian u32. Those bytes are really the
+            # socket counters plus the _enchantDataList count that follows.
+            14: "",
+            16: "",
+            17: "",
         },
     },
     # SealableItemInfo (crimson-rs structs.rs lines 411-487) — read order:

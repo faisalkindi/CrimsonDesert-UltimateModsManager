@@ -1,155 +1,305 @@
 # Game-Data Unlock — Status & Roadmap
 
-Roadmap for unlocking more Crimson Desert `.pabgb` game-data tables for **Format 3
-(`.field.json`) field-name modding** in CDUMM. This is contributor-facing: it
-records the core blocker, the `iteminfo` reverse-engineering done so far, and the
-concrete paths to finish so nobody has to re-derive it.
+How to let CDUMM mod more of Crimson Desert's `.pabgb` data tables by field
+name (the Format 3 flow). Contributor-facing: records the blocker, what's
+been done, what's been *ruled out*, and the two paths that remain — so
+nobody re-derives it.
+
+**Last verified: 2026-07-11, game build 1.13.**
 
 ---
 
-## 1. The goal
+## 1. Where we actually are
 
-Let users mod more of Crimson Desert's ~322 `.pabgb` data tables by **field name**
-(the Format 3 flow), beyond the ~10 tables supported today. The headline target is
-`iteminfo` (weapons / armour / consumables).
+Measured against the installed game (134 `.pabgb` tables shipped):
 
----
+| | tables |
+|---|---|
+| **Full decode + edit** (native writer and/or hand-RE'd `_ordered_fields`) | **13** |
+| Schema exists, but in **memory order** → lands on the wrong bytes | 82 |
+| No schema at all | 41 |
 
-## 2. Where the field-name flow stands
+The 13: `iteminfo`, `characterinfo`, `dropsetinfo`, `equipslotinfo`,
+`multichangeinfo`, `skill`, `storeinfo`, `stringinfo`, `fieldinfo`,
+`stageinfo`, `regioninfo`, `vehicleinfo`, `wantedinfo`.
 
-- The engine that **applies** Format 3 mods ships in CDUMM.
-- Per-field write locations live in `field_schema/<table>.json` (see
-  `field_schema/README.md`) and/or the `_ordered_fields` overrides in
-  `schemas/pabgb_type_overrides.json`.
-- A **verified-only** mechanism gates both display and apply: `TableSchema.verified_fields`
-  marks fields validated against real record data; the Game Data tab renders every
-  other field as `(unverified)`, and `format3_apply._resolve_write_pos` refuses to
-  write any field a table's `verified_fields` doesn't vouch for. This is what keeps
-  an unproven offset from silently corrupting a table. `wantedinfo` is the reference
-  example of a single hand-verified field.
+**`iteminfo` is done** (this is the part of the old roadmap that was most
+stale — it used to say "43 of 113 fields on 1.12"):
 
----
-
-## 3. The core blocker (read before starting)
-
-**A. Memory-order schema.** The shipped `schemas/pabgb_complete_schema.json`
-(from NattKh, MPL-2.0) sorts each table's fields by the field descriptor's **memory
-address in the exe**, *not* by on-disk serialization order. So any table without a
-hand-authored `_ordered_fields` override reads fields at the wrong offsets and
-produces garbage (e.g. `mercenaryinfo` booleans decode to the ASCII bytes of
-"mer**cenary**"; `relationinfo` reads the high halves of floats).
-
-**B. Game-version drift.** The current game build is **1.12**. Every *readable*
-community reference — NattKh's `iteminfo.hexpat`, the decoded `iteminfo_dump`, and
-even the **1.11** `dmm_parser` type stubs — is 1.11 or older. The 1.12 patch changed
-record layouts, so even a correct ≤1.11 layout desyncs on current data.
-
-**Net:** every unsupported table needs its complete 1.12 field order reverse-engineered
-by hand, and no version-matched reference currently hands it to us. Confirmed
-empirically: **0 of ~312 unsupported tables fully decode on 1.12**, and cheap
-correctness heuristics (e.g. "`_isBlocked` is 0/1") are unreliable.
+- all 6508 records decode on 1.13, 0 opaque, byte-exact round-trip
+- all 3151 equipment records decode (they were silently desynced — see
+  `iteminfo_native_parser`, the SubItem-tag-17 + `_enchantDataList` fix)
+- gear stats (armour/weapon) are readable **and** writable
+- the semantic walker reaches 110 of 113 fields (was 11)
 
 ---
 
-## 4. `iteminfo` — findings
+## 2. The blocker, stated precisely
 
-`iteminfo`'s override **already has the full 113-field `_ordered_fields`** and all
-41 sub-structs / tagged variants in `src/cdumm/semantic/pabgb_types.py`. The schema
-is not the gap — **1.12 layout drift is.** On 1.12 the walker stalls at field 14
-`_itemIconList` for 6477 / 6483 items.
+`schemas/pabgb_complete_schema.json` lists each table's fields **sorted by
+the field descriptor's memory address in the exe**, not by on-disk
+serialization order. Walk it and you read the wrong bytes — `mercenaryinfo`
+booleans decode to the ASCII of "mer**cenary**"; `relationinfo` reads the
+high halves of floats.
 
-Three 1.12 drift points have been reverse-engineered, cascading the decode from
-**11 → 43 of 113 fields**, each decoded field verifying against the launch answer-key
-dump (item 1000080 "Hwando"):
+Two things worth knowing, both established 2026-07-11:
 
-1. **`ItemIconData` grew 9 → 14 bytes** and absorbed `map_icon_path`:
-   `{ icon_path u32, map_icon_path u32, unk6 [u8;6] }` — and the separate
-   `_mapIconPath` field after `_itemIconList` is **removed** (now per-icon).
-   Verified by fingerprint: `materialKey==materialMatchInfo` sits at offset 24 from
-   the stall for 1-icon items, 38 for 2-icon items → +14 bytes/element.
-2. **Insert after `_extractMultiChangeInfo`:**
-   `{ u16 marker=0xFFFF, CString filter_category_name, u32 a=0, u32 group_key, u32 b=0 }`.
-3. **Insert after `_isAllGimmickSealable`** (7 bytes):
-   `{ u8 0, u8 0, u8 1, u32 hash=0x9D7C0DD0 }`.
+**(a) The order was destroyed by the dump, not by the game.** All 347 types
+in the schema are sorted by address `s`. The extractor sorted them. So this
+is an *extraction* problem, not an RE-from-scratch problem.
 
-**Remaining for `iteminfo`:**
-- The 5 consecutive `CArray<SealableItemInfo>` sealable-list fields drift on 1.12
-  (element size/type changed — 4-byte `u32` keys observed where 13+ byte structs
-  were expected; list counts land on garbage). Neither insert-2 sizing (7/8/9) nor
-  swapping the lists to `CArray<u32>` cleared it — needs the exact restructure.
-- Past the sealable region sit the high-value tail scalars: `_itemTier`, `_cooltime`,
-  `_maxEndurance`, durability, charge counts, `_respawnTimeSeconds` (and
-  `_equipableLevel`, `_categoryInfo`, which already decode).
+**(b) There is no cheap rule to recover it.** Tested, on the 7 tables where
+both the schema order and a verified file order are known: sorting by `s`
+(address), by `fn` (function pointer), by `stream`, and the raw schema list
+order — **none** reproduces file order on any table.
 
-> **Do not ship a partial `iteminfo` schema.** A half-mapped item layout can misplace
-> writes and corrupt the item table. Finish the full 1.12 walk, or gate strictly to
-> the verified subset, before shipping.
+> Beware a tempting false positive here: sorting by `fn` *appears* to work
+> if you sort a list that is already in file order — `fn` is near-constant,
+> so a stable sort returns the input unchanged. It is a tautology. Sort the
+> *schema* order and compare; it fails.
+
+A rule that is right for 90% of fields is worse than no rule: it silently
+writes the other 10% to the wrong bytes.
 
 ---
 
-## 5. Why there's no quick "easy table" instead
+## 3. What the wider ecosystem has (researched 2026-07-11)
 
-A survey for a small, already-correct table found: 79 unsupported tables are
-all-primitive, but **none fully decode to the record boundary on 1.12** (the shipped
-schema is missing/mis-ordering fields for all of them). Even "supported" tables
-aren't fully decoded (`fieldinfo` leaves a 21-byte gap, `dropsetinfo` ~99 bytes) —
-they only map the fields people mod. Correctness heuristics are unreliable. So each
-table is genuine hand-RE + per-field verification; there is no shortcut table.
+Every public tool was checked, with its licence. **None solves this.**
 
----
+| project | licence | what it does with `.pabgb` |
+|---|---|---|
+| [LukeFZ/pycrimson](https://github.com/LukeFZ/pycrimson) | **MIT** | Raw bytes only — slices rows by offset, returns `dict[offset → bytes]`. Its own notes call pabgb *"raw table entries"*. **No field decode.** |
+| [hzeemr/crimsonforge](https://github.com/hzeemr/crimsonforge) | **MIT** | Heuristic guesser: walks 4 bytes at a time guessing u32/f32/string. **No field names, no struct/array awareness.** Fine for viewing; unsafe to write with. |
+| [NattKh/CrimsonDesertModdingTools](https://github.com/NattKh/CrimsonDesertModdingTools) | **NONE** (all rights reserved) | **Has real reader-order parsers** (`parsers/*.py`) — the thing we need. Cannot be used. |
+| exodiaprivate-eng/dmm-parser | CDMTL | Explicitly prohibits use by a competing mod manager. **Do not read, do not port.** |
 
-## 6. Licensing (respect it)
+**The finding that matters:** LukeFZ — a serious reverse engineer — hit the
+*exact same wall* and did not attempt field decode. That is independent
+confirmation the schema genuinely is not in the shipped data files.
 
-- **Usable now (MPL-2.0):** `NattKh/CRIMSON-DESERT-SAVE-EDITOR-AND-GAME-MODS`
-  (root `LICENSE.txt` is MPL-2.0). CDUMM already ships its `pabgb_complete_schema.json`
-  under MPL-2.0 per `schemas/NOTICE`; port from here with attribution.
-- **Not usable yet (no license = all rights reserved):**
-  `NattKh/CrimsonDesertModdingTools` — the repo holding
-  `pabgb_full_schema_with_readers.json` (reader-order schema) and extra per-table
-  parsers. Do not copy it in until it carries an explicit license (request open at
-  `NattKh/CrimsonDesertModdingTools` issue #1). "Public repo" ≠ "free to use."
+### Confirmed: the schema is not in the assets
 
----
+The game's other formats (`prefab`, `paseq`, `pae`, `parg`, `pasg`,
+`meshinfo`, `paa_metabin`, `palevel`) **are** reflection-serialised: each
+carries a type table of `{type name → ORDERED property list}` — exactly the
+shape we want.
 
-## 7. Two ways to finish
-
-**Path A — reader-order schema (preferred, sustainable).** Once
-`CrimsonDesertModdingTools` is licensed (or a 1.12 update ships), take
-`pabgb_full_schema_with_readers.json` (or the per-table parsers) and **auto-generate
-`_ordered_fields`** for many tables at once; verify each against game data, mark
-`verified_fields`, ship. Mechanical rather than byte-by-byte; regenerating after each
-patch keeps it from rotting.
-
-**Path B — per-table hand-RE (works today, slow).** The `wantedinfo` method: pick a
-table, find one field whose value is **independently cross-checkable** in-game
-(`wantedinfo._increasePrice=1500` matched the bounty economy), verify its offset, add
-it to `_ordered_fields` + `verified_fields`, ship. Reliable but linear.
-
-**Path C — ASI reflection dumper (durable, biggest effort).** The version-proof source
-is the game's own type registry, read at runtime from the packed exe via an injected
-ASI probe. A reflection dump yields authoritative field order/types for every table
-and every future patch. Large, multi-session RE.
+Tested: harvested the type tables from a sample of those assets — parsed 36
+of 60, yielding 44 distinct types (`SceneObject`, `Material`,
+`SkinnedMeshComponent`, …). **0 of our 134 data-table types appear.** The
+reflection assets carry scene/render types only. The data-table type
+registry exists **only in the exe**.
 
 ---
 
-## 8. Next-step checklist
+## 4. The two paths that remain
 
-- [ ] Watch `CrimsonDesertModdingTools` issue #1. If licensed → **Path A**: script
-      `_ordered_fields` generation from the reader-order schema, verify, batch-PR tables.
-- [ ] Finish `iteminfo` 1.12: crack the sealable-list restructure → reach the tail
-      scalars → verify vs the launch dump → add `_ordered_fields` + `verified_fields`
-      + `field_schema/iteminfo` → tests → PR (stacks on the `verified_fields` mechanism).
-- [ ] Interim option: ship `iteminfo` with `verified_fields` limited to the fields that
-      already decode + verify (§4), so those specific fields display real values and
-      become moddable — only if the apply gate reliably refuses everything else.
-- [ ] Longer term: the ASI reflection dumper as the patch-proof source.
+**Path A — get `CrimsonDesertModdingTools` licensed (cheapest by far).**
+It already contains reader-order parsers. With a permissive licence we can
+auto-generate `_ordered_fields` for many tables at once and verify each
+against game data — mechanical, not byte-by-byte.
+
+Status: licence request is **open at issue #1 since April, zero replies**;
+the repo hasn't been pushed to in 3 months.
+
+*New leverage:* we are now in live contact with NattKh — we sent a
+substantive PR to `CrimsonDesertCommunityItemMapping` (correcting 18 wrong
+stat ids and adding the 51 missing ones). That is a far better moment to
+ask than a cold issue was.
+
+**Path C — read the game's own type registry (authoritative, version-proof).**
+The registry that says which fields, in which order, is in the exe. Read it
+and every table's order falls out — no trusting anyone's hand-work.
+
+This path was investigated directly against the installed 1.13 exe
+(`bin64/CrimsonDesert.exe`, 344 MB) on 2026-07-11. Findings, all read-only:
+
+**Strongly positive — the metadata is NOT encrypted at rest:**
+- Type-name strings are present: `ItemInfo` is referenced 215 times,
+  `BuffInfo` 19, `DropSetInfo` etc. all present.
+- **105 of 113 ItemInfo field-name strings are present as plain ASCII** in
+  the exe. (The 8 absent are the synthetic `_unk_*` names CDUMM invented,
+  not real game strings.) So the packer protects the *code*, not the
+  reflection strings.
+- The PE maps cleanly (image base `0x140000000`, normal section table), so
+  VA→file-offset resolution works.
+
+**Two shortcuts that were tried and DON'T work (recorded so they aren't
+retried):**
+- *Replaying the old schema's addresses.* `pabgb_complete_schema.json`
+  carries an `s` (address) per field. On the current build those addresses
+  are **stale** — they resolve to unrelated Havok class metadata
+  (`hkClassEnum`, `declaredEnums`, `inertiaTensor`), not ItemInfo
+  descriptors. The dump is from an older build; the addresses drifted. You
+  cannot statically walk "at address `s`" on the live game.
+- *Assuming it's Havok reflection.* The stale pointers landing in Havok data
+  made this look plausible, but the counts refute it: `hkClassMember`
+  appears **once**, `hkClass` five times — nowhere near enough to describe
+  ~322 tables. The pabgb registry is Pearl Abyss's **own** system (matching
+  pycrimson's custom `ReflectionType`/`ReflectionProperty`, not `hkClass`).
+
+**So the reliable form of Path C is a live reader-order hook, not static
+walking.** When the game loads a `.pabgb`, its per-type transfer function
+reads the fields in serialization order. An injected ASI that hooks that
+function and logs the call sequence observes the ground-truth order
+directly — for every table, on whatever build is running, with no dependence
+on a drifting static layout. This is aligned with how CD RE already has to
+be done (the exe is packed; live-memory capture is the established method).
+
+pycrimson (MIT) still helps: it documents the shape the transfer produces —
+`ReflectionType{ name, properties[] }` /
+`ReflectionProperty{ name, type_name, type, fixed_size, flags }` with an
+ordered property list — so we know what a correct dump should look like.
+
+Effort: real, multi-session (build the ASI, find the transfer/reader
+dispatch signature, capture, verify). But it is the only path that is
+**authoritative and survives patches**, and the metadata being unencrypted
+means the packer is not a blocker.
+
+**Path C′ — the unstripped macOS binary (newly found, likely the easiest
+of all).** NattKh's `PABGB_DECODE_PROCESS.md` (in the **MPL-2.0** SAVE-EDITOR
+repo — the *method* is licensed and citable, even though his tool code is
+not) documents exactly how the field order was recovered, and the key
+ingredient is not the Windows exe at all:
+
+> "The Mac binary (`CrimsonDesert_Steam-*`) has unstripped symbols with
+> error strings in Korean: `<Class>의 _<field>를 읽어들이는데 실패했다`
+> (= 'Failed to read _<field> of <Class>'). These appear in the EXACT read
+> order."
+
+So on the **macOS** build, a per-class regex over the error strings yields
+the field names *in serialization order* — no disassembly, no live process,
+no packer. That is dramatically cheaper than Path C's ASI hook.
+
+Tested whether the same shortcut works on the **Windows** exe we already
+have (2026-07-11): the Korean error-string machinery is present (4362
+"read", 5309 "fail" strings) and 105/113 ItemInfo field names are present —
+but the names are **not** laid out in order (longest ordered, packed run =
+2 fields). They're pointer-referenced from descriptor structs, so on Windows
+you still need IDA on the reader functions. **The Mac binary is the
+artifact that makes this a regex instead of an RE project.**
+
+Concrete next step for this path: obtain the macOS build of Crimson Desert
+(same game, Steam macOS depot), scan its per-class Korean error strings for
+field order, feed the result through the §4a harness (it must reproduce all
+7 known tables), then batch-add the tables that verify. This is the single
+highest-leverage lead found so far.
+
+The same doc independently confirms details CDUMM already implements — the
+pabgh index format detection, and the "#1 gotcha" that hash-lookup fields
+read a u32 from file but store a u16 in memory (CDUMM's `pabgh_rewrite`
+already handles this). Good corroboration that our own RE is on the right
+track.
+
+**Path B — per-table hand-RE (works today, slow, linear).** The
+`wantedinfo` method: pick a table, find one field whose value is
+independently cross-checkable in-game, verify its offset, add it to
+`_ordered_fields` + `verified_fields`, ship. Reliable, but one table at a
+time — and hand-RE'd layouts break on the next patch.
 
 ---
 
-## 9. Correctness & attribution notes
+## 4a. The prerequisite for ALL of them: a verification harness — BUILT
 
-- Never ship an unverified/partial table schema — a wrong offset silently writes to
-  the wrong bytes. The `verified_fields` gate exists to keep unproven fields un-writable.
-- Hand-RE'd 1.12 layouts break on the next patch; Path A/C are the durable fixes.
-- Keep `schemas/NOTICE` and the `pabgb_type_overrides.json` `_meta` provenance accurate
-  for anything ported from NattKh (MPL-2.0) or Potter420/crimson-rs (MIT).
+"Who's to say the rest works?" is the right question — and it is what sank
+naive trust in the community stat mapping (18 of 24 entries wrong, all
+flagged `verified`). The answer is not to trust any source, but to make
+every source **prove itself against ground truth we already hold.**
+
+**Status: shipped** — `cdumm.engine.schema_verify`, tests in
+`tests/test_schema_verify.py`.
+
+CDUMM has **7 tables with a hand-verified `_ordered_fields`** (ItemInfo,
+VehicleInfo, FieldInfo, StageInfo, RegionInfo, CharacterInfo, WantedInfo).
+`verify_order_source(candidate)` takes a `{table: [field, ...]}` mapping —
+what Path A's parsers or a Path C dump would produce — and checks it two
+ways per table:
+
+1. **Order identity** — the candidate's order must equal the verified
+   order exactly. This is the workhorse: it catches a scramble, a missing
+   or extra field, or a single misplaced field.
+2. **Fixture decode score** — where a committed fixture exists (ItemInfo,
+   via `vanilla113`), the candidate order is used to *walk the 6508 real
+   records*. This anchors our own ground truth to real bytes ("verified"
+   = "decodes real data", not "asserted") and flags gross corruption.
+
+The two are complementary and the tests prove it: ground truth passes 7/7;
+a scrambled order is rejected by **both** gates (identity mismatch **and**
+median fields decoded drops from 11 to 4); a single adjacent swap is caught
+by identity (its honest blind spot — same-width swaps upstream of the
+walker stall decode to the same byte count — is pinned as a test, so the
+division of labour is explicit).
+
+A source that fails either gate on any covered table is rejected. One that
+passes all it covers is `trustworthy` on those — and even then each new
+table stays gated to `verified_fields` before its fields become writable.
+
+> The decode score sharpens automatically as the walker reaches deeper.
+> On this branch it stalls at ~11 of 113 ItemInfo fields (pre-#276); once
+> #276's walker fixes land (110/113) the byte check gets far more
+> discriminating for free.
+
+---
+
+## 5. Adjacent opportunity (not the pabgb gap, but real)
+
+pycrimson's **reflection parser is MIT and generic** — and CDUMM currently
+has *zero* support for the reflection-serialised formats: `prefab` (47,343
+assets), `paseq` (4,688), `palevel`, `meshinfo`, `paa_metabin`, `pae`.
+
+That is an entire modding surface (scenes, sequences, levels, materials)
+that is *self-describing* — no schema RE needed, the field names and order
+are in the file. If we want breadth rather than depth, this is the cheapest
+big win available, and the licence is clean (MIT, with attribution).
+
+---
+
+## 6. Rules
+
+- **Never ship an unverified or partial table schema.** A wrong offset
+  silently writes to the wrong bytes. The `verified_fields` gate exists to
+  keep unproven fields un-writable — an unproven field is *refused*, not
+  guessed.
+- Hand-RE'd layouts rot on the next patch. Paths A and C are the durable
+  fixes; Path B is a stopgap.
+- Keep `schemas/NOTICE` and the `_meta` provenance in
+  `pabgb_type_overrides.json` accurate for anything ported from NattKh
+  (MPL-2.0), Potter420/crimson-rs (MIT), or LukeFZ/pycrimson (MIT).
+- `exodiaprivate-eng/dmm-parser` is CDMTL-licensed and explicitly targets
+  competing mod managers. Do not read it, do not port from it, do not
+  derive parity from it. Everything in CDUMM is our own RE.
+
+---
+
+## 7. Next steps
+
+- [x] **Verification harness (§4a) — DONE.** `cdumm.engine.schema_verify`
+      + `tests/test_schema_verify.py`. Any order source now runs through
+      `verify_order_source` before it is trusted. This was the answer to
+      "who's to say the rest works."
+- [ ] **Path C′ (macOS binary) is now the recommended first attempt** — it
+      is a regex over unstripped Korean error strings, per NattKh's MPL-2.0
+      method doc, not a live hook or a disassembly. Get the macOS build,
+      extract per-class field order, run it through §4a. Far cheaper than
+      Path C if it pans out.
+- [ ] **Path C (ASI reader-order hook)** stays the durable, version-proof
+      fallback for whatever the Mac scan can't resolve. The reflection
+      metadata is unencrypted in the exe (§4); the live hook observes
+      ground-truth order and survives patches. (Static replay of the old
+      schema addresses is out — they've drifted.)
+- [ ] **Path A in parallel, as the cheap interim:** bump
+      `CrimsonDesertModdingTools` issue #1 on the back of the
+      community-mapping PR. If it gets licensed, its parsers go straight
+      through the §4a harness — no blind trust. Good contact exists now.
+- [ ] Adjacent: evaluate MIT-licensed reflection support for `prefab` /
+      `paseq` / `palevel` — a whole new moddable surface with no schema
+      problem (§5).
+- [ ] Housekeeping: the semantic walker is still broken on CD 1.10 (64 of
+      113 fields, never reaches `_cooltime`) — documented and pinned, not
+      fixed.
+
+> Provenance of §4/§4a: read-only inspection of the installed 1.13 exe on
+> 2026-07-11 (string presence, PE section map, descriptor bytes at the
+> schema's `s` addresses, Havok-fingerprint counts). No code was extracted
+> from the exe; only its own metadata was measured to scope the work.

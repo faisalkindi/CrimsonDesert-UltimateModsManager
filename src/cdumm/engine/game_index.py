@@ -27,6 +27,18 @@ from typing import Any, Callable, Iterable
 # Data-table blob (.pabgb) + schema/header (.pabgh) extensions.
 TABLE_EXTS = (".pabgb", ".pabgh")
 
+# The game's own verbose reflection-serialized formats — these embed a real
+# field / type / object name schema as text (readable via decode_reflection /
+# extract_strings). Packed value-only formats (.pabgh/.paatt/.paac/…) and
+# third-party binaries (.hkx, .roadsector, …) embed NO name schema, so the
+# flat "names" outline must never be mined from them.
+REFLECTION_EXTS = (".pae", ".paseq", ".prefab", ".meshinfo", ".paproj",
+                   ".pastage")
+
+# Video clips the game ships raw (UI advice / cutscene stingers). Played inline
+# in the Game Data preview via Qt Multimedia's FFmpeg backend.
+VIDEO_EXTS = (".mp4",)
+
 
 def category_of(path: str) -> str:
     """First path segment, e.g. 'gamedata' for 'gamedata/iteminfo.pabgb'."""
@@ -592,8 +604,12 @@ def convert_to_wav(data: bytes, out_wav: str) -> bool:
     try:
         tmp.write(data)
         tmp.close()
+        # CREATE_NO_WINDOW (0x08000000) stops a console window flashing on
+        # screen every time vgmstream runs as a subprocess (e.g. on Play).
+        _flags = 0x08000000 if os.name == "nt" else 0
         subprocess.run([exe, "-o", out_wav, tmp.name],
-                       capture_output=True, timeout=60, check=False)
+                       capture_output=True, timeout=60, check=False,
+                       creationflags=_flags)
         return os.path.exists(out_wav) and os.path.getsize(out_wav) > 44
     except Exception:  # noqa: BLE001
         return False
@@ -604,11 +620,34 @@ def convert_to_wav(data: bytes, out_wav: str) -> bool:
             pass
 
 
+_NAME_LIKE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")   # engine identifier
+
+
+def _is_name_like(s: str) -> bool:
+    """True only for strings shaped like an engine reflection name — a plain
+    identifier (``Sequence``, ``_isAccessLock``, ``bool``) or an asset-path
+    reference (contains ``/``).
+
+    Packed value-only formats (.paatt / .pabgh / .paac / …) embed no names —
+    their printable-ASCII runs are just random byte noise (``&N$0``, ``;@g#``,
+    ``JJ<sR``). Those must NOT be surfaced as a "names" outline, so anything
+    carrying punctuation or otherwise not identifier/path-shaped is rejected.
+    """
+    if _NAME_LIKE.match(s):
+        return True
+    return "/" in s and any(c.isalpha() for c in s)
+
+
 def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
-    """Printable-ASCII runs of at least ``min_len`` chars — the embedded
-    field / type / object names in the game's reflection-serialized binaries
-    (.paseq, .prefab, .meshinfo, ...). De-duplicated in encounter order and
-    capped to ``limit`` — a readable structure outline instead of raw hex."""
+    """Printable-ASCII runs of at least ``min_len`` chars that look like
+    engine names — the embedded field / type / object names in the game's
+    reflection-serialized binaries (.paseq, .prefab, .meshinfo, ...).
+    De-duplicated in encounter order and capped to ``limit`` — a readable
+    structure outline instead of raw hex.
+
+    Only ``_is_name_like`` runs are kept, so packed value-only files don't
+    masquerade their random ASCII noise as a structure outline.
+    """
     out: list = []
     seen: set = set()
     cur = bytearray()
@@ -618,7 +657,7 @@ def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
         else:
             if len(cur) >= min_len:
                 s = cur.decode("ascii")
-                if s not in seen:
+                if s not in seen and _is_name_like(s):
                     seen.add(s)
                     out.append(s)
                     if len(out) >= limit:
@@ -626,12 +665,13 @@ def extract_strings(data: bytes, min_len: int = 4, limit: int = 600) -> list:
             cur = bytearray()
     if len(cur) >= min_len and len(out) < limit:
         s = cur.decode("ascii")
-        if s not in seen:
+        if s not in seen and _is_name_like(s):
             out.append(s)
     return out
 
 
 _REFLECT_ID = re.compile(r"[A-Za-z][A-Za-z0-9]*$")   # class / type identifier
+_FIELD_ID = re.compile(r"_[A-Za-z][A-Za-z0-9_]*$")   # engine "_field" name
 
 
 def _raw_ascii_runs(data: bytes, min_len: int = 4, cap: int = 12000) -> list:
@@ -673,7 +713,7 @@ def decode_reflection(data: bytes, limit: int = 4000) -> dict | None:
     i, n = 0, len(ss)
     while i < n and len(fields) < limit:
         s = ss[i]
-        if s.startswith("_"):
+        if _FIELD_ID.match(s):
             fields.append((cur, s, ss[i + 1] if i + 1 < n else ""))
             i += 2
         else:

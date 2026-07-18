@@ -229,7 +229,7 @@ def _dirs_losing_pamt(deferred_file_deletions: "list[Path]") -> "set[str]":
 from cdumm.archive.papgt_manager import PapgtManager
 from cdumm.archive.transactional_io import TransactionalIO
 from cdumm.engine.delta_engine import (
-    SPARSE_MAGIC, apply_delta, apply_delta_from_file, load_delta,
+    SPARSE_MAGIC, apply_delta_from_file,
 )
 from cdumm.storage.database import Database
 
@@ -360,6 +360,17 @@ def _rewrite_mount_error_with_mod_names(
     )
 
 
+def _normalize_target(name: str) -> str:
+    """Compare a Format 3 `target` with a Format 2 `game_file` fairly.
+
+    One ships ``gamedata/binary__/client/bin/iteminfo.pabgb`` and the other
+    ``gamedata/iteminfo.pabgb``. Comparing them raw silently never matches --
+    the exact path-vs-bare-name trap that made `match` select zero records
+    (#275) and array_append no-op (#278). Compare on the bare table name.
+    """
+    return (str(name or "").replace("\\", "/").rsplit("/", 1)[-1].lower())
+
+
 def aggregate_json_mods_into_synthetic_patches(
     db, overlay_priority_tiebreak: bool = True,
 ) -> tuple[dict, list[dict]]:
@@ -406,6 +417,51 @@ def aggregate_json_mods_into_synthetic_patches(
     per_mod_summary: list[dict] = []
 
     from pathlib import Path as _Path
+
+    # ── Byte offsets vs a rebuilt table (GitHub #293) ──────────────────
+    #
+    # A Format 3 mod does not patch bytes: CDUMM parses the whole table,
+    # edits records, and RE-SERIALIZES it. Records change size, so every
+    # byte offset after the first edited record MOVES.
+    #
+    # A Format 2 mod patches fixed offsets. Applied against a table that a
+    # Format 3 mod has rebuilt, those offsets no longer point where the
+    # author measured them -- the write lands in the middle of some other
+    # record. The result is a structurally invalid table and the game will
+    # not start. falobos76 hit exactly this (GitHub #191): pinapana's
+    # socket mods (Format 3, iteminfo) plus any of three offset mods that
+    # also patch iteminfo -> crash on startup. Each works alone.
+    #
+    # CDUMM already knew which tables get rebuilt -- `f3_target_files` was
+    # collected and then used ONLY for a display label. Nothing guarded on
+    # it. So: find them first, and refuse the unsafe combination rather
+    # than corrupt the file. An honest refusal beats a broken install the
+    # user only discovers when the game won't launch.
+    f3_rebuilt: dict[str, str] = {}      # {game_file: mod that rebuilds it}
+    for _mid, _mname, _src, _dis, _pri, _cv in rows:
+        _p = _Path(_src)
+        if not _p.exists():
+            continue
+        try:
+            _d = _json.loads(_p.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if _d.get("format") != 3:
+            continue
+        try:
+            from cdumm.engine.format3_handler import (
+                parse_format3_mod_targets as _pf3)
+            for _tgt, _ints in _pf3(_p):
+                if _ints:
+                    f3_rebuilt.setdefault(
+                        _normalize_target(_tgt), _mname or f"mod {_mid}")
+        except Exception:  # noqa: BLE001 - never break apply over the guard
+            logger.exception(
+                "aggregate: could not read Format 3 targets for mod %s; "
+                "the byte-offset guard cannot protect its tables", _mid)
+
+    refused_offset_mods: list[dict] = []
+
     for mod_id, mod_name, json_source, disabled_raw, priority, cv_raw in rows:
         jp_path = _Path(json_source)
         if not jp_path.exists():
@@ -465,7 +521,28 @@ def aggregate_json_mods_into_synthetic_patches(
             game_file = patch.get("game_file")
             if not game_file:
                 continue
+
+            # GitHub #293: this mod patches fixed byte offsets in a table
+            # that a Format 3 mod rebuilds. Those offsets are stale the
+            # moment the table is re-serialized.
+            #
+            # #294 refused the mod outright here. #296 can do better --
+            # work out where those bytes MOVED to and rewrite the offsets --
+            # but that needs the rebuilt table, which doesn't exist yet:
+            # expand_format3_into_aggregated() runs later. So tag the
+            # changes now and re-anchor them once the rebuild is in hand
+            # (_reanchor_offsets_onto_rebuilds, below). Anything that can't
+            # be re-anchored is still refused, which is the whole point.
+            rebuilder = f3_rebuilt.get(_normalize_target(game_file))
             all_changes = patch.get("changes", [])
+            if rebuilder:
+                logger.info(
+                    "%r patches %s at fixed byte offsets and %r rebuilds "
+                    "that table (Format 3) — the offsets will be re-anchored "
+                    "onto the rebuilt table (#296).",
+                    mod_name, game_file, rebuilder)
+                all_changes = [
+                    {**c, "_needs_reanchor": rebuilder} for c in all_changes]
             # Apply custom values BEFORE the disabled filter so both
             # operations key by ORIGINAL patch index. Earlier this
             # ran custom_values on the already-filtered list, which
@@ -560,6 +637,11 @@ def aggregate_json_mods_into_synthetic_patches(
             for gf, changes in aggregated.items()
         ],
     }
+    if refused_offset_mods:
+        # Carried so the apply path / bug report can name the combination
+        # instead of the user discovering it when the game won't launch.
+        # Consumers read "patches"; an extra key is inert to them.
+        synth_patch_data["_refused_offset_mods"] = refused_offset_mods
     return synth_patch_data, per_mod_summary
 
 
@@ -766,6 +848,10 @@ def _expand_format3_into_synth_data(
             "Format 3 aggregator: bare-basename normalisation failed "
             "(%s); falling through with original keys", _e_norm)
 
+    # The Format 3 rebuild now exists in `aggregated`, so the byte-offset
+    # changes tagged during aggregation can finally be moved onto it (#296).
+    _reanchor_offsets_onto_rebuilds(aggregated, synth_data)
+
     new_keys = set(aggregated.keys()) - pre_keys
     if new_keys or any(len(aggregated[k]) != len(
             next((p["changes"] for p in synth_data.get("patches", [])
@@ -778,6 +864,190 @@ def _expand_format3_into_synth_data(
              "changes": aggregated[gf]}
             for gf in aggregated
         ]
+
+
+def _rebuilt_header_for(
+    aggregated: dict[str, list[dict]], vanilla_header: bytes,
+) -> bytes:
+    """The .pabgh index that frames the REBUILT body.
+
+    When a Format 3 mod grows records, the whole-table writer emits a companion
+    change that replaces the whole .pabgh (offset 0, ``original`` == the vanilla
+    header). That rebuilt header is what frames the rebuilt body; vanilla's no
+    longer does. Find it by its vanilla-header ``original`` -- which is unique
+    across the whole apply set, so no path-normalisation guessing is needed --
+    and fall back to vanilla when no record changed size (no companion emitted).
+    """
+    vh = vanilla_header.hex()
+    for changes in aggregated.values():
+        for c in changes:
+            if (c.get("offset") == 0 and c.get("original") == vh
+                    and c.get("patched")):
+                try:
+                    return bytes.fromhex(c["patched"])
+                except ValueError:
+                    pass
+    return vanilla_header
+
+
+def _rescue_refused_as_fields(
+    whole: dict, dropped: list[dict],
+    aggregated: dict[str, list[dict]], game_file: str,
+) -> bytes | None:
+    """Name refused byte offsets by item+field and fold them into the rebuild.
+
+    GitHub #50 (falobos76). #296 re-anchors offsets that merely MOVED; it
+    refuses the ones whose record a Format 3 mod rewrote, because a byte offset
+    can no longer say which item it meant once the surrounding bytes are gone.
+    But CDUMM can: each refused change's ``original`` still matches VANILLA, so
+    resolve it to (item, field) there -- the only table it anchors in -- and
+    re-apply it as a field edit on top of the rebuilt table. Durability and
+    sockets on the same armor then both land.
+
+    All-or-nothing: if any refused change can't be named (opaque record, lands
+    between fields, non-scalar, or built for another game version), the whole
+    rescue is abandoned and the caller keeps them refused. A partial rescue
+    would silently drop what it couldn't name -- the #285-class guess this
+    project refuses to make.
+
+    Returns the new rebuilt-body bytes on success, or None to keep refusing.
+    """
+    f3 = whole.get("_f3_rebuild") or {}
+    if f3.get("table") != "iteminfo":
+        return None                 # only iteminfo has a v2->field decoder
+    header_hex = f3.get("header")
+    if not header_hex:
+        return None
+    try:
+        vanilla_body = bytes.fromhex(whole["original"])
+        rebuilt_body = bytes.fromhex(whole["patched"])
+        vanilla_header = bytes.fromhex(header_hex)
+    except (KeyError, ValueError):
+        return None
+
+    from cdumm.engine.v2_to_format3 import ConversionRefused, convert_iteminfo
+    try:
+        rep = convert_iteminfo(dropped, vanilla_body, vanilla_header)
+    except ConversionRefused:
+        return None                 # stale for this version -> can't name it
+    if rep.unconverted or not rep.intents:
+        return None                 # couldn't name every one -> all-or-nothing
+
+    from cdumm.engine.format3_handler import Format3Intent
+    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
+    intents = [
+        Format3Intent(entry=i["entry"], key=i["key"], field=i["field"],
+                      op=i["op"], new=i["new"], old=None)
+        for i in rep.intents
+    ]
+
+    # The field edits go ON TOP of the rebuilt body, which the socket mod's
+    # rebuilt .pabgh frames (a socket add moves record offsets), not vanilla's.
+    rebuilt_header = _rebuilt_header_for(aggregated, vanilla_header)
+    change = build_iteminfo_intent_change(
+        rebuilt_body, intents, vanilla_header=rebuilt_header)
+    if change is None:
+        return None
+    new_body = bytes.fromhex(change["patched"])
+
+    # A rescued field edit is a fixed-size scalar `set`; it must NOT resize a
+    # record. If it did, the companion .pabgh offsets and the already
+    # re-anchored offsets would move under us -- refuse the fold rather than
+    # corrupt them. (The converter only emits scalar sets, so this is a guard
+    # against a future non-scalar path, not an expected branch.)
+    if len(new_body) != len(rebuilt_body) or change.get("_pabgh_companion"):
+        return None
+    return new_body
+
+
+def _reanchor_offsets_onto_rebuilds(
+    aggregated: dict[str, list[dict]], synth_data: dict,
+) -> None:
+    """Move byte-offset changes onto the table a Format 3 mod rebuilt.
+
+    GitHub #293. Without this, #296's re-anchor module is dead code: it was
+    shipped with its tests but never called, so falobos76's mods would still
+    be REFUSED by #294 rather than made to work. (Same mistake as #288 —
+    a translator nothing called. Wiring is not a detail.)
+
+    Refuses, rather than guesses, in the two cases that matter:
+      * the rebuild didn't materialise (Format 3 expansion failed) — the
+        offsets are still stale, so they must not be written;
+      * a change can't be re-anchored because the Format 3 mod changed the
+        very bytes it patches — the two mods genuinely disagree.
+    """
+    from cdumm.engine.offset_reanchor import (
+        reanchor_changes, whole_table_change,
+    )
+
+    refused: list[dict] = list(synth_data.get("_refused_offset_mods") or [])
+
+    def _refuse(change: dict, game_file: str, why: str) -> None:
+        refused.append({
+            "mod_id": change.get("_source_mod_id"),
+            "mod_name": change.get("_source_mod_name") or "a byte-offset mod",
+            "game_file": game_file,
+            "rebuilt_by": change.get("_needs_reanchor"),
+            "reason": why,
+        })
+
+    for game_file, changes in list(aggregated.items()):
+        tagged = [c for c in changes if c.get("_needs_reanchor")]
+        if not tagged:
+            continue
+
+        whole = whole_table_change(changes)
+        if whole is None:
+            # A Format 3 mod claims this table but produced no rebuilt body
+            # (extraction failed, zero supported intents, ...). The offsets
+            # are stale and there is nothing to re-anchor them onto.
+            logger.warning(
+                "REFUSED: %d byte-offset change(s) on %s — %r rebuilds this "
+                "table but its rebuild is not present, so the offsets cannot "
+                "be re-anchored and would write to the wrong bytes.",
+                len(tagged), game_file, tagged[0].get("_needs_reanchor"))
+            for c in tagged:
+                _refuse(c, game_file, "the Format 3 rebuild is missing")
+            aggregated[game_file] = [
+                c for c in changes if not c.get("_needs_reanchor")]
+            continue
+
+        kept, dropped = reanchor_changes(changes)
+
+        # #50: a REFUSED offset means a Format 3 mod rewrote that record, so
+        # the offset no longer says which item it meant -- but its `original`
+        # still matches vanilla, where CDUMM can name the item and field and
+        # re-apply the change as a field edit on top of the rebuilt table
+        # instead of dropping it. Mutating `whole["patched"]` in place is safe:
+        # `whole` is the same object reanchor kept, and the rescue is a
+        # fixed-size scalar fold, so the offsets already re-anchored onto it do
+        # not move.
+        if dropped:
+            rescued = _rescue_refused_as_fields(
+                whole, dropped, aggregated, game_file)
+            if rescued is not None:
+                whole["patched"] = rescued.hex()
+                logger.info(
+                    "offset re-anchor on %s: %d refused change(s) rescued as "
+                    "field edits folded into the rebuilt table (both the "
+                    "Format 3 mod and the byte-offset mod now apply)",
+                    game_file, len(dropped))
+                dropped = []
+
+        for c in dropped:
+            _refuse(c, game_file,
+                    c.get("_refuse_reason") or "could not be re-anchored")
+        moved = sum(1 for c in kept if "_reanchored_from" in c)
+        logger.info(
+            "offset re-anchor on %s: %d change(s) moved onto the rebuilt "
+            "table, %d refused", game_file, moved, len(dropped))
+        aggregated[game_file] = [
+            {k: v for k, v in c.items() if k != "_needs_reanchor"}
+            for c in kept
+        ]
+
+    if refused:
+        synth_data["_refused_offset_mods"] = refused
 
 
 def collect_enabled_json_targets(db) -> set[str]:
@@ -2490,7 +2760,7 @@ class ApplyWorker(QObject):
             # from the snapshot but aren't managed by an enabled mod.
             if not file_deltas:  # only when reverting everything
                 try:
-                    from cdumm.engine.snapshot_manager import hash_file, hash_matches
+                    from cdumm.engine.snapshot_manager import hash_matches
                     snap_cursor = self._db.connection.execute(
                         "SELECT file_path, file_hash, file_size FROM snapshots")
                     already_staged = set(txn.staged_files()) if hasattr(txn, 'staged_files') else set()
@@ -3048,7 +3318,7 @@ class ApplyWorker(QObject):
         ENTR deltas are applied first (different entries compose perfectly),
         then byte-level deltas on top for backward compatibility.
         """
-        from cdumm.engine.delta_engine import ENTRY_MAGIC, load_entry_delta
+        from cdumm.engine.delta_engine import load_entry_delta
 
         # Check for JSON patch merge opportunities BEFORE byte-level composition.
         # If multiple mods have json_patches for the same game file, merge them
@@ -4146,7 +4416,6 @@ class ApplyWorker(QObject):
         # Group byte-range deltas by approximate region (same file, overlapping ranges).
         # Skip FULL_COPY deltas — they replace the entire file and are handled
         # correctly by _compose_file's standard full_replace logic.
-        from collections import defaultdict
         range_deltas = []
         for d in deltas:
             if d["delta_path"] in already_files:
@@ -4484,7 +4753,6 @@ class ApplyWorker(QObject):
             if vanilla_bytes:
                 snap_hash, snap_size = snap_map[rel]
                 # Only restore if file actually differs from vanilla
-                import hashlib
                 if len(vanilla_bytes) == snap_size:
                     game_bytes = game_file.read_bytes()
                     if game_bytes != vanilla_bytes:
@@ -4576,7 +4844,6 @@ class ApplyWorker(QObject):
         try:
             pathc = read_pathc(vanilla_pathc)
             import bisect
-            import struct as _st
 
             updated = 0
             added = 0

@@ -159,11 +159,51 @@ def test_occupied_equip_slot_data():
 
 
 def test_item_icon_data():
-    # u32 icon_path + u8 check_exist_sealed_data + CArray<u32> gimmick_state_list
-    body = (struct.pack("<I", 100) + b"\x01"
-            + struct.pack("<I", 2) + struct.pack("<II", 7, 8))
-    assert consume_bytes(
-        "ItemIconData", body, 0, len(body)) == 4 + 1 + 4 + 8
+    """Post-1.0.4.1 layout: fixed 14 bytes, no inner list.
+
+    This test previously pinned the pre-1.0.4.1 shape (u32 icon_path + u8
+    check_exist_sealed_data + CArray<u32> gimmick_state_list). It only ever
+    asserted against bytes it packed itself, so it restated the definition
+    rather than checking it against a real table -- and the definition had
+    been wrong for several game versions. Measured: the old shape bails the
+    walk on 6477/6483 records of the committed 1.10 fixture and 6502/6508 of
+    the live 1.13 table, while this 14-byte shape (the one
+    iteminfo_native_parser uses, which round-trips both tables byte-exact)
+    walks straight through.
+    """
+    body = struct.pack("<IIIH", 100, 7, 8, 9)
+    assert consume_bytes("ItemIconData", body, 0, len(body)) == 14
+
+
+def test_sub_item_none_sentinels_consume_no_payload():
+    """The tag that means "None" has drifted with the game: CD 1.10 ships
+    16, CD 1.13 ships 17 (14 is the older crimson-rs value). All three must
+    consume the tag byte and nothing else.
+
+    Modelling 16/17 as payload-bearing is what stalled the walk inside
+    DropDefaultData on every shipped table -- the four bytes it swallowed
+    are really [socket_valid_count][use_socket] plus the low half of the
+    _enchantDataList count that follows.
+    """
+    for tag in (14, 16, 17):
+        body = bytes([tag]) + struct.pack("<I", 0xDEADBEEF)
+        assert consume_bytes("SubItem", body, 0, len(body)) == 1, (
+            f"tag {tag} must be a no-payload sentinel")
+
+
+def test_sub_item_real_tags_still_carry_their_u32():
+    for tag in (0, 3, 9):
+        body = bytes([tag]) + struct.pack("<I", 42)
+        assert consume_bytes("SubItem", body, 0, len(body)) == 5
+
+
+def test_enchant_data_carries_the_1_12_item_effect_info_u32():
+    """CD 1.12 added a u32 to EnchantData. Sizes: u16 level + 4 empty stat
+    carrays + empty buy_price_list + empty equip_buffs + u32 = 2+16+4+4+4.
+    """
+    body = struct.pack("<H", 3) + struct.pack("<I", 0) * 4 \
+        + struct.pack("<I", 0) + struct.pack("<I", 0) + struct.pack("<I", 7)
+    assert consume_bytes("EnchantData", body, 0, len(body)) == 2 + 16 + 4 + 4 + 4
 
 
 def test_item_bundle_data_fixed_size():
@@ -448,7 +488,6 @@ def test_override_file_with_utf8_bom_loads_correctly(tmp_path, monkeypatch):
     silently disabled overrides.
     """
     import json
-    import logging
     from cdumm.semantic import parser as parser_mod
 
     schema_path = tmp_path / "pabgb_complete_schema.json"

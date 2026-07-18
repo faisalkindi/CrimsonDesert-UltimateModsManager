@@ -7,14 +7,14 @@ CDUMM. Without this, the writer is reachable from tests but not
 from real mod imports.
 """
 from __future__ import annotations
-import struct
-from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_VANILLA_PABGB = Path(r"C:\Users\faisa\AppData\Local\Temp\dropsetinfo.pabgb")
-_VANILLA_PABGH = Path(r"C:\Users\faisa\AppData\Local\Temp\dropsetinfo.pabgh")
+
+_VANILLA_PABGB = vanilla113_file("dropsetinfo.pabgb")
+_VANILLA_PABGH = vanilla113_file("dropsetinfo.pabgh")
 
 
 def _have_vanilla() -> bool:

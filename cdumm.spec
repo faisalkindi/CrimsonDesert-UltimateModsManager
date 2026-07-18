@@ -62,11 +62,38 @@ _qflw_datas, _qflw_binaries, _qflw_hiddenimports = collect_all('qframelesswindow
 # (GitHub #175 / #178 / #179: CERTIFICATE_VERIFY_FAILED).
 _certifi_datas = collect_data_files('certifi')
 
+# Qt3D native DLLs + Qt6ShaderTools. PyInstaller's PySide6 hook bundles the
+# Qt3D*.pyd modules but not always their Qt63D*.dll native libs, and never the
+# Qt6ShaderTools.dll that Qt3D's default RHI (DirectX) render plugin links — so
+# a frozen build died with "DLL load failed while importing Qt3DExtras" and the
+# Game Data 3D texture preview was dead. Bundle both explicitly from the
+# installed PySide6 (dest 'PySide6' = alongside Qt6Core.dll in the frozen app).
+import glob as _glob
+import PySide6 as _pyside6
+_pyside6_dir = os.path.dirname(_pyside6.__file__)
+_qt3d_binaries = [(f, 'PySide6')
+                  for f in _glob.glob(os.path.join(_pyside6_dir, 'Qt63D*.dll'))]
+_st_dll = os.path.join(_pyside6_dir, 'Qt6ShaderTools.dll')
+if os.path.isfile(_st_dll):
+    _qt3d_binaries.append((_st_dll, 'PySide6'))
+# Qt6SpatialAudio.dll — Qt6Multimedia.dll links it, but the hook only bundles it
+# when QtSpatialAudio is imported directly. Add it so the .mp4 video preview's
+# audio works in the frozen build.
+_sa_dll = os.path.join(_pyside6_dir, 'Qt6SpatialAudio.dll')
+if os.path.isfile(_sa_dll):
+    _qt3d_binaries.append((_sa_dll, 'PySide6'))
+# Qt6OpenGLWidgets.dll — Qt6MultimediaWidgets.dll (the .mp4 QVideoWidget) links
+# it. The hook doesn't bundle it unless QtOpenGLWidgets is imported, so add it
+# so the video preview widget constructs in the frozen build.
+_oglw_dll = os.path.join(_pyside6_dir, 'Qt6OpenGLWidgets.dll')
+if os.path.isfile(_oglw_dll):
+    _qt3d_binaries.append((_oglw_dll, 'PySide6'))
+
 
 a = Analysis(
     ['src/cdumm/main.py'],
     pathex=['src'],
-    binaries=_xxhash_binaries + _native_binaries + _crimson_rs_binaries + _qflw_binaries,
+    binaries=_xxhash_binaries + _native_binaries + _crimson_rs_binaries + _qflw_binaries + _qt3d_binaries,
     datas=[('cdumm.ico', '.'), ('asi_loader/winmm.dll', 'asi_loader'),
            ('src/cdumm/translations', 'cdumm/translations'),
            ('schemas/pabgb_complete_schema.json', 'schemas'),
@@ -86,6 +113,14 @@ a = Analysis(
            ('assets/store-epic-white.svg', 'assets'),
            ] + _crimson_rs_datas + _qfw_datas + _qflw_datas + _certifi_datas,
     hiddenimports=[
+        # stdlib C-extension that PyInstaller occasionally fails to pick
+        # up on a --clean build, crashing the exe with "No module named
+        # '_sqlite3'". Pin it so the sqlite hook always bundles _sqlite3.pyd.
+        'sqlite3',
+        '_sqlite3',
+        'cdumm.gui.notifications',
+        'cdumm.gui.accent',
+        'cdumm.gui.ui_scale',
         'cdumm.cli',
         'cdumm.worker_process',
         'cdumm.gui.setup_dialog',
@@ -153,6 +188,20 @@ a = Analysis(
         'cdumm.engine.language',
         'cdumm.engine.compiled_merge',
         'cdumm.engine.texture_mod_handler',
+        # PIL DDS texture decode for the Game Data preview — name the core
+        # codec + DDS plugin so the onefile build actually bundles them
+        # (Pillow registers plugins lazily, which PyInstaller can miss).
+        'PIL', 'PIL.Image', 'PIL.ImageFile', 'PIL.DdsImagePlugin',
+        # Qt3D for the Game Data texture 3D preview (sphere/cube). The
+        # PySide6 hook bundles the Qt3D DLLs + plugins once these are imported
+        # (and not excluded); QtOpenGL is what Qt3DRender renders through.
+        'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DExtras',
+        'PySide6.Qt3DInput', 'PySide6.Qt3DLogic', 'PySide6.Qt3DAnimation',
+        'PySide6.QtOpenGL',
+        # Qt Multimedia — the Game Data preview plays .mp4 clips inline. Listed
+        # explicitly because the import is lazy/guarded, which PyInstaller's
+        # static analysis can miss.
+        'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets', 'PySide6.QtNetwork',
         'cdumm.archive.pathc_handler',
         'cdumm.engine.mod_health_check',
         'cdumm.asi.asi_manager',
@@ -224,24 +273,35 @@ a = Analysis(
     excludes=[
         # PySide6 modules not used by CDUMM (only QtCore/QtGui/QtWidgets/QtSvg needed)
         'PySide6.QtWebEngine', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
-        'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DInput', 'PySide6.Qt3DExtras',
-        'PySide6.QtCharts', 'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',
+        # Qt3D IS used — the Game Data texture 3D preview (sphere/cube). Do NOT
+        # exclude Qt3DCore/Render/Input/Extras or the preview reports
+        # "3D preview unavailable: No module named 'PySide6.Qt3DExtras'".
+        # QtMultimedia + QtMultimediaWidgets KEPT — the Game Data preview plays
+        # .mp4 clips inline through them (FFmpeg backend).
+        'PySide6.QtCharts',
         'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtBluetooth',
         'PySide6.QtPositioning', 'PySide6.QtSensors', 'PySide6.QtSerialPort',
         'PySide6.QtRemoteObjects', 'PySide6.QtNfc',
-        'PySide6.QtOpenGL', 'PySide6.QtOpenGLWidgets',
-        'PySide6.QtNetwork',
+        # QtOpenGL kept (Qt3DRender renders through it). QtOpenGLWidgets KEPT too
+        # — Qt6MultimediaWidgets.dll (the .mp4 QVideoWidget) links
+        # Qt6OpenGLWidgets.dll, so excluding it broke video playback.
+        # QtNetwork KEPT — PySide6's QtMultimedia binding declares QtNetwork as a
+        # dependency and imports it, so excluding the Python module broke .mp4
+        # playback with "could not import module 'PySide6.QtMultimedia'".
         'PySide6.QtDataVisualization', 'PySide6.QtGraphs',
         'PySide6.QtAxContainer', 'PySide6.QtDesigner',
         'PySide6.QtHelp', 'PySide6.QtPdf', 'PySide6.QtPdfWidgets',
         'PySide6.QtQuick3D', 'PySide6.QtShaderTools',
-        'PySide6.QtSpatialAudio', 'PySide6.QtHttpServer',
+        # QtSpatialAudio KEPT — Qt6Multimedia.dll links Qt6SpatialAudio.dll, so
+        # excluding it breaks the .mp4 video preview's audio.
+        'PySide6.QtHttpServer',
         'PySide6.QtTest', 'PySide6.QtDBus', 'PySide6.QtConcurrent',
         # scipy/numpy — only needed for acrylic blur (disabled)
         'scipy', 'numpy', 'numpy.core', 'numpy.linalg',
-        # PIL/Pillow — not imported by CDUMM (colorthief dep, unused)
-        'PIL', 'PIL._imaging', 'PIL._avif', 'PIL._webp', 'PIL.Image',
-        'Pillow', 'colorthief',
+        # PIL/Pillow IS used — it decodes DDS textures for the Game Data
+        # preview, so it must be bundled (do NOT exclude it). Only colorthief
+        # (which merely pulls PIL in transitively) is unused.
+        'colorthief',
         # brotli — not used by CDUMM (transitive dep from py7zr)
         'brotli', '_brotli', 'brotlicffi',
         # cryptography used by privatebin for AES-GCM + PBKDF2. Keep minimal subset.
@@ -254,25 +314,27 @@ a = Analysis(
 
 # Strip large unused DLLs from binaries
 _dll_excludes = {
-    'opengl32sw.dll',        # ~20 MB software OpenGL (not needed)
-    'Qt6Network.dll',        # ~3 MB
+    # opengl32sw.dll (~20 MB software OpenGL) stripped — verified NOT loaded by
+    # the running app after using the 3D preview: Qt3D uses the DirectX RHI
+    # backend + hardware opengl32.dll, never the software renderer (every
+    # machine that runs Crimson Desert has a DirectX/GL-capable GPU).
+    'opengl32sw.dll',
+    # Qt6Network.dll kept — Qt63DCore.dll links it (loaded); stripping it broke
+    # the 3D preview with "DLL load failed while importing Qt3DExtras".
     'Qt6Pdf.dll',            # ~4 MB
     'Qt6Designer.dll',       # ~5 MB
     'Qt6Quick.dll',          # ~6 MB
     'Qt6Qml.dll',            # ~5 MB
-    'Qt6ShaderTools.dll',    # ~4 MB
+    # Qt6ShaderTools.dll kept — Qt3D's RHI (DirectX) render plugin links it.
     'Qt6Quick3DRuntimeRender.dll',
-    'Qt6OpenGL.dll',         # ~1.9 MB (not used — no OpenGL rendering)
+    # Qt6OpenGL.dll kept — Qt3DRender (texture 3D preview) renders through it.
     'Qt6QmlModels.dll',      # ~0.95 MB
     'Qt6QmlMeta.dll',        # ~0.15 MB
     'Qt6QmlWorkerScript.dll',  # ~0.08 MB
     'Qt6VirtualKeyboard.dll',  # ~0.4 MB (desktop app, no touch keyboard)
     'qdirect2d.dll',         # ~1 MB (qwindows.dll is sufficient)
-    'avcodec-61.dll',        # ~13 MB multimedia codec
-    'avformat-61.dll',
-    'avutil-59.dll',
-    'swresample-5.dll',
-    'swscale-8.dll',
+    # avcodec / avformat / avutil / swresample / swscale KEPT — Qt Multimedia's
+    # FFmpeg backend decodes the Game Data .mp4 video preview through them.
     # libcrypto + libssl kept for HTTPS (NexusMods API, update checker)
     # Image format plugins CDUMM doesn't use (keep qico, qsvg, qgif)
     'qtiff.dll',             # ~0.43 MB
@@ -283,9 +345,11 @@ _dll_excludes = {
     'qtga.dll',              # ~0.04 MB
     'qwbmp.dll',             # ~0.04 MB
 }
-# Also filter out PIL/brotli/cryptography binary extensions
+# Also filter out brotli/cryptography binary extensions. Keep PIL's core
+# '_imaging' (DDS/BCn texture decode); only the AVIF/WebP/CMS codecs — which
+# CDUMM's DDS preview never touches — are dropped.
 _binary_name_excludes = {
-    '_avif', '_imaging', '_webp', '_imagingcms', '_brotli',
+    '_avif', '_webp', '_imagingcms', '_brotli',
     # '_rust' kept — cryptography uses it for AES-GCM in privatebin uploads
     '_ec_ws',      # Cryptodome elliptic curve (not used by CDUMM)
     '_ed448',      # Cryptodome Ed448
@@ -328,7 +392,10 @@ exe = EXE(
     name='CDUMM',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
+    # GNU strip on the windows-latest CI runner corrupts python313.dll (the exe
+    # then fails at launch: "Failed to load Python DLL ... Invalid access to
+    # memory location"). Strip only on posix, never on Windows.
+    strip=(os.name != 'nt'),
     # UPX disabled — heuristic AV engines (Bkav, CrowdStrike Falcon,
     # DeepInstinct, Fortinet) flag UPX-packed PyInstaller binaries
     # because real malware uses UPX too. Defender is fine either way,

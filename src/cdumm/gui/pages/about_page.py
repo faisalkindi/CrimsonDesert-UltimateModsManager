@@ -122,7 +122,6 @@ class AboutPage(SmoothScrollArea):
         # ``_update_tag`` tracks which state the label is in so a
         # language switch can re-render the right text (None = up to date).
         self._update_tag: str | None = None
-        from PySide6.QtGui import QFont as _QF
         self._update_status = StrongBodyLabel(tr("about.up_to_date"), header_card)
         usf = self._update_status.font()
         usf.setPixelSize(13)
@@ -214,6 +213,8 @@ class AboutPage(SmoothScrollArea):
         self._credits_dev = BodyLabel(tr("about.credits_dev"), credits_card)
         credits_layout.addWidget(self._credits_dev)
         self._credits_detail = CaptionLabel(tr("about.credits_detail"), credits_card)
+        # Contributor list is long; wrap it instead of clipping at the card edge.
+        self._credits_detail.setWordWrap(True)
         credits_layout.addWidget(self._credits_detail)
         self._layout.addWidget(credits_card)
 

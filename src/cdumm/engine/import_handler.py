@@ -418,6 +418,14 @@ def detect_format(path: Path) -> str:
     if path.is_dir():
         return "folder"
     suffix = path.suffix.lower()
+    if suffix == ".cdmod":
+        # `crimson-mod-package` (GitHub #288). It IS a zip, but must not be
+        # reported as one: a plain-zip import would extract it, find
+        # patches/semantic.json, fail to recognise it as Format 3 (it uses
+        # operations/path/selector/value, not intents/field/key/new) and
+        # import a mod that changes nothing. Give it its own branch so the
+        # translation is explicit -- see cdmod_handler.
+        return "cdmod"
     if suffix == ".zip":
         return "zip"
     if suffix == ".7z":
@@ -454,7 +462,7 @@ import json
 import re
 
 from cdumm.engine.crimson_browser_handler import detect_crimson_browser, convert_to_paz_mod
-from cdumm.engine.json_patch_handler import detect_json_patch, convert_json_patch_to_paz, import_json_fast
+from cdumm.engine.json_patch_handler import detect_json_patch, import_json_fast
 from cdumm.engine.texture_mod_handler import detect_texture_mod, convert_texture_mod
 
 # Pattern for valid game file paths: NNNN/N.paz, NNNN/N.pamt, meta/0.papgt, meta/0.pathc
@@ -1188,8 +1196,7 @@ def _try_paz_entry_import(
 
     Returns True if successful, False to fall back to byte-level deltas.
     """
-    from cdumm.archive.paz_parse import parse_pamt
-    from cdumm.archive.paz_crypto import lz4_decompress, decrypt
+    from cdumm.archive.paz_crypto import lz4_decompress
     from cdumm.engine.delta_engine import save_entry_delta
     from cdumm.engine.json_patch_handler import _extract_from_paz
     import sys as _sys
@@ -4464,6 +4471,47 @@ def _import_format3_bundle(
         note += f" {len(failed)} could not be imported: {shown}."
     primary.info = f"{primary.info}\n{note}" if primary.info else note
     return primary
+
+
+def import_from_cdmod(
+    cdmod_path: Path, game_dir: Path, db: Database, snapshot: SnapshotManager,
+    deltas_dir: Path, existing_mod_id: int | None = None,
+) -> ModImportResult:
+    """Importer for `.cdmod` (`crimson-mod-package`, GitHub #288).
+
+    The package's semantic-patch IS Format 3 under different key names, so
+    translate it and hand the result to the Format 3 importer rather than
+    growing a parallel apply path.
+
+    A `.cdmod` we cannot faithfully translate is REFUSED (CdmodError), not
+    imported as an empty mod: an empty mod would install clean and change
+    nothing, which is the failure mode of #259 / #275 / #278 / #285.
+    """
+    import tempfile
+
+    from cdumm.engine.cdmod_handler import CdmodError, cdmod_to_format3
+
+    try:
+        doc = cdmod_to_format3(cdmod_path)
+    except CdmodError as e:
+        logger.warning("cdmod import refused for %s: %s", cdmod_path.name, e)
+        res = ModImportResult(cdmod_path.name, mod_type="format3")
+        res.error = f"This .cdmod could not be imported: {e}"
+        return res
+
+    # Keep the original stem so prettify_mod_name / Nexus filename parsing
+    # still see the real name rather than a temp path.
+    stage = Path(tempfile.mkdtemp(prefix="cdumm_cdmod_"))
+    translated = stage / f"{cdmod_path.stem}.field.json"
+    translated.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    logger.info(
+        "cdmod: %s -> Format 3 (%d target(s), %d intent(s))",
+        cdmod_path.name, len(doc["targets"]),
+        sum(len(t["intents"]) for t in doc["targets"]))
+
+    return import_from_natt_format_3(
+        translated, game_dir, db, snapshot, deltas_dir,
+        existing_mod_id=existing_mod_id)
 
 
 def import_from_natt_format_3(

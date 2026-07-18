@@ -1,6 +1,7 @@
 import atexit
 import faulthandler
 import os
+import shutil
 import sys
 import logging
 import threading
@@ -11,6 +12,44 @@ from cdumm.platform import IS_LINUX, IS_WINDOWS, app_data_dir
 
 APP_DATA_DIR = app_data_dir()
 
+
+def _preserve_prior_crash_trace(trace_path: Path) -> None:
+    """Move a previous session's crash trace aside before it is truncated.
+
+    faulthandler keeps ``trace_path`` open for the whole session and
+    rewrites it at fault time, so opening it ``"w"`` at startup wipes
+    whatever the PREVIOUS session's fatal fault recorded. Without this
+    rename the "CRASH TRACE (previous session)" bug-report section could
+    never fire for a real hard crash: the relaunch destroyed the evidence
+    before the user could generate a report. Move any non-empty prior
+    trace to ``<name>.prev<suffix>`` so it survives into the next session,
+    where the user actually clicks "generate bug report".
+
+    Best-effort: never raises, so a locked or unwritable file can't block
+    boot. ``os.replace`` overwrites an older ``.prev`` copy, so we always
+    keep the most recent previous session's trace.
+    """
+    try:
+        if not (trace_path.is_file() and trace_path.stat().st_size > 0):
+            return
+        prev = trace_path.with_name(
+            trace_path.stem + ".prev" + trace_path.suffix)
+        try:
+            os.replace(trace_path, prev)
+        except OSError:
+            # The rename fails outright (WinError 32) while ANY process
+            # still holds the file open — a hung prior instance whose
+            # faulthandler handle never closed, or an AV scanner mid-scan.
+            # Windows share semantics still let the caller's open("w")
+            # truncate it, so swallowing this would destroy the trace
+            # anyway — exactly the crash we most need the trace for. Copy
+            # the bytes out instead, so it survives even when it can't be
+            # moved.
+            shutil.copyfile(trace_path, prev)
+    except Exception:
+        pass
+
+
 # Enable faulthandler to dump C-level stack trace on segfault.
 # Defensive: if AppData is read-only / permissions fail (domolinixd1000
 # report: CDUMM.exe closes in 2-3s, can't even produce a bug report),
@@ -20,6 +59,7 @@ APP_DATA_DIR = app_data_dir()
 _fault_log = None
 try:
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _preserve_prior_crash_trace(APP_DATA_DIR / "crash_trace.txt")
     _fault_log = open(APP_DATA_DIR / "crash_trace.txt", "w")
     faulthandler.enable(file=_fault_log)
 except Exception:
@@ -28,8 +68,9 @@ except Exception:
     # breaks Python's stdlib open on some Windows configs.
     try:
         import tempfile as _tempfile
-        _fault_log = open(
-            Path(_tempfile.gettempdir()) / "cdumm_crash_trace.txt", "w")
+        _tmp_trace = Path(_tempfile.gettempdir()) / "cdumm_crash_trace.txt"
+        _preserve_prior_crash_trace(_tmp_trace)
+        _fault_log = open(_tmp_trace, "w")
         faulthandler.enable(file=_fault_log)
     except Exception:
         try:
@@ -344,6 +385,18 @@ def main() -> int:
     # gets more frequent time slices during worker Python execution.
     sys.setswitchinterval(0.0005)
 
+    # Interface zoom (accessibility): apply the saved UI scale before the
+    # QApplication is constructed — Qt only reads QT_SCALE_FACTOR at that
+    # point. Stored in a sidecar file so we don't need the SQLite config
+    # this early in startup. An explicit user env override wins.
+    try:
+        from cdumm.gui.ui_scale import read_ui_scale
+        _ui_scale = read_ui_scale()
+        if _ui_scale != "1.0" and not os.environ.get("QT_SCALE_FACTOR"):
+            os.environ["QT_SCALE_FACTOR"] = _ui_scale
+    except Exception:
+        pass
+
     # Minimal import for QApplication — everything else is lazy
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QGuiApplication
@@ -587,6 +640,15 @@ def main() -> int:
         elif saved_theme == "dark":
             from qfluentwidgets import setTheme, Theme
             setTheme(Theme.DARK)
+
+    # Apply saved accent colour (overrides the default set at startup).
+    _saved_accent = config.get("accent_color")
+    if _saved_accent:
+        try:
+            from qfluentwidgets import setThemeColor
+            setThemeColor(_saved_accent)
+        except Exception:
+            pass
 
     # Set RTL layout direction for Arabic/Hebrew/etc.
     from cdumm.i18n import is_rtl

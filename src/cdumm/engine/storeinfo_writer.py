@@ -29,9 +29,10 @@ import logging
 import struct
 
 from cdumm.engine.storeinfo_native_parser import (
-    LIST_COUNT_PAYLOAD_OFFSET,
     StockRecord,
     StoreinfoParseError,
+    StoreLayout,
+    detect_storeinfo_layout,
     parse_stock_list,
     serialize_stock_list,
 )
@@ -106,6 +107,14 @@ def _build_new_record(j: dict, idx: int) -> StockRecord:
         raw_c=int(j.get("raw_c") or 0),
         raw_d=int(j.get("raw_d") or 0),
         raw_e=int(j.get("raw_e") or 0),
+        # CD 1.13's u32 @30. Mods that know about it ship it as
+        # `order_index_113` (donr484's Shop Smart names it exactly that);
+        # 0xFFFFFFFF is its value in all 3661 vanilla records, so that is
+        # the default for a mod written before the field existed. Ignored
+        # entirely on pre-1.13 layouts, which have no such field.
+        order_index=int(
+            j.get("order_index_113",
+                  j.get("order_index", 0xFFFFFFFF)) or 0) & 0xFFFFFFFF,
         flag_a=int(j.get("flag_a") or 0),
         flag_b=int(j.get("flag_b") or 0),
         flag_c=int(j.get("flag_c") or 0),
@@ -214,20 +223,40 @@ def build_storeinfo_changes(
     if not per_key:
         return [], None
 
+    # Detect the record shape from the table in front of us rather than
+    # assuming one. The layout has moved twice -- CD 1.11 inserted
+    # is_restore_item, CD 1.13 inserted order_index_113 -- and each time
+    # every store mod silently stopped applying until the constants were
+    # hand-edited. Detection makes the next shift a fixture, not an outage.
+    #
+    # Done here, after we know there is work: a mod that targets no store
+    # in this table should skip cleanly, not trip layout detection.
+    #
+    # A table in no shape we know raises, and is re-raised as a refusal so
+    # the caller treats it like any other per-mod skip. Refusing is the
+    # right outcome: storeinfo has no integrity check, and a misread record
+    # written back crashes the game on store open.
+    try:
+        layout: StoreLayout = detect_storeinfo_layout(
+            vanilla_body, sorted(offsets.values()))
+    except StoreinfoParseError as e:
+        raise StoreinfoWriteRefused(f"storeinfo: {e}") from e
+
     # Rebuild each targeted entry's list span.
     replacements: dict[int, tuple[int, int, bytes]] = {}
     for key, json_records in per_key.items():
         off = offsets[key]
         entry_end = sorted_offs[sorted_offs.index(off) + 1]
         _, _, payload = _parse_entry_header(vanilla_body, off, key_size)
-        count_off = payload + LIST_COUNT_PAYLOAD_OFFSET
+        count_off = payload + layout.count_payload_offset
         try:
             van_records, list_start, list_end = parse_stock_list(
-                vanilla_body, count_off)
+                vanilla_body, count_off, layout)
         except (StoreinfoParseError, struct.error, IndexError) as e:
             raise StoreinfoWriteRefused(
                 f"store entry {key}: vanilla stock list does not match "
-                f"the verified layout ({e}); refusing to rewrite it")
+                f"the detected {layout.label} layout ({e}); refusing to "
+                f"rewrite it")
         # Round-trip identity (audit 2026-06-11, the iteminfo/skill
         # writers gate on an explicit identity serialize): no separate
         # pre-flight is needed here because parse_stock_list and
@@ -256,7 +285,7 @@ def build_storeinfo_changes(
             else:
                 out_records.append(_build_new_record(j, idx))
                 n_new += 1
-        new_list = serialize_stock_list(out_records)
+        new_list = serialize_stock_list(out_records, layout)
         replacements[key] = (list_start, list_end, new_list)
         logger.info(
             "storeinfo writer: store %d stock list %d -> %d records "

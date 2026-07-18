@@ -10,7 +10,6 @@ from cdumm.platform import (
     IS_WINDOWS,
     app_data_dir as _resolve_app_data_dir,
     open_path,
-    subprocess_no_window_kwargs,
     worker_command,
 )
 
@@ -1315,6 +1314,11 @@ class CdummWindow(FluentWindow):
             position=NavigationItemPosition.SCROLL,
         )
 
+        # Notification bell — a single global widget in the nav rail,
+        # sitting just above the bug-report item (no per-page widget).
+        from cdumm.gui.notifications import install_bell
+        install_bell(self)
+
         # Bottom navigation
         self.addSubInterface(
             self.bug_report_page, FluentIcon.FEEDBACK, tr("nav.bug_report"),
@@ -1721,7 +1725,7 @@ class CdummWindow(FluentWindow):
         if self._game_dir and self._snapshot and not self._snapshot.has_snapshot():
             from qfluentwidgets import (
                 MessageBoxBase, SubtitleLabel, BodyLabel, CaptionLabel,
-                CardWidget, StrongBodyLabel, setCustomStyleSheet,
+                CardWidget, StrongBodyLabel,
             )
             from PySide6.QtGui import QFont
             from PySide6.QtWidgets import QVBoxLayout
@@ -2473,7 +2477,8 @@ class CdummWindow(FluentWindow):
         # so a concurrent ``--nxm`` launcher that appends in the window
         # between our read and unlink doesn't have its URL dropped on
         # the floor. ``os.replace`` is atomic on both Windows and POSIX.
-        import os, time as _time
+        import os
+        import time as _time
         processing = self._app_data_dir / f".pending_nxm.processing.{os.getpid()}.{int(_time.time() * 1000)}"
         try:
             os.replace(pending, processing)
@@ -2720,7 +2725,9 @@ class CdummWindow(FluentWindow):
         import threading
 
         def _worker():
-            import tempfile, urllib.request, urllib.parse
+            import tempfile
+            import urllib.request
+            import urllib.parse
             from cdumm.engine.nexus_api import (
                 get_download_link, NexusPremiumRequired,
                 NexusAuthError, NexusRateLimited,
@@ -3876,7 +3883,7 @@ class CdummWindow(FluentWindow):
                             with zipfile.ZipFile(bp) as zf:
                                 for n in zf.namelist():
                                     if n.lower().endswith('.json'):
-                                        import tempfile, json as _jj
+                                        import tempfile
                                         tmp_j = Path(tempfile.mktemp(suffix='.json'))
                                         tmp_j.write_bytes(zf.read(n))
                                         json_data = detect_json_patch(tmp_j)
@@ -4166,7 +4173,7 @@ class CdummWindow(FluentWindow):
                     MessageBoxBase, SingleDirectionScrollArea,
                     SubtitleLabel, CaptionLabel,
                 )
-                from PySide6.QtWidgets import QRadioButton, QFrame
+                from PySide6.QtWidgets import QRadioButton
                 from PySide6.QtGui import QFont as _QF
 
                 class _VariantDialog(MessageBoxBase):
@@ -4249,7 +4256,8 @@ class CdummWindow(FluentWindow):
         # ── 5. Preset picker ──────────────────────────────────────────
         try:
             from cdumm.gui.preset_picker import find_json_presets, PresetPickerDialog
-            import tempfile, zipfile
+            import tempfile
+            import zipfile
             check_path = path
             tmp_extract = None
             if path.is_file() and path.suffix.lower() in ('.zip', '.7z'):
@@ -4951,7 +4959,8 @@ class CdummWindow(FluentWindow):
                 dialog = TogglePickerDialog(json_data, self)
                 if dialog.exec() and dialog.selected_data:
                     # Write filtered JSON to temp
-                    import tempfile, json
+                    import tempfile
+                    import json
                     tmp = tempfile.NamedTemporaryFile(
                         suffix=".json", prefix="cdumm_toggle_",
                         delete=False, mode="w", encoding="utf-8")
@@ -6752,7 +6761,7 @@ class CdummWindow(FluentWindow):
                 title=tr("main.game_launched"), content=tr("main.game_launched_msg"),
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             self._hide_for_game_launch()
-        except Exception as e:
+        except Exception:
             if steam:
                 # Could not reach Steam. Spawning the bare exe here
                 # would silently fail under Themida + Denuvo and the
@@ -7854,25 +7863,41 @@ class CdummWindow(FluentWindow):
         pass
 
     def _check_show_update_notes(self) -> None:
-        """Show patch notes dialog when CDUMM was upgraded since the
-        last run. Stamps the new version even when the dialog isn't
-        shown so a fresh install doesn't fire on every subsequent
-        launch.
+        """Show patch notes when the newest notes changed since last run.
 
-        Skipped on a true fresh install (``last_seen_version`` is
-        unset), a brand-new user has no reason to see "what's new in
-        v3.2" for a version they just installed for the first time.
+        Keyed on a SIGNATURE of the top changelog entry, not the version
+        string alone. A community rebuild ships under the SAME version but
+        with updated notes; gating on the version left those updated notes
+        unseen in the shipped exe (AgentKush / falobos76, #191). The
+        signature changes whenever the newest entry's version OR its notes
+        change, so an updated build re-shows them and an unchanged relaunch
+        does not. A true fresh install is stamped silently -- a brand-new
+        user has no reason to see "what's new" for a version they just
+        installed. ``last_seen_version`` is still stamped for anything else
+        that reads it, and doubles as the "has run before" signal when
+        upgrading from a pre-signature build.
         """
+        import hashlib
+        import json as _json
+
         from cdumm import __version__
+        from cdumm.gui.changelog import CHANGELOG
         from cdumm.storage.config import Config
 
         config = Config(self._db)
+        top = CHANGELOG[0] if CHANGELOG else {}
+        notes_sig = hashlib.sha256(
+            _json.dumps([top.get("version", ""), top.get("notes", [])],
+                        ensure_ascii=False).encode("utf-8")).hexdigest()
+
+        last_sig = config.get("last_seen_notes_sig")
         last_ver = config.get("last_seen_version")
-        if last_ver == __version__:
+        if last_sig == notes_sig:
             return
+        config.set("last_seen_notes_sig", notes_sig)
         config.set("last_seen_version", __version__)
-        if not last_ver:
-            # Fresh install, stamp the version, don't pop the dialog.
+        if not last_sig and not last_ver:
+            # Fresh install: stamp both signals, don't pop "what's new".
             return
         try:
             from cdumm.gui.changelog import PatchNotesDialog
@@ -8022,7 +8047,8 @@ class CdummWindow(FluentWindow):
         """
         if not self._db or not self._game_dir or not self._vanilla_dir:
             return
-        import shutil, os
+        import shutil
+        import os
         from cdumm.engine.json_target_scanner import enabled_json_target_archives
         MAX_SYNC_SIZE = 10 * 1024 * 1024  # 10MB, PAMT/PAPGT/PATHC are all <14MB
         try:

@@ -14,7 +14,6 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     FluentIcon,
-    PillPushButton,
     PushButton,
     SearchLineEdit,
     SmoothScrollArea,
@@ -140,7 +139,6 @@ class ActivityPage(SmoothScrollArea):
         self._title = SubtitleLabel(tr("activity.title"), self._container)
         header_layout.addWidget(self._title)
         header_layout.addStretch()
-        from qfluentwidgets import setCustomStyleSheet
         self._refresh_btn = PushButton(tr("activity.refresh"), self._container, FluentIcon.SYNC)
         self._refresh_btn.setFixedHeight(34)
         _rbf = self._refresh_btn.font()
@@ -148,13 +146,9 @@ class ActivityPage(SmoothScrollArea):
         _rbf.setWeight(QFont.Weight.Bold)
         self._refresh_btn.setFont(_rbf)
         self._refresh_btn.clicked.connect(self.refresh)
-        setCustomStyleSheet(self._refresh_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 17px; padding: 0 16px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }"
-            "PushButton:pressed { background: #D0E0F8; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 17px; padding: 0 16px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }"
-            "PushButton:pressed { background: #2A3C58; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._refresh_btn, radius=17,
+                          padding_css="padding: 0 16px; padding-bottom: 6px;")
         header_layout.addWidget(self._refresh_btn)
         self._layout.addLayout(header_layout)
 

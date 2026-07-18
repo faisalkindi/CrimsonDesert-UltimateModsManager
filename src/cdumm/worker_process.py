@@ -72,8 +72,8 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
         import_from_json_patch, import_from_bsdiff, import_from_script,
-        import_from_rar, import_from_natt_format_3, set_import_progress_cb,
-        set_allow_scripts,
+        import_from_rar, import_from_natt_format_3, import_from_cdmod,
+        set_import_progress_cb, set_allow_scripts,
     )
     # Script-execution consent (audit C1/import): only the GUI's
     # explicit confirm dialog sets this for the re-dispatched import.
@@ -102,6 +102,11 @@ def _run_import(mod_path: str, game_dir: str, db_path: str,
         "json_patch": lambda: import_from_json_patch(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "natt_format_3": lambda: import_from_natt_format_3(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
         "bsdiff": lambda: import_from_bsdiff(mod_path, game_dir, db, snapshot, deltas_dir),
+        # .cdmod / crimson-mod-package (#288). Translated to Format 3 and
+        # then run through the ordinary Format 3 importer -- without this
+        # entry detect_format() would return "cdmod", find no handler, and
+        # the drop would fail with "unsupported file format".
+        "cdmod": lambda: import_from_cdmod(mod_path, game_dir, db, snapshot, deltas_dir, existing_mod_id=existing_id),
     }
 
     handler = dispatch.get(fmt)
@@ -217,7 +222,8 @@ def _run_batch_import(paths_file: str, game_dir: str, db_path: str,
     # Per-mod timing instrumentation. ``perf_counter`` for accuracy
     # (monotonic, sub-microsecond resolution). Emitted via stderr so
     # the GUI's _on_stderr handler logs it without parsing as JSON.
-    import time as _time, sys as _sys
+    import time as _time
+    import sys as _sys
     batch_start = _time.perf_counter()
     timings: list[tuple[str, float, str]] = []  # (mod_name, duration_s, fmt)
 
@@ -390,8 +396,7 @@ def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
     from cdumm.engine.snapshot_manager import SnapshotManager
     from cdumm.engine.import_handler import (
         detect_format, import_from_zip, import_from_7z, import_from_folder,
-        import_from_json_patch, import_from_bsdiff, import_from_script,
-        import_from_rar, import_from_natt_format_3, set_import_progress_cb,
+        import_from_json_patch, import_from_rar, import_from_natt_format_3, set_import_progress_cb,
     )
 
     game_dir = Path(game_dir)
@@ -480,7 +485,6 @@ def _run_reimport_batch(paths_file: str, game_dir: str, db_path: str,
 
 def _run_apply(game_dir: str, vanilla_dir: str, db_path: str,
                force_outdated: str = "0") -> None:
-    from cdumm.storage.database import Database
     from cdumm.engine.apply_engine import ApplyWorker
 
     worker = ApplyWorker(
@@ -505,7 +509,6 @@ def _run_apply(game_dir: str, vanilla_dir: str, db_path: str,
 # ── Revert ────────────────────────────────────────────────────────────
 
 def _run_revert(game_dir: str, vanilla_dir: str, db_path: str) -> None:
-    from cdumm.storage.database import Database
     from cdumm.engine.apply_engine import RevertWorker
 
     worker = RevertWorker(

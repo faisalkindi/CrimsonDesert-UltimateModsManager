@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from cdumm.engine.storeinfo_native_parser import (
+    LAYOUTS,
     LIST_COUNT_PAYLOAD_OFFSET,
     StockRecord,
     StoreinfoParseError,
@@ -46,26 +47,36 @@ def _sample_records() -> list[StockRecord]:
     ]
 
 
-def test_synthetic_round_trip():
+@pytest.mark.parametrize("layout", LAYOUTS, ids=lambda ly: ly.label)
+def test_synthetic_round_trip(layout):
+    """Round-trips in EVERY layout, not just whichever one is the default.
+
+    This used to hardcode head == 110 (CD 1.11). When CD 1.13 moved the
+    record shape, that hardcoding is precisely what made the test agree
+    with a parser that could no longer read the game — so it is now driven
+    off the layout under test.
+    """
     recs = _sample_records()
-    blob = serialize_stock_list(recs)
-    # 4 (count) + rec0 with sub_data (110+1+13+4) + rec1 without (110+1+4).
-    # Head is 110 since CD 1.11 added the is_restore_item u8 (#183).
-    assert len(blob) == 4 + 128 + 115
-    parsed, start, end = parse_stock_list(blob, 0)
+    blob = serialize_stock_list(recs, layout)
+    # count + rec0 (head + sub_data flag + 13 + effect u32)
+    #       + rec1 (head + sub_data flag +  0 + effect u32)
+    head = layout.head_size
+    assert len(blob) == 4 + (head + 1 + 13 + 4) + (head + 1 + 4)
+    parsed, start, end = parse_stock_list(blob, 0, layout)
     assert (start, end) == (0, len(blob))
-    assert serialize_stock_list(parsed) == blob
+    assert serialize_stock_list(parsed, layout) == blob
     assert parsed[0].sub_data == recs[0].sub_data
     assert parsed[1].sub_data is None
     assert [r.body for r in parsed] == [6001, 1_003_172]
 
 
-def test_refuses_unknown_sub_data_flag():
-    blob = bytearray(serialize_stock_list([_sample_records()[1]]))
-    # Corrupt the sub_data optional flag (count 4B + head 110B).
-    blob[4 + 110] = 7
+@pytest.mark.parametrize("layout", LAYOUTS, ids=lambda ly: ly.label)
+def test_refuses_unknown_sub_data_flag(layout):
+    blob = bytearray(serialize_stock_list([_sample_records()[1]], layout))
+    # Corrupt the sub_data optional flag (count u32 + the record head).
+    blob[4 + layout.head_size] = 7
     with pytest.raises(StoreinfoParseError, match="optional flag is 7"):
-        parse_stock_list(bytes(blob), 0)
+        parse_stock_list(bytes(blob), 0, layout)
 
 
 def test_refuses_non_empty_effect_list_on_parse():

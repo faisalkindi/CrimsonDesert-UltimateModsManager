@@ -1,5 +1,11 @@
 # Format 3 op coverage — what CDUMM doesn't support yet
 
+> **STATUS (resolved in PR #271):** the gaps below are closed. `match`,
+> `clone_record`, `delete_record` and `new_record` (template) now apply;
+> `array_append` applies for `dropsetinfo.drops` and gives an actionable
+> skip elsewhere. User-facing reference: `docs/FORMAT3_OPS.md`. This note is
+> kept for the history of how the gap was derived.
+
 Internal tracking note, not user-facing. Records a verified gap between what
 Format 3 (`.field.json`) mods *can* express and what CDUMM's apply pipeline
 currently accepts, so it isn't re-derived from scratch later.

@@ -8,15 +8,15 @@ cumulative-shift cascade work together for variable-length list
 rewriting.
 """
 from __future__ import annotations
-import json
-import struct
 from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_VANILLA_PABGB = Path(r"C:\Users\faisa\AppData\Local\Temp\dropsetinfo.pabgb")
-_VANILLA_PABGH = Path(r"C:\Users\faisa\AppData\Local\Temp\dropsetinfo.pabgh")
+
+_VANILLA_PABGB = vanilla113_file("dropsetinfo.pabgb")
+_VANILLA_PABGH = vanilla113_file("dropsetinfo.pabgh")
 _FIXTURE = Path(__file__).parent / "fixtures" / "format3" / "dropsetinfo_5x_drops.json"
 
 

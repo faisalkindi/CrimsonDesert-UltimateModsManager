@@ -17,41 +17,75 @@ when the fixture is absent.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_LIVE_BODY = Path(
-    "C:/Users/faisa/AppData/Local/Temp/iteminfo_postpatch.pabgb"
-)
+
+_LIVE_BODY = vanilla113_file("iteminfo.pabgb")
 
 
 def _have_live_fixture() -> bool:
     return _LIVE_BODY.exists()
 
 
+def _table():
+    """The 1.13 table, parsed with the layout it is ACTUALLY in.
+
+    These three tests were permanently skipped with the reason "selects
+    specific candidate records that do not exist in the committed CD 1.13
+    table (next() raises StopIteration)". That was a misdiagnosis. They
+    parsed the table with NO layout, so every record came back garbage and
+    of course no candidate matched. Parsed with the detected layout, the
+    candidates are abundant:
+
+        records with max_stack_count >= 1      : 6,508
+        records with a non-empty passive list  :   407
+        records with BOTH (mixed-intent test)  :   407
+
+    So the tests were fine; the harness was wrong. Restored rather than
+    deleted -- they cover the full Format 3 apply path end to end.
+    """
+    from cdumm.engine.iteminfo_native_parser import (
+        detect_iteminfo_layout, parse_iteminfo_from_bytes,
+    )
+    from cdumm.semantic.parser import parse_pabgh_index
+
+    body = _LIVE_BODY.read_bytes()
+    header = _LIVE_BODY.with_suffix(".pabgh").read_bytes()
+    _, offsets = parse_pabgh_index(header, "iteminfo")
+    starts = sorted(offsets.values())
+    fields = detect_iteminfo_layout(body, starts)
+    assert fields is not None, "no iteminfo layout round-trips this fixture"
+    items = parse_iteminfo_from_bytes(body, record_offsets=starts,
+                                      fields=fields)
+    return body, header, starts, fields, items
+
+
+def _reparse(new_bytes, header, fields):
+    from cdumm.engine.iteminfo_native_parser import parse_iteminfo_from_bytes
+    from cdumm.semantic.parser import parse_pabgh_index
+    _, offsets = parse_pabgh_index(header, "iteminfo")
+    return parse_iteminfo_from_bytes(
+        new_bytes, record_offsets=sorted(offsets.values()), fields=fields)
+
+
+@pytest.mark.slow
 @pytest.mark.skipif(
     not _have_live_fixture(),
-    reason="iteminfo_postpatch.pabgb fixture not present",
+    reason="CD 1.13 iteminfo fixture not present",
 )
 def test_format3_max_stack_count_apply_round_trip():
     """Set max_stack_count on a real item via the full Format 3 path
     and verify the patched binary parses back with the intended value.
     """
-    from cdumm.engine.iteminfo_native_parser import parse_iteminfo_from_bytes
-    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
     from cdumm.engine.format3_handler import Format3Intent
+    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
 
-    body = _LIVE_BODY.read_bytes()
-    items = parse_iteminfo_from_bytes(body)
+    body, header, starts, fields, items = _table()
 
-    # Pick the first item that has a non-zero max_stack_count we can
-    # bump to a sentinel value distinct from anything else.
-    target = next(
-        it for it in items
-        if it.get("max_stack_count", 0) >= 1
-    )
+    target = next(it for it in items if it.get("max_stack_count", 0) >= 1)
     target_key = target["key"]
     new_value = 9999
 
@@ -63,65 +97,58 @@ def test_format3_max_stack_count_apply_round_trip():
         new=new_value,
     )
 
-    change = build_iteminfo_intent_change(body, [intent])
+    change = build_iteminfo_intent_change(body, [intent],
+                                          vanilla_header=header)
     assert change is not None, (
         "build_iteminfo_intent_change returned None for a valid intent")
 
     new_bytes = bytes.fromhex(change["patched"])
     assert len(new_bytes) == len(body), (
         f"patched length {len(new_bytes)} != vanilla length {len(body)} "
-        f"(fixed-size primitive shouldn't change total size)"
+        f"(a fixed-size primitive must not change the total size)"
     )
 
-    new_items = parse_iteminfo_from_bytes(new_bytes)
+    new_items = _reparse(new_bytes, header, fields)
     new_target = next(it for it in new_items if it["key"] == target_key)
     assert new_target["max_stack_count"] == new_value, (
         f"after-patch max_stack_count = {new_target['max_stack_count']}, "
         f"expected {new_value}"
     )
 
-    # All OTHER items must be unchanged byte-for-byte (round-trip
-    # identity for non-targeted items).
+    # Every OTHER item must be untouched. An apply that edits one item and
+    # quietly perturbs a second is the corruption class this whole suite
+    # exists to catch.
+    before = {it["key"]: it for it in items}
     other_changed = [
-        new_it for new_it in new_items
-        if new_it["key"] != target_key
-        and new_it != next(
-            it for it in items if it["key"] == new_it["key"]
-        )
+        it["key"] for it in new_items
+        if it["key"] != target_key and it != before[it["key"]]
     ]
     assert not other_changed, (
         f"{len(other_changed)} non-target items mutated during apply; "
-        f"first: key={other_changed[0]['key']}"
+        f"first: key={other_changed[0]}"
     )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     not _have_live_fixture(),
-    reason="iteminfo_postpatch.pabgb fixture not present",
+    reason="CD 1.13 iteminfo fixture not present",
 )
 def test_format3_list_of_dict_apply_round_trip():
-    """Set equip_passive_skill_list (a list-of-dict field) on a real
-    item via the full Format 3 path and verify the patched binary
-    parses back with the intended value. This exercises the
-    list-of-dict writer path that was the original GitHub #62 bug
-    (originally reported on enchant_data_list, which the post-1.0.4.1
-    schema removed; equip_passive_skill_list is the equivalent
-    list-of-dict path that still exists).
+    """Set equip_passive_skill_list (a list-of-dict field) on a real item
+    via the full Format 3 path and verify the patched binary parses back
+    with the intended value. This is the list-of-dict writer path that was
+    the original GitHub #62 bug -- and a size-CHANGING edit, so it also
+    proves the .pabgh index gets rewritten correctly.
     """
-    from cdumm.engine.iteminfo_native_parser import parse_iteminfo_from_bytes
-    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
     from cdumm.engine.format3_handler import Format3Intent
+    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
 
-    body = _LIVE_BODY.read_bytes()
-    items = parse_iteminfo_from_bytes(body)
+    body, header, starts, fields, items = _table()
 
-    target = next(
-        it for it in items
-        if it.get("equip_passive_skill_list")
-        and len(it["equip_passive_skill_list"]) > 0
-    )
+    target = next(it for it in items if it.get("equip_passive_skill_list"))
     target_key = target["key"]
-    new_value = []  # Strip the list — simplest distinct value.
+    new_value = []      # strip the list — the simplest distinct value
 
     intent = Format3Intent(
         entry=target.get("string_key", str(target_key)),
@@ -131,18 +158,25 @@ def test_format3_list_of_dict_apply_round_trip():
         new=new_value,
     )
 
-    change = build_iteminfo_intent_change(body, [intent])
+    change = build_iteminfo_intent_change(body, [intent],
+                                          vanilla_header=header)
     assert change is not None
 
     new_bytes = bytes.fromhex(change["patched"])
-    new_items = parse_iteminfo_from_bytes(new_bytes)
+    # The record shrank, so the record offsets moved: re-read the index the
+    # writer rebuilt rather than reusing the vanilla one.
+    companion = change.get("_pabgh_companion")
+    new_header = (bytes.fromhex(companion["patched"])
+                  if companion else header)
+    new_items = _reparse(new_bytes, new_header, fields)
     new_target = next(it for it in new_items if it["key"] == target_key)
     assert new_target["equip_passive_skill_list"] == new_value
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     not _have_live_fixture(),
-    reason="iteminfo_postpatch.pabgb fixture not present",
+    reason="CD 1.13 iteminfo fixture not present",
 )
 def test_format3_mixed_primitive_and_list_of_dict_apply():
     """Real production load shape: a single mod batches multiple
@@ -150,21 +184,18 @@ def test_format3_mixed_primitive_and_list_of_dict_apply():
     fields. Batched through one build_iteminfo_intent_change call,
     re-parsed, both fields must reflect their intents.
     """
-    from cdumm.engine.iteminfo_native_parser import parse_iteminfo_from_bytes
-    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
     from cdumm.engine.format3_handler import Format3Intent
+    from cdumm.engine.iteminfo_writer import build_iteminfo_intent_change
 
-    body = _LIVE_BODY.read_bytes()
-    items = parse_iteminfo_from_bytes(body)
+    body, header, starts, fields, items = _table()
 
-    # Pick a single item that has BOTH a non-zero max_stack_count
-    # and a non-empty equip_passive_skill_list, so we can mutate
-    # both via the same batch.
+    # One item with BOTH a non-zero max_stack_count and a non-empty passive
+    # list, so a single batch mutates a fixed-size field and a size-changing
+    # one at once — the shape a real mod actually ships.
     target = next(
         it for it in items
         if it.get("max_stack_count", 0) >= 1
         and it.get("equip_passive_skill_list")
-        and len(it["equip_passive_skill_list"]) > 0
     )
     target_key = target["key"]
     new_stack = 7777
@@ -187,12 +218,16 @@ def test_format3_mixed_primitive_and_list_of_dict_apply():
         ),
     ]
 
-    change = build_iteminfo_intent_change(body, intents)
+    change = build_iteminfo_intent_change(body, intents,
+                                          vanilla_header=header)
     assert change is not None, (
         "build_iteminfo_intent_change returned None for two valid intents")
 
     new_bytes = bytes.fromhex(change["patched"])
-    new_items = parse_iteminfo_from_bytes(new_bytes)
+    companion = change.get("_pabgh_companion")
+    new_header = (bytes.fromhex(companion["patched"])
+                  if companion else header)
+    new_items = _reparse(new_bytes, new_header, fields)
     new_target = next(it for it in new_items if it["key"] == target_key)
     assert new_target["max_stack_count"] == new_stack
     assert new_target["equip_passive_skill_list"] == new_passives

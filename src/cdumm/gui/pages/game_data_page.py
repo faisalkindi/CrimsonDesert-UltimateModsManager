@@ -10,20 +10,26 @@ localization keys; localization is a follow-up.
 """
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import (QColor, QFont, QImage, QPixmap, QSyntaxHighlighter,
+                           QTextCharFormat)
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QScrollArea, QSizePolicy, QSplitter,
                                QTableWidgetItem, QVBoxLayout, QWidget)
+from qfluentwidgets import TableItemDelegate, isDarkTheme
 
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
 from cdumm.platform import IS_MACOS, IS_WINDOWS
+
+logger = logging.getLogger(__name__)
 
 
 class _GameIndexWorker(QObject):
@@ -66,48 +72,240 @@ def _cell(v) -> str:
     return s if len(s) <= 200 else s[:200] + "…"
 
 
-_FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you're looking at, and which ones you actually edit to make a mod. (Some are Pearl Abyss's own undocumented formats; where a meaning is inferred it's marked "~".)
+_FILE_TYPE_GUIDE = """A quick guide to Crimson Desert's file types — what you're looking at, and which ones you actually edit to make a mod. Many are Pearl Abyss's own undocumented formats: where a meaning is inferred it's marked "~", and the genuinely opaque ones are named honestly at the bottom rather than guessed at.
 
 ━━ THE ONES MODDERS EDIT MOST ━━
-.pabgb / .pabgh   Game-data TABLES + their key index — items, NPCs (character), quests, skills, drops, gimmicks, spawns, stages. Stats and values live here; most gameplay mods edit these. Opens as a grid of records (the _key and _name columns are always reliable).
-.paz              The ARCHIVE everything is packed into (like a .zip). The mod manager reads/writes these for you — you rarely touch them by hand.
+.pabgb / .pabgh Game-data TABLES + their key index — items, NPCs (character), quests, skills, drops, gimmicks, spawns, stages. Stats and values live here; most gameplay mods edit these. Opens as a grid of records (the _key and _name columns are always reliable).
+.paz The ARCHIVE everything is packed into (like a .zip). The mod manager reads/writes these for you — you rarely touch them by hand.
 
 ━━ VISUALS ━━
-.dds              TEXTURES / images — armour, faces, UI, the world map. Opens as an image (with a 3D view too).
-.padxil           Compiled SHADERS (GPU code) that draw surfaces. ~
-.pami / .pam / .pamlod   Model / MESH data and level-of-detail versions. ~
-.meshinfo         Mesh + collision / physics info for an object.
-.prefab           A placed "scene object" with its components and transform.
+.dds / .png TEXTURES / images — armour, faces, UI, the world map. .dds opens as an image (with a 3D view too).
+.padxil Compiled SHADERS — "DXIL" is DirectX shader bytecode that draws surfaces. ~
+.material / .technique / .mi / .pamt Material + shading setup: which shader, and its textures and parameters. ~
+.pami / .pam / .pamlod / .pampg Model / MESH data + level-of-detail / streaming variants. ~
+.meshinfo Mesh + collision / physics info for an object.
+.impostor A flat "billboard" stand-in for a mesh seen from far away. ~
+.prefab / .prefabdata_xml A placed "scene object" with its components and transform (and its data as XML).
+.spline / .spline2d Curves / paths used to lay out geometry and routes. ~
+.ies Light profiles (IES photometry) — how a lamp casts light. ~
+.ttf A font file (TrueType).
 
 ━━ ANIMATION & COMBAT ━━
-.paa              ANIMATIONS (Pearl Abyss "PAR" clips) — character/creature motion.
-.paa_metabin      Metadata that rides alongside an animation.
-.paac / .paatt    ACTION CHARTS + their attribute blocks — the combat/animation logic (which move plays and its properties). ~
-.hkx              HAVOK data — ragdoll / physics / some animation (third-party format; shown as a structure outline).
+.paa ANIMATIONS (Pearl Abyss "PAR" clips) — character/creature motion.
+.paa_metabin Metadata that rides alongside an animation.
+.paac / .paatt ACTION CHARTS + their attribute blocks — the combat/animation logic (which move plays and its properties). ~
+.motionblending How one animation blends into the next. ~
+.hkx HAVOK data — ragdoll / physics / some animation (third-party format; shown as a structure outline).
 
 ━━ AUDIO ━━
-.wem              Wwise SOUND streams — SFX, voice, music. Windows can't play them raw; the previewer decodes them with vgmstream so you can hear + export them.
-.bnk              Wwise SOUNDBANK — a container of sounds + event data.
+.wem Wwise SOUND streams — SFX, voice, music. Windows can't play them raw; the previewer decodes them with vgmstream so you can hear + export them.
+.bnk Wwise SOUNDBANK — a container of sounds + event data.
+.pasound A sound definition / reference. ~
+
+━━ VIDEO ━━
+.mp4 VIDEO clips — the in-game "advice" tutorials for gear, skills and items. Play them inline (Pause + seek) or extract to a file.
 
 ━━ EFFECTS · CUTSCENES · WORLD ━━
-.pae              Particle / EFFECT data — fire, sparks, auras.
-.paseq / .paseqc  SEQUENCER — timeline / cutscene data.
-.paproj           Projectile definitions — arrows, bombs, spells. ~
-.palevel / .levelinfo    Level / world data. ~
-.road / .roadsector / .nav   Roads and AI navigation meshes. ~
+.pae Particle / EFFECT data — fire, sparks, auras.
+.paseq / .paseqc / .pastage SEQUENCER / quest-STAGE timelines — cutscene + quest logic. .pastage opens as an editable field/type schema. ~
+.paproj / .paprojdesc Projectile definitions — arrows, bombs, spells. ~
+.palevel / .levelinfo Level / world data. ~
+.road / .roadsector / .roadidx Roads + their sector / index data for AI navigation. ~
+.paschedule / .paschedulepath NPC daily SCHEDULES + the paths they walk. ~
+.binarygimmick Interactive "gimmicks" — levers, doors, traps, physics props. ~
+.linkedsceneobject / .questgaugecount Scene-object links and quest counters. ~
+.pat / .pbd / .uianiminit Other packed object / UI binaries. No names inside — shown as a typed word table. ~
 
 ━━ TEXT & CONFIG ━━
-.xml / .pac_xml / .app_xml / .html / .css / .thtml   Human-readable text, config, and UI.
+.xml / .pac / .pac_xml / .app_xml / .html / .css / .thtml Human-readable text, config, and UI (.pac is the packed twin of .pac_xml).
+.txt / .dat / .binarystring / .paloc Plain text, loose data blobs, packed strings, and localisation. ~
+
+━━ OTHER PEARL ABYSS FORMATS (opaque — not editable by hand) ━━
+Value-only packed binaries with no field names inside. The previewer shows them as a typed word table (the raw bytes as unsigned / signed / float) so you can still patch by offset, but their layout isn't documented:
+.paccd .imp .parg .seqmt .paem .pabc .save .pab .pabv .pcg .pasg .pashv .papr .ani .pai .pas .pma .paacdesc .paasmt .pamhc .pappt .pathc .paschedulectx .paseqh .binarygimmickcacheddata .binarygimmickframeevent
 
 ━━ HOW THE PREVIEW DECIDES WHAT TO SHOW ━━
 • Text formats → shown as text.
 • Textures → shown as an image (+ 3D).
 • Data tables (.pabgb) → a record grid.
-• Reflection formats (.pae / .paseq / .prefab / .meshinfo …) → a Field → Type schema table, using the engine's OWN names.
+• Reflection formats (.pae / .paseq / .pastage / .prefab / .meshinfo …) → a Field → Type schema table, using the engine's OWN names.
 • Audio (.wem / .bnk) → metadata + Play / Export-to-WAV.
-• Everything else (packed formats like .paatt / .paa / .pabgh) → a typed word table: the exact bytes shown as unsigned / signed / float. These formats carry no field names inside the file, so the values are shown accurately as raw numbers you can still patch by offset.
+• Video (.mp4) → plays inline with Pause + seek.
+• Everything else (packed formats like .paatt / .paa / .pabgh / .pat / .pbd / .uianiminit) → a typed word table: the exact bytes shown as unsigned / signed / float. These formats carry no field names inside the file, so the values are shown accurately as raw numbers you can still patch by offset.
 
 Tip: a name ending in "info" is almost always a game-data table you can edit."""
+
+
+_MOD_HOWTO_GUIDE = """How to turn game data into a mod — no hex editor needed.
+
+1. Build the index (top of this tab), then click a keyed data table
+   (.pabgb) in the results — e.g. iteminfo for items/gear, storeinfo
+   for shops. It opens as a grid of records.
+
+2. Edit a value. Cells CDUMM has verified byte-exact are editable —
+   double-click one (for example an item's price) and type a new
+   number. Un-verified fields stay locked so you can't corrupt them.
+
+3. Click "Make mod from edits…" to build the mod, or
+   "Export .field.json…" to save a shareable copy.
+
+4. Enable the new mod in the Mods tab, then Apply.
+
+Every edit is a same-width, byte-exact write: the file stays valid,
+the game still loads it, and you can disable the mod to revert."""
+
+
+class _ExtHighlighter(QSyntaxHighlighter):
+    """Colour the file-type tokens (.dds, .pabgb, .pac_xml, ...) in the
+    "New to modding" guides so each entry reads as a scannable line rather
+    than one wall of grey text. The colour tracks the theme accent and
+    updates live when the accent picker changes (same bus as the buttons)."""
+
+    _RX = re.compile(r"\.[A-Za-z][A-Za-z0-9_]+")
+
+    def __init__(self, document) -> None:
+        super().__init__(document)
+        self._fmt = QTextCharFormat()
+        self._fmt.setFontWeight(QFont.Weight.Bold)
+        self._apply_accent()
+        try:   # the accent module ships in a separate PR; degrade if absent
+            from cdumm.gui import accent
+            accent.bus().changed.connect(self._on_accent)
+        except Exception:
+            pass
+
+    def _apply_accent(self) -> None:
+        try:
+            from cdumm.gui import accent
+            self._fmt.setForeground(accent.current_accent())
+        except Exception:   # no accent module in this build -> brand blue
+            self._fmt.setForeground(QColor("#2878D0"))
+
+    def _on_accent(self) -> None:
+        self._apply_accent()
+        self.rehighlight()
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802
+        for m in self._RX.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(), self._fmt)
+
+
+def _human_size(n) -> str:
+    """Bytes -> a short human string (e.g. ``512 B``, ``763 KB``, ``4.8 MB``)."""
+    size = float(int(n))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.0f} {unit}" if size >= 100 else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{int(n)} B"
+
+
+# Broad file-type category -> colour, so the Type column reads at a glance
+# (audio vs texture vs table ...). Extensions not listed stay the default.
+_CAT_COLOUR = {
+    "table": "#5AD19A", "visual": "#4FA3FF", "anim": "#E0A85E",
+    "audio": "#B98BE0", "video": "#E06A8B", "world": "#4FC9C9", "text": "#9AA0A6",
+}
+_EXT_CAT = {
+    ".pabgb": "table", ".pabgh": "table",
+    ".wem": "audio", ".bnk": "audio", ".pasound": "audio",
+    ".mp4": "video",
+    ".dds": "visual", ".png": "visual", ".padxil": "visual", ".material": "visual",
+    ".technique": "visual", ".mi": "visual", ".pamt": "visual", ".pami": "visual",
+    ".pam": "visual", ".pamlod": "visual", ".pampg": "visual", ".meshinfo": "visual",
+    ".prefab": "visual", ".prefabdata_xml": "visual", ".spline": "visual",
+    ".spline2d": "visual", ".ies": "visual", ".ttf": "visual", ".impostor": "visual",
+    ".paa": "anim", ".paa_metabin": "anim", ".paac": "anim", ".paatt": "anim",
+    ".hkx": "anim", ".motionblending": "anim",
+    ".pae": "world", ".paseq": "world", ".paseqc": "world", ".pastage": "world",
+    ".paproj": "world", ".palevel": "world", ".levelinfo": "world", ".road": "world",
+    ".roadsector": "world", ".roadidx": "world", ".paschedule": "world",
+    ".paschedulepath": "world", ".binarygimmick": "world", ".pat": "world",
+    ".pbd": "world", ".uianiminit": "world",
+    ".xml": "text", ".pac": "text", ".pac_xml": "text", ".app_xml": "text",
+    ".html": "text", ".css": "text", ".thtml": "text", ".txt": "text",
+    ".dat": "text", ".binarystring": "text", ".paloc": "text",
+}
+
+
+def _type_colour(ext: str) -> "str | None":
+    """Hex colour for a file-type's category, or None if uncategorised."""
+    return _CAT_COLOUR.get(_EXT_CAT.get((ext or "").lower()))
+
+
+def _split_path(path: str) -> "tuple[str, str]":
+    """Return ``(folder, name)`` from a game asset path (handles / and \\)."""
+    sep = max(path.rfind("/"), path.rfind("\\"))
+    return (path[:sep], path[sep + 1:]) if sep >= 0 else ("", path)
+
+
+class _NumericItem(QTableWidgetItem):
+    """Table cell that SORTS by a numeric key while DISPLAYING formatted text,
+    so the Size column sorts by real byte count (not by its "763 KB" text)."""
+
+    def __init__(self, text: str, value: float) -> None:
+        super().__init__(text)
+        self._value = value
+
+    def __lt__(self, other) -> bool:
+        if isinstance(other, _NumericItem):
+            return self._value < other._value
+        return super().__lt__(other)
+
+
+class _ZebraDelegate(TableItemDelegate):
+    """Stronger alternating-row shading. qfluentwidgets' stock alternate band
+    is alpha 5/255 (near-invisible); pre-fill odd, non-selected rows with a
+    firmer translucent band, then let the base delegate paint hover / selection
+    / content on top. Keyed on the VISUAL row so it survives sorting, and it
+    skips selected rows so the selection highlight still shows."""
+
+    def paint(self, painter, option, index):  # noqa: N802
+        if (index.row() % 2) and index.row() not in self.selectedRows:
+            painter.save()
+            _c = 255 if isDarkTheme() else 0
+            painter.fillRect(option.rect, QColor(_c, _c, _c, 16))
+            painter.restore()
+        super().paint(painter, option, index)
+
+
+def _build_row_items(r) -> list:
+    """Build the five cells for one search result: Name (full path stashed in
+    UserRole for selection) - Folder (dimmed) - Archive - Type (category-
+    coloured) - Size (human text, numeric sort key, right-aligned, exact bytes
+    in the tooltip)."""
+    path = str(r["path"])
+    folder, name = _split_path(path)
+    ext = str(r["ext"])
+    size = int(r["orig_size"])
+
+    name_item = QTableWidgetItem(name)
+    name_item.setData(Qt.ItemDataRole.UserRole, path)
+    name_item.setToolTip(path)
+
+    folder_item = QTableWidgetItem(folder)
+    folder_item.setForeground(QColor("#9AA0A6"))
+    folder_item.setToolTip(path)
+
+    archive_item = QTableWidgetItem(str(r["archive"]))
+
+    type_item = QTableWidgetItem(ext)
+    type_item.setToolTip(ext)
+    _tc = _type_colour(ext)
+    if _tc:
+        # Colour only — do NOT override the item font. A standalone item's
+        # font() is the default (not the table's 15px), so bolding it here
+        # rendered Type larger/heavier than every other column.
+        type_item.setForeground(QColor(_tc))
+
+    size_item = _NumericItem(_human_size(size), size)
+    size_item.setTextAlignment(
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    size_item.setToolTip(f"{size:,} bytes")
+
+    return [name_item, folder_item, archive_item, type_item, size_item]
 
 
 def _shape_records(records: dict, schema, positions: dict | None = None
@@ -199,6 +397,36 @@ def _shape_records(records: dict, schema, positions: dict | None = None
     return cols, rows, len(records), health
 
 
+def _locate_gear_stats(table: str, body: bytes, header: bytes) -> dict:
+    """``{item_key: [GearStat, ...]}`` for iteminfo, ``{}`` for anything else.
+
+    Gear stats (armour defence, weapon damage, enhancement values) live in
+    nested blocks that the display decoder flattens away, so they get no
+    grid columns and have to be edited through their own dialog. They come
+    from the native 1.13 decode — every stat at its exact path, nothing
+    scanned or inferred.
+
+    Best-effort: a table view must never fail because the stat locator did.
+    """
+    if table != "iteminfo":
+        return {}
+    try:
+        from cdumm.engine.gear_stat_view import locate_all_gear_stats
+        from cdumm.engine.iteminfo_native_parser import (
+            detect_iteminfo_layout, parse_iteminfo_from_bytes)
+        n = int.from_bytes(header[:2], "little")
+        starts = sorted(
+            int.from_bytes(header[2 + i * 8 + 4:2 + i * 8 + 8], "little")
+            for i in range(n))
+        items = parse_iteminfo_from_bytes(
+            body, starts, fields=detect_iteminfo_layout(body, starts))
+        return locate_all_gear_stats(
+            {it["key"]: it for it in items if "key" in it})
+    except Exception:  # noqa: BLE001 — never break the table view
+        logger.exception("gear-stat locator failed on %s", table)
+        return {}
+
+
 class _PreviewWorker(QObject):
     """Reads + decodes one asset off the UI thread so a large table or
     texture can never freeze the app. Emits exactly one ``ready`` dict
@@ -218,6 +446,7 @@ class _PreviewWorker(QObject):
         self._image_limit = image_limit
         self._text_cap = text_cap
         self._hex_cap = hex_cap
+        self._video_limit = 256 * 1024 * 1024  # mp4 clips are small; cap anyway
 
     def run(self) -> None:
         res = {"gen": self._gen, "path": self._path}
@@ -269,7 +498,9 @@ class _PreviewWorker(QObject):
                         recs, sem.get_schema(table), positions)
                     res.update(kind="table", table=table, cols=cols,
                                rows=rows, total=total, health=health,
-                               has_pos=bool(positions))
+                               has_pos=bool(positions),
+                               gear_stats=_locate_gear_stats(
+                                   table, body, header))
                     return
 
         # 2) no game folder → metadata only
@@ -303,6 +534,15 @@ class _PreviewWorker(QObject):
                            vgmstream=bool(game_index.find_vgmstream()))
                 return
 
+        # 3.6) Video clips (.mp4) → play inline via Qt Multimedia.
+        if self._path.lower().endswith(game_index.VIDEO_EXTS):
+            if orig > self._video_limit:
+                res.update(kind="toobig")
+                return
+            data = game_index.extract_asset(con, self._path, gd)
+            res.update(kind="video", data=data)
+            return
+
         # 4) too big for an inline byte preview
         if orig > self._byte_limit:
             res.update(kind="toobig")
@@ -314,19 +554,22 @@ class _PreviewWorker(QObject):
             res.update(kind="text", text=text[:self._text_cap],
                        truncated=len(text) >= self._text_cap)
             return
-        # Reflection-serialized binaries (.paseq/.prefab/.meshinfo/...) embed
-        # their field/type/object names as text — surface those as a readable
-        # outline instead of raw hex.
         # Verbose reflection binaries (.pae/.paseq/.prefab/.meshinfo/…) embed a
         # full field→type schema; surface it as a named table.
         refl = game_index.decode_reflection(data)
         if refl:
             res.update(kind="schema", **refl)
             return
-        strings = game_index.extract_strings(data)
-        if len(strings) >= 6:
-            res.update(kind="outline", strings=strings, nstr=len(strings))
-            return
+        # The flat name outline is only meaningful for those same verbose
+        # reflection formats. Packed value-only files (.pabgh/.paatt/…) and
+        # third-party binaries (.hkx, .roadsector, …) embed no name schema, so
+        # mining them yields misleading noise ("navigraphX" repeats, Havok type
+        # tags) — route everything else to the struct/hex view instead.
+        if game_index.ext_of(self._path) in game_index.REFLECTION_EXTS:
+            strings = game_index.extract_strings(data)
+            if len(strings) >= 6:
+                res.update(kind="outline", strings=strings, nstr=len(strings))
+                return
         # No embedded names, but a word-aligned struct (.paatt attribute
         # blocks, .pabgh key indexes) reads far better as a typed word
         # table than a raw hex wall.
@@ -354,6 +597,61 @@ class _VgmDownloadWorker(QObject):
         except Exception as ex:  # noqa: BLE001
             ok, msg = False, str(ex)
         self.done.emit(ok, msg)
+
+
+class _AudioDecodeWorker(QObject):
+    """Decode a Wwise .wem to a temp WAV via vgmstream off the UI thread.
+
+    vgmstream runs as a subprocess; doing that inline froze the window
+    ('not responding') until it finished. This runs it on a worker thread and
+    hands back the WAV path + real duration so the pane can play it and show a
+    live timer.
+    """
+
+    done = Signal(dict)   # {token, wav, dur, name} on success; {token, error}
+
+    def __init__(self, index_path, game_dir, path, data, name, token):
+        super().__init__()
+        self._index_path = index_path
+        self._game_dir = game_dir
+        self._path = path
+        self._data = data
+        self._name = name
+        self._token = token
+
+    def run(self) -> None:
+        import contextlib
+        import tempfile
+        import wave
+        res = {"token": self._token, "name": self._name}
+        data = self._data
+        try:
+            if data is None:                       # large asset — read on demand
+                con = sqlite3.connect(self._index_path)
+                try:
+                    data = game_index.extract_asset(
+                        con, self._path, self._game_dir)
+                finally:
+                    con.close()
+            fd, wav = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            if not game_index.convert_to_wav(data, wav):
+                with contextlib.suppress(OSError):
+                    os.unlink(wav)
+                res["error"] = ("Could not decode audio — is vgmstream "
+                                "installed?")
+                self.done.emit(res)
+                return
+            dur = 0.0
+            with contextlib.suppress(Exception):
+                with contextlib.closing(wave.open(wav, "rb")) as w:
+                    if w.getframerate():
+                        dur = w.getnframes() / float(w.getframerate())
+            res["wav"] = wav
+            res["dur"] = dur
+        except Exception as ex:  # noqa: BLE001
+            res["error"] = f"Read/decode failed: {ex}"
+        self.done.emit(res)
 
 
 class _Texture3DView(QDialog):
@@ -648,23 +946,69 @@ class GameDataPage(ToolPageBase):
         root.insertWidget(root.count() - 1, self._hits)
         root.insertSpacing(root.count() - 1, 8)
 
-        # Beginner-friendly file-type guide — a collapsible box so newcomers can
-        # learn what each format is without it taking over the page.
+        # ── Modding info row — three columns side by side ────────────────
+        # The "Largest keyed game-data tables" summary (filled after a build)
+        # sits next to two collapsible guides: what the file types mean, and
+        # how to turn game data into a mod. Grouping them here keeps the
+        # newcomer help beside the thing it explains.
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(12)
+
+        # Column 1 — the largest-tables card lands here in _on_done().
+        self._largest_col = QVBoxLayout()
+        self._largest_col.setContentsMargins(0, 0, 0, 0)
+        self._largest_col.setSpacing(0)
+        info_row.addLayout(self._largest_col, 3)
+
+        # Column 2 — "New to modding? What these file types mean".
+        types_col = QVBoxLayout()
+        types_col.setContentsMargins(0, 0, 0, 0)
+        types_col.setSpacing(6)
         self._guide_btn = PushButton(
             "📖  New to modding?  What these file types mean", self._container)
         self._guide_btn.setCheckable(True)
         self._guide_btn.clicked.connect(
             lambda: self._guide_box.setVisible(self._guide_btn.isChecked()))
-        root.insertWidget(root.count() - 1, self._guide_btn)
+        types_col.addWidget(self._guide_btn)
         self._guide_box = PlainTextEdit(self._container)
         self._guide_box.setReadOnly(True)
         self._guide_box.setPlainText(_FILE_TYPE_GUIDE)
+        self._guide_hl = _ExtHighlighter(self._guide_box.document())
         _gbf = self._guide_box.font()
         _gbf.setPixelSize(13)
         self._guide_box.setFont(_gbf)
         self._guide_box.setFixedHeight(300)
         self._guide_box.setVisible(False)
-        root.insertWidget(root.count() - 1, self._guide_box)
+        types_col.addWidget(self._guide_box)
+        types_col.addStretch(1)
+        info_row.addLayout(types_col, 4)
+
+        # Column 3 — "How to make a mod from game data" (the same collapsible
+        # pattern, so the two guides read as a pair).
+        howto_col = QVBoxLayout()
+        howto_col.setContentsMargins(0, 0, 0, 0)
+        howto_col.setSpacing(6)
+        self._howto_btn = PushButton(
+            "🛠  How to make a mod from game data", self._container)
+        self._howto_btn.setCheckable(True)
+        self._howto_btn.clicked.connect(
+            lambda: self._howto_box.setVisible(self._howto_btn.isChecked()))
+        howto_col.addWidget(self._howto_btn)
+        self._howto_box = PlainTextEdit(self._container)
+        self._howto_box.setReadOnly(True)
+        self._howto_box.setPlainText(_MOD_HOWTO_GUIDE)
+        self._howto_hl = _ExtHighlighter(self._howto_box.document())
+        _hbf = self._howto_box.font()
+        _hbf.setPixelSize(13)
+        self._howto_box.setFont(_hbf)
+        self._howto_box.setFixedHeight(300)
+        self._howto_box.setVisible(False)
+        howto_col.addWidget(self._howto_box)
+        howto_col.addStretch(1)
+        info_row.addLayout(howto_col, 4)
+
+        root.insertLayout(root.count() - 1, info_row)
         root.insertSpacing(root.count() - 1, 8)
 
         # Results table (left) + live preview pane (right), in a draggable
@@ -678,13 +1022,24 @@ class GameDataPage(ToolPageBase):
                             QSizePolicy.Policy.Expanding)
 
         self._table = TableWidget(split)
-        self._table.setColumnCount(4)
+        self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(
-            ["Path", "Archive", "Type", "Size (bytes)"])
+            ["Name", "Folder", "Archive", "Type", "Size"])
         self._table.verticalHeader().hide()
         self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(
             self._table.SelectionBehavior.SelectRows)
+        self._table.setSortingEnabled(True)          # click a header to sort
+        self._table.setAlternatingRowColors(True)    # zebra (via _ZebraDelegate)
+        self._table.setItemDelegate(_ZebraDelegate(self._table))
+        self._table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_menu)
+        # Reserve a gutter for the vertical scrollbar so it sits beside the
+        # rows instead of overlaying the last column (which caused mis-clicks
+        # landing on a row instead of the scrollbar).
+        self._table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         # Larger, more readable text + roomier rows.
         _tf = self._table.font()
         _tf.setPixelSize(15)
@@ -693,16 +1048,16 @@ class GameDataPage(ToolPageBase):
         _hf = _hdr.font()
         _hf.setPixelSize(15)
         _hdr.setFont(_hf)
-        # Path stretches to fill the slack; the other three get fixed widths.
-        # This keeps the columns spanning the full table width (so the vertical
-        # scrollbar hugs the last column) WITHOUT ResizeToContents, which
-        # re-measures every row on every update and can stall the UI thread.
-        _hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for _c in (1, 2, 3):
+        # Folder stretches to fill the slack; the rest get fixed widths, so the
+        # columns still span the full width (scrollbar hugs the last column)
+        # WITHOUT ResizeToContents, which re-measures every row and can stall.
+        _hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for _c in (0, 2, 3, 4):
             _hdr.setSectionResizeMode(_c, QHeaderView.ResizeMode.Interactive)
-        self._table.setColumnWidth(1, 90)
-        self._table.setColumnWidth(2, 140)
-        self._table.setColumnWidth(3, 130)
+        self._table.setColumnWidth(0, 260)   # Name
+        self._table.setColumnWidth(2, 80)    # Archive
+        self._table.setColumnWidth(3, 120)   # Type
+        self._table.setColumnWidth(4, 110)   # Size
         self._table.verticalHeader().setDefaultSectionSize(36)
         self._table.itemSelectionChanged.connect(self._on_asset_selected)
         split.addWidget(self._table)
@@ -740,6 +1095,8 @@ class GameDataPage(ToolPageBase):
         # semantic schemas. Hidden until a table is selected.
         self._pv_grid = TableWidget(pane)
         self._pv_grid.verticalHeader().hide()
+        self._pv_grid.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self._pv_grid.setEditTriggers(self._pv_grid.EditTrigger.NoEditTriggers)
         _gf = self._pv_grid.font()
         _gf.setPixelSize(13)
@@ -750,6 +1107,9 @@ class GameDataPage(ToolPageBase):
         # mod). Always connected; the handler no-ops unless the current
         # preview is an editable table (self._pv_table is set).
         self._pv_grid.itemChanged.connect(self._on_grid_cell_edited)
+        # Gear-stat editor: the button only appears when the selected row is
+        # an item that actually carries stats.
+        self._pv_grid.itemSelectionChanged.connect(self._update_gear_button)
         pv.addWidget(self._pv_grid, 1)
 
         # Image view for textures (DDS decoded to PNG). Hidden until selected.
@@ -761,6 +1121,46 @@ class GameDataPage(ToolPageBase):
         self._pv_img_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._pv_img_scroll.setVisible(False)
         pv.addWidget(self._pv_img_scroll, 1)
+
+        # Video view for .mp4 clips — plays inline via Qt Multimedia (FFmpeg
+        # backend). Guarded so the Game Data page still loads if a build ships
+        # without multimedia. Hidden until a video is selected.
+        self._video_ok = False
+        self._video_err = ""
+        self._pv_vtemp = None
+        try:
+            from PySide6.QtMultimediaWidgets import QVideoWidget
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            from PySide6.QtWidgets import QSlider
+            self._pv_video = QVideoWidget(pane)
+            self._pv_video.setMinimumHeight(240)
+            self._pv_video.setVisible(False)
+            pv.addWidget(self._pv_video, 1)
+            self._pv_player = QMediaPlayer(self)
+            self._pv_audio_out = QAudioOutput(self)
+            self._pv_player.setAudioOutput(self._pv_audio_out)
+            self._pv_player.setVideoOutput(self._pv_video)
+            self._pv_vrow = QWidget(pane)
+            _vr = QHBoxLayout(self._pv_vrow)
+            _vr.setContentsMargins(0, 0, 0, 0)
+            self._pv_vplay = PushButton("⏸  Pause", self._pv_vrow)
+            self._pv_vplay.clicked.connect(self._on_video_playpause)
+            _vr.addWidget(self._pv_vplay)
+            self._pv_vslider = QSlider(Qt.Orientation.Horizontal, self._pv_vrow)
+            self._pv_vslider.sliderMoved.connect(self._pv_player.setPosition)
+            _vr.addWidget(self._pv_vslider, 1)
+            self._pv_vrow.setVisible(False)
+            pv.addWidget(self._pv_vrow)
+            self._pv_player.durationChanged.connect(
+                lambda d: self._pv_vslider.setRange(0, max(0, d)))
+            self._pv_player.positionChanged.connect(self._on_video_pos)
+            self._video_ok = True
+        except Exception as _ve:  # noqa: BLE001
+            _cause = getattr(_ve, "__cause__", None) or getattr(_ve, "__context__", None)
+            self._video_err = str(_ve) + (f" | {_cause!r}" if _cause else "")
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "video preview unavailable: %s", self._video_err)
 
         # "View in 3D" — only shown for image previews; opens a pop-up with
         # the texture on a rotatable sphere/cube (Qt3D).
@@ -817,6 +1217,12 @@ class GameDataPage(ToolPageBase):
         self._mm_export_btn.setEnabled(False)
         self._mm_export_btn.clicked.connect(self._on_export_field_json)
         pv.addWidget(self._mm_export_btn)
+        # Gear stats sit in nested blocks that the grid flattens away, so
+        # they get their own dialog. Shown only for rows that have them.
+        self._mm_gear_btn = PushButton("Edit gear stats…", pane)
+        self._mm_gear_btn.setVisible(False)
+        self._mm_gear_btn.clicked.connect(self._on_edit_gear_stats)
+        pv.addWidget(self._mm_gear_btn)
         split.addWidget(pane)
 
         split.setStretchFactor(0, 3)
@@ -835,6 +1241,12 @@ class GameDataPage(ToolPageBase):
         self._pv_schema = None
         self._mm_editable_cols: dict = {}        # grid col index -> FieldSpec
         self._pending_edits: dict = {}           # (key, field) -> FieldEdit
+        # Gear stats for the current table: {item_key: [GearStat, ...]}.
+        # Populated for iteminfo only; empty for every other table.
+        self._gear_stats: dict = {}
+        # Stat id -> name, read from the game's own statusinfo table. Loaded
+        # once, lazily, the first time the editor is opened.
+        self._stat_names: dict | None = None
         # stretch=1 makes this row absorb the page's spare vertical space
         # (the base layout's trailing addStretch() has factor 0, so it yields).
         root.insertWidget(root.count() - 1, split, 1)
@@ -967,9 +1379,19 @@ class GameDataPage(ToolPageBase):
                 for t in tables)
         except Exception as ex:  # noqa: BLE001
             detail = f"(could not read tables: {ex})"
-        card = self._add_result_card("Largest keyed game-data tables", detail)
+        # Drop the fresh card into the info row's left column (next to the
+        # help boxes). Clear any prior card first so a rebuild replaces it.
+        from cdumm.gui.pages.tool_page import _ResultCard
+        while self._largest_col.count():
+            old = self._largest_col.takeAt(0)
+            w = old.widget()
+            if w is not None:
+                w.deleteLater()
+        card = _ResultCard(
+            "Largest keyed game-data tables", detail, "", self._container)
         card.setMaximumWidth(600)   # hug the content instead of spanning the page
-        self._results_layout.setAlignment(card, Qt.AlignLeft)
+        self._largest_col.addWidget(card)
+        self._largest_col.addStretch(1)
         # refresh the viewer if a search is active
         self._on_search(self._search.text())
 
@@ -1023,8 +1445,13 @@ class GameDataPage(ToolPageBase):
         return exts[idx] if 0 <= idx < len(exts) else None
 
     def _populate_type_filter(self, con) -> None:
-        """Fill the Type dropdown from the extensions actually indexed, most
-        common first, each labelled with its file count."""
+        """Fill the Type dropdown from EVERY extension actually indexed, most
+        common first, each labelled with its file count.
+
+        No cap: rare but modding-relevant formats (e.g. .pabgb keyed tables,
+        ~130 files) must not be dropped just because bulk assets
+        (.wem / .paa / .dds, hundreds of thousands each) dwarf them in count.
+        """
         try:
             rows = con.execute(
                 "SELECT ext, COUNT(*) c FROM assets GROUP BY ext "
@@ -1032,7 +1459,7 @@ class GameDataPage(ToolPageBase):
         except Exception:  # noqa: BLE001
             return
         items = [("All types", None)]
-        for ext, c in rows[:40]:
+        for ext, c in rows:
             if ext and ext != "(none)":
                 items.append((f"{ext}  ({c:,})", ext))
         if len(items) > 1:
@@ -1068,13 +1495,12 @@ class GameDataPage(ToolPageBase):
             f"{len(rows):,} match(es)"
             + (f" (showing first {limit:,} — narrow the search for more)"
                if capped else ""))
+        self._table.setSortingEnabled(False)   # bulk-fill, then re-enable
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(str(r["path"])))
-            self._table.setItem(i, 1, QTableWidgetItem(str(r["archive"])))
-            self._table.setItem(i, 2, QTableWidgetItem(str(r["ext"])))
-            self._table.setItem(
-                i, 3, QTableWidgetItem(f"{int(r['orig_size']):,}"))
+            for c, cell in enumerate(_build_row_items(r)):
+                self._table.setItem(i, c, cell)
+        self._table.setSortingEnabled(True)
 
     # ── preview pane ─────────────────────────────────────────────────
     _PREVIEW_TEXT_CAP = 200_000            # chars shown for text assets
@@ -1089,8 +1515,50 @@ class GameDataPage(ToolPageBase):
         items = self._table.selectedItems()
         if not items:
             return None
-        cell = self._table.item(items[0].row(), 0)
-        return cell.text() if cell else None
+        cell = self._table.item(items[0].row(), 0)   # Name cell carries the
+        if cell is None:                              # full path in UserRole
+            return None
+        full = cell.data(Qt.ItemDataRole.UserRole)
+        return str(full) if full else cell.text()
+
+    def _set_type_filter(self, ext: str) -> None:
+        """Point the Type dropdown at ``ext`` (re-runs the search)."""
+        exts = getattr(self, "_type_exts", [])
+        if ext in exts:
+            self._type_combo.setCurrentIndex(exts.index(ext))
+
+    def _on_table_menu(self, pos) -> None:
+        """Right-click a result row: copy its path / filename, or filter the
+        list to that file type."""
+        item = self._table.itemAt(pos)
+        if item is None:
+            return
+        name_cell = self._table.item(item.row(), 0)
+        full = name_cell.data(Qt.ItemDataRole.UserRole) if name_cell else None
+        if not full:
+            return
+        full = str(full)
+        _folder, name = _split_path(full)
+        type_cell = self._table.item(item.row(), 3)
+        ext = type_cell.text() if type_cell else ""
+        from PySide6.QtWidgets import QApplication
+        from qfluentwidgets import Action, RoundMenu
+        menu = RoundMenu(parent=self._table)
+        _act_path = Action("Copy path")
+        _act_path.triggered.connect(
+            lambda: QApplication.clipboard().setText(full))
+        menu.addAction(_act_path)
+        _act_name = Action("Copy filename")
+        _act_name.triggered.connect(
+            lambda: QApplication.clipboard().setText(name))
+        menu.addAction(_act_name)
+        if ext and ext in getattr(self, "_type_exts", []):
+            menu.addSeparator()
+            _act_filter = Action(f"Show only {ext}")
+            _act_filter.triggered.connect(
+                lambda e=ext: self._set_type_filter(e))
+            menu.addAction(_act_filter)
+        menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _on_asset_selected(self) -> None:
         """Kick off a background read of the clicked asset. The heavy work
@@ -1130,6 +1598,7 @@ class GameDataPage(ToolPageBase):
         if res.get("gen") != self._pv_gen:
             return   # a newer selection superseded this result
         self._reset_maker()   # clear any staged edits/controls from a prior asset
+        self._stop_video()    # stop + hide any video playing from a prior asset
         # Image-only button; _show_image re-shows it, every other branch leaves
         # it hidden.
         self._pv_saveimg_btn.setVisible(False)
@@ -1166,6 +1635,8 @@ class GameDataPage(ToolPageBase):
             self._pv_extract.setEnabled(True)
             self._enable_table_editing(
                 res.get("table", ""), res.get("cols", []))
+            self._gear_stats = res.get("gear_stats") or {}
+            self._update_gear_button()
             return
 
         if kind == "image":
@@ -1176,6 +1647,14 @@ class GameDataPage(ToolPageBase):
                 + (f"  ·  {meta}" if meta else "")
                 + f"\n{res.get('path', '')}")
             self._show_image(img.get("png", b""))
+            self._pv_extract.setEnabled(True)
+            return
+
+        if kind == "video":
+            self._pv_meta.setText(
+                (f"video  ·  {meta}" if meta else "video")
+                + f"\n{res.get('path', '')}")
+            self._show_video(res)
             self._pv_extract.setEnabled(True)
             return
 
@@ -1238,6 +1717,77 @@ class GameDataPage(ToolPageBase):
             else self._pv_text.LineWrapMode.NoWrap)
         self._pv_text.setPlainText(text)
 
+    def _show_video(self, res: dict) -> None:
+        # Hide the other preview views, write the clip to a temp .mp4 and play.
+        self._pv_text.setVisible(False)
+        self._pv_grid.setVisible(False)
+        self._pv_img_scroll.setVisible(False)
+        self._pv_3d_btn.setVisible(False)
+        self._pv_saveimg_btn.setVisible(False)
+        self._pv_play_btn.setVisible(False)
+        self._pv_export_btn.setVisible(False)
+        self._pv_getvgm_btn.setVisible(False)
+        if not self._video_ok:
+            self._pv_text.setVisible(True)
+            _why = getattr(self, "_video_err", "")
+            self._pv_text.setPlainText(
+                "Video playback isn't available in this build. Use "
+                "“Extract raw file…” to save the .mp4 and open it in a player."
+                + (f"\n\n({_why})" if _why else ""))
+            return
+        import os as _os
+        import tempfile as _tf
+        from PySide6.QtCore import QUrl
+        try:
+            fd, tmp = _tf.mkstemp(suffix=".mp4", prefix="cdumm_vid_")
+            with _os.fdopen(fd, "wb") as fh:
+                fh.write(res.get("data", b""))
+            self._pv_vtemp = tmp
+            self._pv_video.setVisible(True)
+            self._pv_vrow.setVisible(True)
+            self._pv_vplay.setText("⏸  Pause")
+            self._pv_player.setSource(QUrl.fromLocalFile(tmp))
+            self._pv_player.play()
+        except Exception as e:  # noqa: BLE001
+            self._pv_text.setVisible(True)
+            self._pv_text.setPlainText(f"Could not play video: {e}")
+
+    def _stop_video(self) -> None:
+        """Stop playback, hide the video widgets and delete the temp clip.
+        Safe to call whether or not a video is showing (or supported)."""
+        if not getattr(self, "_video_ok", False):
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            self._pv_player.stop()
+            self._pv_player.setSource(QUrl())
+        except Exception:  # noqa: BLE001
+            pass
+        self._pv_video.setVisible(False)
+        self._pv_vrow.setVisible(False)
+        if getattr(self, "_pv_vtemp", None):
+            try:
+                import os as _os
+                _os.unlink(self._pv_vtemp)
+            except OSError:
+                pass
+            self._pv_vtemp = None
+
+    def _on_video_playpause(self) -> None:
+        if not getattr(self, "_video_ok", False):
+            return
+        from PySide6.QtMultimedia import QMediaPlayer as _MP
+        if self._pv_player.playbackState() == _MP.PlaybackState.PlayingState:
+            self._pv_player.pause()
+            self._pv_vplay.setText("▶  Play")
+        else:
+            self._pv_player.play()
+            self._pv_vplay.setText("⏸  Pause")
+
+    def _on_video_pos(self, pos: int) -> None:
+        if getattr(self, "_video_ok", False) and not self._pv_vslider.isSliderDown():
+            self._pv_vslider.setValue(pos)
+
     def _show_struct(self, res: dict) -> None:
         total = res.get("total_words", 0)
         shown = res.get("shown", 0)
@@ -1296,17 +1846,25 @@ class GameDataPage(ToolPageBase):
                     f"Chunks        {', '.join(a.get('chunks', []))}\n")
             playable = has_vgm
         else:  # .bnk SoundBank
+            _ns = a.get('embedded_streams', 0)
             body = ("Wwise SoundBank (.bnk)\n\n"
                     f"Bank version       {a.get('bank_version')}\n"
                     f"Sections           {', '.join(a.get('sections', []))}\n"
-                    f"Embedded streams   {a.get('embedded_streams', 0)}\n")
-            playable = False   # banks hold many subsongs — extract, don't play
+                    f"Embedded streams   {_ns}\n")
+            # A bank that carries embedded audio (DIDX/DATA) is playable —
+            # vgmstream decodes its first embedded sound. Banks with no streams
+            # (event / metadata only) have nothing to play.
+            playable = has_vgm and _ns > 0
         note = ("\nThe game ships all sound through Wwise: .wem are the encoded "
                 "streams (Wwise Vorbis) and .bnk are SoundBanks — Windows can't "
                 "play these directly.\n")
         if has_vgm:
-            note += ("Use ▶ Play to hear it or Export as WAV for a playable "
-                     "copy; Extract raw file saves the original .wem/.bnk.")
+            if a.get("kind") != "wem" and playable:
+                note += ("Use ▶ Play to hear the bank's first embedded sound or "
+                         "Export as WAV; Extract raw file saves the whole .bnk.")
+            else:
+                note += ("Use ▶ Play to hear it or Export as WAV for a playable "
+                         "copy; Extract raw file saves the original .wem/.bnk.")
         else:
             note += ("Playback needs vgmstream — drop vgmstream-cli.exe into the "
                      "app's tools/vgmstream folder. Extract raw file works now.")
@@ -1347,9 +1905,11 @@ class GameDataPage(ToolPageBase):
         self._pv_schema = None
         self._mm_editable_cols = {}
         self._pending_edits = {}
+        self._gear_stats = {}
         for w in (getattr(self, "_mm_status", None),
                   getattr(self, "_mm_make_btn", None),
-                  getattr(self, "_mm_export_btn", None)):
+                  getattr(self, "_mm_export_btn", None),
+                  getattr(self, "_mm_gear_btn", None)):
             if w is not None:
                 w.setVisible(False)
         grid = getattr(self, "_pv_grid", None)
@@ -1556,6 +2116,150 @@ class GameDataPage(ToolPageBase):
             f"Exported {len(self._pending_edits)} edit(s) to "
             f"{os.path.basename(path)}.", error=False)
 
+    # ── gear-stat editor ─────────────────────────────────────────────
+    def _selected_record_key(self) -> "int | None":
+        """Record key of the selected grid row (column 0), or None."""
+        grid = self._pv_grid
+        r = grid.currentRow()
+        if r < 0:
+            return None
+        cell = grid.item(r, 0)
+        try:
+            return int(str(cell.text()).strip()) if cell else None
+        except (ValueError, AttributeError):
+            return None
+
+    def _update_gear_button(self) -> None:
+        """Show 'Edit gear stats…' only for a row that actually has stats."""
+        btn = getattr(self, "_mm_gear_btn", None)
+        if btn is None:
+            return
+        key = self._selected_record_key()
+        btn.setVisible(key is not None and key in self._gear_stats)
+
+    def _get_stat_names(self) -> dict:
+        """Stat id -> name, from the game's own statusinfo table.
+
+        Read from the installed game rather than a hardcoded map, because a
+        hardcoded map is exactly what rots when the game patches. Falls back
+        to the CD 1.13 snapshot when the game isn't reachable.
+        """
+        if self._stat_names is None:
+            from cdumm.engine.stat_names import load_stat_names
+            try:
+                self._stat_names = load_stat_names()
+            except Exception:  # noqa: BLE001 — names are a nicety, not the data
+                logger.exception("could not read stat names from the game")
+                self._stat_names = {}
+        return self._stat_names
+
+    def _on_edit_gear_stats(self) -> None:
+        """Edit the selected item's gear stats, staging each change as a
+        Format 3 edit on that stat's exact nested path."""
+        key = self._selected_record_key()
+        stats = self._gear_stats.get(key) if key is not None else None
+        if not stats:
+            self._flash_maker("Select an item that has gear stats first.",
+                              error=True)
+            return
+        grid = self._pv_grid
+        name_cell = grid.item(grid.currentRow(), 1)
+        entry = name_cell.text() if name_cell else ""
+
+        edits = self._prompt_gear_stats(entry or f"item {key}", stats)
+        if not edits:
+            return
+        from cdumm.engine.format3_builder import FieldEdit
+        target = f"{self._pv_table}.pabgb"
+        for stat, new in edits:
+            # Keyed by path, so each tier is its own edit. The old editor
+            # keyed by stat id and could only ever write one of them.
+            self._pending_edits[(key, stat.path)] = FieldEdit(
+                target=target, entry=entry, key=key, field=stat.path,
+                new=new, old=stat.value)
+        self._refresh_maker_buttons()
+        self._flash_maker(
+            f"Staged {len(edits)} stat edit(s) for “{entry or key}”.",
+            error=False)
+
+    def _prompt_gear_stats(self, title: str, stats: list) -> list:
+        """Modal editor for one item's stats. Returns ``[(GearStat, new)]``
+        for the values the user actually changed.
+
+        Every occurrence gets its own row — base and each enhancement tier —
+        because they are separate values in the file. Editing one does not
+        touch the others, and the dialog says so rather than hiding it.
+        """
+        from PySide6.QtWidgets import (QAbstractItemView, QDialog,
+                                       QDialogButtonBox, QHeaderView, QLabel,
+                                       QTableWidget, QTableWidgetItem,
+                                       QVBoxLayout)
+        from cdumm.engine.stat_names import stat_label
+
+        names = self._get_stat_names()
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit gear stats — {title}")
+        dlg.resize(560, 460)
+        outer = QVBoxLayout(dlg)
+        blurb = QLabel(
+            "Each row is a separate value in the game file. “Base” is the "
+            "item as dropped; each “Enhance +N” is what it becomes at that "
+            "upgrade level.\n"
+            "Changing one row changes only that row — edit every tier if you "
+            "want the change to hold as the item is upgraded.")
+        blurb.setWordWrap(True)
+        outer.addWidget(blurb)
+
+        tbl = QTableWidget(len(stats), 3, dlg)
+        tbl.setHorizontalHeaderLabels(["Stat", "Where", "Value"])
+        tbl.verticalHeader().hide()
+        tbl.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for row, s in enumerate(stats):
+            for col, text in ((0, stat_label(s.stat, names)), (1, s.where)):
+                cell = QTableWidgetItem(text)
+                cell.setFlags(Qt.ItemFlag.ItemIsEnabled)   # read-only
+                tbl.setItem(row, col, cell)
+            val = QTableWidgetItem(str(s.value))
+            val.setData(Qt.ItemDataRole.UserRole, s.value)
+            tbl.setItem(row, 2, val)
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        outer.addWidget(tbl, 1)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        outer.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+
+        out = []
+        for row, s in enumerate(stats):
+            cell = tbl.item(row, 2)
+            text = (cell.text() if cell else "").strip()
+            if not text:
+                continue
+            try:
+                new = int(text)
+            except ValueError:
+                self._flash_maker(
+                    f"“{text}” isn't a whole number "
+                    f"({stat_label(s.stat, names)}, {s.where}) — skipped.",
+                    error=True)
+                continue
+            if not (-(2 ** 63) <= new < 2 ** 63):
+                self._flash_maker(
+                    f"{stat_label(s.stat, names)} ({s.where}) is out of "
+                    f"range — skipped.", error=True)
+                continue
+            if new != s.value:
+                out.append((s, new))
+        return out
+
     def _show_grid(self, cols: list, rows: list) -> None:
         self._pv_text.setVisible(False)
         self._pv_img_scroll.setVisible(False)
@@ -1583,7 +2287,21 @@ class GameDataPage(ToolPageBase):
                 self._pv_grid.setColumnWidth(c, 130)
 
     def _on_view_3d(self) -> None:
-        """Open the current texture on a rotatable sphere/cube (pop-up)."""
+        """Open the current texture on a rotatable sphere/cube (pop-up).
+
+        Qt3DWindow creates a native OpenGL window; doing that *inside* this
+        click handler triggers a COM input-synchronous crash
+        (0x8001010d / RPC_E_CANTCALLOUT_ININPUTSYNCCALL) in the packaged
+        build — a hard native crash the try/except below can't catch. Defer to
+        the next event-loop tick so the click event finishes dispatching first.
+        """
+        if self._pv_qimage is None or self._pv_qimage.isNull():
+            return
+        from PySide6.QtCore import QTimer
+        self._set_status("Opening 3D preview…", "")
+        QTimer.singleShot(0, self._open_3d_deferred)
+
+    def _open_3d_deferred(self) -> None:
         if self._pv_qimage is None or self._pv_qimage.isNull():
             return
         try:
@@ -1594,6 +2312,7 @@ class GameDataPage(ToolPageBase):
             return
         self._pv_3d_dlg = dlg          # keep a ref so it isn't GC'd
         dlg.show()
+        self._set_status("", "")
 
     def _on_save_image(self) -> None:
         """Save the decoded texture as a standard image the OS can open.
@@ -1691,13 +2410,52 @@ class GameDataPage(ToolPageBase):
         return wav
 
     def _on_play_audio(self) -> None:
+        """Decode the .wem off the UI thread (vgmstream is a subprocess and
+        froze the window if run inline), then play + show a live timer."""
         path = self._selected_path()
         if not path:
             return
-        wav = self._audio_wav(path)
-        if not wav:
-            return
+        self._play_token += 1
+        token = self._play_token
         name = self._preview_name or os.path.basename(path)
+        self._stop_playback()                 # halt any current sound + timer
+        self._pv_play_btn.setEnabled(False)
+        self._set_status(f"Decoding {name}…", "")
+        th = QThread(self)
+        w = _AudioDecodeWorker(
+            self._index_path,
+            str(self._game_dir) if self._game_dir else "",
+            path, self._preview_bytes, name, token)
+        w.moveToThread(th)
+        th.started.connect(w.run)
+        w.done.connect(self._on_audio_decoded)
+        w.done.connect(th.quit)
+        w.done.connect(w.deleteLater)
+        th.finished.connect(th.deleteLater)
+        job = (th, w)
+        self._pv_jobs.append(job)
+        th.finished.connect(
+            lambda job=job: job in self._pv_jobs and self._pv_jobs.remove(job))
+        th.start()
+
+    def _on_audio_decoded(self, res: dict) -> None:
+        if res.get("token") != self._play_token:
+            # a newer Play (or a different asset) superseded this — drop the
+            # stale temp WAV so decodes don't pile up in %TEMP%.
+            if res.get("wav"):
+                try:
+                    os.unlink(res["wav"])
+                except OSError:
+                    pass
+            return
+        self._pv_play_btn.setEnabled(True)
+        if res.get("error"):
+            self._set_status(res["error"], "#BF616A")
+            return
+        self._start_playback(
+            res.get("wav"), res.get("name", ""), res.get("dur", 0.0))
+
+    def _start_playback(self, wav: str, name: str, dur: float) -> None:
         try:                                   # winsound is Windows-only
             import winsound
             winsound.PlaySound(None, winsound.SND_PURGE)      # stop any prior
@@ -1705,31 +2463,45 @@ class GameDataPage(ToolPageBase):
         except Exception as ex:  # noqa: BLE001
             self._set_status(f"Playback failed: {ex}", "#BF616A")
             return
-        # Read the decoded WAV's real length so we can flip the status back
-        # to "finished" live when it ends (winsound gives no end callback).
-        dur = 0.0
-        try:
-            import contextlib
-            import wave
-            with contextlib.closing(wave.open(wav, "rb")) as w:
-                if w.getframerate():
-                    dur = w.getnframes() / float(w.getframerate())
-        except Exception:  # noqa: BLE001
-            pass
-        self._play_token += 1
-        token = self._play_token
-        tag = f"  ({dur:.1f}s)" if dur else ""
-        self._set_status(f"▶ Playing: {name}{tag}", "#2E7D32")
-        if dur > 0:
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(
-                int(dur * 1000) + 150,
-                lambda t=token, n=name: self._on_play_finished(t, n))
+        import time
+        from PySide6.QtCore import QTimer
+        self._play_name = name
+        self._play_dur = float(dur or 0.0)
+        self._play_started = time.monotonic()
+        if getattr(self, "_play_timer", None) is None:
+            self._play_timer = QTimer(self)
+            self._play_timer.setInterval(200)   # live countdown, 5×/second
+            self._play_timer.timeout.connect(self._tick_play)
+        self._play_timer.start()
+        self._tick_play()                       # paint the timer immediately
         # temp WAV is left for the async player; the OS reclaims %TEMP%.
 
-    def _on_play_finished(self, token: int, name: str) -> None:
-        if token == self._play_token:      # not superseded by a newer Play
+    def _tick_play(self) -> None:
+        import time
+        dur = getattr(self, "_play_dur", 0.0)
+        name = getattr(self, "_play_name", "")
+        elapsed = time.monotonic() - getattr(
+            self, "_play_started", time.monotonic())
+        if dur and elapsed >= dur:
+            self._stop_playback()
             self._set_status(f"Finished: {name}", "")
+            return
+        if dur:
+            self._set_status(
+                f"▶ {name}   {elapsed:0.1f} / {dur:0.1f}s", "#2E7D32")
+        else:
+            self._set_status(f"▶ {name}   {elapsed:0.1f}s", "#2E7D32")
+
+    def _stop_playback(self) -> None:
+        """Stop the async sound + the live timer (new Play, or playback end)."""
+        t = getattr(self, "_play_timer", None)
+        if t is not None:
+            t.stop()
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_export_wav(self) -> None:
         path = self._selected_path()

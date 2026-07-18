@@ -7,10 +7,9 @@ drag-drop import overlay, and search/filter controls.
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QObject, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -240,6 +239,43 @@ def _preset_signature(data: dict) -> str | None:
         return None
 
 
+class _ConvertFormat3Worker(QObject):
+    """Converts a byte-offset mod into a Format 3 mod, off the UI thread.
+
+    Parsing the item table is ~6,500 records; on the main thread the window
+    would sit frozen for the better part of a minute, which users reasonably
+    read as a crash.
+    """
+
+    done = Signal(str, str)      # out_path, human summary
+    failed = Signal(str)
+
+    def __init__(self, json_source: str, game_dir: str, out_path: str,
+                 mod_name: str) -> None:
+        super().__init__()
+        self._src = json_source
+        self._game_dir = game_dir
+        self._out = out_path
+        self._name = mod_name
+
+    def run(self) -> None:
+        try:
+            from cdumm.engine.v2_to_format3 import (
+                ConversionRefused, convert_mod_file,
+            )
+            try:
+                rep = convert_mod_file(
+                    Path(self._src), Path(self._game_dir), Path(self._out),
+                    mod_name=self._name)
+            except ConversionRefused as e:
+                self.failed.emit(str(e))
+                return
+            self.done.emit(self._out, rep.summary())
+        except Exception as e:                      # noqa: BLE001
+            logger.exception("Format 3 conversion failed")
+            self.failed.emit(str(e))
+
+
 # ======================================================================
 # ModsPage
 # ======================================================================
@@ -270,6 +306,10 @@ class ModsPage(QWidget):
         self._conflict_detector = None
         self._db = None
         self._game_dir: Path | None = None
+
+        # Live Format 3 conversion jobs (thread, worker). Held so Python
+        # doesn't garbage-collect a running QThread out from under Qt.
+        self._convert_jobs: list = []
 
         # Card tracking
         self._mod_cards: list[ModCard] = []
@@ -343,13 +383,9 @@ class ModsPage(QWidget):
         _nbf.setWeight(_QFont.Weight.Bold)
         self._new_folder_btn.setFont(_nbf)
         self._new_folder_btn.clicked.connect(self._on_new_folder)
-        setCustomStyleSheet(self._new_folder_btn,
-            "PushButton { background: #F0F4FF; color: #2878D0; border: 1px solid #B8D4F0; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #E0ECFF; }"
-            "PushButton:pressed { background: #D0E0F8; }",
-            "PushButton { background: #1A2840; color: #5CB8F0; border: 1px solid #2A4060; border-radius: 16px; padding: 0 14px; padding-bottom: 6px; }"
-            "PushButton:hover { background: #223450; }"
-            "PushButton:pressed { background: #2A3C58; }")
+        from cdumm.gui.accent import style_chip_button
+        style_chip_button(self._new_folder_btn, radius=16,
+                          padding_css="padding: 0 14px; padding-bottom: 6px;")
         select_row.addWidget(self._new_folder_btn)
 
         # Dedicated conflict-order view (Miki990 UX request). Opens a
@@ -425,9 +461,16 @@ class ModsPage(QWidget):
         hero_icon.setFont(hif)
         hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         from qfluentwidgets import setCustomStyleSheet
-        setCustomStyleSheet(hero_icon,
-            "SubtitleLabel { color: #2878D0; }",
-            "SubtitleLabel { color: #5CB8F0; }")
+
+        def _style_hero():
+            from cdumm.gui.accent import accent_hex
+            c = accent_hex()
+            setCustomStyleSheet(hero_icon,
+                f"SubtitleLabel {{ color: {c}; }}",
+                f"SubtitleLabel {{ color: {c}; }}")
+        _style_hero()
+        from cdumm.gui.accent import bus as _hero_bus
+        _hero_bus().changed.connect(_style_hero)
         hero_layout.addWidget(hero_icon)
 
         hero_title = SubtitleLabel(tr("mods.drop_subtitle"), self._empty_hero)
@@ -1440,7 +1483,7 @@ class ModsPage(QWidget):
             if sp and sp.exists() and sp.is_dir():
                 try:
                     from cdumm.gui.preset_picker import (
-                        find_json_presets, find_folder_variants)
+                        find_json_presets)
                     presets = find_json_presets(sp)
                     leaves = _flatten_folder_variants(sp)
                     # Folder-variant branch — only when there are no JSON
@@ -2318,6 +2361,23 @@ class ModsPage(QWidget):
             menu.addAction(Action(FluentIcon.SYNC, tr("mod_context.reimport_source"),
                                   triggered=lambda: self._ctx_batch_reimport([mod_id])))
 
+            # Convert a byte-offset (v2) mod into a Format 3 field-name mod
+            # (GitHub #191, falobos76). Only offered when the mod actually
+            # carries convertible offsets -- an action that greys out or
+            # errors on half the mods is worse than no action.
+            json_src_conv = self._mod_manager.get_json_source(mod_id)
+            if json_src_conv and self._game_dir:
+                try:
+                    from cdumm.engine.v2_to_format3 import is_convertible
+                    offer = is_convertible(Path(json_src_conv))
+                except Exception:
+                    offer = False
+                if offer:
+                    menu.addAction(Action(
+                        FluentIcon.SYNC, tr("mod_context.convert_format3"),
+                        triggered=lambda: self._ctx_convert_format3(
+                            mod_id, mod, json_src_conv)))
+
             menu.addSeparator()
 
             # Uninstall
@@ -2325,6 +2385,84 @@ class ModsPage(QWidget):
                                   triggered=lambda: self._ctx_uninstall(mod_id)))
 
         menu.exec(global_pos)
+
+    def _ctx_convert_format3(
+        self, mod_id: int, mod: dict, json_source: str,
+    ) -> None:
+        """Write a Format 3 copy of a byte-offset mod (GitHub #191).
+
+        A byte-offset mod names a position in a file; a Format 3 mod names
+        an item and a field. The second survives every Crimson Desert patch,
+        because CDUMM looks the item up in the player's own files on each
+        Apply. falobos76 asked for this because two of the mods he relies on
+        are abandoned on Nexus and go stale on every update.
+
+        The conversion parses the whole item table (6,508 records), so it
+        runs on a worker -- doing it inline would freeze the window for the
+        better part of a minute.
+        """
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QFileDialog
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        if not self._game_dir:
+            return
+
+        default = str(Path.home() / f"{mod.get('name', 'mod')}.field.json")
+        out_path, _flt = QFileDialog.getSaveFileName(
+            self.window(), tr("mod_context.convert_format3_save"),
+            default, "Format 3 mod (*.field.json);;All files (*)")
+        if not out_path:
+            return
+
+        InfoBar.info(
+            title=tr("mod_context.convert_format3_running_title"),
+            content=tr("mod_context.convert_format3_running_body"),
+            duration=3000, position=InfoBarPosition.TOP,
+            parent=self.window())
+
+        thread = QThread(self)
+        worker = _ConvertFormat3Worker(
+            json_source, str(self._game_dir), out_path, mod.get("name", ""))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_convert_format3_done)
+        worker.failed.connect(self._on_convert_format3_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # Keep a reference or Python garbage-collects the thread mid-run.
+        self._convert_jobs.append((thread, worker))
+        thread.finished.connect(
+            lambda: self._convert_jobs.remove((thread, worker))
+            if (thread, worker) in self._convert_jobs else None)
+        thread.start()
+
+    def _on_convert_format3_done(self, out_path: str, summary: str) -> None:
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        InfoBar.success(
+            title=tr("mod_context.convert_format3_done_title"),
+            content=tr("mod_context.convert_format3_done_body",
+                       path=out_path, summary=summary),
+            duration=10000, position=InfoBarPosition.TOP,
+            parent=self.window())
+
+    def _on_convert_format3_failed(self, message: str) -> None:
+        # A conversion failure carries a multi-line reason the user MUST read:
+        # which change couldn't be named to an item+field, or that the mod is
+        # stale for this game version. A transient InfoBar toast rendered that
+        # blank on falobos76's setup (#191: "white and transparent") -- a
+        # paragraph of must-read text doesn't belong in a toast, and a modal
+        # dialog paints reliably where the translucent InfoBar didn't. Guard
+        # against an empty message so the dialog is never itself blank.
+        from qfluentwidgets import MessageBox
+        title = tr("mod_context.convert_format3_failed_title")
+        text = (message or "").strip() or title
+        box = MessageBox(title, text, self.window())
+        box.cancelButton.hide()
+        box.exec()
 
     def _ctx_open_nexus(self, nexus_id: int) -> None:
         import webbrowser

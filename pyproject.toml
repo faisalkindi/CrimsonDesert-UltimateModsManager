@@ -16,6 +16,10 @@ dependencies = [
     "py7zr>=1.0",
     "xxhash>=3.4",
     "websocket-client>=1.7",
+    # Pillow decodes DDS textures (DXT/BC1-7) for the Game Data preview. Must
+    # be a real dependency AND bundled by the .spec, or shipped builds show
+    # every texture as "no visual decoder" hex.
+    "Pillow>=10.3",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +41,14 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+# tools/re/* are reverse-engineering PROBES, not shipped code: dense
+# one-liners that were used to derive the CD 1.13 record tail grammar and are
+# kept as the reference for how it was derived (see tools/re/README.md).
+# Reformatting them to lint rules would obscure the thing they exist to show.
+# They ship in no build and import nothing from the app.
+"tools/re/*.py" = ["E701", "E702", "E741"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

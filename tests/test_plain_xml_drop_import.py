@@ -12,10 +12,11 @@ Source: RockNBeard's Nexus comment 2026-04-30 about "Standard
 Gamepad Layout" mod 1489 (file 1777549676).
 """
 from __future__ import annotations
-from pathlib import Path
 import zipfile
 
 import pytest
+
+from tests.fixture_loaders import real_mod_fixture
 
 
 def _fake_pamt_entry(target_name: str):
@@ -139,10 +140,7 @@ def test_real_standard_gamepad_layout_zip(tmp_path, monkeypatch):
     - Layout.txt readme as a sibling
     Skips when the fixture ZIP isn't downloaded into Downloads.
     """
-    real_zip = Path(
-        r"C:\Users\faisa\Downloads\Compressed"
-        r"\Standard Gamepad Layout-1489-2-0-2-1777549676.zip"
-    )
+    real_zip = real_mod_fixture("Standard Gamepad Layout-1489-2-0-2-1777549676.zip")
     if not real_zip.exists():
         pytest.skip(f"Real fixture ZIP not at {real_zip}")
 

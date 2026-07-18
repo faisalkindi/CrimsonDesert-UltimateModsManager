@@ -10,13 +10,14 @@ dropsetinfo.pabgb. CDUMM's primitive-only writer skips them with a
 """
 from __future__ import annotations
 import struct
-from pathlib import Path
 
 import pytest
 
+from tests.fixture_loaders import vanilla113_file
 
-_VANILLA_PABGB = Path(r"C:\Users\faisa\AppData\Local\Temp\dropsetinfo.pabgb")
-_VANILLA_PABGH = Path(r"C:\Users\faisa\AppData\Local\Temp\dropsetinfo.pabgh")
+
+_VANILLA_PABGB = vanilla113_file("dropsetinfo.pabgb")
+_VANILLA_PABGH = vanilla113_file("dropsetinfo.pabgh")
 
 
 def _have_vanilla() -> bool:
