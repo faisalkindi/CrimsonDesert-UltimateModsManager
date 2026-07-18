@@ -6594,6 +6594,13 @@ class CdummWindow(FluentWindow):
     def _quit_from_tray(self) -> None:
         if self._tray_icon is not None:
             self._tray_icon.hide()
+        # On macOS, make the primary window visible before closing it so
+        # quitOnLastWindowClosed can end the event loop naturally. Calling
+        # QApplication.quit() from closeEvent while NSApplication is already
+        # handling a native Quit event recursively terminates Qt/Python and
+        # can crash in Shiboken::Object::recursive_invalidate.
+        if IS_MACOS and not self.isVisible():
+            self.show()
         self.close()
 
     def _hide_for_game_launch(self) -> None:
@@ -8265,8 +8272,14 @@ class CdummWindow(FluentWindow):
         # lingers in the background holding .gui_lock and the next
         # launch refuses with "another_running". Force the event
         # loop to exit so atexit releases the lock file handle.
+        #
+        # Do not do this on macOS. A native AppKit Quit event reaches
+        # closeEvent while NSApplication terminate: is already on the stack;
+        # synchronously calling QApplication.quit() here re-enters terminate:
+        # and can segfault while Shiboken tears down QObject parent links.
+        if IS_MACOS:
+            return
         try:
-            from PySide6.QtWidgets import QApplication
             _qapp = QApplication.instance()
             if _qapp is not None:
                 _qapp.quit()

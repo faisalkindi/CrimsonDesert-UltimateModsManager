@@ -1,6 +1,7 @@
 """Regression tests for macOS hide-on-launch window recovery."""
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
@@ -85,3 +86,27 @@ def test_single_click_on_menu_bar_icon_restores_window():
         window, QSystemTrayIcon.ActivationReason.Trigger)
 
     assert calls == ["restore"]
+
+
+def test_hidden_macos_tray_quit_shows_window_before_close(monkeypatch):
+    calls = []
+    tray = SimpleNamespace(hide=lambda: calls.append("hide-tray"))
+    window = SimpleNamespace(
+        _tray_icon=tray,
+        isVisible=lambda: False,
+        show=lambda: calls.append("show-window"),
+        close=lambda: calls.append("close-window"),
+    )
+    monkeypatch.setattr(fluent_window, "IS_MACOS", True)
+
+    CdummWindow._quit_from_tray(window)
+
+    assert calls == ["hide-tray", "show-window", "close-window"]
+
+
+def test_macos_close_event_does_not_reenter_qapplication_quit():
+    source = inspect.getsource(CdummWindow.closeEvent)
+    guard = source.index("if IS_MACOS:")
+    forced_quit = source.index("_qapp.quit()")
+
+    assert guard < forced_quit
