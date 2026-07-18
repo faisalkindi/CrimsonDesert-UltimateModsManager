@@ -14,8 +14,8 @@ from cdumm.platform import (
 )
 
 from PySide6.QtCore import Property, QEasingCurve, QObject, QPropertyAnimation, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtGui import QAction, QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     FluentWindow,
@@ -939,13 +939,12 @@ class CdummWindow(FluentWindow):
         self.titleBar.titleLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.titleBar.titleLabel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # Still set taskbar icon
-        if getattr(sys, "frozen", False):
-            icon_path = Path(sys._MEIPASS) / "cdumm.ico"
-        else:
-            icon_path = Path(__file__).resolve().parents[3] / "cdumm.ico"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        # Reuse the application icon for this window and the menu-bar status
+        # item. On macOS the frozen bundle ships a PNG/.icns, not cdumm.ico.
+        from cdumm.gui.app_icon import application_icon
+        icon = application_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
 
         # ── Window-scoped drag-drop ──────────────────────────────────
         self.setAcceptDrops(True)
@@ -1097,6 +1096,13 @@ class CdummWindow(FluentWindow):
         # game session without relaunching the exe.
         self._tray_icon: QSystemTrayIcon | None = None
         self._setup_tray_icon()
+        # macOS does not automatically re-show a QWidget hidden with hide()
+        # when the user clicks the Dock icon. Restore it whenever the app is
+        # activated with no visible main window (or a minimized one).
+        app = QApplication.instance()
+        if IS_MACOS and app is not None:
+            app.applicationStateChanged.connect(
+                self._on_application_state_changed)
 
         # ── Deferred startup (after window is visible) ────────────────
         QTimer.singleShot(500, self._deferred_startup)
@@ -6533,8 +6539,17 @@ class CdummWindow(FluentWindow):
             logger.info("System tray not available, hide-on-launch will "
                         "fall back to minimize")
             return
+        icon = self.windowIcon()
+        if icon.isNull():
+            app = QApplication.instance()
+            if app is not None:
+                icon = app.windowIcon()
+        if icon.isNull():
+            logger.warning("System tray icon is null, hide-on-launch will "
+                           "fall back to minimize")
+            return
         tray = QSystemTrayIcon(self)
-        tray.setIcon(self.windowIcon())
+        tray.setIcon(icon)
         tray.setToolTip(tr("app.name_short") + " v" + __version__)
         menu = QMenu(self)
         show_action = QAction(tr("tray.show"), self)
@@ -6549,7 +6564,17 @@ class CdummWindow(FluentWindow):
         self._tray_icon = tray
 
     def _on_tray_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._restore_from_tray()
+
+    def _on_application_state_changed(self, state) -> None:
+        """Restore a hidden/minimized window when macOS activates CDUMM."""
+        if not IS_MACOS or state != Qt.ApplicationState.ApplicationActive:
+            return
+        if not self.isVisible() or self.isMinimized():
             self._restore_from_tray()
 
     def _restore_from_tray(self) -> None:
@@ -6587,6 +6612,11 @@ class CdummWindow(FluentWindow):
             self.showMinimized()
             return
         self._tray_icon.show()
+        if not self._tray_icon.isVisible():
+            logger.warning("System tray icon failed to become visible; "
+                           "minimizing instead of hiding")
+            self.showMinimized()
+            return
         try:
             self._tray_icon.showMessage(
                 tr("app.name_short"),

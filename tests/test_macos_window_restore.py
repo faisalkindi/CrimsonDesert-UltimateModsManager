@@ -1,0 +1,75 @@
+"""Regression tests for macOS hide-on-launch window recovery."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QSystemTrayIcon
+
+import cdumm.gui.app_icon as app_icon
+import cdumm.gui.fluent_window as fluent_window
+from cdumm.gui.fluent_window import CdummWindow
+
+
+def test_frozen_macos_icon_uses_bundled_png(monkeypatch, tmp_path):
+    logo = tmp_path / "assets" / "cdumm-logo.png"
+    logo.parent.mkdir()
+    logo.write_bytes(b"png fixture")
+
+    monkeypatch.setattr(app_icon, "IS_MACOS", True)
+    monkeypatch.setattr(app_icon, "IS_LINUX", False)
+    monkeypatch.setattr(app_icon.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app_icon.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    assert app_icon.application_icon_path() == logo
+
+
+def _fake_window(*, visible: bool, minimized: bool):
+    calls = []
+    window = SimpleNamespace(
+        isVisible=lambda: visible,
+        isMinimized=lambda: minimized,
+        _restore_from_tray=lambda: calls.append("restore"),
+    )
+    return window, calls
+
+
+def test_macos_dock_activation_restores_hidden_window(monkeypatch):
+    monkeypatch.setattr(fluent_window, "IS_MACOS", True)
+    window, calls = _fake_window(visible=False, minimized=False)
+
+    CdummWindow._on_application_state_changed(
+        window, Qt.ApplicationState.ApplicationActive)
+
+    assert calls == ["restore"]
+
+
+def test_macos_inactive_event_does_not_restore(monkeypatch):
+    monkeypatch.setattr(fluent_window, "IS_MACOS", True)
+    window, calls = _fake_window(visible=False, minimized=False)
+
+    CdummWindow._on_application_state_changed(
+        window, Qt.ApplicationState.ApplicationInactive)
+
+    assert calls == []
+
+
+def test_visible_window_is_not_needlessly_restored(monkeypatch):
+    monkeypatch.setattr(fluent_window, "IS_MACOS", True)
+    window, calls = _fake_window(visible=True, minimized=False)
+
+    CdummWindow._on_application_state_changed(
+        window, Qt.ApplicationState.ApplicationActive)
+
+    assert calls == []
+
+
+def test_single_click_on_menu_bar_icon_restores_window():
+    calls = []
+    window = SimpleNamespace(
+        _restore_from_tray=lambda: calls.append("restore"))
+
+    CdummWindow._on_tray_activated(
+        window, QSystemTrayIcon.ActivationReason.Trigger)
+
+    assert calls == ["restore"]
