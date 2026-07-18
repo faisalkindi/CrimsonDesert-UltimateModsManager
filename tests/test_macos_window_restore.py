@@ -24,6 +24,18 @@ def test_frozen_macos_icon_uses_bundled_png(monkeypatch, tmp_path):
     assert app_icon.application_icon_path() == logo
 
 
+def test_macos_does_not_override_native_dock_icon(monkeypatch):
+    calls = []
+    target = SimpleNamespace(
+        setWindowIcon=lambda icon: calls.append(icon))
+    monkeypatch.setattr(app_icon, "IS_MACOS", True)
+
+    applied = app_icon.apply_application_icon(target)
+
+    assert applied is False
+    assert calls == []
+
+
 def _fake_window(*, visible: bool, minimized: bool):
     calls = []
     window = SimpleNamespace(

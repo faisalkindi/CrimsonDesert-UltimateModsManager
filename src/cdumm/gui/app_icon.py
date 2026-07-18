@@ -45,3 +45,21 @@ def application_icon() -> QIcon:
     """Load the platform application icon, or return a null icon."""
     path = application_icon_path()
     return QIcon(str(path)) if path is not None else QIcon()
+
+
+def apply_application_icon(target) -> bool:
+    """Set a Qt application/window icon without overriding the macOS Dock.
+
+    A bundled macOS app gets its Dock icon from ``CFBundleIconFile``. Calling
+    ``setWindowIcon`` with the raw PNG replaces that native icon at runtime
+    and makes it render noticeably larger than neighboring Dock icons. The
+    PNG remains available through :func:`application_icon` for the separate
+    menu-bar status item.
+    """
+    if IS_MACOS:
+        return False
+    icon = application_icon()
+    if icon.isNull():
+        return False
+    target.setWindowIcon(icon)
+    return True

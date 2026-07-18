@@ -423,14 +423,11 @@ def main() -> int:
     if IS_LINUX:
         QGuiApplication.setDesktopFileName("cdumm")
 
-    # Set one application-level icon for the Dock/taskbar, windows, and
-    # QSystemTrayIcon. The macOS bundle does not contain cdumm.ico; resolving
-    # that Windows-only filename left the menu-bar status item with a null
-    # icon, so CDUMM could hide itself with no visible way to restore it.
-    from cdumm.gui.app_icon import application_icon
-    _app_icon = application_icon()
-    if not _app_icon.isNull():
-        app.setWindowIcon(_app_icon)
+    # Windows/Linux need an explicit Qt icon. On macOS, leave the Dock icon
+    # under CFBundleIconFile control; setting the raw PNG here overrides the
+    # native .icns and makes the Dock tile render larger than neighboring apps.
+    from cdumm.gui.app_icon import apply_application_icon
+    apply_application_icon(app)
 
     # Load Oxanium font
     from PySide6.QtGui import QFontDatabase

@@ -939,12 +939,10 @@ class CdummWindow(FluentWindow):
         self.titleBar.titleLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.titleBar.titleLabel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # Reuse the application icon for this window and the menu-bar status
-        # item. On macOS the frozen bundle ships a PNG/.icns, not cdumm.ico.
-        from cdumm.gui.app_icon import application_icon
-        icon = application_icon()
-        if not icon.isNull():
-            self.setWindowIcon(icon)
+        # Keep the macOS Dock icon under CFBundleIconFile control. The status
+        # item gets its own explicit PNG later in _setup_tray_icon.
+        from cdumm.gui.app_icon import apply_application_icon
+        apply_application_icon(self)
 
         # ── Window-scoped drag-drop ──────────────────────────────────
         self.setAcceptDrops(True)
@@ -6539,11 +6537,17 @@ class CdummWindow(FluentWindow):
             logger.info("System tray not available, hide-on-launch will "
                         "fall back to minimize")
             return
-        icon = self.windowIcon()
-        if icon.isNull():
-            app = QApplication.instance()
-            if app is not None:
-                icon = app.windowIcon()
+        if IS_MACOS:
+            # Do not reuse/setWindowIcon on macOS: that replaces the native
+            # Dock .icns with this raw PNG and changes its apparent size.
+            from cdumm.gui.app_icon import application_icon
+            icon = application_icon()
+        else:
+            icon = self.windowIcon()
+            if icon.isNull():
+                app = QApplication.instance()
+                if app is not None:
+                    icon = app.windowIcon()
         if icon.isNull():
             logger.warning("System tray icon is null, hide-on-launch will "
                            "fall back to minimize")
