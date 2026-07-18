@@ -104,7 +104,7 @@ auto-detect locate it under `~/Games`, `~/Applications`,
 | Multi-variant pickers, configurable mods | ✓ |
 | Mod conflict detection + load order     | ✓ |
 | Game Update Recovery banner             | ✓ |
-| Find Culprit (auto-bisect crash search) | Windows only — needs Pearl Abyss' `crashpad_handler.exe` infrastructure |
+| Find Culprit (auto-bisect crash search) | ✓ — bisection classifies each round from whether the game process appears and survives (via `psutil`), not from Windows crash dumps. Detects the Proton/Wine `CrimsonDesert.exe` and the native macOS Steam `CrimsonDesert_Steam` process (#299). |
 | ASI plugins                             | Not possible — ASI is a Win32-only proxy DLL format. The page is hidden on macOS. |
 | `nxm://` Mod Manager Download buttons   | Windows only for now — macOS would need a packaged `.app` to register a URL scheme handler |
 | RAR archive import                      | Works out-of-box on most macOS systems via the built-in `/usr/bin/bsdtar`. RAR5 archives with v6 compression need `unar` (`brew install unar`) — the open-source `sevenzip` formula doesn't ship RARLAB's codec, so it can't decode v6 RAR5 files. CDUMM tries 7z, then unar, then bsdtar in sequence. |

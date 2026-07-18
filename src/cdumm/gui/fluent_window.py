@@ -6145,11 +6145,13 @@ class CdummWindow(FluentWindow):
 
         Cross-platform: scans the live process list via psutil (already
         a CDUMM dependency). On Windows the binary is
-        ``CrimsonDesert.exe``; on the native macOS build the executable
-        inside the .app bundle is ``CrimsonDesert`` (lives at
-        ``Crimson Desert.app/Contents/MacOS/CrimsonDesert``). Match
-        either name regardless of host platform, psutil reports the
-        leaf basename, no extension matching needed.
+        ``CrimsonDesert.exe``; on the native macOS Steam build the
+        executable inside the .app bundle is ``CrimsonDesert_Steam``
+        (lives at ``Crimson Desert/CrimsonDesert_Steam.app/Contents/
+        MacOS/CrimsonDesert_Steam``). Match any known name regardless of
+        host platform — psutil reports the leaf basename, so no extension
+        matching is needed. Sharing the set with game_monitor keeps the
+        Apply-guard and Find Culprit in agreement (lwjiyuan, #299).
 
         Falls open: any error during the scan returns True so the user
         can still apply mods. The downside (mod apply during game run)
@@ -6160,7 +6162,8 @@ class CdummWindow(FluentWindow):
         except Exception:
             return True
         try:
-            target_names = {"crimsondesert.exe", "crimsondesert"}
+            from cdumm.engine.game_monitor import NON_WINDOWS_GAME_EXE_NAMES
+            target_names = NON_WINDOWS_GAME_EXE_NAMES
             for proc in psutil.process_iter(attrs=("name",)):
                 try:
                     name = (proc.info.get("name") or "").lower()
