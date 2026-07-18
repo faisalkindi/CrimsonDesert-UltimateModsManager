@@ -28,7 +28,10 @@ import pytest
 from tests.fixture_loaders import load_vanilla113, load_vanilla110
 
 from cdumm.engine import iteminfo_native_parser as P
-from cdumm.engine.iteminfo_writer import normalize_prefab_data_list
+from cdumm.engine.iteminfo_writer import (
+    normalize_prefab_data_list, SUPPORTED_FIELDS)
+from cdumm.engine.format3_handler import (
+    Format3Intent, LIST_WRITERS, validate_intents)
 from cdumm.semantic.parser import parse_pabgh_index
 
 
@@ -167,6 +170,50 @@ def test_edited_record_reparses_with_zero_slack(v113):
     w2 = P._Writer()
     P._write_item(w2, it2, fields=fields)
     assert bytes(w2.buf) == out, "edited record is not byte-stable"
+
+
+# ── the validation gate (Equip Everything / AXIOM QoL) ──────────────────
+
+def test_prefab_data_list_is_registered_for_validation():
+    """The writer has decoded and written prefab_data_list since #285, but
+    the field was never added to LIST_WRITERS, so validate_intents refused
+    every whole-list write with "this table doesn't have a list writer yet"
+    and Equip Everything (Nexus 2571, 13k+ dls) / AXIOM QoL (2508, 22k)
+    applied 0 of their ~2,548 intents. Pin BOTH sides so an accept always
+    implies a real write: registered for validation AND writable. (The same
+    accept/write drift hazard the #150 characterinfo comment warned about.)"""
+    assert ("iteminfo", "prefab_data_list") in LIST_WRITERS
+    assert "prefab_data_list" in SUPPORTED_FIELDS
+
+
+def test_validator_accepts_a_real_prefab_data_list_intent(v113):
+    """Build a genuine Equip-Everything-style intent from the 1.13 fixture
+    (set prefab_data_list with tribe_gender_list cleared) and prove
+    validate_intents now classifies it supported, not skipped. Before the
+    LIST_WRITERS registration this returned 0 supported / 1 skipped with the
+    "variable-length list-of-dicts ... doesn't have a list writer yet"
+    reason -- reported "ready" to the user, then wrote nothing."""
+    body, offs, starts, fields = v113
+    key = 8509
+    s = offs[key]
+    i = starts.index(s)
+    e = starts[i + 1] if i + 1 < len(starts) else len(body)
+    it = P._read_item(P._Reader(body, s, rec_end=e), fields=fields)
+
+    new = [{"prefab_names": el["prefab_names"],
+            "equip_slot_list": el["equip_slot_list"],
+            "tribe_gender_list": [],               # the mod's edit
+            "is_craft_material": 0}
+           for el in it["prefab_data_list"]]
+    intent = Format3Intent(entry=it.get("string_key") or "", key=key,
+                           field="prefab_data_list", op="set", new=new)
+
+    result = validate_intents("iteminfo.pabgb", [intent])
+    assert len(result.supported) == 1 and len(result.skipped) == 0, (
+        "prefab_data_list set must validate as supported now that the "
+        "native writer is registered; got "
+        f"{len(result.supported)} supported / {len(result.skipped)} skipped"
+        + (f" -- {result.skipped[0][1]}" if result.skipped else ""))
 
 
 # ── no collateral damage ────────────────────────────────────────────────

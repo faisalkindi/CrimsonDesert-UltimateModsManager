@@ -55,6 +55,74 @@ def _open_zip_utf8(zip_path) -> "zipfile.ZipFile":
     except UnicodeDecodeError:
         return zipfile.ZipFile(zip_path)
 
+
+def _extractall_collapsing_wrapper(
+        zf: "zipfile.ZipFile", dest, archive_stem: "str | None" = None) -> None:
+    """Extract a zip to ``dest``, collapsing a single redundant top-level
+    wrapper directory so long member paths don't blow past Windows'
+    260-char MAX_PATH.
+
+    DMM's Mod Builder exports each mod as ``ModName/ModName.json`` inside
+    ``ModName.zip`` — the json nested in a folder of the same (~100-char)
+    name. Under the extraction-staging path that doubled name pushes the
+    full path past 260 characters, so ``extractall`` fails with
+    ``[Errno 2] No such file or directory`` while importing the *bare*
+    json works fine (falobos76, GitHub #191). Collapsing the wrapper keeps
+    every extracted path short enough for the rest of the import pipeline,
+    which walks and reads these files with ordinary (non-extended) paths.
+
+    The wrapper is stripped ONLY when it is the DMM self-named shape: a
+    single top-level directory whose name equals the archive's own stem
+    (``ModName.zip`` → ``ModName/``). That is deliberately narrow — a
+    generic single top-level folder like ``ui/`` inside ``DarkUI.zip`` is
+    meaningful (its members target ``ui/menu.css`` etc.) and must survive,
+    so it is NOT collapsed. Without an ``archive_stem`` to match against,
+    nothing is collapsed. Zips that don't match extract exactly as before.
+    """
+    tops: set[str] = set()
+    has_subpaths = False
+    for name in zf.namelist():
+        p = name.replace("\\", "/").lstrip("/")
+        if not p:
+            continue
+        parts = p.split("/", 1)
+        tops.add(parts[0])
+        if len(parts) > 1 and parts[1]:
+            has_subpaths = True
+
+    strip = None
+    if len(tops) == 1 and has_subpaths and archive_stem:
+        top = next(iter(tops))
+        is_paz_dir = top.isdigit() and len(top) == 4
+        if not is_paz_dir and top.lower() == archive_stem.strip().lower():
+            strip = top + "/"
+
+    if strip is None:
+        zf.extractall(dest)
+        return
+
+    logger.info(
+        "Import: collapsing redundant top-level folder %r to keep "
+        "extraction paths under the Windows 260-char limit (#191).", strip)
+    dest_abs = os.path.abspath(dest)
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        rel = info.filename.replace("\\", "/").lstrip("/")
+        if rel.startswith(strip):
+            rel = rel[len(strip):]
+        if not rel:
+            continue
+        out = os.path.normpath(os.path.join(dest_abs, *rel.split("/")))
+        # Path-traversal guard: never write outside dest.
+        if out != dest_abs and not out.startswith(dest_abs + os.sep):
+            logger.warning("Skipping unsafe zip member path: %r", info.filename)
+            continue
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with zf.open(info) as src, open(out, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 import time
 
 # Thread-local progress callback for import operations.
@@ -2937,6 +3005,16 @@ def _import_from_extracted(
         # through to the generic "no recognized format" error.
         f3_pack = _scan_format3_variant_pack(tmp_path)
         if f3_pack:
+            # Import as ONE switchable mod (first enabled, rest on the cog)
+            # instead of dead-ending — same outcome the GUI picker gives,
+            # on every path incl. 7z/rar and re-import (#191). mod_name is
+            # already the archive-derived display name; wrap it as a source
+            # so the multi-variant mod is named for the archive.
+            mv = _import_format3_variant_pack_as_multi(
+                f3_pack, Path(mod_name), game_dir, db, deltas_dir,
+                existing_mod_id=existing_mod_id)
+            if mv is not None:
+                return mv
             ids = ", ".join(vid for _, vid in f3_pack)
             result.error = (
                 f"This archive contains {len(f3_pack)} variants of "
@@ -3111,7 +3189,7 @@ def import_from_zip(
         tmp_path = Path(tmp)
         try:
             with _open_zip_utf8(zip_path) as zf:
-                zf.extractall(tmp_path)
+                _extractall_collapsing_wrapper(zf, tmp_path, zip_path.stem)
         except zipfile.BadZipFile as e:
             result.error = f"Invalid zip file: {e}"
             return result
@@ -3420,6 +3498,15 @@ def import_from_zip(
             # "import one at a time" guidance.
             f3_pack = _scan_format3_variant_pack(tmp_path)
             if f3_pack:
+                # Import as ONE switchable mod (first variant enabled, the
+                # rest on the cog) instead of dead-ending — same outcome the
+                # GUI picker gives, but on every path (#191). Falls back to
+                # the old guidance only if the multi-variant import can't run.
+                mv = _import_format3_variant_pack_as_multi(
+                    f3_pack, zip_path, game_dir, db, deltas_dir,
+                    existing_mod_id=existing_mod_id)
+                if mv is not None:
+                    return _with_asi(mv)
                 ids = ", ".join(vid for _, vid in f3_pack)
                 result.error = (
                     f"This zip contains {len(f3_pack)} variants of "
@@ -4471,6 +4558,63 @@ def _import_format3_bundle(
         note += f" {len(failed)} could not be imported: {shown}."
     primary.info = f"{primary.info}\n{note}" if primary.info else note
     return primary
+
+
+def _import_format3_variant_pack_as_multi(
+    pack: "list[tuple[Path, str]]", source: Path, game_dir: Path,
+    db: Database, deltas_dir: Path, existing_mod_id: int | None = None,
+) -> "ModImportResult | None":
+    """Import a Format 3 variant pack (e.g. Fat Stacks: fat_stacks_2x …
+    _999999) as ONE switchable mod — the first variant enabled, the rest
+    reachable from the mod's cog — instead of dead-ending with a "drop it
+    on the main window to pick a variant" error.
+
+    The GUI's folder-variant picker already produces this outcome for
+    drag-drop. But a variant pack reaching the engine another way — a
+    re-import from source, a programmatic/CLI import, or a drop whose
+    pre-extract for the picker failed — used to hit that hard error and
+    the user got nothing. This backstops every path with the same result
+    the picker gives. GitHub #191 (falobos76 / Fat Stacks).
+
+    Returns a populated ModImportResult on success, or None so the caller
+    can fall back to its previous behaviour.
+    """
+    import json as _json
+    # Stable order so the enabled-by-default variant is deterministic.
+    ordered = sorted(pack, key=lambda t: t[0].name.lower())
+    presets: list[tuple[Path, dict]] = []
+    for jp, _vid in ordered:
+        try:
+            with open(jp, "r", encoding="utf-8-sig") as f:
+                presets.append((jp, _json.load(f)))
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            logger.warning(
+                "variant pack: skipping unreadable %s (%s)", jp.name, e)
+    if len(presets) < 2:
+        return None
+    try:
+        from cdumm.engine.variant_handler import import_multi_variant
+        mods_dir = deltas_dir.parent / "mods"
+        mods_dir.mkdir(parents=True, exist_ok=True)
+        mv = import_multi_variant(
+            presets, source, game_dir, mods_dir, db,
+            existing_mod_id=existing_mod_id,
+            initial_selection={presets[0][0]})
+    except Exception as e:  # noqa: BLE001 — fall back to the caller's error
+        logger.error(
+            "variant-pack multi-import failed (%s); caller falls back", e,
+            exc_info=True)
+        return None
+    if not mv:
+        return None
+    result = ModImportResult(mv.get("mod_name") or source.stem or "variant pack")
+    result.mod_id = int(mv["mod_id"])
+    n = len(mv.get("variants") or presets)
+    result.info = (
+        f"This archive holds {n} versions of one mod (for example, "
+        f"different stack sizes). CDUMM imported it as a single mod with "
+        f"one version enabled — use the mod's cog to switch to another.")
+    return result
 
 
 def import_from_cdmod(

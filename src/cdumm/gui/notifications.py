@@ -85,9 +85,22 @@ class NotificationStore(QObject):
 
     def add(self, level: str, title: str, message: str = "",
             action_label: str | None = None, action_cb=None) -> None:
+        title, message = str(title), str(message or "")
         self._items.insert(0, Notification(
-            level, str(title), str(message or ""), action_label, action_cb))
+            level, title, message, action_label, action_cb))
         del self._items[100:]  # keep the list bounded
+        # Mirror every notification into the app log so the text — e.g.
+        # the "N patches skipped" apply summary — survives in the bug
+        # report even after the toast disappears and can be copied from
+        # the log file. falobos76 asked for exactly this (#191): the
+        # on-screen/notification text used to live only in memory.
+        line = f"notification [{level}] {title}" + (f": {message}" if message else "")
+        try:
+            _lvl = {"error": logging.ERROR, "warning": logging.WARNING}.get(
+                level, logging.INFO)
+            logger.log(_lvl, "%s", line)
+        except Exception:
+            pass
         self.changed.emit()
 
     def items(self) -> list[Notification]:
@@ -230,16 +243,24 @@ class NotificationPanel(QWidget):
         dot.setStyleSheet(f"background: {colour}; border-radius: 5px;")
         h.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
 
+        # Let the user select and copy the notification text — the apply
+        # "N patches skipped" summary only lived here and couldn't be
+        # copied before (falobos76, #191).
+        _selectable = (Qt.TextInteractionFlag.TextSelectableByMouse
+                       | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+
         col = QVBoxLayout()
         col.setSpacing(1)
         title = BodyLabel(n.title, row)
         title.setWordWrap(True)
+        title.setTextInteractionFlags(_selectable)
         if n.read:
             title.setStyleSheet("BodyLabel { color: #9AA0A6; }")
         col.addWidget(title)
         if n.message:
             msg = CaptionLabel(n.message, row)
             msg.setWordWrap(True)
+            msg.setTextInteractionFlags(_selectable)
             col.addWidget(msg)
         col.addWidget(CaptionLabel(_rel_time(n.time), row))
         h.addLayout(col, 1)
@@ -257,8 +278,16 @@ class NotificationPanel(QWidget):
             act.clicked.connect(_do)
             h.addWidget(act, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        # Scope the tint to the row itself. A bare ``QWidget { … }`` rule
+        # cascades to every child, so the BodyLabel / CaptionLabel each got
+        # their own translucent pill painted directly behind the text —
+        # which on some themes sits light-on-text and makes the notification
+        # hard to read in dark mode (falobos76, #191). An objectName
+        # selector paints only the row, so the text renders on the flat
+        # panel background with full theme contrast.
+        row.setObjectName("notifRow")
         row.setStyleSheet(
-            "QWidget { background: rgba(127,127,127,0.08); border-radius: 8px; }")
+            "#notifRow { background: rgba(127,127,127,0.08); border-radius: 8px; }")
         return row
 
 

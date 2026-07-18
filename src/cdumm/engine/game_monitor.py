@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 from cdumm.platform import IS_WINDOWS as _IS_WINDOWS
 
 GAME_EXE_NAME = "CrimsonDesert.exe"
+# Executable basenames the game process can have on non-Windows hosts.
+# Windows always uses CrimsonDesert.exe; a Proton/Wine launch keeps that
+# name in the command line; but the NATIVE macOS Steam build's
+# CFBundleExecutable is ``CrimsonDesert_Steam`` (inside
+# ``Crimson Desert/CrimsonDesert_Steam.app/Contents/MacOS/``). Matching
+# only ``crimsondesert.exe`` there meant Find Culprit never saw the game
+# and scored every bisection round as a crash — falsely blaming an
+# innocent mod (lwjiyuan, GitHub #299). Match any of these (lowercased).
+NON_WINDOWS_GAME_EXE_NAMES = frozenset({
+    "crimsondesert.exe",     # Proton / Wine
+    "crimsondesert_steam",   # native macOS Steam build
+    "crimsondesert",         # native build without the _Steam suffix
+})
 CRASH_DUMP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "CrashDumps")
 FALLBACK_APP_ID = "3321460"
 
@@ -82,11 +95,11 @@ def find_game_process() -> int | None:
     hard-coded install path — is what makes this work on any machine.
     """
     if not _IS_WINDOWS:
-        target = GAME_EXE_NAME.lower()
         for proc in psutil.process_iter(["pid", "cmdline"]):
             try:
                 cmdline = proc.info.get("cmdline")
-                if cmdline and ntpath.basename(cmdline[0]).lower() == target:
+                if (cmdline and ntpath.basename(cmdline[0]).lower()
+                        in NON_WINDOWS_GAME_EXE_NAMES):
                     return proc.info["pid"]
             except (psutil.NoSuchProcess, psutil.AccessDenied,
                     psutil.ZombieProcess, IndexError):

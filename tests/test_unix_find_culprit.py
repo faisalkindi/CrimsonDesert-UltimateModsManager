@@ -63,6 +63,31 @@ def test_crashpad_handler_is_not_matched(monkeypatch):
     assert gm.find_game_process() is None
 
 
+def test_finds_native_macos_steam_executable(monkeypatch):
+    # GitHub #299 (lwjiyuan): the NATIVE macOS Steam build's process is
+    # CrimsonDesert_Steam (CFBundleExecutable), not CrimsonDesert.exe.
+    # Find Culprit must detect it, or every bisection round scores a
+    # false crash and can blame an innocent mod.
+    _force_unix(monkeypatch, [_FakeProc(42, [
+        "/Users/x/Library/Application Support/Steam/steamapps/common/"
+        "Crimson Desert/CrimsonDesert_Steam.app/Contents/MacOS/"
+        "CrimsonDesert_Steam"])])
+    assert gm.find_game_process() == 42
+
+
+def test_finds_native_build_without_steam_suffix(monkeypatch):
+    _force_unix(monkeypatch, [_FakeProc(43, [
+        "/Applications/Crimson Desert.app/Contents/MacOS/CrimsonDesert"])])
+    assert gm.find_game_process() == 43
+
+
+def test_native_macos_helper_process_not_matched(monkeypatch):
+    # A differently-named sibling (e.g. a Steam helper) must not match.
+    _force_unix(monkeypatch, [_FakeProc(1, [
+        "/Users/x/.../MacOS/CrimsonDesert_SteamHelper"])])
+    assert gm.find_game_process() is None
+
+
 def test_returns_none_when_absent(monkeypatch):
     _force_unix(monkeypatch, [_FakeProc(1, ["/usr/bin/foo"])])
     assert gm.find_game_process() is None

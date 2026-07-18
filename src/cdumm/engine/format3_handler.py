@@ -1058,6 +1058,13 @@ LIST_WRITERS: dict[tuple[str, str], str] = {
     # itself is the source of truth for what's actually applicable.
     ("iteminfo", "enchant_data_list"):
         "iteminfo_writer.build_iteminfo_intent_change",
+    # prefab_data_list carries the tribe/gender equip restrictions; #285
+    # relocated it to the record tail on CD 1.13 and the native parser
+    # decodes it (5,687 items non-empty), but it was never registered here,
+    # so validation refused every whole-list write -- Equip Everything
+    # (13k dls) and AXIOM QoL (22k) applied 0 of ~5,098 intents.
+    ("iteminfo", "prefab_data_list"):
+        "iteminfo_writer.build_iteminfo_intent_change",
     ("iteminfo", "equip_passive_skill_list"):
         "iteminfo_writer.build_iteminfo_intent_change",
     ("iteminfo", "occupied_equip_slot_data_list"):
