@@ -423,24 +423,11 @@ def main() -> int:
     if IS_LINUX:
         QGuiApplication.setDesktopFileName("cdumm")
 
-    # Set application-level icon (shows in taskbar)
-    from PySide6.QtGui import QIcon
-    if getattr(sys, 'frozen', False):
-        _app_ico = Path(sys._MEIPASS) / "cdumm.ico"
-    else:
-        _app_ico = Path(__file__).resolve().parents[2] / "cdumm.ico"
-    # On Linux prefer the source PNG over the Windows .ico: Qt's ICO
-    # plugin reads the file but produces a lower-fidelity QIcon than
-    # loading the native 735x735 PNG directly. The .desktop entry
-    # installed by the launcher uses the same PNG so the in-window
-    # and taskbar icons match.
-    if IS_LINUX:
-        _app_png = (Path(__file__).resolve().parents[2]
-                    / "assets" / "cdumm-icon-square.png")
-        if _app_png.exists():
-            _app_ico = _app_png
-    if _app_ico.exists():
-        app.setWindowIcon(QIcon(str(_app_ico)))
+    # Windows/Linux need an explicit Qt icon. On macOS, leave the Dock icon
+    # under CFBundleIconFile control; setting the raw PNG here overrides the
+    # native .icns and makes the Dock tile render larger than neighboring apps.
+    from cdumm.gui.app_icon import apply_application_icon
+    apply_application_icon(app)
 
     # Load Oxanium font
     from PySide6.QtGui import QFontDatabase
