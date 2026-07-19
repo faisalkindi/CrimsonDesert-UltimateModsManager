@@ -67,6 +67,11 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_OPS = frozenset({"set"})
 
+# statusinfo stat_level_data[N] path (DIRECT SPEED .cdmod stat mods). The
+# statusinfo_writer bounds N to 0..15 and refuses non-rate records; this
+# only needs to recognise the shape so the intent reaches that writer.
+_STATUSINFO_SLD_RE = re.compile(r"^stat_level_data\[\d+\]$")
+
 
 _raw_schema_cache: dict[str, dict] | None = None
 
@@ -146,6 +151,10 @@ class Format3Intent:
     old: str | None = None
     match: dict | None = None
     clone: dict | None = None
+    # DMM Mod Builder's op:"scale" carries a numeric ``factor`` instead of a
+    # ``new`` value. Parsed leniently so a scale intent doesn't fail the whole
+    # mod; validate_intents decides whether the op is actually supported.
+    factor: Any = None
 
 
 @dataclass
@@ -344,14 +353,17 @@ def _parse_intents_block(
         # the apply path resolves records by decoding the table. ``field``
         # and ``new`` are always required.
         raw_match = raw.get("match")
-        if raw_match is not None and (
-            not isinstance(raw_match, dict) or not raw_match
-        ):
+        if raw_match is not None and not isinstance(raw_match, dict):
             raise ValueError(
                 f"{label} intent #{i} has an invalid 'match' selector; "
-                f"'match' must be a non-empty object of field:value "
-                f"conditions"
+                f"'match' must be an object of field:value conditions "
+                f"(an empty object {{}} matches every record in the table)"
             )
+        # An empty ``match: {}`` is DMM Mod Builder's "apply to every record"
+        # selector (e.g. infinite durability on all items). It is valid --
+        # the apply path's _match_record_keys treats a no-condition match as
+        # "all records" (all([]) is True) -- so accept it here rather than
+        # rejecting the whole mod.
         required_keys = (
             ("field",) if raw_match is not None else ("entry", "field")
         )
@@ -361,7 +373,18 @@ def _parse_intents_block(
                     f"{label} intent #{i} is missing required key "
                     f"'{required}'"
                 )
-        if "new" not in raw:
+        # ``op: scale`` (DMM Mod Builder) carries a ``factor`` instead of a
+        # ``new``. Require that instead so the intent parses and reaches
+        # validate_intents, which skips it per-intent if scale isn't supported
+        # for the target -- rather than the missing-``new`` check taking the
+        # whole mod down (the parser's lenient-on-op contract, #66).
+        _op = str(raw.get("op", "set"))
+        if _op == "scale":
+            if "factor" not in raw:
+                raise ValueError(
+                    f"{label} intent #{i} with op 'scale' is missing "
+                    f"'factor' (the multiplier)")
+        elif "new" not in raw:
             raise ValueError(
                 f"{label} intent #{i} is missing 'new' "
                 f"(the value to set)"
@@ -402,10 +425,11 @@ def _parse_intents_block(
             entry=str(raw.get("entry", "")),
             key=raw_key,
             field=str(raw["field"]),
-            op=str(raw.get("op", "set")),
-            new=raw["new"],
+            op=_op,
+            new=raw.get("new"),
             old=raw_old,
             match=raw_match,
+            factor=raw.get("factor"),
         ))
     return intents
 
@@ -694,8 +718,12 @@ def _classify_match_selector(
     """
     match = intent.match or {}
     vf = getattr(schema, "verified_fields", None)
+    # DMM Mod Builder names the identity match fields ``key``/``string_key``;
+    # they resolve to CDUMM's ``_key``/``_name`` metadata (see
+    # format3_apply._DMM_MATCH_FIELD_ALIASES), which are always safe to match.
+    _dmm_aliases = {"key": "_key", "string_key": "_name"}
     for mf in match:
-        if mf in _MATCH_META_FIELDS:
+        if _dmm_aliases.get(mf, mf) in _MATCH_META_FIELDS:
             continue
         resolved = _resolve_schema_field_name(mf, field_specs)
         if resolved is None:
@@ -1097,6 +1125,16 @@ LIST_WRITERS: dict[tuple[str, str], str] = {
         "skill_writer.build_skill_intent_change",
     ("skill", "_buffLevelList"):
         "skill_writer.build_skill_intent_change",
+    # inventory slot-count writer (DMM Mod Builder "max inventory" mods).
+    # inventory.pabgb has no PABGB schema and its .pabgh carries no record
+    # offsets, so these scalar fields route through the content-framed
+    # inventory_writer, which locates records by name.
+    ("inventory", "default_slot_count"):
+        "inventory_writer.build_inventory_changes",
+    ("inventory", "max_slot_count"):
+        "inventory_writer.build_inventory_changes",
+    ("inventory", "need_save_slot_count"):
+        "inventory_writer.build_inventory_changes",
 }
 
 
@@ -1409,6 +1447,19 @@ def _classify_intent(
     # the writer re-checks before committing.
     if tn_norm == "stringinfo" and intent.field.lstrip("_").lower() == (
             "buffer") and isinstance(getattr(intent, "new", None), str):
+        return None
+
+    # statusinfo (DIRECT SPEED .cdmod stat mods): stat_level_data[N] is an
+    # int64 per-level element on the four rate records. statusinfo's PABGB
+    # schema is positional and has no such array, so the generic walker
+    # can't resolve it; the clean-room statusinfo writer
+    # (statusinfo_writer.build_statusinfo_changes) locates the record by key
+    # and writes the element in place. The value must be an int, and the
+    # writer refuses any record that isn't a 212-byte rate record and any
+    # index outside 0..15 -- both dropped cleanly at apply time with a
+    # logged warning, mirroring the multichangeinfo/stringinfo early-accept.
+    if tn_norm == "statusinfo" and _STATUSINFO_SLD_RE.match(intent.field) \
+            and isinstance(getattr(intent, "new", None), int):
         return None
 
     # GitHub #150 (Female Animations) + #192 (mesh swap): characterinfo's

@@ -52,6 +52,13 @@ _FIELD_MAP: dict[str, tuple[str, str, int]] = {
     "skeleton_name": ("_skeletonName_offset", "<I", 4),
     "lookup_25": ("_skeletonVariationName_offset", "<I", 4),
     "flag_c": ("_flagC_offset", "<B", 1),
+    # DMM "no dragon / companion re-summon cooldown" mods set this to 1 on
+    # mount/companion records (Riding_Dragon_1, Kliff, Damian, ...). It is a
+    # u64 re-summon cooldown the parser already decodes (only summonable
+    # entities have a nonzero value; ordinary NPCs read 0). Adding it here
+    # enables both validation (_CHARACTERINFO_FIELDS is this same set) and the
+    # in-place, length-preserving write.
+    "call_mercenary_cool_time": ("_callMercenaryCoolTime_offset", "<Q", 8),
 }
 
 SUPPORTED_FIELDS = frozenset(_FIELD_MAP)

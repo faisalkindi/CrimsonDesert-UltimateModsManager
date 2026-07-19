@@ -25,7 +25,8 @@ from cdumm.engine.characterinfo_writer import build_characterinfo_changes
 
 def _make_record(key: int, name: str, *, upper: int, lower: int,
                  gameplay: int, appearance: int, prefab: int,
-                 skeleton: int, skelvar: int, flag_c: int) -> bytes:
+                 skeleton: int, skelvar: int, flag_c: int,
+                 cooldown: int = 0) -> bytes:
     """Build one characterinfo record matching the parser walk in
     characterinfo_full_parser.parse_entry."""
     nb = name.encode("latin-1")
@@ -40,7 +41,7 @@ def _make_record(key: int, name: str, *, upper: int, lower: int,
     r += b"\x00" + b"\x00"                    # two u8
     r += b"\x00" * 4 + b"\x00" * 4            # two u32
     r += struct.pack("<H", 0)                 # _vehicleInfo u16
-    r += struct.pack("<Q", 0)                 # _callMercenaryCoolTime
+    r += struct.pack("<Q", cooldown)          # _callMercenaryCoolTime
     r += struct.pack("<Q", 0)                 # _callMercenarySpawnDuration
     r += b"\x00"                              # _mercenaryCoolTimeType u8
     r += b"\x00" * 6                          # u32 + u16
@@ -214,3 +215,31 @@ def test_lookup_22_24_in_format3_characterinfo_accept_set():
     from cdumm.engine.characterinfo_writer import SUPPORTED_FIELDS
     assert "lookup_22" in SUPPORTED_FIELDS
     assert "lookup_24" in SUPPORTED_FIELDS
+
+
+def test_writer_patches_call_mercenary_cool_time():
+    """DMM 'no dragon / companion re-summon cooldown' mods set this u64 to 1
+    on mount/companion records (Riding_Dragon_1, Kliff, ...). It sits right
+    after _vehicleInfo, located by the same parser walk as the #150 fields."""
+    rec = _make_record(1, "Kliff", cooldown=3600, **_vanilla_kwargs())
+    pabgb, pabgh = _make_table([rec])
+    changes = build_characterinfo_changes(
+        pabgb, pabgh, [("Kliff", 0, "call_mercenary_cool_time", 1)])
+    assert len(changes) == 1
+    patched = _apply(pabgb, changes)
+    assert len(patched) == len(pabgb), "writes must not resize the record"
+    from cdumm.archive.format_parsers.characterinfo_full_parser import (
+        parse_pabgh_index, parse_entry,
+    )
+    r = parse_entry(patched, parse_pabgh_index(pabgh)[1], len(patched))
+    assert r["_callMercenaryCoolTime"] == 1
+    # the neighbouring u64 (_callMercenarySpawnDuration) must be untouched,
+    # proving the offset and width (u64, 8 bytes) are exact.
+    assert r["_callMercenarySpawnDuration"] == 0
+
+
+def test_call_mercenary_cool_time_in_supported_fields():
+    """Pin the field in the writer's accept-set (== format3_handler's
+    _CHARACTERINFO_FIELDS), so validation and the write can't drift apart."""
+    from cdumm.engine.characterinfo_writer import SUPPORTED_FIELDS
+    assert "call_mercenary_cool_time" in SUPPORTED_FIELDS

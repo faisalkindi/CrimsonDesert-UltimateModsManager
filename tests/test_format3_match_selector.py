@@ -107,10 +107,12 @@ def test_parse_still_requires_entry_without_match():
         _parse_intents_block([{"field": "_bar", "new": 2}])
 
 
-def test_parse_rejects_empty_match():
-    with pytest.raises(ValueError):
-        _parse_intents_block(
-            [{"match": {}, "field": "_bar", "new": 2}])
+def test_parse_accepts_empty_match_as_match_all():
+    # An empty match {} is DMM Mod Builder's "apply to every record"
+    # selector; the apply path treats a no-condition match as all records.
+    out = _parse_intents_block(
+        [{"match": {}, "field": "_bar", "new": 2}])
+    assert out[0].match == {}
 
 
 def test_parse_rejects_non_dict_match():

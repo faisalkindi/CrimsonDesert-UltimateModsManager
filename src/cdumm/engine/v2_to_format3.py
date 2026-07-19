@@ -362,21 +362,55 @@ def _load_vanilla_table(game_dir: Path, name: str) -> bytes:
         _extract_from_paz, _find_pamt_entry,
     )
     vanilla_dir = game_dir / "CDMods" / "vanilla"
-    entry = None
-    if vanilla_dir.exists():
-        entry = _find_pamt_entry(name, vanilla_dir)
-    if entry is None:
-        entry = _find_pamt_entry(name, game_dir)
-    if entry is None:
+
+    def _extract(entry):
+        paz = Path(entry.paz_file)
+        if not paz.exists() and vanilla_dir.exists():
+            try:
+                paz = game_dir / paz.relative_to(vanilla_dir)
+            except ValueError:
+                pass
+        return _extract_from_paz(entry, str(paz))
+
+    # CDUMM caches a vanilla PAMT index in CDMods/vanilla, but the .paz bodies
+    # live in the game install. After a game update Steam rewrites those .paz
+    # files, so the cached index points at the wrong bytes. For a compressed
+    # table that throws a raw LZ4 error; for an uncompressed one (many .pabgh)
+    # it silently returns garbage. Detect staleness up front by comparing the
+    # cached entry against the game's own current index: if they disagree on
+    # where the data lives, the cache is stale (the game moved on) and the
+    # live index is authoritative for the installed build. This fixes both
+    # the crash and the silent-wrong-bytes case.
+    cached = (_find_pamt_entry(name, vanilla_dir)
+              if vanilla_dir.exists() else None)
+    live = _find_pamt_entry(name, game_dir)
+    if (cached is not None and live is not None
+            and (getattr(cached, "offset", None), getattr(cached, "comp_size", None))
+            != (getattr(live, "offset", None), getattr(live, "comp_size", None))):
+        logger.info(
+            "vanilla-cached index for %s disagrees with the live game index "
+            "(game updated since the backup); using the live index", name)
+        cached = None
+
+    if cached is not None:
+        try:
+            return _extract(cached)
+        except Exception:
+            logger.info(
+                "vanilla-cached index stale for %s; falling back to the live "
+                "game index", name)
+
+    if live is None:
         raise ConversionRefused(
             f"{name} could not be found in your game's archives")
-    paz = Path(entry.paz_file)
-    if not paz.exists() and vanilla_dir.exists():
-        try:
-            paz = game_dir / paz.relative_to(vanilla_dir)
-        except ValueError:
-            pass
-    return _extract_from_paz(entry, str(paz))
+    try:
+        return _extract(live)
+    except Exception as e:
+        raise ConversionRefused(
+            f"CDUMM couldn't read the vanilla '{name}' from your game files. "
+            f"Its saved vanilla copy is out of date -- this usually happens "
+            f"right after a game update. Run Settings → Fix Everything "
+            f"to refresh CDUMM's vanilla backup, then try again.") from e
 
 
 def convert_mod_file(
