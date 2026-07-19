@@ -37,24 +37,55 @@ from cdumm.archive.format_parsers.characterinfo_full_parser import (
 
 logger = logging.getLogger(__name__)
 
-# Mod field name -> (parse_entry offset key, struct format, byte width).
-_FIELD_MAP: dict[str, tuple[str, str, int]] = {
-    "upper_chart.group_lookup":
-        ("_upperActionChartPackageGroupName_offset", "<I", 4),
+# The action-chart block start; hash-block fields are written at a fixed byte
+# delta from it. Located per record by the parser walk.
+_BLK = "_upperActionChartPackageGroupName_offset"
+
+# Mod field name -> (parse_entry offset key, byte delta, struct format, width).
+# The absolute write offset is ``record[offset_key] + delta``.
+#
+# LEGACY DMM naming (GitHub #150 / #192), kept byte-for-byte to preserve
+# behaviour for mods already in the wild.
+_FIELD_MAP: dict[str, tuple[str, int, str, int]] = {
+    "upper_chart.group_lookup": (_BLK, 0, "<I", 4),
     "lower_chart.group_lookup":
-        ("_lowerActionChartPackageGroupName_offset", "<I", 4),
-    # GitHub #192 (Yorivel): mesh / visual-swap mods set the appearance
-    # hash and the model-path hash. Both are plain u32 name-hash slots
-    # in the same action-chart block (block+12 / block+16), located by
-    # the same parser walk as the four #150 u32 fields.
-    "lookup_22": ("_appearanceName_stream_offset", "<I", 4),
-    "lookup_24": ("_characterPrefabPath_stream_offset", "<I", 4),
-    "skeleton_name": ("_skeletonName_offset", "<I", 4),
-    "lookup_25": ("_skeletonVariationName_offset", "<I", 4),
-    "flag_c": ("_flagC_offset", "<B", 1),
+        ("_lowerActionChartPackageGroupName_offset", 0, "<I", 4),
+    "lookup_22": ("_appearanceName_stream_offset", 0, "<I", 4),
+    "lookup_24": ("_characterPrefabPath_stream_offset", 0, "<I", 4),
+    "skeleton_name": ("_skeletonName_offset", 0, "<I", 4),
+    "lookup_25": ("_skeletonVariationName_offset", 0, "<I", 4),
+    "flag_c": ("_flagC_offset", 0, "<B", 1),
 }
 
-SUPPORTED_FIELDS = frozenset(_FIELD_MAP)
+# CURRENT DMM Mod Builder naming (Character Creator / Female Animations 7.6,
+# GitHub #302). DMM renamed the action-chart slots between versions, so the
+# same field names resolve to DIFFERENT block offsets than the legacy set.
+# The mod copies the Damian record onto Kliff, and Damian holds each target
+# value at these exact block deltas, verified against the live 1.13/1.14
+# table: appearance_name=+0, character_prefab_path=+4, skeleton_name=+8,
+# lookup_24=+20, lookup_25=+24. block+16 is a table-wide constant type-tag
+# (3938836851 across all 7105 records), so the legacy lookup_24->+16 mapping
+# wrote to a constant; the current schema routes lookup_24 to its real slot
+# (+20). The three post-block fields the 7.6 mod also sets
+# (default_action_action_index, character_weight, f36) sit in the stretch
+# Pearl Abyss made variable-length in 1.13; their offset drifts per record
+# and is deliberately NOT mapped -- they report "could not locate" rather
+# than being written to a guess.
+_NEW_SCHEMA_MAP: dict[str, tuple[str, int, str, int]] = {
+    **_FIELD_MAP,
+    "appearance_name": (_BLK, 0, "<I", 4),
+    "character_prefab_path": (_BLK, 4, "<I", 4),
+    "skeleton_name": (_BLK, 8, "<I", 4),
+    "lookup_24": (_BLK, 20, "<I", 4),
+    "lookup_25": (_BLK, 24, "<I", 4),
+}
+
+# A characterinfo mod that uses either semantic name was exported by the
+# current DMM Mod Builder, so the new block layout applies to the whole mod.
+# Legacy mods never use these names and keep the old offsets.
+_NEW_SCHEMA_MARKERS = frozenset({"appearance_name", "character_prefab_path"})
+
+SUPPORTED_FIELDS = frozenset(_FIELD_MAP) | _NEW_SCHEMA_MARKERS
 
 
 def build_characterinfo_changes(
@@ -91,9 +122,16 @@ def build_characterinfo_changes(
         if name:
             name_to_key.setdefault(name, key)
 
+    # A mod that uses the current DMM semantic names resolves the shared
+    # action-chart slots at different block offsets than legacy mods, so the
+    # whole mod is interpreted under one schema or the other.
+    fields_present = {field for _n, _k, field, _v in intents}
+    field_map = (_NEW_SCHEMA_MAP
+                 if _NEW_SCHEMA_MARKERS & fields_present else _FIELD_MAP)
+
     changes: list[dict] = []
     for entry_name, raw_key, field, new_value in intents:
-        spec = _FIELD_MAP.get(field)
+        spec = field_map.get(field)
         if spec is None:
             logger.warning(
                 "characterinfo: field %r is not supported, skipping",
@@ -114,14 +152,15 @@ def build_characterinfo_changes(
                 "parsable, skipping intent on %s",
                 entry_name, raw_key, field)
             continue
-        off_key, fmt, width = spec
-        abs_off = rec.get(off_key)
-        if abs_off is None:
+        off_key, delta, fmt, width = spec
+        base = rec.get(off_key)
+        if base is None:
             logger.warning(
                 "characterinfo: could not locate field %r for entry "
                 "%r (record parsed only partially), skipping",
                 field, entry_name)
             continue
+        abs_off = base + delta
         if abs_off + width > len(vanilla_body):
             continue
         try:

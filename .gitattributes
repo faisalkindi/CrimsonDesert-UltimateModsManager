@@ -1,0 +1,7 @@
+# Binary test fixtures (zlib-compressed vanilla game tables). Mark them binary
+# so git never applies EOL normalization and always renders them as binary in
+# diffs. Without this, a tiny zlib blob that happens to contain no NUL byte is
+# misdetected as text -- shown as a garbage "text" diff on GitHub, and at risk
+# of CRLF corruption on checkout under core.autocrlf, which would silently
+# break the fixture (it would no longer decompress).
+*.zlib binary
