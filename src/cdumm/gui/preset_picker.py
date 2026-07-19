@@ -195,6 +195,38 @@ def has_structural_folder_variants(path: Path, max_depth: int = 4) -> bool:
     return False
 
 
+def descend_to_folder_variants(path: Path, max_depth: int = 4) -> Path:
+    """Return the directory that actually holds 2+ variant subfolders,
+    descending single wrapper directories on the way.
+
+    A ZIP that wraps everything in one ``Character Creator/`` directory
+    otherwise hides its race/gender variant folders: the import picker
+    calls ``find_folder_variants`` on the extraction root, sees only the
+    lone wrapper (``find_folder_variants`` doesn't descend), and never
+    offers the choice (#302, mod 837). This mirrors
+    ``has_structural_folder_variants``' descent but yields the path so
+    the caller can run its picker there. Returns ``path`` unchanged when
+    no wrapped variant level exists, so non-wrapped mods are unaffected.
+    """
+    import re
+    probe = path
+    for _ in range(max_depth):
+        if not probe.is_dir():
+            break
+        if len(find_folder_variants(probe)) >= 2:
+            return probe
+        subs = [
+            d for d in probe.iterdir()
+            if d.is_dir() and not d.name.startswith(('.', '_'))
+            and not re.match(r'^\d{4}$', d.name)
+            and d.name.lower() != 'meta'
+        ]
+        if len(subs) != 1:
+            break
+        probe = subs[0]  # descend the single wrapper folder and retry
+    return path
+
+
 def folder_variant_game_files(folders: list[Path]) -> dict[Path, set[str]]:
     """For each folder, collect the set of game_file targets its JSONs
     declare. Used by the picker to decide whether the folders behave

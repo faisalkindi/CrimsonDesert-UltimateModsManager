@@ -4478,7 +4478,9 @@ class CdummWindow(FluentWindow):
         # picks the alphabetically-last variant and the user never sees
         # the dialog (Vaxis LoD extra-shadows vs no-extra-shadows case).
         try:
-            from cdumm.gui.preset_picker import find_folder_variants, FolderVariantDialog
+            from cdumm.gui.preset_picker import (
+                find_folder_variants, FolderVariantDialog,
+                descend_to_folder_variants)
             from cdumm.engine.import_handler import find_loose_file_variants
 
             scan_dir: Path | None = None
@@ -4660,6 +4662,17 @@ class CdummWindow(FluentWindow):
                 # loops on pathological inputs.
                 MAX_VARIANT_DEPTH = 4
                 _current = scan_dir
+                # A ZIP that nests its variant folders inside a single
+                # wrapper directory (Character Creator 837 ships 8
+                # race/gender folders under one "Character Creator/")
+                # otherwise hides them: find_folder_variants sees only the
+                # wrapper and the picker never fires (#302). Descend to the
+                # level that actually holds the variants first. No-op for
+                # non-wrapped mods (returns the path unchanged).
+                try:
+                    _current = descend_to_folder_variants(_current)
+                except Exception:
+                    pass
                 _fired_any_picker = False
                 _aborted = False
                 for _depth in range(MAX_VARIANT_DEPTH):
