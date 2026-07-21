@@ -117,3 +117,81 @@ def test_check_game_updated_surfaces_sticky_banner_on_decline():
         "when user declines the rescan prompt, _check_game_updated "
         "must show a sticky InfoBar explaining apply is now locked "
         "(not just silently close the dialog)")
+
+
+# ── Live-fingerprint gate (mid-session game update, #307) ─────────────
+#
+# The startup game_updated flag is a one-shot computed in main.py at
+# launch. A Steam auto-update that lands *while CDUMM is already open*
+# leaves the flag False, so the stale-snapshot gate above passes and
+# the user patches onto a stale vanilla baseline (crash on next launch,
+# GitHub #307). _on_apply must therefore ALSO re-check the live game
+# fingerprint against the snapshot's.
+
+def test_live_helper_exists():
+    from cdumm.gui import apply_watchdog
+    assert hasattr(apply_watchdog, "is_apply_blocked_by_live_game_change")
+
+
+def test_live_helper_blocks_on_fingerprint_mismatch():
+    """A mid-session Steam update changes the live fingerprint; against
+    a known, differing snapshot fingerprint, apply must be blocked."""
+    from cdumm.gui.apply_watchdog import is_apply_blocked_by_live_game_change
+    assert is_apply_blocked_by_live_game_change(
+        current_fingerprint="aaaa1111", snapshot_fingerprint="bbbb2222"
+    ) is True
+
+
+def test_live_helper_allows_on_fingerprint_match():
+    """A clean apply/revert never changes the exe fingerprint, so a
+    matching pair must NOT be treated as an update (no false positive)."""
+    from cdumm.gui.apply_watchdog import is_apply_blocked_by_live_game_change
+    assert is_apply_blocked_by_live_game_change(
+        current_fingerprint="aaaa1111", snapshot_fingerprint="aaaa1111"
+    ) is False
+
+
+def test_live_helper_no_false_positive_when_live_unknown():
+    """detect_game_version returned None (Xbox/custom install, missing
+    exe): a detection gap must never block a legitimate apply."""
+    from cdumm.gui.apply_watchdog import is_apply_blocked_by_live_game_change
+    assert is_apply_blocked_by_live_game_change(
+        current_fingerprint=None, snapshot_fingerprint="aaaa1111"
+    ) is False
+
+
+def test_live_helper_no_block_when_no_snapshot_fingerprint():
+    """No stored snapshot fingerprint -> the separate missing-snapshot
+    gate owns that case; this helper must stay out of it."""
+    from cdumm.gui.apply_watchdog import is_apply_blocked_by_live_game_change
+    assert is_apply_blocked_by_live_game_change(
+        current_fingerprint="aaaa1111", snapshot_fingerprint=None
+    ) is False
+
+
+def test_live_helper_both_none_is_false():
+    from cdumm.gui.apply_watchdog import is_apply_blocked_by_live_game_change
+    assert is_apply_blocked_by_live_game_change(
+        current_fingerprint=None, snapshot_fingerprint=None
+    ) is False
+
+
+def test_on_apply_gates_on_live_game_change():
+    """_on_apply must ALSO re-check the live game fingerprint (not just
+    the one-shot startup flag) before _run_qprocess, so a mid-session
+    Steam update is caught (#307)."""
+    src = _fluent_src()
+    anchor = src.find("def _on_apply(self)")
+    assert anchor != -1
+    next_def = src.find("\n    def ", anchor + 20)
+    body = src[anchor:next_def if next_def != -1 else anchor + 4000]
+    assert "is_apply_blocked_by_live_game_change" in body, (
+        "_on_apply must re-check the live game fingerprint so a "
+        "mid-session game update blocks apply (#307)")
+    assert "detect_game_version" in body, (
+        "the live re-check must use detect_game_version (the same "
+        "detector the bug report and startup path use)")
+    gate_idx = body.find("is_apply_blocked_by_live_game_change")
+    run_idx = body.find("_run_qprocess(")
+    assert gate_idx != -1 and run_idx != -1 and gate_idx < run_idx, (
+        "the live game-change gate must be checked BEFORE _run_qprocess")

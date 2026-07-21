@@ -6197,9 +6197,34 @@ class CdummWindow(FluentWindow):
         # the wrong bytes because our vanilla baseline no longer
         # matches the live game.
         from cdumm.gui.apply_watchdog import (
+            is_apply_blocked_by_live_game_change,
             is_apply_blocked_by_stale_snapshot,
         )
-        if is_apply_blocked_by_stale_snapshot(self._startup_context):
+        stale = is_apply_blocked_by_stale_snapshot(self._startup_context)
+        if not stale and self._game_dir:
+            # The startup game_updated flag is a one-shot computed at
+            # launch, so a Steam auto-update that lands mid-session
+            # slips past it and the user patches onto a stale vanilla
+            # baseline (crash on next launch, GitHub #307). Re-check the
+            # live game fingerprint against the snapshot's here, using
+            # the same detector the bug report and startup path use.
+            try:
+                from cdumm.engine.version_detector import detect_game_version
+                from cdumm.storage.config import Config
+                live_fp = detect_game_version(self._game_dir)
+                snap_fp = (Config(self._db).get("game_version_fingerprint")
+                           if self._db else None)
+                if is_apply_blocked_by_live_game_change(
+                        current_fingerprint=live_fp,
+                        snapshot_fingerprint=snap_fp):
+                    stale = True
+                    logger.info(
+                        "Apply blocked: live game fingerprint %s != "
+                        "snapshot %s (mid-session game update, #307)",
+                        live_fp, snap_fp)
+            except Exception as e:
+                logger.debug("live game-change apply check failed: %s", e)
+        if stale:
             InfoBar.error(
                 title=tr("apply.rescan_required_title"),
                 content=tr("apply.rescan_required_body"),

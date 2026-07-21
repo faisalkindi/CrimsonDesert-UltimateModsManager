@@ -82,6 +82,39 @@ def is_apply_blocked_by_stale_snapshot(startup_context) -> bool:
     return bool(startup_context.get("game_updated"))
 
 
+def is_apply_blocked_by_live_game_change(
+    *, current_fingerprint: str | None, snapshot_fingerprint: str | None
+) -> bool:
+    """Return True iff the *live* game version fingerprint no longer
+    matches the one the vanilla snapshot was captured against.
+
+    :func:`is_apply_blocked_by_stale_snapshot` only reads the one-shot
+    ``game_updated`` flag that ``main.py`` computes at launch. A Steam
+    auto-update (or a file verify) that lands *while CDUMM is already
+    open* is therefore invisible to it: the flag stays False, Apply is
+    not blocked, and the user patches onto a stale vanilla baseline —
+    which is exactly the crash-on-launch reported in GitHub #307
+    (game exe modified 18:57, after the 17:51 snapshot, then applied).
+
+    Re-computing the fingerprint at apply time closes that window. The
+    caller passes ``current_fingerprint`` from
+    :func:`cdumm.engine.version_detector.detect_game_version` (the same
+    detector the bug report and the startup path use) and
+    ``snapshot_fingerprint`` from the stored ``game_version_fingerprint``
+    config value.
+
+    Returns False whenever either fingerprint is unknown, so a detection
+    gap can never *block* a legitimate apply (no false positives). The
+    missing-snapshot case is owned by the separate rescan-required gate,
+    and applying/reverting mods never changes the fingerprint (it is
+    derived only from the Steam build id + game exe, never from staged
+    PAZ/PAMT files), so a clean apply is never mistaken for an update.
+    """
+    if not current_fingerprint or not snapshot_fingerprint:
+        return False
+    return current_fingerprint != snapshot_fingerprint
+
+
 def is_apply_stalled(*, now: float, last_progress_ts: float,
                      threshold_s: float) -> bool:
     """Return True iff ``now - last_progress_ts`` strictly exceeds
