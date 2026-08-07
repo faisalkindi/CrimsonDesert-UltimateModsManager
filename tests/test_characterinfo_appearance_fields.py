@@ -240,7 +240,11 @@ def test_refusal_reason_is_reported_not_just_logged(table):
     assert len(refusals) == 1, refusals
     assert "Kliff_Clone" in refusals[0]
     # It must say what could not be placed, or it isn't actionable.
-    assert "f36" in refusals[0]
+    # Only character_weight now: `f36` is the gender byte at block+66,
+    # which is placeable on every record, so it is no longer part of why
+    # this one is abandoned.
+    assert "character_weight" in refusals[0]
+    assert "f36" not in refusals[0]
 
 
 def test_a_lone_half_writable_record_is_abandoned_too(table):
@@ -642,3 +646,77 @@ def test_a_bad_value_does_not_abandon_an_unrelated_record(table):
     labels = [c["label"] for c in changes]
     assert labels == ["Kliff_AI.appearance_name"], labels
     assert len(refusals) == 1 and "Kliff" in refusals[0]
+
+
+def test_f36_is_the_gender_byte_at_block_plus_66(table):
+    """`f36` is the record's GENDER byte, not the parser's `_f36` u32.
+
+    Character Creator ships this same edit twice: as the Format 3 file
+    under test, and as a raw offset patch whose hand-written labels name
+    the field ``_gender`` and change it from 01 to 02. The two files agree
+    field for field on all five records, and once every other field is
+    paired off by its exact value, the one left over is ``f36`` here and
+    ``_gender`` there.
+
+    That field is ONE byte at block+66, and it must be written there.
+    """
+    body, header = table
+    changes = build_characterinfo_changes(body, header, _MOD_INTENTS)
+
+    idx = parse_pabgh_index(header)
+    order = sorted(idx.items(), key=lambda kv: kv[1])
+    blocks: dict[str, int] = {}
+    for rank, (key, start) in enumerate(order):
+        end = (order[rank + 1][1]
+               if rank + 1 < len(order) else len(body))
+        rec = parse_entry(body, start, end)
+        if rec and rec.get("name"):
+            blk = rec.get("_upperActionChartPackageGroupName_offset")
+            if blk is not None:
+                blocks[rec["name"]] = blk
+
+    f36 = {c["label"].split(".")[0]: c
+           for c in changes if c["label"].endswith(".f36")}
+    assert f36, "the mod sets f36; it must produce changes"
+
+    for name, change in f36.items():
+        assert change["offset"] == blocks[name] + 66, (
+            f"{name}.f36 must land on the gender byte at block+66, "
+            f"got block+{change['offset'] - blocks[name]}")
+        # One byte wide, not four.
+        assert len(change["patched"]) == 2, change
+        assert change["patched"].lower() == "02", change
+        # And it must actually be a change, not a write of the same value.
+        assert change["original"].lower() != change["patched"].lower(), (
+            f"{name}.f36 writes its existing value -- a no-op edit is the "
+            f"signature of the wrong slot")
+
+
+def test_block_plus_66_is_an_enum_on_every_record(table):
+    """Shape check on the slot the mapping above depends on.
+
+    Gender is a small enum present on every record. Across the full live
+    table block+66 holds only 0, 1 or 2 on all 7244 records; the parser's
+    `_f36_offset`, by contrast, is published on 142 of them. Assert the
+    enum shape here so a future layout change that breaks it is caught.
+    """
+    body, header = table
+    idx = parse_pabgh_index(header)
+    order = sorted(idx.items(), key=lambda kv: kv[1])
+    seen: set[int] = set()
+    n = 0
+    for rank, (key, start) in enumerate(order):
+        end = (order[rank + 1][1]
+               if rank + 1 < len(order) else len(body))
+        rec = parse_entry(body, start, end)
+        if not rec:
+            continue
+        blk = rec.get("_upperActionChartPackageGroupName_offset")
+        if blk is None or blk + 66 >= len(body):
+            continue
+        seen.add(body[blk + 66])
+        n += 1
+
+    assert n, "no records carried a block offset"
+    assert seen <= {0, 1, 2}, (
+        f"block+66 is meant to be the gender enum, saw {sorted(seen)}")

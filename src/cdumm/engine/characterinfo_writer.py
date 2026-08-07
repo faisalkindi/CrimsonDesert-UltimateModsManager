@@ -67,7 +67,33 @@ _FIELD_MAP: dict[str, tuple[str, int, str, int]] = {
     # and is refused by name below -- never written at a guessed position.
     "default_action_action_index": (
         "_defaultActionActionIndex_offset", 0, "<I", 4),
-    "f36": ("_f36_offset", 0, "<I", 4),
+    # `f36` is the record's GENDER byte, at block+66. It is NOT the u32 the
+    # parser publishes as `_f36_offset` (GitHub #302).
+    #
+    # That earlier mapping was added for this very mod and was never
+    # confirmed in-game -- the mod has never once worked. Four independent
+    # measurements say it is the wrong slot:
+    #
+    # 1. Field correspondence. Character Creator ships the same edit twice,
+    #    as this Format 3 file and as a raw offset patch with hand-written
+    #    labels. The two agree field for field on all five records
+    #    (7/6/6/3/3). Every field matches by exact value except one; once
+    #    the rest are paired off, the leftover is `f36` here and `_gender`
+    #    there, both set to 2.
+    # 2. Position. That patch puts `_gender` one byte at block+66. On the
+    #    live table that byte still reads 01 on Kliff / Kliff_AI / Yann,
+    #    exactly the "before" value the patch expects for its 01 -> 02 edit.
+    # 3. Table-wide shape. Across all 7244 records block+66 holds only
+    #    0, 1 or 2 (1357 / 4909 / 978) -- a clean enum on every record.
+    #    `_f36_offset` is published on 142 records, i.e. 2% of the table.
+    # 4. Intent. Read as gender the mod sets 1 -> 2 on every record it
+    #    touches. Read as `_f36` it writes 2 over an existing 2 on Kliff_AI
+    #    and PlayerAll, so two of the four edits would be no-ops -- not
+    #    something a mod author writes on purpose.
+    #
+    # Block-relative also means it is placeable on every record, so records
+    # the post-block walk cannot reach are no longer refused over this field.
+    "f36": (_BLK, 66, "<B", 1),
     # `character_weight` is the SAME SLOT under a different DMM name, and
     # that is documented by the mod author rather than inferred. Character
     # Creator 7.5 shipped as raw offset patches with hand-written labels;
