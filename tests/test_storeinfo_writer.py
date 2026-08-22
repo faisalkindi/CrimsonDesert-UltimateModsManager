@@ -7,9 +7,11 @@ which sets store 3101's stock list to 42 records. On the 1.11 build 37
 of those match a vanilla record by identity and 5 are new.
 
 Safety contract pinned here:
-* matched records keep their vanilla bytes verbatim (interior diffs in
-  the mod JSON are stale-export noise from an older game version and
-  must not overwrite current data),
+* matched records take the mod's mapped per-slot fields (quantity,
+  flags, restock/sort order), falling back to vanilla for any field
+  the mod's JSON omits, but keep the vanilla value-struct interior
+  (interior diffs in the mod JSON are stale-export noise from an older
+  game version and must not overwrite current data),
 * new records build from the mapped fields with the unmapped value
   interior zeroed,
 * a new record carrying a non-zero unmapped field REFUSES the intent,
@@ -137,24 +139,16 @@ def test_hernandpets_applies_end_to_end():
         assert r.lookup_a == j["lookup_a"]
         assert (r.sub_data is None) == (j["sub_data"] is None)
 
-    # Matched records keep vanilla bytes verbatim: each parsed record
-    # whose body matches a vanilla record re-serializes to that vanilla
-    # record's exact bytes (the mod's interior diffs must NOT have been
-    # written).
+    # Matched records keep vanilla's value-struct interior verbatim
+    # (the mod's ``value.*`` diffs must NOT have been written -- the
+    # #183 protection this fixture exists for) even though their
+    # mapped head fields now come from the mod's JSON.
     vby_body = {r.body: r for r in vrecords}
     for r in records:
         if r.body in vbodies:
-            from cdumm.engine.storeinfo_native_parser import _Writer
-            wa, wb = _Writer(), _Writer()
-            from cdumm.engine.storeinfo_native_parser import write_stock_record
-            # Named, not defaulted. This is the #351 trap the fixture
-            # helper above exists to avoid, and it caught this line when
-            # CD 1.16.1 became the newest layout: these records come from
-            # a CD 1.11 snapshot with a 71-byte interior, and the default
-            # had moved to a layout whose interior is 67.
-            write_stock_record(wa, r, layout)
-            write_stock_record(wb, vby_body[r.body], layout)
-            assert bytes(wa.out) == bytes(wb.out), r.body
+            van = vby_body[r.body]
+            assert r.vgap == van.vgap, r.body
+            assert r.effect_list == van.effect_list, r.body
 
     # Every entry offset after store 3101 shifted by exactly +growth.
     for key, voff in voffs.items():
@@ -284,3 +278,74 @@ def test_new_record_applies_on_cd1161():
         "<I", added.vgap, layout.raw_q_off)[0] == new_body_id
     # And nowhere near the stale pre-1.16.1 indices.
     assert struct.unpack_from("<I", added.vgap, 41)[0] != 0xDEAD1E
+
+
+@pytest.mark.skipif(
+    not _have_vanilla1161("storeinfo.pabgb"),
+    reason="vanilla1161 storeinfo fixture absent")
+def test_matched_record_applies_the_mods_quantity_on_cd1161():
+    """GitHub #365 residual: a Format 3 'set' on stock_data_list is
+    meant to replace a slot's fields outright, including ones an item
+    already had before the mod. Before this fix, any record whose item
+    id matched an existing vanilla record discarded the mod's fields
+    wholesale and kept the vanilla bytes verbatim, so bumping the stock
+    of an item a store already carried (as opposed to adding a
+    brand-new one) silently did nothing.
+    """
+    from cdumm.engine.storeinfo_native_parser import LAYOUTS, locate_stock_list
+    from cdumm.engine.storeinfo_writer import build_storeinfo_changes
+    from cdumm.semantic.parser import _parse_entry_header, parse_pabgh_index
+
+    layout = next(ly for ly in LAYOUTS if ly.label == "CD 1.16.1")
+    body = _load_vanilla1161("storeinfo.pabgb")
+    header = _load_vanilla1161("storeinfo.pabgh")
+
+    ks, offs = parse_pabgh_index(header, "storeinfo")
+    key = 3101
+    sorted_offs = sorted(offs.values()) + [len(body)]
+    entry_end = sorted_offs[sorted_offs.index(offs[key]) + 1]
+    _, ename, payload = _parse_entry_header(body, offs[key], ks)
+    vrecords, _s, _e = locate_stock_list(body, payload, entry_end, key, layout)
+
+    target = vrecords[0]
+    assert target.raw_c == 1  # pinned: what the fix needs to change
+
+    # Reproduce the whole list (a Format 3 'set' exports every record,
+    # matched or new); bump only the target's quantity.
+    new_records = []
+    for r in vrecords:
+        j = {"value": {"payload": {"body": r.body}}}
+        if r.body == target.body:
+            j["raw_c"] = 999
+        new_records.append(j)
+
+    intent = _Intent(entry=ename, key=key, field="stock_data_list",
+                     op="set", new=new_records)
+    pabgb_changes, pabgh_change = build_storeinfo_changes(body, header, [intent])
+    assert pabgb_changes, "the quantity bump must not be a no-op"
+
+    patched = _apply(body, pabgb_changes)
+    new_header = bytes.fromhex(pabgh_change["patched"]) if pabgh_change else header
+    _, noffs = parse_pabgh_index(new_header, "storeinfo")
+    nsorted_offs = sorted(noffs.values()) + [len(patched)]
+    nentry_end = nsorted_offs[nsorted_offs.index(noffs[key]) + 1]
+    _, _, npayload = _parse_entry_header(patched, noffs[key], ks)
+    out_records, _s, _e = locate_stock_list(
+        patched, npayload, nentry_end, key, layout)
+
+    out = next(r for r in out_records if r.body == target.body)
+    assert out.raw_c == 999
+    # Untouched fields, and the whole opaque interior, still match
+    # vanilla -- only the field the mod actually set moved.
+    assert out.vgap == target.vgap
+    assert out.lookup_a == target.lookup_a
+    assert out.flag_a == target.flag_a and out.flag_c == target.flag_c
+    assert out.sub_data == target.sub_data
+
+    # Every other slot in the store, none of which the mod touched,
+    # is untouched too.
+    out_by_body = {r.body: r for r in out_records}
+    for r in vrecords:
+        if r.body != target.body:
+            assert out_by_body[r.body].raw_c == r.raw_c
+            assert out_by_body[r.body].vgap == r.vgap

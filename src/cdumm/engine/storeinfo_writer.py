@@ -11,17 +11,22 @@ Safety model (the value-struct interior is only partially mapped, see
 storeinfo_native_parser):
 
 * Records in the intent that MATCH a vanilla record (same
-  ``value.payload.body``, which doubles as ``raw_q``) keep the vanilla
-  bytes verbatim, reordered per the intent. Their pinned fields were
-  validated identical across the whole ground-truth entry; interior
-  diffs observed in real mods are stale-export noise from older game
-  versions, which must NOT be written over current vanilla data.
+  ``value.payload.body``, which doubles as ``raw_q``) take the mod's
+  per-slot fields (quantity, flags, restock/sort order -- everything
+  the head maps), falling back to the vanilla value for any field the
+  mod's JSON omits (GitHub #365 residual: a matched record used to keep
+  100% vanilla bytes, so a mod bumping the stock of an item a store
+  already carried had no effect). The value-struct interior (``vgap``)
+  and ``effect_list`` stay vanilla unconditionally: interior diffs
+  observed in real mods are stale-export noise from older game
+  versions.
 * NEW records are built from the pinned fields plus sub_data, with the
   unmapped value interior zeroed. If a new record carries a NON-zero
   value in any unmapped interior field, the whole intent is refused,
   we cannot place the value, and a wrong placement corrupts the table
   (the game crashes on store open).
-* Non-empty ``effect_list`` refuses (element layout not decoded).
+* A new record's non-empty ``effect_list`` refuses (element layout not
+  decoded); a matched record's carries over from vanilla verbatim.
 """
 from __future__ import annotations
 
@@ -96,6 +101,57 @@ def _check_new_record_buildable(j: dict, idx: int) -> None:
                 f"new stock record [{idx}]: value.raw_q={v['raw_q']!r} "
                 f"differs from value.payload.body; in every "
                 f"ground-truth record they are the same value")
+
+
+def _build_matched_record(j: dict, van: StockRecord) -> StockRecord:
+    """A mod record whose item id matches an existing vanilla stock
+    entry at this store.
+
+    Applies the mod's per-slot fields (quantity, flags, restock/sort
+    order) -- they are exactly as mapped as they are for a brand-new
+    record, and a Format 3 'set' intent means them as an authoritative
+    replacement, not noise. A field the mod's JSON omits falls back to
+    the vanilla value instead of a hardcoded default, since a vanilla
+    record to fall back to actually exists here (unlike the new-record
+    case).
+
+    Keeps vanilla's value-struct interior (``vgap``) and ``effect_list``
+    verbatim rather than trusting the mod's ``value.*`` -- this is the
+    #183 protection, unchanged: interior diffs seen in real mods are
+    stale-export noise from an older layout, and the interior encodes
+    the ITEM's own definition (price/type), which does not vary by
+    which store sells it.
+    """
+    def field(name: str) -> int:
+        v = j.get(name)
+        return int(v) if v is not None else getattr(van, name)
+
+    order_index = j.get("order_index_113", j.get("order_index"))
+    order_index = (int(order_index) & 0xFFFFFFFF if order_index is not None
+                   else van.order_index)
+    low_thr = j.get("low_price_threshold_count")
+    low_thr = (int(low_thr) & 0xFFFFFFFF if low_thr is not None
+               else van.low_price_threshold_count)
+
+    return StockRecord(
+        lookup_a=field("lookup_a"),
+        raw_a=field("raw_a"),
+        raw_b=field("raw_b"),
+        raw_c=field("raw_c"),
+        low_price_threshold_count=low_thr,
+        raw_d=field("raw_d"),
+        raw_e=field("raw_e"),
+        order_index=order_index,
+        flag_a=field("flag_a"),
+        flag_b=field("flag_b"),
+        flag_c=field("flag_c"),
+        is_restore_item=field("is_restore_item"),
+        const33=van.const33,
+        body=van.body,
+        vgap=van.vgap,
+        sub_data=van.sub_data,
+        effect_list=van.effect_list,
+    )
 
 
 def _build_new_record(j: dict, idx: int,
@@ -309,9 +365,12 @@ def build_storeinfo_changes(
         # sub_data, the always-zero effect_list count) is written back
         # verbatim by write_stock_record, and any byte pattern outside
         # the verified disc-0 shape raises StoreinfoParseError above
-        # (caught as a refusal) instead of parsing lossily. Matched
-        # vanilla records therefore reproduce their bytes exactly;
-        # tests/test_storeinfo_writer.py pins this on the real table.
+        # (caught as a refusal) instead of parsing lossily. A matched
+        # record whose mod JSON reproduces vanilla's head fields
+        # therefore round-trips byte-exact too (see
+        # _build_matched_record for the fields that always stay
+        # vanilla); tests/test_storeinfo_writer.py pins this on the
+        # real table.
         if list_end > entry_end:
             raise StoreinfoWriteRefused(
                 f"store entry {key}: parsed list overruns the entry "
@@ -325,7 +384,7 @@ def build_storeinfo_changes(
             ident = _record_identity(j)
             van = by_body.get(ident) if ident is not None else None
             if van is not None:
-                out_records.append(van)
+                out_records.append(_build_matched_record(j, van))
             else:
                 out_records.append(
                     _build_new_record(j, idx, layout))
