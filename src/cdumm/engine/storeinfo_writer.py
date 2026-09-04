@@ -16,8 +16,8 @@ storeinfo_native_parser):
   the head maps), falling back to the vanilla value for any field the
   mod's JSON omits (GitHub #365 residual: a matched record used to keep
   100% vanilla bytes, so a mod bumping the stock of an item a store
-  already carried had no effect). The value-struct interior (``vgap``)
-  and ``effect_list`` stay vanilla unconditionally: interior diffs
+  already carried had no effect). The opaque blocks (``vgap``,
+  ``sub_gap``) and ``effect_list`` stay vanilla unconditionally: diffs
   observed in real mods are stale-export noise from older game
   versions.
 * NEW records are built from the pinned fields plus sub_data, with the
@@ -121,9 +121,9 @@ def _build_matched_record(j: dict, van: StockRecord) -> StockRecord:
     record to fall back to actually exists here (unlike the new-record
     case).
 
-    Keeps vanilla's value-struct interior (``vgap``) and ``effect_list``
-    verbatim rather than trusting the mod's ``value.*`` -- this is the
-    #183 protection, unchanged: interior diffs seen in real mods are
+    Keeps vanilla's opaque blocks (``vgap``, ``sub_gap``) and its
+    ``effect_list`` verbatim rather than trusting the mod's ``value.*``
+    -- this is the #183 protection, unchanged: interior diffs are
     stale-export noise from an older layout, and the interior encodes
     the ITEM's own definition (price/type), which does not vary by
     which store sells it.
@@ -156,6 +156,7 @@ def _build_matched_record(j: dict, van: StockRecord) -> StockRecord:
         body=van.body,
         vgap=van.vgap,
         sub_data=van.sub_data,
+        sub_gap=van.sub_gap,
         effect_list=van.effect_list,
     )
 
@@ -229,6 +230,10 @@ def _build_new_record(j: dict, idx: int,
                      int(v.get("raw_g") or 0) & 0xFFFF)
     struct.pack_into("<I", vgap, layout.raw_q_off, int(v.get("raw_q") or 0))
     rec.vgap = bytes(vgap)
+    # The second opaque block (CD b25116796+). Zero in every record the
+    # game ships, so a new record gets zeros -- and on a build that has
+    # no such block, layout.sub_gap_size is 0 and this is empty.
+    rec.sub_gap = b"\x00" * layout.sub_gap_size
     sd = j.get("sub_data")
     if sd is not None:
         rec.sub_data = {

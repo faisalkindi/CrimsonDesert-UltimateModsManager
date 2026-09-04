@@ -231,6 +231,37 @@ def has_vanilla_b24994088(name: str) -> bool:
         return False
 
 
+def load_vanilla_b25116796(name: str) -> bytes:
+    """Load a vanilla extract from Steam buildid 25116796 (4 Sep 2026).
+
+    The update that renamed every table to ``.staticinfoheader`` /
+    ``.staticinfobody`` also changed the storeinfo stock record: 8 zero
+    bytes appeared between ``sub_data`` and the ``effect_list`` count,
+    with nothing ahead of them moving. Every pre-existing layout reads
+    at most 17 of the 436 entries, so the writer refused 16 of the 17
+    stores in donr484's "Shop Smart. Shop H-Mart".
+
+    Named by buildid, not by a version string: this build's
+    bin64/CrimsonDesert.exe still reports 1.0.0.2760, so there is no
+    in-app label to cite (same reasoning as ``load_vanilla_b24773079``).
+    Extracted from ``gamedata/storeinfo.staticinfo*`` but stored under
+    the logical ``.pabgb`` / ``.pabgh`` names the codebase uses
+    throughout (see ``cdumm.archive.table_ext``).
+    """
+    packed = _TESTS_DIR / "fixtures" / "vanilla_b25116796" / (name + ".zlib")
+    if packed.exists():
+        return zlib.decompress(packed.read_bytes())
+    raise FileNotFoundError(
+        f"vanilla_b25116796 fixture {name!r} absent from tests/fixtures")
+
+
+def has_vanilla_b25116796(name: str) -> bool:
+    try:
+        load_vanilla_b25116796(name)
+        return True
+    except FileNotFoundError:
+        return False
+
 
 def has_vanilla115(name: str) -> bool:
     try:
