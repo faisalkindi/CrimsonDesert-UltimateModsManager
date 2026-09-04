@@ -194,6 +194,52 @@ def test_apply_disabling_every_json_mod_does_not_bail_with_stale_overlay(
     db.close()
 
 
+def test_apply_deactivating_a_silently_failed_json_mod_reconciles_state(
+        tmp_path: Path) -> None:
+    """Report 2026-09-04 (glebk): deactivating every mod gave "Apply
+    Failed: No mod changes to apply or revert" and the card kept its
+    "Apply to Deactivate" badge on every retry.
+
+    The mod was a json_source mod whose patches all got skipped at the
+    previous apply (APPLY_SILENT_FAILURE, "no PAMT entry for ..."), so it
+    was snapshotted as applied=1 while leaving NO overlay dir on disk.
+    Turning it off then produced empty file_deltas/revert_files/
+    has_enabled_json and — unlike the 2026-08-26 case — no stale overlay
+    to catch the bail either, so Apply errored out. error_occurred means
+    no finished() signal, so the GUI never re-snapshotted applied state
+    and the pending badge could never clear.
+
+    applied != enabled is a pending user change: Apply must run and
+    finish so the state gets reconciled.
+    """
+    game_dir, vanilla_dir, db = _setup_apply_test(tmp_path)
+
+    # Disabled json_source mod still marked applied=1 by the previous
+    # (silently failed) apply. No mod_deltas row, no overlay dir on disk.
+    db.connection.execute(
+        "INSERT INTO mods (name, mod_type, enabled, applied, json_source, "
+        "priority) VALUES ('JsonMod', 'paz', 0, 1, 'C:/fake/JsonMod.json', 1)"
+    )
+    db.connection.commit()
+    assert not any(d.name.isdigit() and int(d.name) >= 36
+                   for d in game_dir.iterdir() if d.is_dir()), (
+        "precondition: no overlay dir on disk, so has_stale_overlay can't "
+        "be what saves this case")
+
+    worker = ApplyWorker(game_dir, vanilla_dir, db.db_path)
+    errors = []
+    finished = []
+    worker.error_occurred.connect(lambda e: errors.append(e))
+    worker.finished.connect(lambda: finished.append(True))
+    worker.run()
+
+    assert errors == [], f"Apply must not bail on a pending deactivation: {errors}"
+    assert len(finished) == 1, (
+        "finished() must fire so the GUI re-snapshots applied state and the "
+        "'Apply to Deactivate' badge clears")
+    db.close()
+
+
 def test_revert_no_backups(tmp_path: Path) -> None:
     game_dir = tmp_path / "game"
     game_dir.mkdir()
