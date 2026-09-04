@@ -24,8 +24,11 @@ import struct
 import time
 from typing import Any, Callable, Iterable
 
-# Data-table blob (.pabgb) + schema/header (.pabgh) extensions.
-TABLE_EXTS = (".pabgb", ".pabgh")
+from cdumm.archive.table_ext import BODY_EXTS, HEADER_EXTS
+
+# Data-table blob + schema/header extensions, under both the pre- and
+# post-2026-09-04 names (see cdumm.archive.table_ext).
+TABLE_EXTS = BODY_EXTS + HEADER_EXTS
 
 # The game's own verbose reflection-serialized formats — these embed a real
 # field / type / object name schema as text (readable via decode_reflection /
@@ -143,8 +146,9 @@ def write_stats(con: sqlite3.Connection, **extra: Any) -> dict:
     # One data table == one .pabgb blob (+ its .pabgh key index). Count the
     # blobs only, so the paired header file isn't tallied as a second table.
     distinct = con.execute(
-        "SELECT COUNT(DISTINCT name) FROM data_tables "
-        "WHERE name LIKE '%.pabgb'").fetchone()[0]
+        "SELECT COUNT(DISTINCT name) FROM data_tables WHERE "
+        + " OR ".join("name LIKE ?" for _ in BODY_EXTS),
+        tuple("%" + e for e in BODY_EXTS)).fetchone()[0]
     stats: dict[str, Any] = {
         "assets_total": total,
         "archives": archives,

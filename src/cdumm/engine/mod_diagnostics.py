@@ -14,6 +14,8 @@ import struct
 import zipfile
 from pathlib import Path
 
+from cdumm.archive.table_ext import BODY_EXTS, header_path_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -192,7 +194,7 @@ def _diagnose_archive(mod_path: Path, game_dir: Path, db_path: Path,
 
     # Check for loose game files (xml, css, etc. without numbered dirs)
     loose_game = [n for n in names if n.lower().endswith(
-        (".xml", ".css", ".pabgb", ".paac", ".dds"))
+        (".xml", ".css", ".paac", ".dds") + BODY_EXTS)
         and not n.startswith("__MACOSX")]
     if loose_game and "paz_dirs" not in detected:
         detected.append("loose_files")
@@ -487,7 +489,7 @@ def _verify_json_patch_bytes(data: dict, game_dir: Path,
                     from cdumm.engine.json_patch_handler import (
                         _build_name_offsets_for_v2,
                     )
-                    pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+                    pabgh_file = header_path_for(game_file)
                     pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
                     if pabgh_entry is not None:
                         pabgh_raw = open(pabgh_entry.paz_file, 'rb').read()

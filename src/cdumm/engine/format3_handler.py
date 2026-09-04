@@ -46,6 +46,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from cdumm.archive.table_ext import (
+    is_body_path, strip_body_ext, strip_table_ext,
+)
 from cdumm.engine.characterinfo_writer import (
     SUPPORTED_FIELDS as _CHARACTERINFO_FIELDS,
 )
@@ -507,9 +510,7 @@ def _apply_field_aliases(
     replaced with a fresh dataclasses.replace() copy rather than
     mutated in place.
     """
-    tname = target.lower()
-    if not (tname == "iteminfo.pabgb"
-            or tname.endswith("/iteminfo.pabgb")):
+    if not is_body_path(target) or strip_table_ext(target) != "iteminfo":
         return
     import dataclasses
     for i, intent in enumerate(intents):
@@ -655,15 +656,21 @@ def parse_format3_mod(path: Path) -> tuple[str, list[Format3Intent]]:
 
 
 def _table_name_from_target(target: str) -> str:
-    """Strip ``.pabgb`` and normalize to the schema's lowercase key.
+    """Strip the table body extension and lowercase.
 
     ``parser.has_schema`` looks up by the lowercase filename stem —
-    same convention CDUMM uses everywhere else.
+    same convention CDUMM uses everywhere else. Both the mod-declared
+    ``.pabgb`` name and the post-2026-09-04 ``.staticinfobody`` the
+    game now ships strip to the same key (cdumm.archive.table_ext).
+
+    Deliberately keeps any leading directory: a path-qualified target
+    comes back as ``gamedata/iteminfo``. Two callers in
+    ``format3_apply`` are built around that and re-derive the bare
+    name themselves (see the comments at the ``array_append`` and
+    ``match`` routers), so stripping the path here would silently
+    change which intents those routers expand.
     """
-    name = target
-    if name.lower().endswith(".pabgb"):
-        name = name[: -len(".pabgb")]
-    return name.lower()
+    return strip_body_ext(target)
 
 
 _SUPPORTED_OPS = frozenset({"set"})
@@ -1259,7 +1266,7 @@ def _diagnose_unsupported_intent(
         # those at validation , the apply-time helper does the real
         # resolution and emits zero-bytes-cleanly when an item is
         # behind an unknown variant tag.
-        tn = (table_name or "").lower().replace(".pabgb", "")
+        tn = strip_body_ext(table_name or "")
         if tn == "buffinfo" and (field or "").startswith(
                 "buff_data_list["):
             return None
@@ -1332,7 +1339,7 @@ def _diagnose_unsupported_intent(
     if isinstance(new_value, list) and new_value and isinstance(
             new_value[0], dict):
         # Table-specific list-writer registered? Allow.
-        tn = (table_name or "").lower().replace(".pabgb", "")
+        tn = strip_body_ext(table_name or "")
         if (tn, field) in LIST_WRITERS:
             return None
         return (
@@ -1465,7 +1472,7 @@ def _classify_intent(
     # resolve, so a typo in the nested path produces a clean
     # "0 byte changes" warning rather than a misleading
     # "add a field_schema entry" instruction the author can't act on.
-    tn_norm = (table_name or "").lower().replace(".pabgb", "")
+    tn_norm = strip_body_ext(table_name or "")
     if tn_norm == "buffinfo" and intent.field.startswith(
             "buff_data_list["):
         return None

@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 # Map file path patterns to parsers
 _PARSERS = {
     ".pabgb": identify_pabgb_records,
+    # Same container, renamed by the 2026-09-04 client update.
+    ".staticinfobody": identify_pabgb_records,
     ".paac": identify_paac_records,
     ".pamt": identify_pamt_records,
 }

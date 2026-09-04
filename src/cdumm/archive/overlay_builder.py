@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional
 
 from cdumm.archive.hashlittle import hashlittle
 from cdumm.archive.paz_crypto import lz4_compress
+from cdumm.archive.table_ext import header_path_for, is_body_path, is_header_path
 from cdumm.engine.cdmods_paths import get_cdmods_root
 
 if TYPE_CHECKING:
@@ -540,8 +541,10 @@ def _get_vanilla_pabgh(
     if not pamt_dir or not game_dir:
         return None
 
-    # Derive PABGH path from PABGB path
-    pabgh_path = pabgb_entry_path.replace(".pabgb", ".pabgh")
+    # Derive PABGH path from PABGB path, keeping the naming family the
+    # live PAMT uses — post-2026-09-04 installs store the pair as
+    # .staticinfoheader / .staticinfobody (cdumm.archive.table_ext).
+    pabgh_path = header_path_for(pabgb_entry_path)
     pabgh_filename = pabgh_path.rsplit("/", 1)[-1] if "/" in pabgh_path else pabgh_path
 
     game_dir = Path(game_dir)
@@ -628,7 +631,7 @@ def build_overlay(
     _added_pabgh: set[str] = set()
     for _c, _m in entries:
         _ep = _m.get("entry_path", "")
-        if _ep.lower().endswith(".pabgh"):
+        if is_header_path(_ep):
             _added_pabgh.add(_ep.lower())
     total_entries = len(entries)
 
@@ -645,10 +648,10 @@ def build_overlay(
         the mod silently broke after the first apply (audit finding
         C6, 2026-06-10).
         """
-        if not (filename.endswith(".pabgb") and game_dir):
+        if not (is_body_path(filename) and game_dir):
             return
-        pabgh_name = filename.replace(".pabgb", ".pabgh")
-        companion_entry_path = entry_path.rsplit(".", 1)[0] + ".pabgh"
+        pabgh_name = header_path_for(filename)
+        companion_entry_path = header_path_for(entry_path)
         pabgh_dedupe_key = companion_entry_path.lower()
         if pabgh_dedupe_key in _added_pabgh:
             return
