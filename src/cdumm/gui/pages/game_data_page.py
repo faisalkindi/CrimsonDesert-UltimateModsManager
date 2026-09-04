@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QHeaderView,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 from qfluentwidgets import TableItemDelegate, isDarkTheme
 
+from cdumm.archive.table_ext import header_path_for, is_body_path
 from cdumm.engine import game_index
 from cdumm.gui.pages.tool_page import ToolPageBase
 from cdumm.platform import IS_MACOS, IS_WINDOWS
@@ -210,6 +211,7 @@ _CAT_COLOUR = {
 }
 _EXT_CAT = {
     ".pabgb": "table", ".pabgh": "table",
+    ".staticinfobody": "table", ".staticinfoheader": "table",
     ".wem": "audio", ".bnk": "audio", ".pasound": "audio",
     ".mp4": "video",
     ".dds": "visual", ".png": "visual", ".padxil": "visual", ".material": "visual",
@@ -471,7 +473,7 @@ class _PreviewWorker(QObject):
         gd = self._game_dir
 
         # 1) keyed game-data table → parsed grid (CDUMM's semantic schemas)
-        if gd and self._path.endswith(".pabgb"):
+        if gd and is_body_path(self._path):
             try:
                 from cdumm.semantic import parser as sem
                 table = sem.identify_table_from_path(self._path)
@@ -484,7 +486,7 @@ class _PreviewWorker(QObject):
                 try:
                     body = game_index.extract_asset(con, self._path, gd)
                     header = game_index.extract_asset(
-                        con, self._path[:-6] + ".pabgh", gd)
+                        con, header_path_for(self._path), gd)
                     # Display-only decoder: honors override flags + walks
                     # variable-length fields so richly-schema'd tables
                     # (iteminfo, regioninfo, ...) show their real columns.

@@ -56,6 +56,9 @@ from typing import TYPE_CHECKING
 from cdumm.archive.paz_parse import parse_pamt, PazEntry
 from cdumm.archive.paz_crypto import decrypt, encrypt, lz4_decompress, lz4_compress
 from cdumm.archive.paz_repack import repack_entry_bytes, _save_timestamps
+from cdumm.archive.table_ext import (
+    alias_paths, header_path_for, is_body_path, BODY_EXTS, HEADER_EXTS,
+)
 from cdumm.engine.cdmods_paths import get_cdmods_root
 
 if TYPE_CHECKING:
@@ -70,7 +73,7 @@ def _prettify(name: str) -> str:
     return prettify_mod_name(name)
 
 
-_PABGB_DATA_TABLE_EXTS = (".pabgb", ".pabgh", ".pamt")
+_PABGB_DATA_TABLE_EXTS = BODY_EXTS + HEADER_EXTS + (".pamt",)
 
 
 def _should_reject_partial_pabgb(game_file: str, applied: int,
@@ -1783,7 +1786,7 @@ def convert_json_patch_to_paz(
         needs_pabgh = any(
             c.get("record_key") is not None or c.get("entry") for c in changes)
         if needs_pabgh:
-            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_file = header_path_for(game_file)
             pabgh_entry = entry_cache.get(pabgh_file.lower())
             if pabgh_entry is None:
                 pabgh_entry = _find_pamt_entry(pabgh_file, vanilla_dir)
@@ -2031,6 +2034,34 @@ def _update_pamt_record(pamt_path: Path, entry: PazEntry,
 _pamt_index_cache: dict[str, dict[str, PazEntry]] = {}
 
 
+_PAMT_INDEX_CACHE_VERSION = "v4"
+
+
+def _retire_superseded_index_caches(cdmods: Path) -> None:
+    """Delete PAMT index caches left behind by older cache versions.
+
+    Only files matching CDUMM's own ``.pamt_index*.cache`` naming are
+    touched, and only those NOT carrying the current version tag. One
+    CDMods root legitimately holds several current-version caches at
+    once (``_vanilla`` plus one ``_game_<hash>`` per install), so the
+    sweep must key on the version, not on the single filename the
+    caller happens to be about to write.
+    """
+    keep_prefix = f".pamt_index_{_PAMT_INDEX_CACHE_VERSION}_"
+    try:
+        for old in cdmods.glob(".pamt_index*.cache"):
+            if old.name.startswith(keep_prefix):
+                continue
+            try:
+                old.unlink()
+                logger.info("Removed superseded PAMT index cache: %s",
+                            old.name)
+            except OSError as e:
+                logger.debug("Could not remove %s: %s", old.name, e)
+    except OSError as e:
+        logger.debug("PAMT cache sweep failed in %s: %s", cdmods, e)
+
+
 def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     """Build or retrieve a cached index of all PAMT entries for a game directory.
 
@@ -2070,6 +2101,10 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     _key = "vanilla" if game_dir.name == "vanilla" else (
         "game_" + _hashlib.sha1(str(game_dir).encode("utf-8")).hexdigest()[:12]
     )
+    # Cache version bumped to v4 on 2026-09-04 for the .pabgb ->
+    # .staticinfobody alias keys (see cdumm.archive.table_ext). A v3
+    # cache carries only the post-update names, so every mod-declared
+    # ".pabgb" lookup missed and Apply ended in APPLY_SILENT_FAILURE.
     # Cache version bumped to v3 on 2026-05-26 when the twin-entry
     # tracking landed (AeGhBrA/jikulopo #167). Older caches only have
     # the single-entry path map; the twin retry path needs the new
@@ -2077,7 +2112,15 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     # v2 was the first-seen-wins basename fix (paloroycevincent-sketch
     # GitHub #99). Bumping the filename forces a one-time rebuild on
     # the next run.
-    cache_path = cdmods / f".pamt_index_v3_{_key}.cache"
+    cache_path = cdmods / (
+        f".pamt_index_{_PAMT_INDEX_CACHE_VERSION}_{_key}.cache")
+    # Superseded index caches are never read again and are NOT small:
+    # a full live-game index pickles to ~600 MB, the vanilla snapshot
+    # to ~340 MB. Earlier bumps left them behind as "harmless
+    # leftovers"; at this size that is nearly a gigabyte of dead disk
+    # per CDMods root, so retire them when the new version is written
+    # (best-effort — a locked or missing file is not an error).
+    _retire_superseded_index_caches(cdmods)
     if cache_path.exists():
         try:
             cache_mtime = cache_path.stat().st_mtime
@@ -2116,55 +2159,66 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
         try:
             entries = parse_pamt(str(pamt), paz_dir=str(d))
             for e in entries:
-                ep = e.path.lower().replace("\\", "/")
-                # #167 (AeGhBrA, jikulopo): some PAMTs hold the same
-                # full path twice with different binary content. Skip
-                # More Animations (Nexus 774) patches paseq files that
-                # live in 0014 at "sequencer/gimmick_craft_stone_repair_01.paseq"
-                # for both copies; the mod JSON declares the longer
-                # "sequencer/binary__/baseseq/.../foo.paseq" form. The
-                # old index overwrote one entry with the other, so the
-                # apply path could only ever see whichever copy was
-                # parsed last. Track every copy under a sidecar
-                # "__twins:" key so the apply loop can retry on the
-                # other twin when the first one's bytes don't match.
-                if ep in index:
-                    twins_key = "__twins:" + ep
-                    twins = index.get(twins_key)
-                    if not isinstance(twins, list):
-                        twins = [index[ep]]
-                        index[twins_key] = twins
-                    twins.append(e)
-                index[ep] = e
-                bname = ep.rsplit("/", 1)[-1]
-                # First-seen-wins for bare-basename collisions. Crimson
-                # Desert ships two iteminfo.pabgb (one in gamedata/ in
-                # 0008/0.paz, one in ui/ in 0072/0.paz). The old code
-                # used a naive index[bname] = e, so 0072 overwrote
-                # 0008, and Format 3 mods targeting "iteminfo.pabgb"
-                # without a path prefix ended up reading the wrong
-                # file and erroring out with "vanilla bytes unavailable"
-                # because the writer's schema does not match the UI
-                # variant. paloroycevincent-sketch GitHub #99 reproduced
-                # this exactly. Because sorted(game_dir.iterdir())
-                # walks the numbered directories in ascending order,
-                # setdefault makes the lowest-numbered PAZ directory
-                # win, which for iteminfo.pabgb is 0008 = gamedata.
-                # Mod authors who want a specific path-distinguished
-                # variant should still use the full path (e.g.
-                # "ui/iteminfo.pabgb"); the exact-match branch in
-                # _find_pamt_entry handles those without ambiguity.
-                index.setdefault(bname, e)
-                # #167: also track EVERY entry with this basename, so
-                # _find_pamt_entries can hand all candidates back to
-                # the apply loop when the first-seen pick mismatches
-                # the patch's expected bytes.
-                bn_key = "__basename_all:" + bname
-                bn_list = index.get(bn_key)
-                if not isinstance(bn_list, list):
-                    bn_list = []
-                    index[bn_key] = bn_list
-                bn_list.append(e)
+                real_ep = e.path.lower().replace("\\", "/")
+                # The 2026-09-04 client update renamed every data
+                # table from <table>.pabgh / <table>.pabgb to
+                # <table>.staticinfoheader / <table>.staticinfobody
+                # without changing a byte of either container. Mods
+                # (and every already-imported CDMods entry) still
+                # declare the .pabgb names, so register each table
+                # entry under BOTH names and a lookup in either
+                # naming resolves. alias_paths puts the real name
+                # first, so the first-seen-wins rules below behave
+                # exactly as they did pre-update.
+                for ep in alias_paths(real_ep):
+                    # #167 (AeGhBrA, jikulopo): some PAMTs hold the same
+                    # full path twice with different binary content. Skip
+                    # More Animations (Nexus 774) patches paseq files that
+                    # live in 0014 at "sequencer/gimmick_craft_stone_repair_01.paseq"
+                    # for both copies; the mod JSON declares the longer
+                    # "sequencer/binary__/baseseq/.../foo.paseq" form. The
+                    # old index overwrote one entry with the other, so the
+                    # apply path could only ever see whichever copy was
+                    # parsed last. Track every copy under a sidecar
+                    # "__twins:" key so the apply loop can retry on the
+                    # other twin when the first one's bytes don't match.
+                    if ep in index:
+                        twins_key = "__twins:" + ep
+                        twins = index.get(twins_key)
+                        if not isinstance(twins, list):
+                            twins = [index[ep]]
+                            index[twins_key] = twins
+                        twins.append(e)
+                    index[ep] = e
+                    bname = ep.rsplit("/", 1)[-1]
+                    # First-seen-wins for bare-basename collisions. Crimson
+                    # Desert ships two iteminfo.pabgb (one in gamedata/ in
+                    # 0008/0.paz, one in ui/ in 0072/0.paz). The old code
+                    # used a naive index[bname] = e, so 0072 overwrote
+                    # 0008, and Format 3 mods targeting "iteminfo.pabgb"
+                    # without a path prefix ended up reading the wrong
+                    # file and erroring out with "vanilla bytes unavailable"
+                    # because the writer's schema does not match the UI
+                    # variant. paloroycevincent-sketch GitHub #99 reproduced
+                    # this exactly. Because sorted(game_dir.iterdir())
+                    # walks the numbered directories in ascending order,
+                    # setdefault makes the lowest-numbered PAZ directory
+                    # win, which for iteminfo.pabgb is 0008 = gamedata.
+                    # Mod authors who want a specific path-distinguished
+                    # variant should still use the full path (e.g.
+                    # "ui/iteminfo.pabgb"); the exact-match branch in
+                    # _find_pamt_entry handles those without ambiguity.
+                    index.setdefault(bname, e)
+                    # #167: also track EVERY entry with this basename, so
+                    # _find_pamt_entries can hand all candidates back to
+                    # the apply loop when the first-seen pick mismatches
+                    # the patch's expected bytes.
+                    bn_key = "__basename_all:" + bname
+                    bn_list = index.get(bn_key)
+                    if not isinstance(bn_list, list):
+                        bn_list = []
+                        index[bn_key] = bn_list
+                    bn_list.append(e)
         except Exception:
             continue
 
@@ -2456,7 +2510,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         # v2 entry-anchored: resolve name→offset map for characterinfo.pabgb etc.
         name_offsets = None
         if any(c.get("entry") for c in changes):
-            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_file = header_path_for(game_file)
             pabgh_entry = entry_cache.get(pabgh_file.lower())
             if pabgh_entry is None:
                 pabgh_entry = _find_pamt_entry(pabgh_file, game_dir)
@@ -3021,7 +3075,7 @@ def process_json_patches_for_overlay(
         name_offsets = None
         any_entry_anchored = any(c.get("entry") for c in changes)
         if any_entry_anchored:
-            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+            pabgh_file = header_path_for(game_file)
             pabgh_entry = None
             if vanilla_source_resolver is not None:
                 try:
@@ -3343,8 +3397,8 @@ def process_json_patches_for_overlay(
         # the companion .pabgh must have its entry pointers shifted so the
         # game can still find each blob. Emit the fixed .pabgh as an extra
         # overlay entry so it overrides vanilla at load time.
-        if inserts_out and game_file.lower().endswith(".pabgb"):
-            pabgh_file = game_file.rsplit(".", 1)[0] + ".pabgh"
+        if inserts_out and is_body_path(game_file):
+            pabgh_file = header_path_for(game_file)
             pabgh_entry_for_fixup = None
             if vanilla_source_resolver is not None:
                 try:

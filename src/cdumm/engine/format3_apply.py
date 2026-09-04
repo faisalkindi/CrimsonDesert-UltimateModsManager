@@ -38,6 +38,10 @@ import struct
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from cdumm.archive.table_ext import (
+    header_path_for, strip_body_ext, to_legacy_name,
+)
+
 # The writer's field-name resolver, shared on purpose: a `match` key must
 # accept exactly the spellings a `field` key accepts, and copying the rule
 # would let the two drift apart silently.
@@ -762,6 +766,14 @@ def expand_format3_into_aggregated(
         n_mods_processed += 1
 
         for target, intents in target_pairs:
+            # Speak one naming internally: _WHOLE_TABLE_TARGETS, the
+            # per-table writer dispatch and the user-facing warnings
+            # are all keyed on "<table>.pabgb". A mod that declares the
+            # post-2026-09-04 "<table>.staticinfobody" resolves to the
+            # same file either way (table_ext), and normalising here
+            # keeps it on the whole-table writer path instead of
+            # silently falling through to a byte-level no-op.
+            target = to_legacy_name(target)
             try:
                 # Validate intents against the schema + community field_schema
                 validation = validate_intents(target, intents)
@@ -893,7 +905,7 @@ def expand_format3_into_aggregated(
                     body_change["_source_mod_ids"] = [mod_id]
                     aggregated.setdefault(target, []).append(body_change)
                     if companion is not None:
-                        comp_target = target.replace(".pabgb", ".pabgh")
+                        comp_target = header_path_for(target)
                         companion["_target_file"] = comp_target
                         companion["_source_mod_ids"] = [mod_id]
                         aggregated.setdefault(
@@ -1612,7 +1624,7 @@ def expand_format3_into_aggregated(
                         return (_f in ("stock_data_list",
                                        "_exchangeItemInfoListForSell")
                                 or _slot_re.match(_f) is not None)
-                _companion = target.replace(".pabgb", ".pabgh")
+                _companion = header_path_for(target)
                 # Per-intent mod attribution (index-aligned with the
                 # original batched list, built BEFORE any filtering).
                 _intent_mods = whole_table_intent_mods.get(target, [])
@@ -2467,7 +2479,7 @@ def _route_pabgh_companion(change: dict, target: str, out: list) -> None:
     companion = change.pop("_pabgh_companion", None)
     if companion is None:
         return
-    companion["_target_file"] = target.replace(".pabgb", ".pabgh")
+    companion["_target_file"] = header_path_for(target)
     out.append(companion)
 
 
@@ -3012,9 +3024,11 @@ def _entry_name(body: bytes, entry_off: int,
 
 
 def _strip_pabgb(target: str) -> str:
-    name = target
-    if "/" in name:
-        name = name.rsplit("/", 1)[-1]
-    if name.lower().endswith(".pabgb"):
-        name = name[: -len(".pabgb")]
-    return name.lower()
+    """Table name for a body target, in either naming family (table_ext).
+
+    Body extensions only, matching the pre-rename behaviour exactly: a
+    header path is returned with its extension intact so the caller
+    still fails the table lookup it always failed.
+    """
+    name = target.rsplit("/", 1)[-1] if "/" in target else target
+    return strip_body_ext(name)

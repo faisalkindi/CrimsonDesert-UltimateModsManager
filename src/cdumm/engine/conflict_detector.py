@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 
 from cdumm.archive.format_parsers import identify_records_for_file
+from cdumm.archive.table_ext import alias_paths
 from cdumm.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -100,10 +101,17 @@ class ConflictDetector:
         """A Format 3 target is a bare name (iteminfo.pabgb); an entry_path
         may be the full game path. Compare on the basename -- the same trap
         that made `match` select zero records (#275) and array_append a
-        no-op (#278)."""
+        no-op (#278).
+
+        Compare on the alias set, not the literal basename: mods declare
+        ``iteminfo.pabgb`` while a post-2026-09-04 entry_path reads
+        ``gamedata/iteminfo.staticinfobody``. A literal compare misses,
+        and two Format 3 mods editing the same table stop being seen as
+        touching the same file (cdumm.archive.table_ext).
+        """
         t = (target or "").lower().replace("\\", "/").rsplit("/", 1)[-1]
         e = (entry_path or "").lower().replace("\\", "/").rsplit("/", 1)[-1]
-        return bool(t) and t == e
+        return bool(t) and e in alias_paths(t)
 
     def _semantic_conflict_info(
         self, entry_path: str,

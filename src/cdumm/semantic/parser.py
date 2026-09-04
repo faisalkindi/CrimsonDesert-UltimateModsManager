@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cdumm.archive.table_ext import is_body_path, strip_table_ext
+
 logger = logging.getLogger(__name__)
 
 # Tables that use u32 count instead of u16 in pabgh header.
@@ -823,6 +825,7 @@ def identify_table_from_path(entry_path: str) -> str | None:
     """Extract table name from a PAMT entry path.
 
     e.g., 'gamedata/inventory.pabgb' → 'inventory'
+         'gamedata/inventory.staticinfobody' → 'inventory'
          'gamedata/binary__/client/bin/iteminfo.pabgb' → 'iteminfo'
     """
     if not entry_path:
@@ -832,8 +835,11 @@ def identify_table_from_path(entry_path: str) -> str | None:
     parts = entry_path.rsplit("/", 1)
     filename = parts[-1] if len(parts) > 1 else parts[0]
 
-    if not filename.endswith(".pabgb"):
+    # Post-2026-09-04 installs store the same container as
+    # <table>.staticinfobody; both names identify the same table
+    # (cdumm.archive.table_ext).
+    if not is_body_path(filename):
         return None
 
-    table_name = filename[:-6]  # strip .pabgb
+    table_name = strip_table_ext(filename)
     return table_name if has_schema(table_name) else None
