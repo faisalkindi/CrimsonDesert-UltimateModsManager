@@ -1940,10 +1940,39 @@ class ApplyWorker(QObject):
             if d.is_dir() and d.name.isdigit() and len(d.name) == 4
             and int(d.name) >= 36
         )
+        # The stale-overlay probe above only fires when the disabled mods
+        # actually managed to BUILD an overlay. A json_source mod whose
+        # patches all got skipped (APPLY_SILENT_FAILURE: "no PAMT entry
+        # for ...") is still snapshotted as applied=1 when that apply
+        # finishes, yet it left nothing on disk. Turning it off then gave
+        # empty file_deltas/revert_files/has_enabled_json AND no overlay
+        # dir, so Apply bailed with "No mod changes to apply or revert" —
+        # error, no finished() signal, so the GUI never re-snapshotted and
+        # the card kept its "Apply to Deactivate" badge forever, with
+        # every retry hitting the same error (report 2026-09-04).
+        # The DB's own applied-vs-enabled bookkeeping is the authority on
+        # whether the user has a pending change: if any paz mod's applied
+        # flag disagrees with its enabled flag, run the normal flow (it
+        # reaches orphan-cleanup, the PAPGT rebuild and a clean commit)
+        # so the state gets reconciled and the badge clears.
+        try:
+            has_pending_state_change = self._db.connection.execute(
+                "SELECT 1 FROM mods WHERE mod_type = 'paz' "
+                "AND COALESCE(applied, 0) != COALESCE(enabled, 0) "
+                "LIMIT 1").fetchone() is not None
+        except Exception as e:  # noqa: BLE001 - bookkeeping must never
+            # break apply (a pre-migration DB has no `applied` column)
+            logger.debug("applied/enabled sync check failed: %s", e)
+            has_pending_state_change = False
         if (not file_deltas and not revert_files and not has_enabled_json
-                and not has_stale_overlay):
+                and not has_stale_overlay and not has_pending_state_change):
             self.error_occurred.emit("No mod changes to apply or revert.")
             return
+        if (not file_deltas and not revert_files and not has_enabled_json
+                and not has_stale_overlay):
+            logger.info(
+                "Nothing to write, but mod applied/enabled state is out of "
+                "sync — running apply to reconcile it")
 
         # Entry-level deltas (from script mods) require updating the PAMT
         # after PAZ composition. Track updates here for Phase 2.
