@@ -27,7 +27,7 @@ real tables, exactly one offset per entry satisfies it; never two.
 
 A stock record is::
 
-    [fixed head][sub_data optional][effect_list carray]
+    [fixed head][sub_data optional][sub_gap][effect_list carray]
 
 Head fields, in every layout so far::
 
@@ -46,25 +46,33 @@ Head fields, in every layout so far::
 
 ``sub_data`` uses the engine's optional encoding: u8 flag right after
 the head; when 1, 13 more bytes follow (u8 flag + 3x u32 lookup).
-``effect_list`` is a u32-count carray at the record end -- the engine's
-``StockData._orderCountDataList``, whose element is
-``StockOrderCountData``. Its 12-byte size was derived by exact tiling
+``sub_gap`` is a second opaque block, empty until CD b25116796 added
+8 bytes there; like the value interior it is carried verbatim, because
+it is zero in every record the game ships and so offers nothing to
+name fields from. ``effect_list`` is a u32-count carray at the record
+end -- the engine's ``StockData._orderCountDataList``, whose element
+is ``StockOrderCountData``. Its 12-byte size was derived by exact tiling
 (see ``ORDER_ELEM_SIZE``); the interior is carried verbatim rather than
 decoded, which is enough to round-trip and keeps us from guessing at
 two fields we have no ground truth for.
 
 THE LAYOUT MOVES, SO IT IS DETECTED, NOT ASSUMED
 ------------------------------------------------
-This module used to hardcode one layout. It has now been broken by a
-game patch twice:
+This module used to hardcode one layout. Game patches have since moved
+the shape five times:
 
   * CD 1.11 inserted ``is_restore_item`` (head 109 -> 110).
   * CD 1.12/1.13 inserted a u32 ``order_index_113`` at @30
     (head 110 -> 114), which shifted the flags and the const byte down
     four bytes.
+  * CD 1.16 inserted a u32 ``_lowPriceThresholdCount`` after ``raw_c``.
+  * CD 1.16.1 took four bytes back OUT of the opaque interior, 71 -> 67,
+    without moving anything ahead of it.
+  * CD b25116796 added eight bytes AFTER ``sub_data``, ahead of the
+    ``effect_list`` count -- again with nothing ahead of it moving.
 
-Each time, every store mod stopped applying: the const tripwire caught
-the misalignment and the writer refused the whole batch (GitHub #259,
+The first three broke every store mod outright: the const tripwire
+caught the misalignment and the writer refused the batch (GitHub #259,
 donr484's "Shop Smart. Shop H-Mart" -- 10 of 14 stores dropped). The
 tripwire did its job, but the fix was a hand-edit of the constants,
 which means the next patch breaks it again.
@@ -175,6 +183,13 @@ class StoreLayout:
     #: Reading is unaffected by this flag either way: the interior is
     #: always carried through verbatim for records that already exist.
     vgap_map_verified: bool = True
+    #: Bytes of a second opaque block, between ``sub_data`` and the
+    #: ``effect_list`` count. 0 up to CD 2.00.01; the 4 September 2026
+    #: patch added 8 -- see the CD b25116796 layout. Carried verbatim
+    #: like ``vgap`` rather than decoded: it is zero in all 6,376
+    #: records of the shipped table, so there is no ground truth to
+    #: name fields from and nothing to lose by not naming them.
+    sub_gap_size: int = 0
 
     @property
     def body_off(self) -> int:
@@ -192,6 +207,39 @@ class StoreLayout:
 #: Newest first -- detection prefers the current game, and an older build
 #: only wins if it actually decodes better.
 LAYOUTS: tuple[StoreLayout, ...] = (
+    # CD buildid 25116796 (4 September 2026 patch -- the same one that
+    # renamed the tables to .staticinfobody, see cdumm.archive.table_ext):
+    # 8 zero bytes appeared between ``sub_data`` and the ``effect_list``
+    # count. Named by buildid because this build ships no version string
+    # worth citing -- bin64/CrimsonDesert.exe still reports 1.0.0.2760 --
+    # and a buildid is machine-checkable rather than guessed (the same
+    # reasoning as the vanilla_b24773079 fixture).
+    #
+    # Everything AHEAD of the insertion is untouched, which is why this
+    # one did not trip the const tripwire either: it still reads 1 at
+    # offset 42 and the 67-byte interior is unchanged. Detection did not
+    # degrade cleanly, it degraded into CD 1.16 decoding 17 of 436
+    # entries by coincidence, and the writer then refused 16 of the 17
+    # stores in donr484's "Shop Smart. Shop H-Mart".
+    #
+    # Derived against the committed CD 2.00.01 table (buildid 24994088),
+    # which carries the same 436 entries: every entry grew by exactly
+    # 1 + 8 x record_count bytes, no exceptions. The +1 is a byte in the
+    # entry's own fixed part, which nothing here reads -- the list is
+    # LOCATED, not computed -- and the +8 is per record. For all 6,376
+    # shared records the 8 bytes sit at the ``effect_list`` count, are
+    # always zero, and the record either side of them is reproduced
+    # byte-exact by the shift. The 99 records that differ past it differ
+    # in raw_a or sub_data, i.e. in shipped values, not in shape. See
+    # tests/test_storeinfo_layout_b25116796.py.
+    #
+    # The 67-byte interior is byte-identical to CD 1.16.1 across those
+    # 6,376 records, so raw_e / raw_g / raw_q keep 37 / 53 / 55 and
+    # ADDING a stock record stays safe on this build.
+    StoreLayout("CD b25116796", 45, 34, 38, 41, 42,
+                low_price_threshold=True, vgap_size=67,
+                raw_e_off=37, raw_g_off=53, raw_q_off=55,
+                vgap_map_verified=True, sub_gap_size=8),
     # CD 1.16.1 (15 Aug 2026 patch): the first change that did NOT insert
     # or remove a field ahead of the const tripwire. Everything up to and
     # including the const byte is identical to CD 1.16 -- record 0 of a
@@ -266,6 +314,9 @@ class StockRecord:
     body: int = 0                        # value.payload.body
     vgap: bytes = b"\x00" * VGAP_SIZE    # opaque value interior
     sub_data: dict | None = None         # {flag, lookup_a, lookup_b, lookup_c}
+    #: Opaque block between ``sub_data`` and the ``effect_list`` count,
+    #: sized by ``StoreLayout.sub_gap_size`` (empty before CD b25116796).
+    sub_gap: bytes = b""
     #: ``_orderCountDataList``: ORDER_ELEM_SIZE-byte blobs, carried
     #: verbatim. Named ``effect_list`` because that is the key Format 3
     #: store mods already use.
@@ -381,6 +432,9 @@ def read_stock_record(r: _Reader,
             f"{r.pos - 1}; record is not the verified disc-0 shape "
             f"(disc-variant value payload)")
 
+    if layout.sub_gap_size:
+        rec.sub_gap = r.raw(layout.sub_gap_size)
+
     effect_count = r.u32()
     if effect_count > 4096:
         # Not a length -- we are misaligned. Bail rather than allocate.
@@ -411,6 +465,16 @@ def write_stock_record(w: _Writer, rec: StockRecord,
         raise StoreinfoParseError(
             f"vgap must be exactly {layout.vgap_size} bytes, got "
             f"{len(rec.vgap)}")
+    if len(rec.sub_gap) != layout.sub_gap_size and not any(rec.sub_gap):
+        # Same reasoning as the vgap placeholder above: an all-zero block
+        # of the wrong length is a default, not data, so size it to the
+        # layout. That is also what lets a record read on one build
+        # serialize on another -- the point of keeping the block opaque.
+        rec.sub_gap = b"\x00" * layout.sub_gap_size
+    if len(rec.sub_gap) != layout.sub_gap_size:
+        raise StoreinfoParseError(
+            f"sub_gap must be exactly {layout.sub_gap_size} bytes, got "
+            f"{len(rec.sub_gap)}")
     w.u16(rec.lookup_a)
     w.u64(rec.raw_a)
     w.u64(rec.raw_b)
@@ -437,6 +501,7 @@ def write_stock_record(w: _Writer, rec: StockRecord,
         w.u32(rec.sub_data["lookup_a"])
         w.u32(rec.sub_data["lookup_b"])
         w.u32(rec.sub_data["lookup_c"])
+    w.raw(rec.sub_gap)
     w.u32(len(rec.effect_list))
     for el in rec.effect_list:
         w.raw(bytes(el))
@@ -499,7 +564,7 @@ def _min_list_bytes(layout: StoreLayout) -> int:
     return 4 + (2 + 8 + 8 + 4 + (4 if layout.low_price_threshold else 0)
                 + 4 + 4 + (4 if layout.order_index_off is not None else 0)
                 + 3 + (1 if layout.is_restore_off is not None else 0)
-                + 1 + 4 + layout.vgap_size + 1 + 4)
+                + 1 + 4 + layout.vgap_size + 1 + layout.sub_gap_size + 4)
 
 
 def locate_stock_list(body: bytes, payload: int, entry_end: int, key: int,
@@ -651,12 +716,14 @@ def detect_storeinfo_layout(body: bytes,
                             entry_offsets: list[int]) -> StoreLayout:
     """Pick the layout that actually decodes this table.
 
-    Trial-parses every candidate and keeps the one that byte-exactly
+    Trial-parses every candidate and keeps the one that leaves the
+    fewest entries unexplained, then the one that byte-exactly
     round-trips the most stock records. Raises when none of them decode
-    anything, which means the game changed in a way we don't model --
-    and a clean refusal is the correct outcome there, because the
-    alternative is writing a misread record into a table whose only
-    integrity check is the game crashing on store open.
+    anything, and equally when the best of them explains less of the
+    table than it leaves unexplained: both mean the game changed in a
+    way we don't model, and a clean refusal is the correct outcome
+    there, because the alternative is writing a misread record into a
+    table whose only integrity check is the game crashing on store open.
     """
     best: StoreLayout | None = None
     best_rank: tuple[int, int, int] | None = None
@@ -699,6 +766,27 @@ def detect_storeinfo_layout(body: bytes,
             + ", ".join(c.label for c in LAYOUTS)
             + "). The game's stock-record shape has changed again; "
               "refusing rather than rewriting records we can't read.")
+
+    # A winner that explains less of the table than it leaves unexplained
+    # has not recognised this build; it has landed on the least-bad of a
+    # set of wrong answers. Returning it is worse than refusing, because
+    # the refusal then arrives per store, from the writer, phrased as if
+    # a mod were at fault -- which is exactly how the 4 Sep 2026 patch
+    # surfaced: "CD 1.16" won with 17 entries read and 380 unexplained,
+    # and the user saw 16 stores dropped with no mention of the game
+    # having changed. Every layout that IS the build's own leaves zero
+    # unexplained entries (asserted for all five committed tables), so
+    # this threshold is far below anything a correct layout produces.
+    holes, entries = -best_rank[0], best_rank[1]
+    if holes > entries:
+        raise StoreinfoParseError(
+            f"no known storeinfo layout explains this table: the best "
+            f"candidate ({best.label}) reads {entries} of "
+            f"{len(entry_offsets)} entries and leaves {holes} it can "
+            f"neither decode nor prove empty. The game's stock-record "
+            f"shape has changed again; refusing rather than rewriting "
+            f"records we can't read (tried: "
+            + ", ".join(c.label for c in LAYOUTS) + ")")
 
     logger.info(
         "storeinfo: detected layout %s (%d/%d entries, %d records "

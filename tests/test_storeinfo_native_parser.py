@@ -102,10 +102,11 @@ def test_synthetic_round_trip(layout):
     """
     recs = _sample_records()
     blob = serialize_stock_list(recs, layout)
-    # count + rec0 (head + sub_data flag + 13 + effect u32)
-    #       + rec1 (head + sub_data flag +  0 + effect u32)
-    head = layout.head_size
-    assert len(blob) == 4 + (head + 1 + 13 + 4) + (head + 1 + 4)
+    # count + rec0 (head + sub_data flag + 13 + sub_gap + effect u32)
+    #       + rec1 (head + sub_data flag +  0 + sub_gap + effect u32)
+    head, gap = layout.head_size, layout.sub_gap_size
+    assert len(blob) == (4 + (head + 1 + 13 + gap + 4)
+                         + (head + 1 + gap + 4))
     parsed, start, end = parse_stock_list(blob, 0, layout)
     assert (start, end) == (0, len(blob))
     assert serialize_stock_list(parsed, layout) == blob
@@ -132,7 +133,8 @@ def test_non_empty_effect_list_round_trips(layout):
     rec.effect_list = [bytes(range(ORDER_ELEM_SIZE)),
                        b"\xff" * ORDER_ELEM_SIZE]
     blob = serialize_stock_list([rec], layout)
-    assert len(blob) == 4 + layout.head_size + 1 + 4 + 2 * ORDER_ELEM_SIZE
+    assert len(blob) == (4 + layout.head_size + 1 + layout.sub_gap_size + 4
+                         + 2 * ORDER_ELEM_SIZE)
     parsed, _s, _e = parse_stock_list(blob, 0, layout)
     assert parsed[0].effect_list == rec.effect_list
     assert serialize_stock_list(parsed, layout) == blob
