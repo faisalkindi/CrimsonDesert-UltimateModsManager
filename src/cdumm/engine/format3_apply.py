@@ -1204,7 +1204,8 @@ def expand_format3_into_aggregated(
                 pt_changes = 0
                 if passthrough:
                     extra = _intents_to_v2_changes(
-                        target, vanilla_body, vanilla_header, passthrough)
+                        target, vanilla_body, vanilla_header, passthrough,
+                        warnings_out=warnings_out)
                     if extra:
                         pt_changes = len(extra)
                         contrib_ids_pt = list(
@@ -1636,7 +1637,8 @@ def expand_format3_into_aggregated(
                 passthrough = [i for i in batched if not _writer_supported(i)]
                 if passthrough:
                     extra = _intents_to_v2_changes(
-                        target, vanilla_body, vanilla_header, passthrough)
+                        target, vanilla_body, vanilla_header, passthrough,
+                        warnings_out=warnings_out)
                     if extra:
                         contrib_ids_pt = list(
                             whole_table_mod_ids.get(target, []))
@@ -1743,7 +1745,8 @@ def expand_format3_into_aggregated(
                 continue
 
             changes = _intents_to_v2_changes(
-                target, vanilla_body, vanilla_header, batched)
+                target, vanilla_body, vanilla_header, batched,
+                warnings_out=warnings_out)
             if not changes:
                 logger.debug(
                     "Format 3 whole-table writer for %s: %d intent(s) "
