@@ -1258,6 +1258,16 @@ class Deriver:
           ('opt',   n)   u8 flag + (n bytes if set)  -- COptional<fixed>
         """
         kind, n = spec
+        if kind == "parts":
+            # An ordered sequence of members, used when a reader holds
+            # MORE THAN ONE string. ('str', n) expresses exactly one, so
+            # collapsing such a reader to it keeps the fixed total and
+            # silently drops every string after the first.
+            for part in n:
+                p = self._apply(body, p, end, part)
+                if p is None or p > end:
+                    return None
+            return p
         if kind == "fixed":
             return p + n
         if kind == "str":
@@ -1322,8 +1332,14 @@ class Deriver:
                     return None, name
                 t, base = m
                 # stage-1 models use 'strplus' for "base then a string"
-                spec = ("str", base) if t in ("str", "strplus") else \
-                       ("list", base) if t == "list" else ("fixed", base)
+                if t == "parts":
+                    spec = ("parts", base)
+                elif t in ("str", "strplus"):
+                    spec = ("str", base)
+                elif t == "list":
+                    spec = ("list", base)
+                else:
+                    spec = ("fixed", base)
                 p = self._apply(body, p, end, spec)
                 if p is None:
                     return None, name
@@ -1605,7 +1621,22 @@ def main(argv: list[str] | None = None) -> int:
         d._memo.clear()
         got = d.solve_reader(c)
         if got is not None:
-            d.model[c] = got
+            # solve_reader summarises a reader as "fixed bytes then ONE
+            # string". reader_parts already holds the real member
+            # sequence, so when that sequence has more than one string,
+            # keep it: the summary is right about the fixed total and
+            # wrong about everything after the first string.
+            #
+            # stageinfo's _sequencerDesc (sub_14228E9D0) is the worked
+            # example, GitHub #409. solve_reader calls it strplus(37);
+            # reader_parts shows 37 fixed bytes and SIX strings, so the
+            # summary under-consumes by five length-prefixed strings on
+            # any record where they are not all empty.
+            parts = d.reader_parts(c)
+            if parts and sum(1 for k, _v in parts if k == "str") > 1:
+                d.model[c] = ("parts", tuple(parts))
+            else:
+                d.model[c] = got
     auto = len(d.model)
     hand = 0
     for c, m in HAND_VERIFIED.items():
