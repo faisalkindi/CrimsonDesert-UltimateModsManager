@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import re
 import struct
 import sys
 from bisect import bisect_left, bisect_right
@@ -1251,8 +1252,9 @@ class Deriver:
                                                        LocalizableString
                                                        (which is 13 + n)
           ('list',  n)   u32 count + count * n       -- CArray<fixed>
-          ('slist', 0)   u32 count + count*(u32 len + len)
+          ('slist', n)   u32 count + count*(n + u32 len + len)
                                                      -- CArray<CString>
+                                                        when n == 0
           ('opt',   n)   u8 flag + (n bytes if set)  -- COptional<fixed>
         """
         kind, n = spec
@@ -1283,6 +1285,10 @@ class Deriver:
             if cnt > 100_000:
                 return None
             for _ in range(cnt):
+                # ``n`` is the element's fixed prefix, the bytes before
+                # its string. n == 0 is CArray<CString>; n > 0 is the
+                # "strplus" element stage 1b reports as "16 + n".
+                p += n
                 if p + 4 > end:
                     return None
                 ln = struct.unpack_from("<I", body, p)[0]
@@ -1622,6 +1628,23 @@ def main(argv: list[str] | None = None) -> int:
             d.elem[c] = ("list", el[1])
             static_lists += 1
         else:
+            # A variable element still has a SHAPE, and list_element has
+            # already computed it: "the element is 16 + n" means 12 bytes
+            # then a CString. Pin it as ('slist', base) with that base,
+            # taken from the loop body, NOT searched against table data.
+            # Searching is what produced the HouseInfo and FailMessageInfo
+            # constants; reading the base off the same loop body that
+            # pins a fixed element is the same provenance stage 1b
+            # already trusts one line above.
+            #
+            # Measured on stageinfo (GitHub #409): pinning all six of its
+            # variable lists this way walks the record from field 13 to
+            # field 23, which is exactly what three passes of proving
+            # those readers by hand produced, one at a time.
+            m_el = re.search(r"element is (\d+) \+ n", el[1] or "")
+            if m_el:
+                d.elem[c] = ("slist", int(m_el.group(1)) - 4)
+                static_lists += 1
             variable[c] = el[1]
     print(f"sub-readers: {auto} solved statically, {hand} hand-verified, "
           f"{static_lists} count-prefixed lists pinned from the loop body "
@@ -1644,8 +1667,8 @@ def main(argv: list[str] | None = None) -> int:
         # missing three fields the exe reads (GitHub #409). Offering the
         # shape is necessary but not sufficient; do not ship it alone.
         print(f"list elements that are VARIABLE-length ({len(variable)}) -- "
-              f"no constant width may be fitted for these, and `candidates` "
-              f"offers no variable-element shape, so these stay unresolved:")
+              f"no CONSTANT width may be fitted for these; each is pinned "
+              f"as ('slist', n) from its own loop body instead:")
         for c, s in sorted(variable.items()):
             print(f"   sub_{c:X}  {s}")
 
