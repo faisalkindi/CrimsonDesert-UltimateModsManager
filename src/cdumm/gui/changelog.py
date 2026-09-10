@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.6",
+        "date": "2026-09-11",
+        "notes": [
+            "<b>Mods that quietly skipped part of their changes now say so.</b> When a mod edits one of the tables CDUMM rebuilds whole (shops, items, skills and a few others), any change the rebuild does not handle falls through to a second path. If that path refused a change, the refusal was thrown away: nothing was written and nothing was said. Those refusals now reach you as a Format 3 warning after Apply, the same way other skipped changes already do. Nothing about which changes apply has altered, only whether you are told when one does not.",
+        ],
+    },
+    {
         "version": "3.17.5",
         "date": "2026-09-09",
         "notes": [
