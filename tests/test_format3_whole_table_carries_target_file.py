@@ -72,7 +72,11 @@ def test_whole_table_change_carries_target_file(tmp_path, monkeypatch):
         "label": "whole_table_merged",
     }
 
-    def fake_intents_to_v2_changes(target, body, header, intents):
+    def fake_intents_to_v2_changes(target, body, header, intents,
+                                   *, warnings_out=None):
+        # Signature has to track the real helper: every call site passes
+        # warnings_out so per-intent refusals reach the user, and a double
+        # that rejects it turns a threading change into a fake failure.
         return [dict(fake_change)]  # always succeed with one merged change
 
     monkeypatch.setattr(fa, "_intents_to_v2_changes",

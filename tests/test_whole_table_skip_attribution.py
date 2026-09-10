@@ -131,7 +131,10 @@ def test_whole_table_writer_tags_merged_change_with_contributor_ids(tmp_path):
 
     # Whole-table writer collects intents, calls _intents_to_v2_changes
     # ONCE post-loop with the union, returns one merged change.
-    def _stub_intents_to(target, body, header, intents):
+    def _stub_intents_to(target, body, header, intents,
+                         *, warnings_out=None):
+        # Signature tracks the real helper: every call site passes
+        # warnings_out so per-intent refusals reach the user.
         # Confirm we received the batched intents (2 mods worth).
         return [{"label": "iteminfo merged",
                  "offset": 0, "original": "00", "patched": "01"}]
