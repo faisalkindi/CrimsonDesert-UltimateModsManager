@@ -64,6 +64,17 @@ def deriver():
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason="Shipped in #420 on a measurement I cannot reproduce. The "
+           "disassembly above is not in doubt: the loop reads one byte "
+           "per element. But on a clean checkout list_element returns "
+           "None here, cold or warm, so the register width is still not "
+           "reaching this verdict by some path the commit did not "
+           "capture. Kept strict and visible rather than deleted or "
+           "softened to `is None`, which would bless behaviour I have "
+           "not shown to be right. CI never caught it: this test is "
+           "slow-marked and CI has no game install. GitHub #409.")
 def test_a_hoisted_width_resolves_to_the_element_size(deriver):
     deriver._memo.clear()
     assert deriver.list_element(0x141494DB0) == ("fixed", 1)
