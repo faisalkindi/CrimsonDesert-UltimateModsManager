@@ -1403,6 +1403,20 @@ class Deriver:
                     spec = ("str", base)
                 elif t == "list":
                     spec = ("list", base)
+                elif t == "opt":
+                    # COptional<fixed>. _apply walks it and nothing pins
+                    # it today, but leaving it out is how slist got lost:
+                    # the else below turns an unmapped shape into a bare
+                    # width rather than an error.
+                    spec = ("opt", base)
+                elif t == "slist":
+                    # #417 taught stage 1b to pin ('slist', n) and _apply
+                    # to walk it, but this mapping was never given the
+                    # branch, so a pinned variable-element list was read
+                    # as a BARE n bytes: no count, no elements, no
+                    # strings. Silent and badly wrong, and it made stage
+                    # 2 disagree with a hand walk that mapped it right.
+                    spec = ("slist", base)
                 else:
                     spec = ("fixed", base)
                 p = self._apply(body, p, end, spec)
