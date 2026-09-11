@@ -780,6 +780,21 @@ class Deriver:
         self._memo[va] = got
         return got
 
+    def element_reader(self, va: int):
+        """The per-element callee of a count-prefixed list reader, or None.
+
+        The first stream-reading immediate call in the body. ``list_element``
+        already locates the loop; this exposes the callee so a caller can ask
+        what ONE element is made of rather than only how wide it is.
+        """
+        from capstone import CS_OP_IMM
+        for i in self.body(va, window=260):
+            if (i.mnemonic == "call" and len(i.operands) == 1
+                    and i.operands[0].type == CS_OP_IMM
+                    and self.reads_stream(i.operands[0].imm)):
+                return i.operands[0].imm
+        return None
+
     def list_element(self, va: int, seen: frozenset | None = None):
         """What ONE element of a count-prefixed list reader consumes.
 
@@ -1287,6 +1302,25 @@ class Deriver:
           ('opt',   n)   u8 flag + (n bytes if set)  -- COptional<fixed>
         """
         kind, n = spec
+        if kind == "plist":
+            # u32 count, then `count` elements each described by an
+            # ordered part sequence. Needed when the element reader holds
+            # MORE THAN ONE string: ('slist', n) expresses exactly one, so
+            # collapsing such an element keeps its fixed total and drops
+            # every string after the first, the same mistake #418 fixed
+            # one level up in the field readers.
+            import struct as _s
+            if p + 4 > end:
+                return None
+            cnt = _s.unpack_from("<I", body, p)[0]
+            p += 4
+            if cnt > 100_000:
+                return None
+            for _ in range(cnt):
+                p = self._apply(body, p, end, ("parts", n))
+                if p is None or p > end:
+                    return None
+            return p
         if kind == "parts":
             # An ordered sequence of members, used when a reader holds
             # MORE THAN ONE string. ('str', n) expresses exactly one, so
@@ -1361,7 +1395,9 @@ class Deriver:
                     return None, name
                 t, base = m
                 # stage-1 models use 'strplus' for "base then a string"
-                if t == "parts":
+                if t == "plist":
+                    spec = ("plist", base)
+                elif t == "parts":
                     spec = ("parts", base)
                 elif t in ("str", "strplus"):
                     spec = ("str", base)
@@ -1701,6 +1737,22 @@ def main(argv: list[str] | None = None) -> int:
             # variable lists this way walks the record from field 13 to
             # field 23, which is exactly what three passes of proving
             # those readers by hand produced, one at a time.
+            # An element whose reader holds MORE THAN ONE string cannot be
+            # described by ('slist', n), which expresses exactly one. Same
+            # mistake as #418 one level down: the collapsed form keeps the
+            # element's fixed total and drops every string after the first.
+            # stageinfo's _executeTargetStageList (sub_141493A00) is the
+            # worked example: its element reader sub_14145B100 reads TWO
+            # strings plus 12 fixed bytes, and solve_reader calls it
+            # strplus(12). Pinning the part sequence instead carried the
+            # record walk from field 23 to field 24 (GitHub #409).
+            er = d.element_reader(c)
+            ep = d.reader_parts(er) if er is not None else None
+            if ep and sum(1 for _k, _v in ep if _k == "str") > 1:
+                d.elem[c] = ("plist", tuple(ep))
+                static_lists += 1
+                variable[c] = el[1]
+                continue
             m_el = re.search(r"element is (\d+) \+ n", el[1] or "")
             if m_el:
                 d.elem[c] = ("slist", int(m_el.group(1)) - 4)

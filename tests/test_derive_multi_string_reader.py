@@ -84,3 +84,36 @@ def test_parts_nest():
     parts = (("fixed", 1), inner, ("str", 0))
     blob = b"\x00" + _s(b"xy") + b"\xAA\xBB" + _s(b"z")
     assert _apply(blob, ("parts", parts)) == len(blob)
+
+
+def test_a_list_of_multi_string_elements_walks_every_element():
+    """``plist``: u32 count, then N elements each an ordered sequence.
+
+    stageinfo's ``_executeTargetStageList`` (``sub_141493A00``) is the
+    worked example, GitHub #409. Its element reader ``sub_14145B100``
+    reads TWO strings plus 12 fixed bytes, and ``solve_reader`` collapses
+    that to ``strplus(12)``. Pinning the sequence instead carried the
+    record walk from field 23 to field 24.
+    """
+    import struct as _s
+    element = (("str", 0), ("str", 0), ("fixed", 4))
+    blob = _s.pack("<I", 2)
+    for a, b in ((b"one", b"two"), (b"", b"xyz")):
+        blob += (_s.pack("<I", len(a)) + a
+                                       + _s.pack("<I", len(b)) + b
+                                       + b"\xAA\xBB\xCC\xDD")
+    assert _apply(blob, ("plist", element)) == len(blob)
+
+
+def test_an_empty_plist_consumes_only_its_count():
+    import struct as _s
+    assert _apply(_s.pack("<I", 0) + b"junk",
+                  ("plist", (("str", 0),))) == 4
+
+
+def test_collapsing_that_element_to_one_string_falls_short():
+    """Why plist exists: slist drops the second string of each element."""
+    import struct as _s
+    blob = _s.pack("<I", 1) + _s.pack("<I", 3) + b"one" + \
+        _s.pack("<I", 3) + b"two" + b"\xAA\xBB\xCC\xDD"
+    assert _apply(blob, ("slist", 12)) != len(blob)
