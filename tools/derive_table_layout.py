@@ -851,6 +851,21 @@ class Deriver:
                          if o[1].mem.base else None)
                     pend = (o[1].mem.disp if b and Frame.q(b) in
                             {Frame.q(z) for z in zeros[n]} else None)
+                elif i.mnemonic == "mov" and o[1].type == CS_OP_REG:
+                    # `mov r8d, ebp` -- MSVC hoists a literal width into a
+                    # callee-saved register when a loop reads the same size
+                    # every iteration, so the constant is defined once
+                    # outside the loop. field_reads already resolves this
+                    # through _const_reg; the loop-body scan did not, and
+                    # dropped the reader to "no verdict" instead.
+                    #
+                    # stageinfo's _logoutMercenaryGroupInfoList
+                    # (sub_141494DB0) is the worked example, GitHub #409:
+                    # `mov ebp, 1` before the loop, `mov r8d, ebp` inside
+                    # it, one byte per element. _const_reg keeps the
+                    # unique-or-nothing rule, so a register written on more
+                    # than one path still yields nothing.
+                    pend = self._const_reg(ins, n, self.md.reg_name(o[1].reg))
                 else:
                     pend = None
             elif (i.mnemonic == "lea" and len(o) == 2 and dst == "rdx"
@@ -912,7 +927,21 @@ class Deriver:
                 # work (`mov r8, qword ptr [rcx + rdx*8]` in sub_14129A5F0
                 # is a hash-bucket pointer). A missing width only matters
                 # where a stream call actually happens, below.
-                pend = o[1].imm if o[1].type == CS_OP_IMM else None
+                #
+                # A register source is resolved the same way field_reads
+                # does it: MSVC hoists a constant width out of the loop
+                # (`mov ebp, 1` outside, `mov r8d, ebp` inside), and
+                # _const_reg returns it only when the register has exactly
+                # one definition in the function. Without this the reader
+                # got no verdict at all, which is how stageinfo's
+                # _logoutMercenaryGroupInfoList sat unresolved (#409).
+                if o[1].type == CS_OP_IMM:
+                    pend = o[1].imm
+                elif i.mnemonic == "mov" and o[1].type == CS_OP_REG:
+                    pend = self._const_reg(
+                        ins, ins.index(i), self.md.reg_name(o[1].reg))
+                else:
+                    pend = None
             elif i.mnemonic == "call" and len(o) == 1:
                 if o[0].type == CS_OP_MEM:
                     if pend is None:
