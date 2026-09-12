@@ -1,30 +1,44 @@
 """A loop whose element width sits in a register still gets a verdict.
 
 MSVC hoists a literal width out of a loop when every iteration reads the
-same size: `mov ebp, 1` before the loop, `mov r8d, ebp` inside it.
+same size: ``mov ebp, 1`` before the loop, ``mov r8d, ebp`` inside it.
 ``field_reads`` already resolved that through ``_const_reg``. The
 loop-body scan in ``list_element`` did not, so those readers came back
 with no verdict at all, and a table using one could never be described.
 
-stageinfo's ``_logoutMercenaryGroupInfoList`` (``sub_141494DB0``) is the
-worked example, GitHub #409. Its body:
+stageinfo's ``_logoutMercenaryGroupInfoList`` and
+``_hideMercenaryGroupInfoList`` are the worked example, GitHub #409.
+Both fields call ``sub_1414960A0``, whose body is::
 
-    141494DC6  mov  r8d, 4          ; u32 count
-    141494DD3  call [rax+8]
-    141494DFC  cmp  [rsp+0x68], esi ; count == 0 -> done
-    141494E02  mov  ebp, 1          ; the width, hoisted
-    141494E18  mov  r8d, ebp        ; one byte per element
-    141494E1E  call [rax+8]
-    141494E25  movzx edx, byte [rsp+0x50]
+    1414960B6  mov   r8d, 4            ; u32 count
+    1414960C3  call  [rax+8]
+    1414960EC  cmp   [rsp+0x68], esi   ; count == 0 -> done
+    1414960F2  mov   ebp, 1            ; the width, hoisted
+    141496108  mov   r8d, ebp          ; one byte per element
+    14149610E  call  [rax+8]
+    141496115  movzx edx, byte [rsp+0x50]
+    141496156  mov   [rax+rcx*2], bx   ; stored widened to u16
 
-so the element is a single byte and the reader is ``CArray<u8>``. The
-``movzx`` afterwards is the decoded value being widened for storage, not
-a second stream read.
+so one byte comes off the stream per element and is widened for
+storage. The element size that matters to a layout walk is the stream
+size, 1, not the 2 bytes the array holds.
 
 ``_const_reg`` keeps its unique-or-nothing rule, so this does not become
 a guess: a register written on more than one path still yields nothing.
 ``sub_14149A200`` takes its width from ``r15d``, which has no unique
 definition, and correctly stays unresolved.
+
+History worth keeping, because it cost three retractions on #409. This
+test previously asserted against ``0x141494DB0``, and #423 then rewrote
+it to assert that ``0x141494DB0`` *abstains*, on the theory that the
+loop had been read out of a neighbouring function through a window
+overrun. Both framings were wrong in the same way: ``0x141494DB0`` does
+not appear among stageinfo's callees at all, so nothing about it was
+ever evidence for or against this field. The overrun story was correct
+as a general hazard and is why ``.pdata`` anchoring exists, but it was
+not what happened here. The lesson is narrower and duller: check that a
+VA is the one the extractor actually reports for the field before
+building anything on it.
 
 Checked against the installed game because the input is the shipped
 executable; there is no fixture for a function body.
@@ -40,6 +54,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 pytest.importorskip("capstone", reason="analysis-only dependency")
 pytest.importorskip("pefile", reason="analysis-only dependency")
+
+READER = 0x1414960A0
+FIELDS = ("_logoutMercenaryGroupInfoList", "_hideMercenaryGroupInfoList")
 
 
 def _game_dir() -> Path | None:
@@ -64,32 +81,40 @@ def deriver():
 
 
 @pytest.mark.slow
-def test_that_reader_abstains_because_the_loop_is_not_its_own(deriver):
-    """The #420 claim was read off a neighbouring function. It is wrong.
+def test_the_reader_under_test_is_the_one_stageinfo_actually_calls(deriver):
+    """Anchor the VA to the extractor, not to a remembered address.
 
-    ``0x141494DB0`` is not the start of its own function. ``.pdata`` puts
-    it inside the range ``0x141494CF0`` to ``0x141494DF9``, and the loop
-    quoted in #420, at ``0x141494E10`` onward, is past that end. Those
-    instructions belong to a different fragment, so the `mov ebp, 1` /
-    `mov r8d, ebp` pair says nothing about this reader.
-
-    That is precisely the failure ``.pdata`` anchoring exists to prevent,
-    and this module's own docstring warns about: a fixed window runs off
-    a short function into whatever follows and attributes the
-    neighbour's loops to it. My #420 measurement came from a window that
-    did exactly that.
-
-    So the honest assertion is the abstention. ``body`` stops at the real
-    end, sees no sized stream read, and ``list_element`` returns None
-    rather than inventing a width. GitHub #409.
+    Skipping this step is what produced #420 and #423. If the binary
+    moves or the extractor changes its mind, this fails first and names
+    the reason, instead of the width assertion failing for a reason that
+    looks like a regression in ``_const_reg``.
     """
-    lo, hi = deriver.function_extent(0x141494DB0)
-    assert (lo, hi) == (0x141494CF0, 0x141494DF9)
-    assert not (lo <= 0x141494E1E < hi), (
-        "the loop #420 quoted must lie OUTSIDE this function, or this "
-        "test is arguing against something that is no longer true")
+    reads = {name: (kind, val) for name, kind, val in
+             deriver.field_reads("StageInfo")}
+    for field in FIELDS:
+        assert reads.get(field) == ("call", READER), (
+            f"{field} is no longer read by sub_{READER:X}; re-derive the "
+            f"reader VA before trusting the rest of this module")
+
+
+@pytest.mark.slow
+def test_a_hoisted_register_width_resolves_to_the_stream_size(deriver):
+    """The width lives in ``ebp``, and the answer is the stream size."""
     deriver._memo.clear()
-    assert deriver.list_element(0x141494DB0) is None
+    assert deriver.list_element(READER) == ("fixed", 1)
+
+
+@pytest.mark.slow
+def test_the_function_is_its_own_and_the_loop_is_inside_it(deriver):
+    """``.pdata`` agrees this is a whole function, loop included.
+
+    The reader starts a function of its own and the sized read at
+    ``0x14149610E`` falls inside that extent, so the width is genuinely
+    this function's and not a neighbour's.
+    """
+    lo, hi = deriver.function_extent(READER)
+    assert lo == READER
+    assert lo <= 0x14149610E < hi
 
 
 @pytest.mark.slow
