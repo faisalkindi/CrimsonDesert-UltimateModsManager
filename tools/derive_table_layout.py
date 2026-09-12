@@ -874,12 +874,21 @@ class Deriver:
                     # through _const_reg; the loop-body scan did not, and
                     # dropped the reader to "no verdict" instead.
                     #
+                    # NOTE: the worked example first given for this,
                     # stageinfo's _logoutMercenaryGroupInfoList
-                    # (sub_141494DB0) is the worked example, GitHub #409:
-                    # `mov ebp, 1` before the loop, `mov r8d, ebp` inside
-                    # it, one byte per element. _const_reg keeps the
+                    # (sub_141494DB0), was WRONG. That address is not a
+                    # function start: .pdata puts it inside
+                    # 0x141494CF0..0x141494DF9, and the `mov ebp, 1` /
+                    # `mov r8d, ebp` pair quoted for it lives past that
+                    # end, in a neighbouring fragment. It was read off a
+                    # raw window that overran the function, the exact
+                    # mistake .pdata anchoring exists to prevent.
+                    #
+                    # The mechanism is still real: field_reads resolves
+                    # register widths the same way and its own comment
+                    # records 86 fields that need it. _const_reg keeps the
                     # unique-or-nothing rule, so a register written on more
-                    # than one path still yields nothing.
+                    # than one path still yields nothing. GitHub #409.
                     pend = self._const_reg(ins, n, self.md.reg_name(o[1].reg))
                 else:
                     pend = None
@@ -948,8 +957,9 @@ class Deriver:
                 # (`mov ebp, 1` outside, `mov r8d, ebp` inside), and
                 # _const_reg returns it only when the register has exactly
                 # one definition in the function. Without this the reader
-                # got no verdict at all, which is how stageinfo's
-                # _logoutMercenaryGroupInfoList sat unresolved (#409).
+                # got no verdict at all. (The stageinfo example first
+                # cited here was misread from a neighbouring function; see
+                # the note on the count-scan branch above.)
                 if o[1].type == CS_OP_IMM:
                     pend = o[1].imm
                 elif i.mnemonic == "mov" and o[1].type == CS_OP_REG:
