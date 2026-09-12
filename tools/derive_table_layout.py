@@ -751,16 +751,35 @@ class Deriver:
             got = ("fixed", total)
             self._memo[va] = got
             return got
-        # CString detection deliberately uses the PERMISSIVE flag. The
-        # strict call-site rule misses sub_1411A33C0, which reads its u32
-        # length and then reads the bytes through `call qword ptr [rax+0x20]`
-        # and `call r8` rather than the usual `call [rax+8]` -- so no
-        # unsized read is visible at a recognised call site. The permissive
-        # flag is safe HERE because the rule also requires the reader's
-        # first read to be exactly 4 bytes, which is the length prefix; it
-        # is not safe for the loop veto above, where it counted a
-        # hash-bucket pointer load as a read.
-        if (var_read or var_seen) and reads[:1] == [4]:
+        # CString detection uses the STRICT flag: an unsized read seen at an
+        # actual call site. It once used the permissive `var_seen` too, on
+        # the argument that requiring a leading 4-byte read made it safe
+        # because that read is the length prefix. It is not safe, and the
+        # counterexample is a whole class of reader rather than a stray
+        # function.
+        #
+        # A u32 STRING-TABLE REFERENCE has the identical signature under
+        # the permissive flag. sub_14148F570 reads exactly 4 bytes and then
+        # treats them as a hash: `div ecx` into buckets, walk the table at
+        # [r10+0x78], compare the key, store 0xFFFF on a miss. The bucket
+        # pointer load is `mov r8, qword ptr [rax + rcx*8]`, which sets
+        # var_seen, and the leading read is 4, so the rule fired and called
+        # it ('str', 0) -- an inline length-prefixed string. On disk it is
+        # four bytes, not four plus a payload, so every walk past such a
+        # field consumed the next field's bytes as string data.
+        #
+        # The discriminator is a SECOND stream read. A CString reads its
+        # length and then reads that many bytes, so it has two calls into
+        # the stream vtable; the hash reference has exactly one and does
+        # all its remaining work in memory. That is what var_read tests and
+        # var_seen does not.
+        #
+        # The sub_1411A33C0 case the permissive flag was kept for does not
+        # need it: that function has var_seen False (its reads go through
+        # immediate calls, not an r8 width), so it never reached this rule
+        # and still resolves as ('fixed', 0). The flag bought nothing and
+        # cost every hash-referenced string field. GitHub #409.
+        if var_read and reads[:1] == [4]:
             self._memo[va] = ("str", 0)
             return self._memo[va]
         extra, kind = 0, "fixed"
