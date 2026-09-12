@@ -64,20 +64,32 @@ def deriver():
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason="Shipped in #420 on a measurement I cannot reproduce. The "
-           "disassembly above is not in doubt: the loop reads one byte "
-           "per element. But on a clean checkout list_element returns "
-           "None here, cold or warm, so the register width is still not "
-           "reaching this verdict by some path the commit did not "
-           "capture. Kept strict and visible rather than deleted or "
-           "softened to `is None`, which would bless behaviour I have "
-           "not shown to be right. CI never caught it: this test is "
-           "slow-marked and CI has no game install. GitHub #409.")
-def test_a_hoisted_width_resolves_to_the_element_size(deriver):
+def test_that_reader_abstains_because_the_loop_is_not_its_own(deriver):
+    """The #420 claim was read off a neighbouring function. It is wrong.
+
+    ``0x141494DB0`` is not the start of its own function. ``.pdata`` puts
+    it inside the range ``0x141494CF0`` to ``0x141494DF9``, and the loop
+    quoted in #420, at ``0x141494E10`` onward, is past that end. Those
+    instructions belong to a different fragment, so the `mov ebp, 1` /
+    `mov r8d, ebp` pair says nothing about this reader.
+
+    That is precisely the failure ``.pdata`` anchoring exists to prevent,
+    and this module's own docstring warns about: a fixed window runs off
+    a short function into whatever follows and attributes the
+    neighbour's loops to it. My #420 measurement came from a window that
+    did exactly that.
+
+    So the honest assertion is the abstention. ``body`` stops at the real
+    end, sees no sized stream read, and ``list_element`` returns None
+    rather than inventing a width. GitHub #409.
+    """
+    lo, hi = deriver.function_extent(0x141494DB0)
+    assert (lo, hi) == (0x141494CF0, 0x141494DF9)
+    assert not (lo <= 0x141494E1E < hi), (
+        "the loop #420 quoted must lie OUTSIDE this function, or this "
+        "test is arguing against something that is no longer true")
     deriver._memo.clear()
-    assert deriver.list_element(0x141494DB0) == ("fixed", 1)
+    assert deriver.list_element(0x141494DB0) is None
 
 
 @pytest.mark.slow
