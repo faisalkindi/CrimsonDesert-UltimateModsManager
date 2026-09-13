@@ -299,6 +299,35 @@ SUBSTRUCT_DEFS: dict[str, list[tuple[str, str]]] = {
     "StageInfo_RewardDropSetEntry": [  # sub_14105FE60 element: 28B fixed
         ("data", "[u8;28]"),
     ],
+    # sub_141494CF0 on b25116796 is the list reader; sub_14145C3F0 reads one
+    # element, in eight sized stream reads:
+    #   14145C400  call 0x14148DF60   4B -> +0   (the _parentStage reader)
+    #   14145C45D  call 0x14148E020   4B -> +4   (the _playCondition reader)
+    #   14145C476  mov r8d, 4            -> +8
+    #   14145C496  mov r8d, 4            -> +0xc
+    #   14145C4B9  mov r8d, 1            -> +0x10
+    #   14145C4DC  mov r8d, 1            -> +0x11
+    #   14145C4FF  mov r8d, 1            -> +0x12
+    #   14145C522  mov r8d, 1            -> +0x13
+    # 4+4+4+4+1+1+1+1 = 20 stream bytes. The store side agrees: the caller
+    # reserves 20 bytes (+0x20 dword, +0x24 word, +0x28 qword, +0x30 dword)
+    # and appends with `lea rcx, [rax+rax*4]` then a 16B vmovups at
+    # [rax+rcx*4] plus a 4B tail at +0x10, i.e. a stride of 20.
+    #
+    # The first two members go through the same hash-reference readers as
+    # _parentStage and _playCondition, which read a u32 key from the stream
+    # and store a u16 handle. Named for the reader they share rather than
+    # for anything the binary calls them. GitHub #409.
+    "StageInfo_ExecuteTargetStageEntry": [
+        ("stage_ref", "u32"),
+        ("condition_ref", "u32"),
+        ("u32_a", "u32"),
+        ("u32_b", "u32"),
+        ("u8_a", "u8"),
+        ("u8_b", "u8"),
+        ("u8_c", "u8"),
+        ("u8_d", "u8"),
+    ],
     "StageInfo_Field840Entry": [
         # sub_141066350 element: u32 + u8 + (optional 7B if u8 != 0)
         # Modeled as a tagged variant so the walker handles both cases.
