@@ -123,8 +123,17 @@ def test_unique_or_nothing_survives(deriver):
 
 
 @pytest.mark.slow
-def test_stageinfo_has_no_unresolved_readers_left(deriver):
-    """The reason this mattered. GitHub #409's meta note said six."""
+def test_stageinfo_has_exactly_one_unresolved_reader_and_it_is_honest(deriver):
+    """The reason this mattered. GitHub #409's meta note said six.
+
+    After this fix the count was zero. Then ``body()`` was taught to
+    decode to the .pdata end rather than a 600-byte window, and
+    ``_sequencerDesc`` (``sub_14228FF40``, 883 bytes) went from a
+    confident wrong flat model to a refusal: it is a struct with a
+    count-prefixed list in the MIDDLE, which no current shape expresses.
+    That refusal is correct and is pinned here so it cannot silently turn
+    back into the wrong answer.
+    """
     import re
     unresolved = []
     for name, kind, va in deriver.field_reads("StageInfo"):
@@ -143,4 +152,4 @@ def test_stageinfo_has_no_unresolved_readers_left(deriver):
         if el is not None and re.search(r"element is (\d+) \+ n", el[1] or ""):
             continue
         unresolved.append((name, hex(va)))
-    assert unresolved == []
+    assert unresolved == [("_sequencerDesc", "0x14228ff40")]

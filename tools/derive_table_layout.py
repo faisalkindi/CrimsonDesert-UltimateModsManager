@@ -287,11 +287,26 @@ class Deriver:
         The end is the first ``ret`` that no forward branch jumps past. A
         ``ret`` before the furthest branch target is just one arm of the
         function, not its end.
+
+        The window is a FALLBACK, not the bound. When ``va`` starts a
+        function .pdata knows about, the decode runs to that function's
+        real end, however long it is. A fixed 600 bytes was silently
+        truncating long readers, which is a quieter failure than the
+        overrun above and worse: the head of the function decodes cleanly,
+        every rule sees a well-formed prefix, and the tail is simply never
+        there. stageinfo's ``_sequencerDesc`` reader (sub_14228FF40) is 883
+        bytes; the window ended at byte 591, so its trailing count-prefixed
+        list was never seen and ``reader_parts`` reported the count as a
+        bare ``('fixed', 4)``. Every field after it in that table was then
+        misaligned by the list's bytes. GitHub #409.
         """
         from capstone import CS_OP_IMM
         off = self.img.va_to_off(va)
         if off is None:
             return []
+        ext = self.function_extent(va)
+        if ext is not None and ext[0] == va:
+            window = max(window, ext[1] - va)
         out = []
         furthest = va
         for i in self.md.disasm(self.img.data[off:off + window], va):
