@@ -636,8 +636,7 @@ class Deriver:
         subs: list[int] = []
         pend = None
         pend_var = False
-        var_read = False      # STRICT: an unsized read at an actual call site
-        var_seen = False      # PERMISSIVE: any non-immediate r8 write
+        var_read = False      # an unsized read at an actual call site
         has_loop = False
         rcx_is_stream = True          # rcx holds the stream on entry
         back: list[tuple[int, int]] = []   # (branch index, target address)
@@ -671,7 +670,6 @@ class Deriver:
                     # records. Decided at the call site below, which is the
                     # only place a missing width can matter.
                     pend, pend_var = None, True
-                    var_seen = True
             if i.mnemonic == "call":
                 if len(o) == 1 and o[0].type == CS_OP_MEM:
                     if pend is not None:
@@ -752,7 +750,8 @@ class Deriver:
             self._memo[va] = got
             return got
         # CString detection uses the STRICT flag: an unsized read seen at an
-        # actual call site. It once used the permissive `var_seen` too, on
+        # actual call site. It once also accepted a PERMISSIVE flag set by
+        # any non-immediate write to r8, on
         # the argument that requiring a leading 4-byte read made it safe
         # because that read is the length prefix. It is not safe, and the
         # counterexample is a whole class of reader rather than a stray
@@ -763,7 +762,8 @@ class Deriver:
         # treats them as a hash: `div ecx` into buckets, walk the table at
         # [r10+0x78], compare the key, store 0xFFFF on a miss. The bucket
         # pointer load is `mov r8, qword ptr [rax + rcx*8]`, which sets
-        # var_seen, and the leading read is 4, so the rule fired and called
+        # that permissive flag, and the leading read is 4, so the rule
+        # fired and called
         # it ('str', 0) -- an inline length-prefixed string. On disk it is
         # four bytes, not four plus a payload, so every walk past such a
         # field consumed the next field's bytes as string data.
@@ -772,10 +772,10 @@ class Deriver:
         # length and then reads that many bytes, so it has two calls into
         # the stream vtable; the hash reference has exactly one and does
         # all its remaining work in memory. That is what var_read tests and
-        # var_seen does not.
+        # the permissive flag did not.
         #
         # The sub_1411A33C0 case the permissive flag was kept for does not
-        # need it: that function has var_seen False (its reads go through
+        # need it: that flag was False there too (its reads go through
         # immediate calls, not an r8 width), so it never reached this rule
         # and still resolves as ('fixed', 0). The flag bought nothing and
         # cost every hash-referenced string field. GitHub #409.
@@ -893,21 +893,23 @@ class Deriver:
                     # through _const_reg; the loop-body scan did not, and
                     # dropped the reader to "no verdict" instead.
                     #
-                    # NOTE: the worked example first given for this,
-                    # stageinfo's _logoutMercenaryGroupInfoList
-                    # (sub_141494DB0), was WRONG. That address is not a
-                    # function start: .pdata puts it inside
-                    # 0x141494CF0..0x141494DF9, and the `mov ebp, 1` /
-                    # `mov r8d, ebp` pair quoted for it lives past that
-                    # end, in a neighbouring fragment. It was read off a
-                    # raw window that overran the function, the exact
-                    # mistake .pdata anchoring exists to prevent.
+                    # NOTE on the worked example, which took three goes
+                    # to state correctly. It is stageinfo's
+                    # _logoutMercenaryGroupInfoList, whose reader is
+                    # sub_1414960A0 (its own .pdata entry,
+                    # 0x1414960A0..0x14149617C). There `mov ebp, 1` at
+                    # 0x1414960F2 and `mov r8d, ebp` at 0x141496108 give a
+                    # 1-byte element, widened to u16 for storage.
                     #
-                    # The mechanism is still real: field_reads resolves
-                    # register widths the same way and its own comment
-                    # records 86 fields that need it. _const_reg keeps the
-                    # unique-or-nothing rule, so a register written on more
-                    # than one path still yields nothing. GitHub #409.
+                    # It was first written up against sub_141494DB0, which
+                    # is not a reader at all: that address is INSIDE
+                    # _executeTargetStageList's reader, whose extent is
+                    # 0x141494CF0..0x141494DF9. Nothing about it was ever
+                    # evidence for this field.
+                    #
+                    # _const_reg keeps the unique-or-nothing rule, so a
+                    # register written on more than one path still yields
+                    # nothing. GitHub #409.
                     pend = self._const_reg(ins, n, self.md.reg_name(o[1].reg))
                 else:
                     pend = None
@@ -975,10 +977,11 @@ class Deriver:
                 # does it: MSVC hoists a constant width out of the loop
                 # (`mov ebp, 1` outside, `mov r8d, ebp` inside), and
                 # _const_reg returns it only when the register has exactly
-                # one definition in the function. Without this the reader
-                # got no verdict at all. (The stageinfo example first
-                # cited here was misread from a neighbouring function; see
-                # the note on the count-scan branch above.)
+                # one definition in the function, and it asks capstone
+                # which instructions actually WRITE the register, because
+                # `push r15` names it without defining it. Without these
+                # the reader got no verdict at all. (See the note on the
+                # count-scan branch above for the worked example.)
                 if o[1].type == CS_OP_IMM:
                     pend = o[1].imm
                 elif i.mnemonic == "mov" and o[1].type == CS_OP_REG:
@@ -1288,6 +1291,13 @@ class Deriver:
         nearest one in ADDRESS order is not necessarily the one that
         reaches, and picking it would be exactly the kind of plausible
         guess this pipeline exists to refuse.
+
+        NAMING A REGISTER IS NOT DEFINING IT. `push r15` has r15 as its
+        first operand but writes only rsp, and counting it as a write put
+        a None beside the real constant, so unique-or-nothing abstained on
+        registers that had exactly one definition. capstone's
+        ``regs_access`` knows the difference, so it is asked rather than
+        inferred from the operand position. GitHub #409.
         """
         from capstone import CS_OP_IMM, CS_OP_REG
         q = Frame.q(reg)
@@ -1299,6 +1309,13 @@ class Deriver:
             dst = x.op_str.split(",")[0].strip()
             if Frame.q(dst) != q:
                 continue
+            try:
+                _read, written = x.regs_access()
+            except (AttributeError, OSError, ValueError):
+                written = None          # older capstone: keep the old rule
+            if written is not None and not any(
+                    Frame.q(self.md.reg_name(r)) == q for r in written):
+                continue                # names the register, does not write it
             if (x.mnemonic == "mov" and len(o) == 2
                     and o[1].type == CS_OP_IMM):
                 vals.add(o[1].imm)
