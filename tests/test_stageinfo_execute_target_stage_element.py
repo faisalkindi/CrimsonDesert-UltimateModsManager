@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from cdumm.semantic.pabgb_types import SUBSTRUCT_DEFS  # noqa: E402
+from cdumm.semantic.pabgb_types import SUBSTRUCT_DEFS
 
 ELEMENT = "StageInfo_ExecuteTargetStageEntry"
 #: The list reader, and the per-element reader it calls.
