@@ -19,20 +19,16 @@ referee when the data actually varies the thing under test.
 """
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
 from cdumm.semantic.pabgb_types import SUBSTRUCT_DEFS
 
 ELEMENT = "StageInfo_ExecuteTargetStageEntry"
-#: The list reader, and the per-element reader it calls.
-LIST_READER = 0x141494CF0
-ELEM_READER = 0x14145C3F0
+#: The list reader (sub_141494CF0 on b25116796), and the per-element
+#: reader it calls (sub_14145C3F0 there), resolved by name at run time.
+LIST_FIELD = ("StageInfo", "_executeTargetStageList")
 WIDTH = {"u8": 1, "u16": 2, "u32": 4, "u64": 8}
 
 
@@ -51,53 +47,33 @@ def test_the_field_points_at_that_element_type():
     assert got == f"CArray<{ELEMENT}>"
 
 
-def _game_dir() -> Path | None:
-    env = os.environ.get("CDUMM_GAME_DIR")
-    if env and (Path(env) / "bin64").is_dir():
-        return Path(env)
-    for root in ("C:", "D:", "E:", "F:"):
-        for lib in ("SteamLibrary", "Steam"):
-            p = Path(f"{root}/{lib}/steamapps/common/Crimson Desert")
-            if (p / "bin64").is_dir():
-                return p
-    return None
-
-
-@pytest.fixture(scope="module")
-def deriver():
-    pytest.importorskip("capstone", reason="analysis-only dependency")
-    pytest.importorskip("pefile", reason="analysis-only dependency")
-    game = _game_dir()
-    if game is None:
-        pytest.skip("no Crimson Desert install found (set CDUMM_GAME_DIR)")
-    from derive_table_layout import Deriver
-    return Deriver(game)
-
 
 @pytest.mark.slow
-def test_the_binary_agrees_the_element_is_twenty_bytes(deriver):
+def test_the_binary_agrees_the_element_is_twenty_bytes(deriver, reader_of):
     deriver._memo.clear()
-    assert deriver.list_element(LIST_READER) == ("fixed", 20)
+    assert deriver.list_element(reader_of(*LIST_FIELD)) == ("fixed", 20)
 
 
 @pytest.mark.slow
-def test_the_element_reader_is_the_one_this_width_came_from(deriver):
+def test_the_element_reader_is_the_one_this_width_came_from(deriver, reader_of):
     """Anchor the claim to the function it was read off.
 
     #420 and #423 were both built on an address that turned out not to be
     the reader they thought it was, so the reader is pinned here rather
     than assumed.
     """
-    assert deriver.element_reader(LIST_READER) == ELEM_READER
+    elem = deriver.element_reader(reader_of(*LIST_FIELD))
+    assert elem is not None
     deriver._memo.clear()
-    assert deriver.solve_reader(ELEM_READER) == ("fixed", 20)
+    assert deriver.solve_reader(elem) == ("fixed", 20)
 
 
 @pytest.mark.slow
-def test_the_members_match_the_readers_sized_reads(deriver):
+def test_the_members_match_the_readers_sized_reads(deriver, reader_of):
     """Four 4-byte reads then four 1-byte reads, in that order."""
+    elem = deriver.element_reader(reader_of(*LIST_FIELD))
     deriver._memo.clear()
-    parts = deriver.reader_parts(ELEM_READER)
+    parts = deriver.reader_parts(elem)
     assert parts == [("fixed", 4)] * 4 + [("fixed", 1)] * 4
     assert [WIDTH[t] for _n, t in SUBSTRUCT_DEFS[ELEMENT]] == [
         n for _k, n in parts]

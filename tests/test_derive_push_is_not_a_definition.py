@@ -38,45 +38,21 @@ GitHub #409.
 """
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-pytest.importorskip("capstone", reason="analysis-only dependency")
-pytest.importorskip("pefile", reason="analysis-only dependency")
+#: Pushes r15, then hoists 1 into it. sub_14149B4F0 on b25116796.
+INLINE_ELEMENT_READER = ("StageInfo", "_subTimelineBreakDescList")
+#: Takes its loop width from a register with no unique definition, so
+#: unique-or-nothing must abstain. On b25116796 that was sub_14149A200
+#: (r15d); on b25381195 the one reader in the binary with the property
+#: is this one (edi). Found by instrumenting _const_reg over every
+#: field reader of every class.
+AMBIGUOUS_WIDTH_READER = ("FactionManagementSpawnData", "_orderList")
 
-#: _subTimelineBreakDescList's reader: pushes r15, then hoists 1 into it.
-INLINE_ELEMENT_READER = 0x14149B4F0
-#: Takes its width from r15d, which has no unique definition. Must abstain.
-AMBIGUOUS_WIDTH_READER = 0x14149A200
-
-
-def _game_dir() -> Path | None:
-    env = os.environ.get("CDUMM_GAME_DIR")
-    if env and (Path(env) / "bin64").is_dir():
-        return Path(env)
-    for root in ("C:", "D:", "E:", "F:"):
-        for lib in ("SteamLibrary", "Steam"):
-            p = Path(f"{root}/{lib}/steamapps/common/Crimson Desert")
-            if (p / "bin64").is_dir():
-                return p
-    return None
-
-
-@pytest.fixture(scope="module")
-def deriver():
-    game = _game_dir()
-    if game is None:
-        pytest.skip("no Crimson Desert install found (set CDUMM_GAME_DIR)")
-    from derive_table_layout import Deriver
-    return Deriver(game)
 
 
 @pytest.mark.slow
-def test_the_push_really_is_there_and_really_writes_only_rsp(deriver):
+def test_the_push_really_is_there_and_really_writes_only_rsp(deriver, reader_of):
     """The premise, asserted rather than assumed.
 
     If the compiler stops saving r15 here, this test is no longer
@@ -84,7 +60,7 @@ def test_the_push_really_is_there_and_really_writes_only_rsp(deriver):
     instead of passing for the wrong reason.
     """
     from derive_table_layout import Frame
-    ins = deriver.body(INLINE_ELEMENT_READER)
+    ins = deriver.body(reader_of(*INLINE_ELEMENT_READER))
     pushes = [x for x in ins
               if x.mnemonic == "push" and x.op_str.strip() == "r15"]
     assert pushes, "expected this reader to save r15 at entry"
@@ -95,31 +71,46 @@ def test_the_push_really_is_there_and_really_writes_only_rsp(deriver):
 
 
 @pytest.mark.slow
-def test_a_width_hoisted_into_a_saved_register_resolves(deriver):
-    ins = deriver.body(INLINE_ELEMENT_READER)
+def test_a_width_hoisted_into_a_saved_register_resolves(deriver, reader_of):
+    ins = deriver.body(reader_of(*INLINE_ELEMENT_READER))
     use = next(n for n, x in enumerate(ins)
                if x.mnemonic == "mov" and x.op_str.startswith("r8d, r15d"))
     assert deriver._const_reg(ins, use, "r15d") == 1
 
 
 @pytest.mark.slow
-def test_the_inline_assembled_element_is_thirteen_bytes(deriver):
+def test_the_inline_assembled_element_is_thirteen_bytes(deriver, reader_of):
     """1 + 4 + 4 + 4, the one inline read plus three hash references."""
+    va = reader_of(*INLINE_ELEMENT_READER)
     deriver._memo.clear()
-    assert deriver.list_element(INLINE_ELEMENT_READER) == ("fixed", 13)
-    assert deriver._parts[INLINE_ELEMENT_READER] == [
+    assert deriver.list_element(va) == ("fixed", 13)
+    assert deriver._parts[va] == [
         ("fixed", 1), ("fixed", 4), ("fixed", 4), ("fixed", 4)]
 
 
 @pytest.mark.slow
-def test_unique_or_nothing_survives(deriver):
+def test_unique_or_nothing_survives(deriver, reader_of):
     """The fix must not buy its answers by relaxing the rule.
 
     This reader's width also lives in a register, but that register has
     more than one definition, so the honest answer is still None.
     """
-    deriver._memo.clear()
-    assert deriver.list_element(AMBIGUOUS_WIDTH_READER) is None
+    va = reader_of(*AMBIGUOUS_WIDTH_READER)
+    abstained = []
+    orig = type(deriver)._const_reg
+
+    def spy(self, ins, before, reg):
+        r = orig(self, ins, before, reg)
+        if r is None:
+            abstained.append(reg)
+        return r
+    type(deriver)._const_reg = spy
+    try:
+        deriver._memo.clear()
+        assert deriver.list_element(va) is None
+    finally:
+        type(deriver)._const_reg = orig
+    assert abstained, "expected the refusal to come from _const_reg"
 
 
 @pytest.mark.slow
@@ -151,5 +142,5 @@ def test_stageinfo_has_exactly_one_unresolved_reader_and_it_is_honest(deriver):
             continue
         if el is not None and re.search(r"element is (\d+) \+ n", el[1] or ""):
             continue
-        unresolved.append((name, hex(va)))
-    assert unresolved == [("_sequencerDesc", "0x14228ff40")]
+        unresolved.append(name)
+    assert unresolved == ["_sequencerDesc"]

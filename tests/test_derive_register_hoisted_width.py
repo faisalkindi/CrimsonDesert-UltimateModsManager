@@ -45,39 +45,11 @@ executable; there is no fixture for a function body.
 """
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-pytest.importorskip("capstone", reason="analysis-only dependency")
-pytest.importorskip("pefile", reason="analysis-only dependency")
-
-READER = 0x1414960A0
+#: sub_1414960A0 on b25116796; both fields share one reader.
 FIELDS = ("_logoutMercenaryGroupInfoList", "_hideMercenaryGroupInfoList")
 
-
-def _game_dir() -> Path | None:
-    env = os.environ.get("CDUMM_GAME_DIR")
-    if env and (Path(env) / "bin64").is_dir():
-        return Path(env)
-    for root in ("C:", "D:", "E:", "F:"):
-        for lib in ("SteamLibrary", "Steam"):
-            p = Path(f"{root}/{lib}/steamapps/common/Crimson Desert")
-            if (p / "bin64").is_dir():
-                return p
-    return None
-
-
-@pytest.fixture(scope="module")
-def deriver():
-    game = _game_dir()
-    if game is None:
-        pytest.skip("no Crimson Desert install found (set CDUMM_GAME_DIR)")
-    from derive_table_layout import Deriver
-    return Deriver(game)
 
 
 @pytest.mark.slow
@@ -91,34 +63,42 @@ def test_the_reader_under_test_is_the_one_stageinfo_actually_calls(deriver):
     """
     reads = {name: (kind, val) for name, kind, val in
              deriver.field_reads("StageInfo")}
-    for field in FIELDS:
-        assert reads.get(field) == ("call", READER), (
-            f"{field} is no longer read by sub_{READER:X}; re-derive the "
-            f"reader VA before trusting the rest of this module")
+    vas = {reads.get(f) for f in FIELDS}
+    assert len(vas) == 1 and next(iter(vas))[0] == "call", (
+        "the two mercenary lists no longer share one reader: "
+        + str({f: reads.get(f) for f in FIELDS}))
 
 
 @pytest.mark.slow
-def test_a_hoisted_register_width_resolves_to_the_stream_size(deriver):
+def test_a_hoisted_register_width_resolves_to_the_stream_size(deriver, reader_of):
     """The width lives in ``ebp``, and the answer is the stream size."""
+    va = reader_of("StageInfo", FIELDS[0])
     deriver._memo.clear()
-    assert deriver.list_element(READER) == ("fixed", 1)
+    assert deriver.list_element(va) == ("fixed", 1)
 
 
 @pytest.mark.slow
-def test_the_function_is_its_own_and_the_loop_is_inside_it(deriver):
+def test_the_function_is_its_own_and_the_loop_is_inside_it(deriver, reader_of):
     """``.pdata`` agrees this is a whole function, loop included.
 
-    The reader starts a function of its own and the sized read at
-    ``0x14149610E`` falls inside that extent, so the width is genuinely
-    this function's and not a neighbour's.
+    The reader starts a function of its own and its sized stream read
+    (``call [rax+8]`` after ``mov r8d, ebp``; at 0x14149610E on
+    b25116796) falls inside that extent, so the width is genuinely this
+    function's and not a neighbour's.
     """
-    lo, hi = deriver.function_extent(READER)
-    assert lo == READER
-    assert lo <= 0x14149610E < hi
+    from capstone import CS_OP_MEM
+    va = reader_of("StageInfo", FIELDS[0])
+    lo, hi = deriver.function_extent(va)
+    assert lo == va
+    ins = deriver.body(va)
+    reads = [i.address for i in ins
+             if i.mnemonic == "call" and i.operands[0].type == CS_OP_MEM]
+    assert reads and all(lo <= a < hi for a in reads)
 
 
 @pytest.mark.slow
-def test_a_width_with_no_unique_definition_still_abstains(deriver):
+def test_a_width_with_no_unique_definition_still_abstains(deriver, reader_of):
     """Unique-or-nothing survives the change; this one must stay unknown."""
+    va = reader_of("FactionManagementSpawnData", "_orderList")
     deriver._memo.clear()
-    assert deriver.list_element(0x14149A200) is None
+    assert deriver.list_element(va) is None

@@ -49,43 +49,18 @@ shipped executable; there is no fixture for a function body.
 """
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-pytest.importorskip("capstone", reason="analysis-only dependency")
-pytest.importorskip("pefile", reason="analysis-only dependency")
-
 #: Reads 4 bytes, then resolves them through the string hash table.
-HASH_REF = 0x14148F570
-#: Same shape, a second instance so the fix is not pinned to one address.
-HASH_REF_2 = 0x14148FA00
+#: sub_14148F570 on b25116796.
+HASH_REF = ("CharacterInfo", "_uiIconPath")
+#: Same shape, a second instance so the fix is not pinned to one reader.
+#: sub_14148FA00 on b25116796.
+HASH_REF_2 = ("CharacterInfo", "_equipInfo")
 #: A genuine CString: reads a u32 length, then reads that many bytes.
-CSTRING = 0x1413910A0
+#: sub_1413910A0 on b25116796.
+CSTRING = ("CharacterInfo", "_stringKey")
 
-
-def _game_dir() -> Path | None:
-    env = os.environ.get("CDUMM_GAME_DIR")
-    if env and (Path(env) / "bin64").is_dir():
-        return Path(env)
-    for root in ("C:", "D:", "E:", "F:"):
-        for lib in ("SteamLibrary", "Steam"):
-            p = Path(f"{root}/{lib}/steamapps/common/Crimson Desert")
-            if (p / "bin64").is_dir():
-                return p
-    return None
-
-
-@pytest.fixture(scope="module")
-def deriver():
-    game = _game_dir()
-    if game is None:
-        pytest.skip("no Crimson Desert install found (set CDUMM_GAME_DIR)")
-    from derive_table_layout import Deriver
-    return Deriver(game)
 
 
 def _stream_calls(deriver, va: int) -> int:
@@ -99,29 +74,31 @@ def _stream_calls(deriver, va: int) -> int:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("va", [HASH_REF, HASH_REF_2])
-def test_a_hash_reference_consumes_four_bytes_and_no_payload(deriver, va):
+@pytest.mark.parametrize("ref", [HASH_REF, HASH_REF_2])
+def test_a_hash_reference_consumes_four_bytes_and_no_payload(deriver, ref, reader_of):
+    va = reader_of(*ref)
     deriver._memo.clear()
     assert deriver.solve_reader(va) == ("fixed", 4)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("va", [HASH_REF, HASH_REF_2])
-def test_the_hash_reference_makes_exactly_one_stream_read(deriver, va):
+@pytest.mark.parametrize("ref", [HASH_REF, HASH_REF_2])
+def test_the_hash_reference_makes_exactly_one_stream_read(deriver, ref, reader_of):
     """The property the classification rests on, asserted directly.
 
     If this ever becomes 2, the reader genuinely reads a payload and the
     expectation above should be revisited rather than forced.
     """
-    assert _stream_calls(deriver, va) == 1
+    assert _stream_calls(deriver, reader_of(*ref)) == 1
 
 
 @pytest.mark.slow
-def test_a_real_cstring_is_still_a_cstring(deriver):
+def test_a_real_cstring_is_still_a_cstring(deriver, reader_of):
     """The fix must not buy its correctness by refusing real strings."""
+    va = reader_of(*CSTRING)
     deriver._memo.clear()
-    assert deriver.solve_reader(CSTRING) == ("str", 0)
-    assert _stream_calls(deriver, CSTRING) >= 2
+    assert deriver.solve_reader(va) == ("str", 0)
+    assert _stream_calls(deriver, va) >= 2
 
 
 @pytest.mark.slow

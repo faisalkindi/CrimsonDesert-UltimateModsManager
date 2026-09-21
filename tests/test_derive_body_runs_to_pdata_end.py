@@ -34,85 +34,62 @@ GitHub #409.
 """
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-pytest.importorskip("capstone", reason="analysis-only dependency")
-pytest.importorskip("pefile", reason="analysis-only dependency")
-
-SEQUENCER_DESC_READER = 0x14228FF40
+#: sub_14228FF40 on b25116796, 883 bytes there and on b25381195.
+SEQUENCER_DESC = ("StageInfo", "_sequencerDesc")
 #: The loop's head is inside the old window; its backward branch is not.
-LOOP_HEAD = 0x142290180
-LOOP_BACK_BRANCH = 0x1422901FC
+#: Byte offsets from the function start, identical on both builds.
+LOOP_HEAD_OFF = 576
+LOOP_BACK_BRANCH_OFF = 700
 OLD_WINDOW = 600
 
 
-def _game_dir() -> Path | None:
-    env = os.environ.get("CDUMM_GAME_DIR")
-    if env and (Path(env) / "bin64").is_dir():
-        return Path(env)
-    for root in ("C:", "D:", "E:", "F:"):
-        for lib in ("SteamLibrary", "Steam"):
-            p = Path(f"{root}/{lib}/steamapps/common/Crimson Desert")
-            if (p / "bin64").is_dir():
-                return p
-    return None
-
-
-@pytest.fixture(scope="module")
-def deriver():
-    game = _game_dir()
-    if game is None:
-        pytest.skip("no Crimson Desert install found (set CDUMM_GAME_DIR)")
-    from derive_table_layout import Deriver
-    return Deriver(game)
-
 
 @pytest.mark.slow
-def test_the_function_really_is_longer_than_the_old_window(deriver):
+def test_the_function_really_is_longer_than_the_old_window(deriver, reader_of):
     """The premise. If the binary changes and this shrinks under 600
     bytes, the rest of this module is no longer testing the bug."""
-    lo, hi = deriver.function_extent(SEQUENCER_DESC_READER)
-    assert lo == SEQUENCER_DESC_READER
+    va = reader_of(*SEQUENCER_DESC)
+    lo, hi = deriver.function_extent(va)
+    assert lo == va
     assert hi - lo > OLD_WINDOW
-    assert LOOP_HEAD < lo + OLD_WINDOW < LOOP_BACK_BRANCH, (
+    assert LOOP_HEAD_OFF < OLD_WINDOW < LOOP_BACK_BRANCH_OFF, (
         "the old window must cut the loop in half, head inside and "
         "backward branch outside, for this to be the case the fix was "
         "written for")
 
 
 @pytest.mark.slow
-def test_body_reaches_the_pdata_end(deriver):
-    _lo, hi = deriver.function_extent(SEQUENCER_DESC_READER)
-    ins = deriver.body(SEQUENCER_DESC_READER)
+def test_body_reaches_the_pdata_end(deriver, reader_of):
+    va = reader_of(*SEQUENCER_DESC)
+    _lo, hi = deriver.function_extent(va)
+    ins = deriver.body(va)
     assert ins[-1].address + ins[-1].size == hi
-    back = next(i for i in ins if i.address == LOOP_BACK_BRANCH)
+    back = next(i for i in ins if i.address == va + LOOP_BACK_BRANCH_OFF)
     assert back.mnemonic == "jb"
-    assert back.operands[0].imm == LOOP_HEAD
+    assert back.operands[0].imm == va + LOOP_HEAD_OFF
 
 
 @pytest.mark.slow
-def test_the_reader_now_refuses_instead_of_flattening_the_list(deriver):
+def test_the_reader_now_refuses_instead_of_flattening_the_list(deriver, reader_of):
     """A struct with a count-prefixed list in the middle is not
     expressible as flat parts, and the honest answer is None until the
     tooling can express it. It must not go back to ('strplus', 41)."""
+    va = reader_of(*SEQUENCER_DESC)
     deriver._memo.clear()
-    assert deriver.solve_reader(SEQUENCER_DESC_READER) is None
+    assert deriver.solve_reader(va) is None
     deriver._memo.clear()
-    assert deriver.reader_parts(SEQUENCER_DESC_READER) is None
+    assert deriver.reader_parts(va) is None
 
 
 @pytest.mark.slow
-def test_a_mid_function_address_still_gets_only_the_window(deriver):
+def test_a_mid_function_address_still_gets_only_the_window(deriver, reader_of):
     """The extent is used only from a function's own start. A body
     requested from inside a function is not extended to the function's
     end, because that address is not where the function begins and the
     caller asked for a window."""
-    mid = LOOP_HEAD
+    mid = reader_of(*SEQUENCER_DESC) + LOOP_HEAD_OFF
     ins = deriver.body(mid, window=64)
     assert ins
     assert ins[-1].address < mid + 64 + 16
