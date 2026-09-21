@@ -928,6 +928,8 @@
   "infobar.asi_loader_missing": "ASI Yükleyici eksik",
   "infobar.asi_installed": "ASI Modu Kuruldu",
   "infobar.asi_installed_msg": "Kuruldu: {files} → bin64/",
+  "infobar.asi_store_install": "Bu bir Microsoft Store / Game Pass kurulumu",
+  "infobar.asi_store_install_msg": "ASI eklentilerinin çoğu Steam exe dosyasına göre derlenir. Bu kurulumda böyle bir eklenti ya çalışmayı reddeder ya da yüklenip hiçbir şey yapmaz; dosyalar bin64 içinde olsa bile. Bozuk diye bildirmeden önce mod sayfasında Game Pass sürümü olup olmadığına bakın.",
   "dialog.revert_incomplete": "Geri Alma Tamamlanmadı",
   "infobar.reverted_to_vanilla": "Vanilla'ya Döndürüldü",
   "infobar.cleanup_complete": "Temizlik Tamamlandı",

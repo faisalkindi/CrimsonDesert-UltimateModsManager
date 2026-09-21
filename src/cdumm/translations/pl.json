@@ -928,6 +928,8 @@
   "infobar.asi_loader_missing": "Brak ładowarki ASI",
   "infobar.asi_installed": "Mod ASI zainstalowany",
   "infobar.asi_installed_msg": "Zainstalowano: {files} w bin64/",
+  "infobar.asi_store_install": "To jest instalacja z Microsoft Store / Game Pass",
+  "infobar.asi_store_install_msg": "Większość wtyczek ASI jest zbudowana pod plik exe ze Steam. Na tej instalacji taka wtyczka albo odmówi uruchomienia, albo załaduje się i nic nie zrobi, mimo że pliki są w bin64. Zanim zgłosisz ją jako zepsutą, sprawdź na stronie moda, czy istnieje wersja dla Game Pass.",
   "dialog.revert_incomplete": "Przywracanie nieukończone",
   "infobar.reverted_to_vanilla": "Przywrócono do vanilla",
   "infobar.cleanup_complete": "Czyszczenie zakończone",

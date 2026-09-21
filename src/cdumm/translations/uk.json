@@ -928,6 +928,8 @@
   "infobar.asi_loader_missing": "Відсутній ASI-завантажувач",
   "infobar.asi_installed": "ASI-мод встановлено",
   "infobar.asi_installed_msg": "Встановлено: {files} у bin64/",
+  "infobar.asi_store_install": "Це встановлення з Microsoft Store / Game Pass",
+  "infobar.asi_store_install_msg": "Більшість ASI-плагінів зібрано під Steam-версію exe. На цьому встановленні такий плагін або відмовиться запускатися, або завантажиться й нічого не зробить, хоча файли лежать у bin64. Перш ніж повідомляти про поломку, перевірте на сторінці мода, чи є збірка для Game Pass.",
   "dialog.revert_incomplete": "Відкат неповний",
   "infobar.reverted_to_vanilla": "Повернено до ванільного стану",
   "infobar.cleanup_complete": "Очищення завершено",

@@ -928,6 +928,8 @@
   "infobar.asi_loader_missing": "ASI ローダーがありません",
   "infobar.asi_installed": "ASI MOD をインストールしました",
   "infobar.asi_installed_msg": "{files} を bin64/ にインストールしました",
+  "infobar.asi_store_install": "これは Microsoft Store / Game Pass 版のインストールです",
+  "infobar.asi_store_install_msg": "ほとんどの ASI プラグインは Steam 版の exe 向けに作られています。このインストールでは、そのようなプラグインは起動を拒否するか、読み込まれても何も起こりません。ファイルは bin64 に入っています。不具合として報告する前に、Mod ページに Game Pass 版があるか確認してください。",
   "dialog.revert_incomplete": "元に戻す操作が未完了です",
   "infobar.reverted_to_vanilla": "バニラに戻しました",
   "infobar.cleanup_complete": "クリーンアップ完了",

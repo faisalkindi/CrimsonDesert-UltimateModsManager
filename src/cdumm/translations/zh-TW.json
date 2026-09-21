@@ -928,6 +928,8 @@
   "infobar.asi_loader_missing": "缺少 ASI 載入器",
   "infobar.asi_installed": "ASI 模組已安裝",
   "infobar.asi_installed_msg": "已安裝 {files} 到 bin64/",
+  "infobar.asi_store_install": "這是 Microsoft Store / Game Pass 安裝版",
+  "infobar.asi_store_install_msg": "大多數 ASI 外掛是針對 Steam 版 exe 編譯的。在此安裝版上，這類外掛要麼拒絕執行，要麼載入後沒有任何效果，即使檔案已在 bin64 中。在回報損壞之前，請先查看模組頁面是否提供 Game Pass 版本。",
   "dialog.revert_incomplete": "還原未完成",
   "infobar.reverted_to_vanilla": "已還原為原版",
   "infobar.cleanup_complete": "清理完成",

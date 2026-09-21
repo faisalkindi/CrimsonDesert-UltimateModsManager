@@ -928,6 +928,8 @@
   "infobar.asi_loader_missing": "Falta el cargador ASI",
   "infobar.asi_installed": "Mod ASI instalado",
   "infobar.asi_installed_msg": "Instalado: {files} en bin64/",
+  "infobar.asi_store_install": "Esta es una instalación de Microsoft Store / Game Pass",
+  "infobar.asi_store_install_msg": "La mayoría de los plugins ASI están compilados para el ejecutable de Steam. En esta instalación, un plugin así se negará a ejecutarse o se cargará sin hacer nada, aunque los archivos estén en bin64. Comprueba en la página del mod si existe una versión para Game Pass antes de reportarlo como roto.",
   "dialog.revert_incomplete": "Reversión incompleta",
   "infobar.reverted_to_vanilla": "Restaurado a vanilla",
   "infobar.cleanup_complete": "Limpieza completada",

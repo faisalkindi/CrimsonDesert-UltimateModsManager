@@ -3840,6 +3840,7 @@ class CdummWindow(FluentWindow):
                 title=tr("main.import_complete"),
                 content=f"{asi_count} ASI plugin(s) installed.",
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
+            self._warn_asi_on_store_install()
             self._refresh_all()
 
         if not paz_paths:
@@ -5936,6 +5937,7 @@ class CdummWindow(FluentWindow):
                 content=tr("infobar.asi_installed_msg", files=", ".join(installed)),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             logger.info("ASI install success: %s", installed)
+            self._warn_asi_on_store_install()
             # Refresh ASI page
             if hasattr(self, 'asi_plugins_page'):
                 self.asi_plugins_page.refresh()
@@ -5943,6 +5945,32 @@ class CdummWindow(FluentWindow):
             InfoBar.warning(
                 title=tr("main.no_asi_files"), content=tr("main.no_asi_files_msg"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
+
+    def _warn_asi_on_store_install(self) -> None:
+        """Say up front that most ASI plugins target the Steam exe.
+
+        GitHub #429 (woowoots): on a Microsoft Store / Game Pass install
+        an ASI plugin built against the Steam exe either refuses itself
+        ("exe size differs from build 1.0.0.2850", QuickSlotLockFilter)
+        or loads and patches offsets that do not exist there and does
+        nothing (Female Kliff Longsword Animation Fix). CDUMM's copy into
+        bin64 succeeds either way, so the success toast was the last
+        thing the user saw before a silent no-op. This is the note that
+        used to be missing. It is advice, not a refusal: some plugins
+        (Character Creator) work on both.
+        """
+        try:
+            from cdumm.storage.game_finder import is_xbox_install
+            if not self._game_dir or not is_xbox_install(self._game_dir):
+                return
+        except Exception:                                  # noqa: BLE001
+            return
+        InfoBar.warning(
+            title=tr("infobar.asi_store_install"),
+            content=tr("infobar.asi_store_install_msg"),
+            duration=12000, position=InfoBarPosition.TOP, parent=self)
+        logger.info("ASI installed on a Store / Game Pass install; "
+                    "Steam-only plugin warning shown")
 
     def _store_asi_version(self, source_path: Path, installed_files: list[str]) -> None:
         """Extract version + NexusMods mod_id from the drop path and store them

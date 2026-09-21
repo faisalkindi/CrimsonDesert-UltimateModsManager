@@ -1183,6 +1183,8 @@
   "infobar.asi_loader_missing": "ASI-Loader fehlt",
   "infobar.asi_installed": "ASI-Mod installiert",
   "infobar.asi_installed_msg": "Installiert: {files} nach bin64/",
+  "infobar.asi_store_install": "Dies ist eine Microsoft Store / Game Pass Installation",
+  "infobar.asi_store_install_msg": "Die meisten ASI-Plugins sind für die Steam-Exe gebaut. Auf dieser Installation verweigert ein solches Plugin entweder den Start oder lädt und bewirkt nichts, obwohl die Dateien in bin64 liegen. Prüfe auf der Mod-Seite, ob es eine Game-Pass-Version gibt, bevor du es als defekt meldest.",
   "dialog.revert_incomplete": "Zurücksetzen unvollständig",
   "infobar.reverted_to_vanilla": "Auf Vanilla zurückgesetzt",
   "infobar.cleanup_complete": "Bereinigung abgeschlossen",
