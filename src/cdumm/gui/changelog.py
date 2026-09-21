@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.8",
+        "date": "2026-09-21",
+        "notes": [
+            "<b>ASI plugins on a Microsoft Store / Game Pass install now come with a heads-up.</b> Most ASI plugins are built against the Steam exe. On a Store install such a plugin either refuses to run or loads and does nothing, even though CDUMM copied it into bin64 correctly, so the success message was the last thing you saw before a silent no-op. After installing an ASI plugin on a Store install, CDUMM now says so and suggests checking the mod page for a Game Pass build. Nothing is blocked; some plugins, Character Creator among them, work on both.",
+        ],
+    },
+    {
         "version": "3.17.7",
         "date": "2026-09-21",
         "notes": [
