@@ -21,6 +21,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _cfg_for(db):
+    """A Config for ``db`` so helpers honour a custom CDMods root.
+
+    ``convert_to_paz_mod`` resolves the vanilla snapshot through
+    ``get_cdmods_root(config, game_dir)``; called without a config it
+    silently falls back to ``<game>/CDMods`` and ignores the location
+    the user actually chose. GitHub #414.
+    """
+    if db is None:
+        return None
+    from cdumm.storage.config import Config as _Config
+    try:
+        return _Config(db)
+    except Exception:            # noqa: BLE001 - never fail an import on this
+        return None
+
 SCRIPT_TIMEOUT = 60  # seconds
 
 # The game ships numbered data directories 0000-0035 (inclusive).
@@ -2891,6 +2908,108 @@ _LOOSE_GAME_EXTENSIONS = {".json", ".xml", ".css", ".html", ".thtml",
 _SKIP_LOOSE_FILES = {"mod.json", "manifest.json", "modinfo.json"}
 
 
+def _bundled_format3_jsons(extracted_root: Path) -> list[Path]:
+    """Format 3 JSONs shipped alongside a loose-file / CB overlay.
+
+    Anything ending in .json outside the numbered PAZ dirs and meta/,
+    that ``is_natt_format_3`` accepts. Manifest-style files are skipped
+    by name before the parse.
+    """
+    from cdumm.engine.json_patch_handler import is_natt_format_3
+    found: list[Path] = []
+    for f in sorted(extracted_root.rglob("*.json")):
+        if not f.is_file():
+            continue
+        parts = f.relative_to(extracted_root).parts
+        if parts and parts[0].isdigit() and len(parts[0]) == 4:
+            continue
+        if parts and parts[0].lower() == "meta":
+            continue
+        if f.name.lower() in _SKIP_LOOSE_FILES:
+            continue
+        try:
+            if is_natt_format_3(f):
+                found.append(f)
+        except Exception as e:                     # noqa: BLE001
+            logger.debug("Not a Format 3 file, skipping %s: %s", f.name, e)
+    return found
+
+
+def _import_bundled_format3(
+    extracted_root: Path, game_dir: Path, db: Database,
+    snapshot: SnapshotManager, deltas_dir: Path,
+    primary: ModImportResult,
+) -> ModImportResult:
+    """Import Format 3 JSONs bundled with an overlay mod as companion cards.
+
+    GitHub #414 (woowoots, Female Kliff Glide Override): the zip ships
+    seven action-chart files under 0010/ AND a .field.json that reroutes
+    Kliff's character records at those charts. The overlay path
+    converted the seven files and handed the JSON to the CB resolver,
+    which cannot place a Format 3 file in any PAZ dir, logged one
+    warning, and dropped it. Nothing reached the user. Dragging the zip
+    gave the animations without the reroute; dragging the JSON on its
+    own, which is what the reporter ended up doing, gave the reroute
+    without the animations. Half a mod either way, and no glide.
+
+    Each JSON becomes its own mod row through the ordinary Format 3
+    importer, under the same display name so the cards sit together.
+    That is the shape users already produce by hand when they drop both
+    halves (the #429 report shows "Female Armor Module Chest And
+    Gloves" twice, one PAZ card and one Format 3 card), and the mod
+    manager already keeps such same-name pairs apart as non-duplicates.
+    A single row could carry both halves in principle, but
+    ``_persist_format3_mod`` clears mod_deltas when it reuses a row,
+    which would discard the overlay's ENTR deltas.
+
+    The primary result is returned with an info line naming what was
+    added, or what could not be, so the outcome is visible in the UI.
+    """
+    jsons = _bundled_format3_jsons(extracted_root)
+    if not jsons or primary.error:
+        return primary
+    added: list[str] = []
+    failed: list[str] = []
+    for jp in jsons:
+        try:
+            res = import_from_natt_format_3(
+                jp, game_dir, db, snapshot, deltas_dir)
+        except Exception as e:                      # noqa: BLE001
+            logger.warning("Bundled Format 3 %s failed: %s", jp.name, e)
+            failed.append(f"{jp.name} ({e})")
+            continue
+        if res.error:
+            logger.warning("Bundled Format 3 %s refused: %s", jp.name, res.error)
+            failed.append(f"{jp.name} ({res.error})")
+            continue
+        # Same display name as the overlay so the two cards sit together.
+        if res.mod_id is not None and primary.name:
+            try:
+                db.connection.execute(
+                    "UPDATE mods SET name = ? WHERE id = ?",
+                    (primary.name, res.mod_id))
+                db.connection.commit()
+            except Exception as e:                  # noqa: BLE001
+                logger.debug("Could not rename companion mod %s: %s",
+                             res.mod_id, e)
+        added.append(jp.name)
+        logger.info("Bundled Format 3 %s imported as companion mod %s "
+                    "of '%s'", jp.name, res.mod_id, primary.name)
+    lines: list[str] = []
+    if added:
+        lines.append(
+            f"This mod also ships {len(added)} data patch file(s) "
+            f"({', '.join(added)}). Imported as a second card with the "
+            f"same name; keep both enabled, the mod needs both halves.")
+    if failed:
+        lines.append(
+            f"{len(failed)} bundled data patch file(s) could not be "
+            f"imported: {'; '.join(failed)}")
+    if lines:
+        primary.info = chr(10).join([primary.info, *lines] if primary.info else lines)
+    return primary
+
+
 def _import_remaining_loose_files(
     extracted_dir: Path, game_dir: Path, db: Database,
     snapshot: SnapshotManager, deltas_dir: Path,
@@ -2950,7 +3069,7 @@ def _import_remaining_loose_files(
         }
 
         cb_output = work_dir / "_cb_output"
-        converted = convert_to_paz_mod(manifest, game_dir, cb_output)
+        converted = convert_to_paz_mod(manifest, game_dir, cb_output, config=_cfg_for(db))
         if converted is None:
             logger.warning("CB handler could not resolve loose files for %s", result.name)
             return
@@ -2979,7 +3098,7 @@ def _import_from_extracted(
     cb_manifest = detect_crimson_browser(tmp_path)
     if cb_manifest is not None:
         cb_work = tmp_path.parent / "_cb_converted"
-        converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work)
+        converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work, config=_cfg_for(db))
         if converted is not None:
             cb_name = _pick_cb_display_name(cb_manifest.get("id"), mod_name)
             modinfo = _read_modinfo(tmp_path)
@@ -3005,7 +3124,7 @@ def _import_from_extracted(
     lfm = detect_loose_file_mod(tmp_path)
     if lfm is not None:
         lfm_work = tmp_path.parent / "_lfm_converted"
-        converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
+        converted = convert_to_paz_mod(lfm, game_dir, lfm_work, config=_cfg_for(db))
         if converted is not None:
             mi = lfm.get("_modinfo", {})
             lfm_name = mi.get("title", mod_name)
@@ -3014,9 +3133,12 @@ def _import_from_extracted(
                 "author": mi.get("author"), "description": mi.get("description"),
                 "force_inplace": mi.get("force_inplace"),
             }
-            return _process_extracted_files(
-                converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=tmp_path)
+            return _import_bundled_format3(
+                tmp_path, game_dir, db, snapshot, deltas_dir,
+                _process_extracted_files(
+                    converted, game_dir, db, snapshot, deltas_dir, lfm_name,
+                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo,
+                    source_archive_dir=tmp_path))
 
     # Check for JSON byte-patch format — use ENTR deltas for proper composition
     jp_data = detect_json_patch(tmp_path)
@@ -3452,7 +3574,7 @@ def import_from_zip(
         cb_manifest = detect_crimson_browser(tmp_path)
         if cb_manifest is not None:
             cb_work = Path(tmp) / "_cb_converted"
-            converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work)
+            converted = convert_to_paz_mod(cb_manifest, game_dir, cb_work, config=_cfg_for(db))
             if converted is not None:
                 cb_name = _pick_cb_display_name(cb_manifest.get("id"), mod_name)
                 modinfo = _read_modinfo(tmp_path)
@@ -3507,7 +3629,7 @@ def import_from_zip(
         lfm = detect_loose_file_mod(tmp_path)
         if lfm is not None:
             lfm_work = Path(tmp) / "_lfm_converted"
-            converted = convert_to_paz_mod(lfm, game_dir, lfm_work)
+            converted = convert_to_paz_mod(lfm, game_dir, lfm_work, config=_cfg_for(db))
             if converted is not None:
                 mi = lfm.get("_modinfo", {})
                 lfm_name = mi.get("title", mod_name)
@@ -3516,9 +3638,12 @@ def import_from_zip(
                     "author": mi.get("author"), "description": mi.get("description"),
                     "force_inplace": mi.get("force_inplace"),
                 }
-                return _with_asi(_process_extracted_files(
-                    converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=tmp_path))
+                return _with_asi(_import_bundled_format3(
+                    tmp_path, game_dir, db, snapshot, deltas_dir,
+                    _process_extracted_files(
+                        converted, game_dir, db, snapshot, deltas_dir, lfm_name,
+                        existing_mod_id=existing_mod_id, modinfo=lfm_modinfo,
+                        source_archive_dir=tmp_path)))
 
         # Check for JSON byte-patch format — use ENTR deltas for proper composition
         jp_data = detect_json_patch(tmp_path)
@@ -3975,7 +4100,8 @@ def import_from_folder(
         with import_staging_dir(game_dir) as cb_tmp:
             cb_work = Path(cb_tmp) / "_cb_converted"
             converted = convert_to_paz_mod(
-                manifest, game_dir, cb_work, trust_symlinks=True)
+                manifest, game_dir, cb_work, trust_symlinks=True,
+                config=_cfg_for(db))
             if converted is not None:
                 cb_name = _pick_cb_display_name(manifest.get("id"), mod_name)
                 modinfo = _read_modinfo(folder_path)
@@ -4011,7 +4137,8 @@ def import_from_folder(
         with import_staging_dir(game_dir) as lfm_tmp:
             lfm_work = Path(lfm_tmp) / "_lfm_converted"
             converted = convert_to_paz_mod(
-                lfm, game_dir, lfm_work, trust_symlinks=True)
+                lfm, game_dir, lfm_work, trust_symlinks=True,
+                config=_cfg_for(db))
             if converted is not None:
                 mi = lfm.get("_modinfo", {})
                 lfm_name = mi.get("title", mod_name)
@@ -4020,9 +4147,12 @@ def import_from_folder(
                     "author": mi.get("author"), "description": mi.get("description"),
                     "force_inplace": mi.get("force_inplace"),
                 }
-                return _process_extracted_files(
-                    converted, game_dir, db, snapshot, deltas_dir, lfm_name,
-                    existing_mod_id=existing_mod_id, modinfo=lfm_modinfo, source_archive_dir=folder_path)
+                return _import_bundled_format3(
+                    folder_path, game_dir, db, snapshot, deltas_dir,
+                    _process_extracted_files(
+                        converted, game_dir, db, snapshot, deltas_dir, lfm_name,
+                        existing_mod_id=existing_mod_id, modinfo=lfm_modinfo,
+                        source_archive_dir=folder_path))
 
     # C1: compound layout detection. Issue #34 (kori228, Character
     # Creator - Female and Male) — a bodytype preset folder shipped

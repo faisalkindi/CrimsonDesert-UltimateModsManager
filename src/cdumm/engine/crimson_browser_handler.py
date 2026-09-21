@@ -131,6 +131,15 @@ def fix_xml_format(
     return fixed
 
 
+def _is_format3_patch(path: Path) -> bool:
+    """True for a NattKh Format 3 (field names + intents) JSON."""
+    try:
+        from cdumm.engine.json_patch_handler import is_natt_format_3
+        return bool(is_natt_format_3(path))
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
 def _uncompressed_entry_is_encrypted_text(paz_src: Path, entry) -> bool:
     """Whether an uncompressed PAZ entry holds ChaCha20-encrypted text.
 
@@ -303,6 +312,15 @@ def convert_to_paz_mod(
     for f in _rglob_follow(files_dir):
         if not f.is_file() or f.name.lower() in _SKIP_FILES:
             continue
+        # A Format 3 data patch is not a loose game file and has no PAZ
+        # slot to resolve to. The importer picks these up itself after
+        # the overlay is converted (_import_bundled_format3); resolving
+        # them here only produced a "could not resolve" warning and lost
+        # the file. GitHub #414.
+        if f.suffix.lower() == ".json" and _is_format3_patch(f):
+            logger.debug("CB import: %s is a Format 3 patch; left to the "
+                         "importer", f.name)
+            continue
         # Symlink / junction safety: _rglob_follow descends into
         # symlinked directories (see its docstring re: the Python 3.13
         # rglob default change), so a malicious mod ZIP with a symlink
@@ -391,11 +409,40 @@ def convert_to_paz_mod(
 
         # Use vanilla PAMT for entry lookup — the current game PAMT may have
         # modified comp_sizes from other mods, which would produce wrong offsets.
-        vanilla_pamt = get_cdmods_root(config, game_dir) / "vanilla" / dir_name / "0.pamt"
+        vanilla_dir = get_cdmods_root(config, game_dir) / "vanilla" / dir_name
+        vanilla_pamt = vanilla_dir / "0.pamt"
         pamt_path = vanilla_pamt if vanilla_pamt.exists() else game_paz_dir / "0.pamt"
         # Always use game directory for PAZ file paths — vanilla backup may
         # not have all PAZ files (only those that were modified and backed up).
         paz_dir_for_parse = str(game_paz_dir)
+
+        # GitHub #414 (woowoots, Female Kliff Glide Override): the PAMT and
+        # the PAZ it describes MUST come from the same build. The snapshot
+        # keeps every PAMT but only the PAZ files a mod has touched, so for
+        # an untouched dir this pairs the SNAPSHOT's PAMT with the LIVE
+        # game PAZ. After a game update without a rescan those are
+        # different builds: the PAMT's offsets point into a PAZ that no
+        # longer has that layout, the rebuilt archive is internally
+        # consistent but describes the wrong bytes, and the entry-level
+        # import then reads past the end of the file ("mod read: failed
+        # to fill whole buffer") or, worse, diffs 114,476 of 122,563
+        # entries as changed for a seven-file mod. The PAMT declares the
+        # size of each PAZ it indexes, so the mismatch is detectable
+        # before any of that: when the declared size disagrees with the
+        # PAZ that will actually be copied, the snapshot PAMT is stale
+        # for this dir and the game's own PAMT, which is guaranteed to
+        # match the game's own PAZ, is used instead.
+        if pamt_path == vanilla_pamt:
+            stale = _pamt_disagrees_with_paz_sizes(
+                vanilla_pamt, vanilla_dir, game_paz_dir)
+            if stale:
+                logger.warning(
+                    "Vanilla snapshot PAMT for %s is from a different "
+                    "build than the PAZ it would be paired with (%s); "
+                    "using the game's own PAMT for this dir. Rescan "
+                    "Game Files to refresh the snapshot.",
+                    dir_name, stale)
+                pamt_path = game_paz_dir / "0.pamt"
 
         if not pamt_path.exists():
             logger.error("CB mod: PAMT not found: %s", pamt_path)
@@ -733,6 +780,64 @@ def _resolve_files_to_directories(
             unresolved.append((inner_path, source))
 
     return result, unresolved
+
+
+def _pamt_declared_paz_sizes(pamt_path: Path) -> list[int]:
+    """The size the PAMT records for each PAZ it indexes, by paz_index.
+
+    Header: magic(4) paz_count(4) hash(4) zero(4), then per PAZ a
+    hash(4) and size(4), with a 4-byte separator after every PAZ but the
+    last. Same layout ``_update_pamt_entries`` writes.
+    """
+    with open(pamt_path, "rb") as fh:
+        head = fh.read(16)
+        if len(head) < 16:
+            return []
+        paz_count = struct.unpack_from("<I", head, 4)[0]
+        if paz_count > 4096:
+            return []
+        table = fh.read(paz_count * 12)
+    sizes = []
+    off = 0
+    for i in range(paz_count):
+        if off + 8 > len(table):
+            break
+        sizes.append(struct.unpack_from("<I", table, off + 4)[0])
+        off += 8
+        if i < paz_count - 1:
+            off += 4
+    return sizes
+
+
+def _pamt_disagrees_with_paz_sizes(
+    pamt_path: Path, vanilla_dir: Path, game_paz_dir: Path,
+) -> str | None:
+    """Why ``pamt_path`` cannot describe the PAZ files that will be used.
+
+    For each PAZ the PAMT indexes, the file that ``convert_to_paz_mod``
+    will copy is the snapshot's copy when it exists and the game's
+    otherwise. Returns a short description of the first size mismatch,
+    or None when every declared size matches its file. An unreadable
+    PAMT counts as a mismatch, since nothing can be built on it.
+    """
+    try:
+        declared = _pamt_declared_paz_sizes(pamt_path)
+    except OSError as e:
+        return f"PAMT unreadable: {e}"
+    if not declared:
+        return "PAMT has no PAZ table"
+    for i, want in enumerate(declared):
+        name = f"{i}.paz"
+        src = vanilla_dir / name
+        if not src.exists():
+            src = game_paz_dir / name
+        if not src.exists():
+            continue                    # nothing to pair it with; not ours
+        have = src.stat().st_size
+        if have != want:
+            return (f"{name}: PAMT says {want:,} bytes, file is "
+                    f"{have:,} bytes")
+    return None
 
 
 def _update_pamt_entries(pamt_path: Path, updates: list[tuple[PazEntry, int, int, int | None, int]]) -> None:
