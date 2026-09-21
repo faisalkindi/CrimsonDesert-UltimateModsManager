@@ -21,6 +21,15 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.7",
+        "date": "2026-09-21",
+        "notes": [
+            "<b>Mods that ship animation files and a data patch together now install as a whole.</b> Some mods, Female Kliff Glide Override among them, ship loose game files under a numbered folder and a .field.json beside them, and need both. CDUMM imported the files and quietly dropped the JSON, so dragging the zip gave you half the mod and dragging the JSON alone gave you the other half. The JSON now imports as a second card with the same name; keep both enabled.",
+            "<b>Importing a loose-file mod after a game update no longer produces a corrupt import.</b> When the game had updated since your last Rescan, CDUMM paired the old snapshot's index with the new game archive, which could fail with a read error or record thousands of unrelated files as changed. It now notices the mismatch, uses the game's own index, and tells you to Rescan.",
+            "A custom CDMods location is now honoured when converting loose-file mods; it was silently ignored before.",
+        ],
+    },
+    {
         "version": "3.17.6",
         "date": "2026-09-11",
         "notes": [
