@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.9",
+        "date": "2026-10-01",
+        "notes": [
+            "<b>Correction to 3.17.8.</b> That version told you an ASI plugin might not work because the game came from the Microsoft Store, and to look for a Game Pass build. That was wrong. An ASI plugin is tied to one specific game build, and refuses or silently does nothing on any other build, on Steam exactly as much as on Game Pass. The note now appears after every ASI install, tells you which build your game actually is so you can compare it against what the mod page asks for, and points at the plugin's own log file in bin64, which is where the reason is usually written. Thanks to woowoots for pushing back on the wrong answer twice.",
+        ],
+    },
+    {
         "version": "3.17.8",
         "date": "2026-09-21",
         "notes": [
