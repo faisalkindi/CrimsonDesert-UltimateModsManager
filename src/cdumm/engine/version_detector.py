@@ -227,3 +227,53 @@ def get_steam_build_id(game_dir: Path) -> str | None:
 
 # Keep old name for internal use
 _get_steam_build_id = get_steam_build_id
+
+
+def read_exe_file_version(exe_path: Path) -> str | None:
+    """The exe's FileVersion string (e.g. "1.0.0.2976"), or None.
+
+    ASI plugins that validate the game build report it in this form, so
+    this is what a user needs in order to compare their install against
+    what a plugin demands. GitHub #435 (woowoots): QuickSlotLockFilter
+    refused with "exe size differs from build 1.0.0.2850" and there was
+    no way inside CDUMM to see which build was actually installed.
+
+    Read through version.dll with ctypes rather than pefile, which is an
+    analysis-only dependency and is not shipped in the frozen build.
+    Returns None off Windows, or whenever the resource is absent or
+    unreadable; no caller should depend on it being present.
+    """
+    if os.name != "nt" or not exe_path or not Path(exe_path).is_file():
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ver = ctypes.WinDLL("version", use_last_error=True)
+        path = str(exe_path)
+        size = ver.GetFileVersionInfoSizeW(wintypes.LPCWSTR(path), None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(
+                wintypes.LPCWSTR(path), 0, size, buf):
+            return None
+        block = ctypes.c_void_p()
+        length = wintypes.UINT()
+        if not ver.VerQueryValueW(
+                buf, wintypes.LPCWSTR(r"\VarFileInfo\Translation"),
+                ctypes.byref(block), ctypes.byref(length)) or not length.value:
+            return None
+        # Translation is an array of (langID, codepage) WORD pairs; the
+        # first one is what the string table is keyed on.
+        lang, page = ctypes.cast(
+            block, ctypes.POINTER(wintypes.WORD * 2)).contents
+        sub = rf"\StringFileInfo\{lang:04x}{page:04x}\FileVersion"
+        if not ver.VerQueryValueW(
+                buf, wintypes.LPCWSTR(sub),
+                ctypes.byref(block), ctypes.byref(length)) or not length.value:
+            return None
+        text = ctypes.wstring_at(block, length.value).strip("\x00").strip()
+        return text or None
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("Could not read FileVersion from %s: %s", exe_path, e)
+        return None

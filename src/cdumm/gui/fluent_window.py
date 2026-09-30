@@ -3840,7 +3840,7 @@ class CdummWindow(FluentWindow):
                 title=tr("main.import_complete"),
                 content=f"{asi_count} ASI plugin(s) installed.",
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
-            self._warn_asi_on_store_install()
+            self._warn_asi_build_specific()
             self._refresh_all()
 
         if not paz_paths:
@@ -5937,7 +5937,7 @@ class CdummWindow(FluentWindow):
                 content=tr("infobar.asi_installed_msg", files=", ".join(installed)),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
             logger.info("ASI install success: %s", installed)
-            self._warn_asi_on_store_install()
+            self._warn_asi_build_specific()
             # Refresh ASI page
             if hasattr(self, 'asi_plugins_page'):
                 self.asi_plugins_page.refresh()
@@ -5946,31 +5946,47 @@ class CdummWindow(FluentWindow):
                 title=tr("main.no_asi_files"), content=tr("main.no_asi_files_msg"),
                 duration=5000, position=InfoBarPosition.TOP, parent=self)
 
-    def _warn_asi_on_store_install(self) -> None:
-        """Say up front that most ASI plugins target the Steam exe.
+    def _warn_asi_build_specific(self) -> None:
+        """Say that an ASI plugin is tied to one game build, and which is installed.
 
-        GitHub #429 (woowoots): on a Microsoft Store / Game Pass install
-        an ASI plugin built against the Steam exe either refuses itself
-        ("exe size differs from build 1.0.0.2850", QuickSlotLockFilter)
-        or loads and patches offsets that do not exist there and does
-        nothing (Female Kliff Longsword Animation Fix). CDUMM's copy into
-        bin64 succeeds either way, so the success toast was the last
-        thing the user saw before a silent no-op. This is the note that
-        used to be missing. It is advice, not a refusal: some plugins
-        (Character Creator) work on both.
+        GitHub #435 (woowoots), correcting #429. The first version of this
+        note said most ASI plugins target the Steam exe and to look for a
+        Game Pass build. That was wrong, and the reporter was right to
+        push back on it. QuickSlotLockFilter refused with:
+
+            exe size differs from build 1.0.0.2850
+
+        and it refuses that way on ANY exe that is not the one it was
+        built for. A Steam install here reports FileVersion 1.0.0.2976,
+        so the same plugin would refuse here too. The store the game came
+        from was never the cause; the game having moved on from the build
+        the plugin was made for is.
+
+        So the note is shown for every ASI install, not just Store ones,
+        and it names the installed build so it can be compared against
+        whatever the mod page asks for. It also points at the plugin's own
+        log in bin64, which is where QuickSlotLockFilter had written the
+        reason all along and where nothing in CDUMM had pointed.
+
+        Advice, not a refusal: the copy into bin64 has already succeeded,
+        and plugins that do not pin a build (Character Creator) are
+        unaffected.
         """
         try:
-            from cdumm.storage.game_finder import is_xbox_install
-            if not self._game_dir or not is_xbox_install(self._game_dir):
-                return
+            from cdumm.engine.version_detector import read_exe_file_version
+            build = read_exe_file_version(
+                self._game_dir / "bin64" / "CrimsonDesert.exe"
+                if self._game_dir else None)
         except Exception:                                  # noqa: BLE001
-            return
+            build = None
+        content = (tr("infobar.asi_build_specific_msg", build=build)
+                   if build else tr("infobar.asi_build_specific_msg_nobuild"))
         InfoBar.warning(
-            title=tr("infobar.asi_store_install"),
-            content=tr("infobar.asi_store_install_msg"),
+            title=tr("infobar.asi_build_specific"),
+            content=content,
             duration=12000, position=InfoBarPosition.TOP, parent=self)
-        logger.info("ASI installed on a Store / Game Pass install; "
-                    "Steam-only plugin warning shown")
+        logger.info("ASI installed; build-specific note shown (game build %s)",
+                    build or "unknown")
 
     def _store_asi_version(self, source_path: Path, installed_files: list[str]) -> None:
         """Extract version + NexusMods mod_id from the drop path and store them
