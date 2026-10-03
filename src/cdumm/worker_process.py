@@ -758,6 +758,17 @@ def _run_fix(game_dir: str, vanilla_dir: str, db_path: str,
             if vanilla_dir.exists():
                 shutil.rmtree(vanilla_dir, ignore_errors=True)
                 vanilla_dir.mkdir(parents=True, exist_ok=True)
+            # The on-disk PAMT index cache for the vanilla backups is a
+            # sibling of vanilla_dir (cdmods / ".pamt_index_<ver>_vanilla
+            # .cache"), not inside it, so the rmtree above never touches
+            # it. Its staleness check only compares mtimes, and a fresh
+            # backup copy can carry over the source file's mtime, so a
+            # cache built against the old backups can survive this reset
+            # and keep serving archive offsets that no longer match the
+            # freshly rebuilt backups (#439). Delete it so the next PAMT
+            # lookup rebuilds the index from the fresh backups instead.
+            for stale_cache in vanilla_dir.parent.glob(".pamt_index*_vanilla.cache"):
+                stale_cache.unlink(missing_ok=True)
             results.append({"title": "Backups Cleared",
                             "desc": "Fresh rescan will rebuild them.", "color": "#A3BE8C"})
         except Exception as e:
