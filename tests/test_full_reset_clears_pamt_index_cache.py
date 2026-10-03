@@ -17,8 +17,6 @@ path, forcing a clean rebuild from the fresh backups.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import cdumm.worker_process as wp
 
 
