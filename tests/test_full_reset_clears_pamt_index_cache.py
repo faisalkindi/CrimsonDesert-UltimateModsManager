@@ -79,7 +79,7 @@ def test_non_verified_path_does_not_need_cache_clear(tmp_path, monkeypatch):
     Steam-verified branch and doesn't blow up on the other path."""
     monkeypatch.setattr(wp, "_emit", lambda obj: None)
 
-    import cdumm.engine.apply_engine as apply_engine
+    from cdumm.engine import apply_engine
 
     class _FakeRevertWorker:
         def __init__(self, **kwargs):
