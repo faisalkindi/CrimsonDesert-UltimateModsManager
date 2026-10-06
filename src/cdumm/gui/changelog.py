@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.10",
+        "date": "2026-10-06",
+        "notes": [
+            "<b>Full Reset + Rescan now really starts clean.</b> It wiped the vanilla backups but left behind the index CDUMM keeps of what is inside them, which lives next to that folder rather than in it. That index decides it is still current by comparing file dates, and a freshly copied backup can carry the old date, so a stale index could survive the reset and keep pointing at positions that no longer matched the rebuilt backups. JSON patch mods then failed for no visible reason. The reset deletes that index too, so the next mod apply rebuilds it from the fresh backups. Reported by baramjeoung.",
+        ],
+    },
+    {
         "version": "3.17.9",
         "date": "2026-10-01",
         "notes": [
