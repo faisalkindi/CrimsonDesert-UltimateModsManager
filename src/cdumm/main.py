@@ -457,9 +457,17 @@ def main() -> int:
     _wizard_theme = "light"
     _wizard_game_dir = None
     if _first_launch:
+        from PySide6.QtWidgets import QDialog
+
         from cdumm.gui.welcome_wizard import WelcomeWizard
         wizard = WelcomeWizard()
-        wizard.exec()  # Cannot be closed without completing (ALT+F4 blocked)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            # Closed via ALT+F4, the taskbar close command or Escape
+            # before finishing (#442) — exit instead of launching the
+            # main window with unset language/theme/game folder. The
+            # wizard will show again next launch since .wizard_done
+            # is only written below, after a completed run.
+            return 0
         _wizard_lang = wizard.chosen_language
         _wizard_theme = wizard.chosen_theme
         _wizard_game_dir = wizard.game_directory

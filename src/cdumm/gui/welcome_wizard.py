@@ -785,15 +785,15 @@ class WelcomeWizard(QDialog):
             self._next_btn.setText(tr("wizard.next"))
         self._back_btn.setText(tr("wizard.back"))
 
-    # ── Prevent close without completing ──────────────────────────────
-
-    def closeEvent(self, event):
-        event.ignore()  # Block ALT+F4 — must complete wizard
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            return  # Block Escape too
-        super().keyPressEvent(event)
+    # ── Closing without completing ──────────────────────────────────────
+    #
+    # This dialog used to override closeEvent/keyPressEvent to block
+    # ALT+F4, the taskbar close command and Escape outright (frameless
+    # window, no close button), so the wizard could never be dismissed
+    # early. That left no way to close it other than killing the process
+    # — GitHub #442. Falling back to QDialog's own closeEvent/keyPressEvent
+    # lets all three reject() the dialog like any other QDialog; the
+    # caller checks the exec() result to tell "finished" from "closed".
 
     # ── Drag to move (frameless) ──────────────────────────────────────
 
