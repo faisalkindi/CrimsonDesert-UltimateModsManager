@@ -263,7 +263,14 @@ def extract_asset(con: sqlite3.Connection, path: str, game_dir: str) -> bytes:
     paz = row["paz_file"]
     if not os.path.exists(paz):
         # Index may have been built on another machine / before a move.
-        paz = os.path.join(game_dir, row["archive"], os.path.basename(paz))
+        # The stored path can carry Windows backslashes (index built on
+        # Windows, read back under Wine/Proton or on macOS); os.path.basename
+        # only splits on the host OS's own separator, so on POSIX it would
+        # return the whole "E:\old\0008\8.paz" string unchanged and join it
+        # onto game_dir as one bogus path component instead of resolving to
+        # the real file.
+        name = paz.replace("\\", "/").rsplit("/", 1)[-1]
+        paz = os.path.join(game_dir, row["archive"], name)
     if not os.path.exists(paz):
         raise FileNotFoundError(paz)
 

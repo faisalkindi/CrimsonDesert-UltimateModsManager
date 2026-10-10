@@ -230,3 +230,27 @@ class TestSubprocessNoWindowKwargs:
         from cdumm import platform as plat
         monkeypatch.setattr(plat, "IS_WINDOWS", False)
         assert plat.subprocess_no_window_kwargs() == {}
+
+
+# ── python3_launcher_command ─────────────────────────────────────────
+
+
+class TestPython3LauncherCommand:
+    """Resolves the argv prefix for running a mod's bundled ``.py``
+    script against the user's SYSTEM Python, never CDUMM's own
+    (possibly frozen) interpreter. Windows has the ``py`` launcher for
+    this; macOS / Linux have no launcher binary, so ``python3`` on
+    PATH is the right fallback there. Before this helper existed, the
+    caller hardcoded ``["py", "-3", ...]`` unconditionally, which does
+    not exist on macOS / Linux and made every consented script-mod
+    import fail with ``FileNotFoundError: 'py'``."""
+
+    def test_windows_uses_py_launcher(self, monkeypatch):
+        from cdumm import platform as plat
+        monkeypatch.setattr(plat, "IS_WINDOWS", True)
+        assert plat.python3_launcher_command() == ["py", "-3"]
+
+    def test_non_windows_uses_python3(self, monkeypatch):
+        from cdumm import platform as plat
+        monkeypatch.setattr(plat, "IS_WINDOWS", False)
+        assert plat.python3_launcher_command() == ["python3"]

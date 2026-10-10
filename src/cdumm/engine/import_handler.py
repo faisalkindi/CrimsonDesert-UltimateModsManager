@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from cdumm.engine.cdmods_paths import get_cdmods_root
 from cdumm.engine.delta_engine import generate_delta, get_changed_byte_ranges, save_delta
-from cdumm.platform import IS_LINUX, IS_MACOS, IS_WINDOWS
+from cdumm.platform import IS_LINUX, IS_MACOS, IS_WINDOWS, python3_launcher_command
 from cdumm.engine.snapshot_manager import SnapshotManager
 from cdumm.storage.database import Database
 
@@ -4611,7 +4611,7 @@ def import_from_script(
         if suffix == ".bat":
             cmd = ["cmd.exe", "/c", script_path.name]
         elif suffix == ".py":
-            cmd = ["py", "-3", script_path.name]
+            cmd = [*python3_launcher_command(), script_path.name]
         else:
             result.error = f"Unsupported script type: {suffix}"
             return result
