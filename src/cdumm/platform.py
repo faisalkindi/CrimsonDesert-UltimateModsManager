@@ -143,6 +143,24 @@ def open_path(path: str | Path) -> bool:
         return False
 
 
+def python3_launcher_command() -> list[str]:
+    """Argv prefix that runs the user's SYSTEM Python 3, for executing a
+    mod's bundled ``.py`` script.
+
+    This must never be ``[sys.executable]``: on the frozen PyInstaller
+    build, ``sys.executable`` points at ``CDUMM.exe`` itself, so handing
+    it a mod script as an argument would just relaunch CDUMM instead of
+    running the script. Windows ships the ``py`` launcher for exactly
+    this case (it finds whichever Python is actually installed,
+    independent of CDUMM's own bundled one). macOS and Linux have no
+    such launcher, but ship ``python3`` on PATH by long-standing
+    convention, so use that there instead.
+    """
+    if IS_WINDOWS:
+        return ["py", "-3"]
+    return ["python3"]
+
+
 def worker_command(extra_args: list[str]) -> tuple[str, list[str]]:
     """Return ``(exe, args)`` for spawning a CDUMM worker subprocess.
 
