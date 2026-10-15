@@ -21,6 +21,7 @@ CDUMM ships frequent updates. The complete version history — every release bac
 
 ### v3.17 — the 4 September game update
 
+- **v3.17.11** — _October 15, 2026_ — **The first-run setup window can be closed again**, instead of swallowing ALT+F4, the taskbar close and Escape and leaving Task Manager as the only way out (reported by Ahplla). **macOS and Linux: script mod imports work and asset extraction no longer fails** on paths built on Windows.
 - **v3.17.10** — _October 6, 2026_ — **Full Reset + Rescan now really starts clean.** It wiped the vanilla backups but left behind the index of what is inside them, and a stale index could survive the reset and keep pointing at positions that no longer matched, failing JSON patch mods silently. Reported by baramjeoung.
 - **v3.17.9** — _October 1, 2026_ — **Correction to 3.17.8.** That version blamed the Microsoft Store for ASI plugins not working and suggested looking for a Game Pass build. Wrong: an ASI plugin is tied to one specific game build and does nothing on any other, on Steam too. The note now names your installed build and points at the plugin's own log in bin64.
 - **v3.17.8** — _September 21, 2026_ — **ASI plugins on a Microsoft Store / Game Pass install now come with a heads-up.** Most ASI plugins are built against the Steam exe and on a Store install either refuse to run or load and do nothing. CDUMM now says so after installing one, and suggests checking the mod page for a Game Pass build.
@@ -224,7 +225,8 @@ Requires Python 3.10+.
 git clone https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager.git
 cd CrimsonDesert-UltimateModsManager
 pip install -e .
-py -3 -m cdumm.main
+py -3 -m cdumm.main      # Windows
+python3 -m cdumm.main    # macOS / Linux
 ```
 
 ### Building the Executable

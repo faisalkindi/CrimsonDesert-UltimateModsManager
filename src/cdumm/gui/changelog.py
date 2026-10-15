@@ -21,6 +21,14 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.11",
+        "date": "2026-10-15",
+        "notes": [
+            "<b>The first-run setup window can be closed again.</b> It swallowed ALT+F4, the taskbar close command and Escape, and being frameless it had no close button of its own, so anyone who opened it and changed their mind had to kill CDUMM from Task Manager. All three now close it like any other dialog, and closing it without finishing exits CDUMM rather than carrying on with no language, theme or game folder set. It reappears next launch. Reported by Ahplla.",
+            "<b>macOS and Linux: importing a script mod works, and extracting a game asset no longer fails.</b> Script import called the Windows-only <code>py</code> launcher, so every script mod import failed outright off Windows. Separately, a fallback path that locates an archive split file paths on the host system's separator only, so an index built on Windows and read back on macOS or Wine produced a nonsense path instead of finding the file. Both were invisible in CI because the fast tests only run on Windows.",
+        ],
+    },
+    {
         "version": "3.17.10",
         "date": "2026-10-06",
         "notes": [
