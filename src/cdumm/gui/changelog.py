@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.12",
+        "date": "2026-10-21",
+        "notes": [
+            "<b>Two mods that change the same game table now both reach the game after you change one of them.</b> When two enabled mods edit the same file, CDUMM merges them into one. To save time on the next Apply, it reuses the previous result if nothing changed, but it only checked the first mod in the merge. So if you edited, updated or swapped the other one, Apply said it worked while the game kept getting the old merge. It now checks the merged result itself, so any change is picked up. Reported and traced by Vi-gilo.",
+        ],
+    },
+    {
         "version": "3.17.11",
         "date": "2026-10-15",
         "notes": [
