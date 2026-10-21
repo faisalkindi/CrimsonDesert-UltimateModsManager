@@ -122,3 +122,64 @@ def test_merged_entry_cache_invalidates_when_second_mod_changes(
         "overlay, which still reads "
         f"{rebuilt[0x20:0x24]!r} instead of b'\\xCC\\xCC\\xCC\\xCC' "
         "(GitHub #447)")
+
+
+def _apply_twice(w, entries_v1, entries_v2):
+    merged_v1 = w._merge_same_target_overlay_entries(entries_v1)
+    paz1, _p1, _e1 = ob.build_overlay(
+        merged_v1, game_dir=None, preloaded_cache=None,
+        vanilla_pathc_path=None)
+    cache1 = ob.build_overlay._last_cache
+    merged_v2 = w._merge_same_target_overlay_entries(entries_v2)
+    paz2, _p2, entries2 = ob.build_overlay(
+        merged_v2, game_dir=None, preloaded_cache=(cache1, paz1, None),
+        vanilla_pathc_path=None)
+    return merged_v1, merged_v2, _decompressed(
+        paz2, entries2, "skill.staticinfobody")
+
+
+def test_merge_of_entries_with_no_hash_or_path_still_rebuilds():
+    """Components built in memory carry neither delta_hash nor
+    delta_path. Before #447 that left the merged entry's delta_hash
+    empty, which disables caching for it. A fingerprint made only from
+    component metadata is then a constant, so the first merge would be
+    cached and every later change to it ignored."""
+    vanilla = b"\x00" * 64
+    meta = {"pamt_dir": "0008",
+            "entry_path": "gamedata/skill.staticinfobody",
+            "compression_type": 2}
+    a = bytearray(vanilla)
+    a[0x00:0x04] = b"\xAA" * 4
+    b1 = bytearray(vanilla)
+    b1[0x20:0x24] = b"\xBB" * 4
+    b2 = bytearray(vanilla)
+    b2[0x20:0x24] = b"\xCC" * 4
+    w = _make_worker(vanilla)
+    _m1, merged_v2, rebuilt = _apply_twice(
+        w,
+        [(bytes(a), {**meta, "priority": 1}),
+         (bytes(b1), {**meta, "priority": 2})],
+        [(bytes(a), {**meta, "priority": 1}),
+         (bytes(b2), {**meta, "priority": 2})])
+    assert rebuilt == merged_v2[0][0]
+    assert rebuilt[0x20:0x24] == b"\xCC" * 4
+
+
+def test_an_unchanged_merge_keeps_its_fingerprint():
+    """The cache must still be usable: the same inputs give the same
+    delta_hash, so an Apply with nothing changed reuses the bytes."""
+    vanilla = b"\x00" * 64
+    meta = {"pamt_dir": "0008",
+            "entry_path": "gamedata/skill.staticinfobody",
+            "compression_type": 2}
+    a = bytearray(vanilla)
+    a[0x00:0x04] = b"\xAA" * 4
+    b = bytearray(vanilla)
+    b[0x20:0x24] = b"\xBB" * 4
+    entries = [(bytes(a), {**meta, "priority": 1}),
+               (bytes(b), {**meta, "priority": 2})]
+    w = _make_worker(vanilla)
+    m1, m2, rebuilt = _apply_twice(w, list(entries), list(entries))
+    assert m1[0][1]["delta_hash"]
+    assert m1[0][1]["delta_hash"] == m2[0][1]["delta_hash"]
+    assert rebuilt == m1[0][0]
