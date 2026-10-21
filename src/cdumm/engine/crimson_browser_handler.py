@@ -346,9 +346,16 @@ def convert_to_paz_mod(
                 continue
         rel = f.relative_to(files_dir)
         parts = rel.parts
-        if len(parts) >= 2 and parts[0].isdigit():
-            dir_num = parts[0]
-            inner_path = "/".join(parts[1:])
+        # The numbered dir may sit below a wrapper folder the author
+        # added (Character Creator ships
+        # "Character Creator Enhanced/0009/character/..."). Strip
+        # everything before the first 4-digit part; without this the
+        # whole wrapper path went to basename lookup, new files were
+        # dropped and new DDSes were packed under the wrapper path.
+        num_idx = _numbered_dir_index(parts)
+        if num_idx is not None:
+            dir_num = parts[num_idx]
+            inner_path = "/".join(parts[num_idx + 1:])
             files_by_dir.setdefault(dir_num, []).append((inner_path, f))
         else:
             # No numbered dir — use full relative path for PAMT lookup
@@ -384,6 +391,11 @@ def convert_to_paz_mod(
     # a NEW texture the mod is introducing — we'll build a texture overlay
     # for those below (PAZ + PAMT + PATHC registration).
     leftover_dds: list[tuple[str, Path]] = []
+    # Files inside a numbered dir with no PAMT entry there are NEW files
+    # (new prefabs / meshes / model properties / preview DDSes). They are
+    # packed, together with leftover_dds, into ONE overlay group below:
+    # (virtual_path, source_file, options for build_new_files_overlay).
+    new_files: list[tuple[str, Path, dict]] = []
     if unresolved:
         dir_map, still_unresolved = _resolve_files_to_directories(unresolved, game_dir)
         for dir_num, file_list in dir_map.items():
@@ -450,6 +462,22 @@ def convert_to_paz_mod(
 
         # Parse PAMT to find all entries
         entries = parse_pamt(str(pamt_path), paz_dir=paz_dir_for_parse)
+        # parse_pamt flattens every path to "<root folder>/<filename>";
+        # the game (and a mod's files/NNNN/ tree) use the FULL folder
+        # path. Index the full paths too so a mod file matches the exact
+        # vanilla entry instead of whichever entry shares its basename.
+        full_paths = _pamt_full_paths(pamt_path)
+        full_map: dict[str, PazEntry] = {}
+        vanilla_folders: set[str] = set()
+        if full_paths is not None and len(full_paths) == len(entries):
+            for fp, e in zip(full_paths, entries):
+                full_map.setdefault(fp.lower(), e)
+                if "/" in fp:
+                    vanilla_folders.add(fp.rsplit("/", 1)[0].lower())
+        elif full_paths is not None:
+            logger.warning("CB mod: full-path index for %s has %d paths for "
+                           "%d entries; using flattened paths only",
+                           dir_name, len(full_paths), len(entries))
         entry_map: dict[str, PazEntry] = {}
         for e in entries:
             # Normalize: strip leading folder prefix for matching
@@ -464,13 +492,20 @@ def convert_to_paz_mod(
         # PAMT flattens paths (e.g., "ui/minimaphudview2.css") while mods
         # may use full filesystem paths ("ui/xml/gamemain/play/minimaphudview2.css")
         basename_map: dict[str, PazEntry] = {}
+        # Same basename -> every entry with it, in PAMT order. Used for
+        # the "/<inner_path>" suffix match below, which used to scan the
+        # whole entry_map per file (654k entries in 0009 x hundreds of
+        # new files).
+        entries_by_basename: dict[str, list[PazEntry]] = {}
         for e in entries:
             bname = e.path.rsplit("/", 1)[-1].lower()
+            entries_by_basename.setdefault(bname, []).append(e)
             # Only use basename if it's unique — ambiguous names skip this fallback
             if bname in basename_map:
                 basename_map[bname] = None  # mark as ambiguous
             else:
                 basename_map[bname] = e
+        new_file_convention: dict[str, tuple[int, bool]] | None = None
 
         pamt_updates: list[tuple[PazEntry, int]] = []  # (entry, new_comp_size)
 
@@ -478,12 +513,25 @@ def convert_to_paz_mod(
             # Find matching PAMT entry
             entry = entry_map.get(inner_path.lower())
             if entry is None:
+                entry = full_map.get(inner_path.lower())
+            folder_known = (
+                "/" in inner_path
+                and inner_path.rsplit("/", 1)[0].lower() in vanilla_folders)
+            if entry is None and folder_known:
+                # The mod's folder exists in vanilla but this file is not
+                # in it: a NEW file. Do not fall back to a basename match,
+                # which would overwrite an unrelated vanilla file that
+                # happens to share the name.
+                pass
+            elif entry is None:
                 # Try with directory prefix (some PAMTs include a root prefix)
-                for key, e in entry_map.items():
-                    if key.endswith("/" + inner_path.lower()) or key == inner_path.lower():
+                suffix = "/" + inner_path.lower()
+                for e in entries_by_basename.get(
+                        inner_path.rsplit("/", 1)[-1].lower(), ()):
+                    if e.path.lower().endswith(suffix):
                         entry = e
                         break
-            if entry is None:
+            if entry is None and not folder_known:
                 # Fallback: match by filename only (PAMT flattens directory structure)
                 bname = inner_path.rsplit("/", 1)[-1].lower()
                 entry = basename_map.get(bname)
@@ -500,13 +548,33 @@ def convert_to_paz_mod(
                 # here and get silently dropped: the import "succeeded" but
                 # the images never loaded. GitHub #193 (RoGreat).
                 if inner_path.lower().endswith(".dds"):
-                    leftover_dds.append((inner_path, source_file))
+                    new_files.append((inner_path, source_file, {}))
                     logger.info(
                         "CB mod: new texture '%s' (no PAMT entry in dir "
                         "%s) routed to texture overlay", inner_path, dir_name)
                     continue
-                logger.warning("CB mod: no PAMT entry for '%s' in dir %s, skipping",
-                               inner_path, dir_name)
+                # Any other file with no PAMT entry is a NEW game file
+                # (Character Creator: 594 prefabs, 69 .pac meshes, 69
+                # .pac_xml model properties). Dropping it made the mod
+                # "import" while every new head/hair option pointed at
+                # nothing. Pack it into the new-file overlay with the
+                # compression/encryption vanilla uses for that extension
+                # in this dir.
+                if new_file_convention is None:
+                    new_file_convention = _vanilla_ext_convention(entries)
+                ext = _file_ext(inner_path)
+                comp_rule, enc = new_file_convention.get(ext, (2, False))
+                size = source_file.stat().st_size
+                new_files.append((inner_path, source_file, {
+                    "pamt_dir": dir_name,
+                    "compression_type": (
+                        2 if comp_rule == 2 and size >= _RAW_BELOW else 0),
+                    "encrypted": enc,
+                }))
+                logger.info(
+                    "CB mod: new file '%s' (no PAMT entry in dir %s) routed "
+                    "to new-file overlay (comp=%s, enc=%s)", inner_path,
+                    dir_name, new_files[-1][2]["compression_type"], enc)
                 continue
 
             # Ensure we have a copy of the PAZ file in work_dir.
@@ -652,37 +720,177 @@ def convert_to_paz_mod(
         if pamt_updates:
             _update_pamt_entries(pamt_dst, pamt_updates)
 
-    # Route unresolved DDS files through the shared texture-overlay helper.
-    # This is what lets CB mods that ship BOTH known XMLs AND new DDS
-    # preview textures (e.g. Barber Unlocked, Character Creator) work:
-    # the known XMLs land in their vanilla PAZ dirs above, and the new
-    # DDSes get a fresh numbered PAZ + PAMT + PATHC registration here.
+    # Route every NEW file (no vanilla PAMT entry) through ONE overlay
+    # group: the unresolved DDSes plus the new files found inside
+    # numbered dirs. This is what lets CB mods that ship BOTH known
+    # files AND new ones (Barber Unlocked, Character Creator) work: the
+    # known files land in their vanilla PAZ dirs above, the new ones get
+    # a fresh numbered PAZ + PAMT (+ PATHC registration for DDS) here.
+    # One call only: _next_paz_directory(game_dir) hands out the same
+    # number every time, so a second group would overwrite the first.
     #
-    # A texture-overlay failure is fatal: partial imports (XML side
-    # landed but DDSes dropped) produce the "imported successfully but
-    # icons are blank" state that brought the fix request to begin with.
-    # Better to reject the import outright than ship half a mod.
-    if leftover_dds:
-        from cdumm.engine.texture_mod_handler import build_texture_overlay
-        overlay_result = build_texture_overlay(leftover_dds, game_dir, work_dir)
+    # An overlay failure is fatal: partial imports (known files landed
+    # but new ones dropped) produce the "imported successfully but icons
+    # are blank / heads missing" state. Better to reject the import
+    # outright than ship half a mod.
+    new_files.extend((p, src, {}) for p, src in leftover_dds)
+    if new_files:
+        from cdumm.engine import texture_mod_handler
+        n_dds = sum(1 for p, _s, _o in new_files if p.lower().endswith(".dds"))
+        if n_dds == len(new_files):
+            # DDS only: the long-standing texture-overlay entry point.
+            tex = texture_mod_handler.build_texture_overlay(
+                [(p, src) for p, src, _o in new_files], game_dir, work_dir)
+            overlay_result = (
+                None if tex is None else (tex[0], len(new_files), tex[1]))
+        else:
+            overlay_result = texture_mod_handler.build_new_files_overlay(
+                new_files, game_dir, work_dir, config=config)
         if overlay_result is None:
             logger.error(
-                "CB mod: %d new DDS file(s) failed the texture overlay "
-                "build — aborting import to avoid a partial apply",
-                len(leftover_dds))
+                "CB mod: %d new file(s) (%d DDS) failed the overlay build "
+                "— aborting import to avoid a partial apply",
+                len(new_files), n_dds)
             return None
-        target_dir, registered = overlay_result
-        if registered == 0:
+        target_dir, packed, registered = overlay_result
+        if packed != len(new_files):
             logger.error(
-                "CB mod: texture overlay wrote PAZ/PAMT but registered "
-                "zero DDS entries in PATHC — aborting import")
+                "CB mod: new-file overlay packed %d of %d file(s) — "
+                "aborting import to avoid a partial apply",
+                packed, len(new_files))
+            return None
+        if n_dds and registered != n_dds:
+            logger.error(
+                "CB mod: new-file overlay registered %d of %d DDS entries "
+                "in PATHC — aborting import", registered, n_dds)
             return None
         logger.info(
-            "CB mod: routed %d new DDS file(s) through texture overlay "
+            "CB mod: routed %d new file(s) (%d DDS) through one overlay "
             "-> %s/ (PATHC registered %d)",
-            len(leftover_dds), target_dir, registered)
+            len(new_files), n_dds, target_dir, registered)
 
     return work_dir
+
+
+# Vanilla packer rule for new files: entries under 4096 bytes are stored
+# raw, larger ones compressed.
+_RAW_BELOW = 4096
+
+
+def _pamt_full_paths(pamt_path: Path) -> list[str] | None:
+    """Full VFS path (folder path + filename) of every PAMT file record.
+
+    Same record order as ``parse_pamt``, so ``zip(paths, entries)``
+    pairs them. Folder records give each file's folder through the
+    folder trie; the node trie gives the filename. Returns None when the
+    PAMT cannot be read.
+    """
+    try:
+        data = Path(pamt_path).read_bytes()
+        off = 4
+        paz_count = struct.unpack_from("<I", data, off)[0]
+        off += 4 + 8
+        off += paz_count * 8 + max(0, paz_count - 1) * 4
+
+        def read_trie(off):
+            size = struct.unpack_from("<I", data, off)[0]
+            start = off + 4
+            items = {}
+            o = start
+            while o < start + size:
+                parent = struct.unpack_from("<I", data, o)[0]
+                slen = data[o + 4]
+                items[o - start] = (parent, data[o + 5:o + 5 + slen].decode(
+                    "utf-8", errors="replace"))
+                o += 5 + slen
+            return items, start + size
+
+        def join(trie, ref, limit):
+            parts = []
+            while ref != 0xFFFFFFFF and len(parts) < limit and ref in trie:
+                parent, name = trie[ref]
+                parts.append(name)
+                ref = parent
+            return "".join(reversed(parts))
+
+        folders, off = read_trie(off)
+        nodes, off = read_trie(off)
+        folder_count = struct.unpack_from("<I", data, off)[0]
+        off += 4
+        file_folder: dict[int, str] = {}
+        for _ in range(folder_count):
+            _h, fref, first, count = struct.unpack_from("<IIII", data, off)
+            off += 16
+            fpath = join(folders, fref, 64).strip("/")
+            for idx in range(first, first + count):
+                file_folder[idx] = fpath
+        off += 4  # file_count
+        out = []
+        i = 0
+        while off + 20 <= len(data):
+            node_ref = struct.unpack_from("<I", data, off)[0]
+            off += 20
+            name = join(nodes, node_ref, 64)
+            folder = file_folder.get(i, "")
+            out.append(f"{folder}/{name}" if folder else name)
+            i += 1
+        return out
+    except Exception as e:
+        logger.debug("CB mod: full-path index failed for %s: %s", pamt_path, e)
+        return None
+
+
+def _numbered_dir_index(parts: tuple[str, ...]) -> int | None:
+    """Index of the PAZ dir part in a mod-relative path, or None.
+
+    ``0009/x.prefab`` -> 0 (any all-digit first part, as before);
+    ``Wrapper/0009/x.prefab`` -> 1 (first 4-digit part below a wrapper).
+    The part must have something after it (a file inside the dir).
+    """
+    if len(parts) >= 2 and parts[0].isdigit():
+        return 0
+    for i in range(1, len(parts) - 1):
+        if parts[i].isdigit() and len(parts[i]) == 4:
+            return i
+    return None
+
+
+def _file_ext(path: str) -> str:
+    name = path.rsplit("/", 1)[-1].lower()
+    dot = name.rfind(".")
+    return name[dot:] if dot > 0 else ""
+
+
+def _vanilla_ext_convention(
+    entries: list[PazEntry],
+) -> dict[str, tuple[int, bool]]:
+    """Per-extension (compression rule, encrypted) from a vanilla PAMT.
+
+    Encryption: the 0x30 nibble of ``flags >> 16`` (ChaCha20) on the
+    majority of that extension's entries (pac_xml / xml / app_xml in
+    0009). Compression rule: 2 when the extension's compressed entries
+    use LZ4 (type 2) — the caller then compresses files of 4096 bytes or
+    more; otherwise 0 (raw). Type 1 is the partial layout (DDS mips,
+    .pac 'PAR'); build_overlay only knows how to write it for DDS, so a
+    new non-DDS file of a type-1 extension is stored raw, which vanilla
+    also does for some entries of those extensions.
+    """
+    stats: dict[str, list[int]] = {}  # ext -> [total, encrypted, lz4]
+    for e in entries:
+        ext = _file_ext(e.path)
+        if not ext:
+            continue
+        st = stats.setdefault(ext, [0, 0, 0])
+        hi = (e.flags >> 16) & 0xFF
+        st[0] += 1
+        if hi & 0xF0 == 0x30:
+            st[1] += 1
+        if hi & 0x0F == 2:
+            st[2] += 1
+    return {
+        ext: (2 if lz4 else 0, enc * 2 > total)
+        for ext, (total, enc, lz4) in stats.items()
+    }
 
 
 def _resolve_files_to_directories(

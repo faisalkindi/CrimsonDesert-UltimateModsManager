@@ -101,18 +101,8 @@ def build_texture_overlay(
 ) -> tuple[str, int] | None:
     """Build a full PAZ + PAMT + PATHC overlay for new DDS textures.
 
-    Shared helper used by both the pure-texture import path (folder of
-    loose DDS files) and the Crimson Browser path (mixed mod where CB
-    routed known XMLs but left new DDSes unresolved).
-
-    1. Allocate a fresh numbered PAMT directory (0036+).
-    2. Read each DDS's bytes, build overlay entries with
-       ``compression_type=1`` (DDS) and the caller-supplied VFS path.
-    3. Call ``overlay_builder.build_overlay`` for PAZ + PAMT bytes.
-    4. Write ``work_dir/<new_dir>/0.paz`` and ``0.pamt``.
-    5. Register each DDS in ``work_dir/meta/0.pathc`` using the
-       m-values + last4 that the overlay PAZ actually carries, so the
-       texture loader's cross-checks pass.
+    Thin DDS-only wrapper over :func:`build_new_files_overlay`, kept for
+    the pure-texture import path and existing callers.
 
     Args:
         dds_entries: list of ``(virtual_path, source_file)`` tuples.
@@ -127,123 +117,182 @@ def build_texture_overlay(
     Returns:
         ``(target_paz_dir, registered_count)`` or ``None`` on failure.
     """
+    if not dds_entries:
+        return None
+    result = build_new_files_overlay(
+        [(vp, src, {}) for vp, src in dds_entries], game_dir, work_dir,
+        config=config)
+    if result is None:
+        return None
+    target_dir, _packed, registered = result
+    return target_dir, registered
+
+
+def build_new_files_overlay(
+    new_entries: list[tuple[str, Path, dict]],
+    game_dir: Path,
+    work_dir: Path,
+    config: "Config | None" = None,
+) -> tuple[str, int, int] | None:
+    """Pack files that have NO vanilla PAMT entry into ONE overlay group.
+
+    Shared helper for the pure-texture import path (folder of loose DDS
+    files) and the Crimson Browser path (mixed mod whose known files
+    were repacked into their vanilla PAZ dirs but which also ships new
+    files: preview DDSes, new prefabs, meshes, model properties).
+
+    Everything goes into a single ``build_overlay`` call because
+    ``_next_paz_directory(game_dir)`` returns the same number on every
+    call (it reads the game dir, not ``work_dir``): two calls would
+    write two groups to the same directory and the second would
+    overwrite the first.
+
+    1. Allocate a fresh numbered PAMT directory (0036+).
+    2. DDS: ``compression_type=1`` (JMM partial payload) and registered
+       in ``work_dir/meta/0.pathc`` with the m-values + last4 the overlay
+       PAZ actually carries, so the texture loader's cross-checks pass.
+    3. Non-DDS: compression/encryption from the per-entry ``options``
+       dict (the caller derives them from the vanilla convention of the
+       file's own numbered dir); without options, raw below 4096 bytes
+       and LZ4 above, unencrypted.
+
+    Args:
+        new_entries: list of ``(virtual_path, source_file, options)``.
+            ``options`` may carry ``compression_type`` (0 or 2 for
+            non-DDS), ``encrypted`` (bool) and ``pamt_dir`` (the vanilla
+            dir the file belongs to, used for folder-path lookups).
+        game_dir: game installation root.
+        work_dir: output directory.
+
+    Returns:
+        ``(target_paz_dir, files_packed, dds_registered)`` or ``None``
+        on failure.
+    """
     from cdumm.archive.overlay_builder import build_overlay
     from cdumm.archive.pathc_handler import update_entry
     from cdumm.engine.import_handler import _next_paz_directory
 
-    if not dds_entries:
+    if not new_entries:
         return None
 
-    # ── Resolve PATHC source: prefer an already-staged copy in work_dir
-    # so this helper can be called more than once and results stack. ──
-    staged_pathc = work_dir / "meta" / "0.pathc"
-    vanilla_backup = get_cdmods_root(config, game_dir) / "vanilla" / "meta" / "0.pathc"
-    game_pathc = game_dir / "meta" / "0.pathc"
-
-    if staged_pathc.exists():
-        pathc_src = staged_pathc
-    elif vanilla_backup.exists():
-        pathc_src = vanilla_backup
-    elif game_pathc.exists():
-        pathc_src = game_pathc
-    else:
-        logger.error("Texture overlay: meta/0.pathc not found")
-        return None
-
-    try:
-        pathc = read_pathc(pathc_src)
-    except Exception as e:
-        logger.error("Failed to parse PATHC: %s", e)
-        return None
-
-    # Always pass the vanilla/game PATHC to build_overlay for last4 lookup,
-    # never the staged one (which may already contain this mod's entries).
-    lookup_pathc = vanilla_backup if vanilla_backup.exists() else game_pathc
-
-    # ── Build entry list for build_overlay ────────────────────────────
-    #
+    target_dir = _next_paz_directory(game_dir)
+    entries: list[tuple[bytes, dict]] = []
     # Two indexes keep PATHC registration path-accurate even when two
     # DDS files in the overlay share the same basename (a real thing in
     # texture packs — e.g. two /foo/normal.dds and /bar/normal.dds).
-    # Previously we keyed by basename, so the second file overwrote the
-    # first in the lookup dict and its PATHC row was written against
-    # the wrong path. Now we carry the full virtual path through.
-    target_dir = _next_paz_directory(game_dir)
-    entries: list[tuple[bytes, dict]] = []
     entry_paths_by_filename: dict[str, list[str]] = {}
     dds_content_by_entry_path: dict[str, bytes] = {}
+    seen_paths: set[str] = set()
 
-    for virtual_path, source_file in sorted(dds_entries):
+    for virtual_path, source_file, options in sorted(
+            new_entries, key=lambda t: (t[0], str(t[1]))):
         entry_path = virtual_path.lstrip("/")
+        if entry_path.lower() in seen_paths:
+            logger.warning("New-file overlay: duplicate path %s — keeping "
+                           "the first copy", entry_path)
+            continue
         try:
             content = source_file.read_bytes()
         except Exception as e:
-            logger.warning("Texture overlay: cannot read %s: %s", source_file, e)
+            logger.warning("New-file overlay: cannot read %s: %s",
+                           source_file, e)
             continue
-        # Validate DDS magic — a file named *.dds without the magic is
-        # garbage and would waste a PAZ slot while PATHC skips it below.
-        # Reject at the door so a bad mod fails cleanly.
-        if not content.startswith(b"DDS "):
-            logger.warning(
-                "Texture overlay: %s is not a valid DDS file "
-                "(missing 'DDS ' magic) — skipping", source_file)
-            continue
-        entries.append((content, {
-            "entry_path": entry_path,
-            "pamt_dir": target_dir,
-            "compression_type": 1,
-        }))
-        filename = entry_path.rsplit("/", 1)[-1].lower()
-        entry_paths_by_filename.setdefault(filename, []).append(entry_path)
-        dds_content_by_entry_path[entry_path] = content
+        if entry_path.lower().endswith(".dds"):
+            # Validate DDS magic — a file named *.dds without the magic
+            # is garbage and would waste a PAZ slot while PATHC skips it.
+            if not content.startswith(b"DDS "):
+                logger.warning(
+                    "Texture overlay: %s is not a valid DDS file "
+                    "(missing 'DDS ' magic) — skipping", source_file)
+                continue
+            meta = {
+                "entry_path": entry_path,
+                "pamt_dir": target_dir,
+                "compression_type": 1,
+            }
+            filename = entry_path.rsplit("/", 1)[-1].lower()
+            entry_paths_by_filename.setdefault(filename, []).append(entry_path)
+            dds_content_by_entry_path[entry_path] = content
+        else:
+            comp = options.get("compression_type")
+            if comp not in (0, 2):
+                # Type 1 is the DDS partial-payload layout in
+                # build_overlay; never hand it a non-DDS file.
+                comp = 0 if len(content) < 4096 else 2
+            meta = {
+                "entry_path": entry_path,
+                "pamt_dir": options.get("pamt_dir") or target_dir,
+                "compression_type": comp,
+            }
+            if options.get("encrypted"):
+                meta["encrypted"] = True
+        seen_paths.add(entry_path.lower())
+        entries.append((content, meta))
 
     if not entries:
-        logger.error("Texture overlay: no valid DDS inputs")
+        logger.error("New-file overlay: no valid inputs")
         return None
 
-    # ── Build PAZ + PAMT via overlay_builder ─────────────────────────
+    pathc = None
+    pathc_src = None
+    staged_pathc = work_dir / "meta" / "0.pathc"
+    vanilla_backup = get_cdmods_root(config, game_dir) / "vanilla" / "meta" / "0.pathc"
+    game_pathc = game_dir / "meta" / "0.pathc"
+    # Always pass the vanilla/game PATHC to build_overlay for last4 lookup,
+    # never the staged one (which may already contain this mod's entries).
+    lookup_pathc = vanilla_backup if vanilla_backup.exists() else game_pathc
+    if dds_content_by_entry_path:
+        # Prefer an already-staged copy in work_dir so additions stack.
+        if staged_pathc.exists():
+            pathc_src = staged_pathc
+        elif vanilla_backup.exists():
+            pathc_src = vanilla_backup
+        elif game_pathc.exists():
+            pathc_src = game_pathc
+        else:
+            logger.error("Texture overlay: meta/0.pathc not found")
+            return None
+        try:
+            pathc = read_pathc(pathc_src)
+        except Exception as e:
+            logger.error("Failed to parse PATHC: %s", e)
+            return None
+
+    # ── Build PAZ + PAMT via overlay_builder (ONE call, ONE group) ──
     try:
         paz_bytes, pamt_bytes, overlay_entries = build_overlay(
             entries, game_dir=game_dir, vanilla_pathc_path=lookup_pathc,
         )
     except Exception as e:
-        logger.error("build_overlay failed for texture overlay: %s", e,
+        logger.error("build_overlay failed for new-file overlay: %s", e,
                      exc_info=True)
         return None
 
-    # ── Write PAZ + PAMT to work_dir/<target_dir>/ ───────────────────
     out_paz_dir = work_dir / target_dir
     out_paz_dir.mkdir(parents=True, exist_ok=True)
     (out_paz_dir / "0.paz").write_bytes(paz_bytes)
     (out_paz_dir / "0.pamt").write_bytes(pamt_bytes)
     logger.info(
-        "Texture overlay: PAZ=%d bytes, PAMT=%d bytes written to %s/",
+        "New-file overlay: %d entries (%d DDS), PAZ=%d bytes, PAMT=%d "
+        "bytes written to %s/", len(entries), len(dds_content_by_entry_path),
         len(paz_bytes), len(pamt_bytes), target_dir)
 
+    if pathc is None:
+        return target_dir, len(entries), 0
+
     # ── Register each DDS in PATHC with m-values + last4 from the
-    # overlay PAZ we just built. Using those authoritative values means
-    # PATHC and PAZ can never disagree on reserved1 / reserved2 bytes,
-    # which the texture loader cross-checks.
-    #
-    # Match the overlay entry back to its source by FULL virtual path
-    # (``dir_path/filename``), not basename alone — basename-only
-    # matching silently lost one of every pair of files that share a
-    # name but live in different folders.
+    # overlay PAZ we just built, matched back by FULL virtual path. ──
     added_count = 0
     for oe in overlay_entries:
-        # Reconstruct the virtual path the way build_overlay produced it.
         oe_full = (
             f"{oe.dir_path}/{oe.filename}" if oe.dir_path else oe.filename
         ).lstrip("/")
-        # Fall back to basename lookup only if the exact virtual path
-        # we supplied isn't represented — covers PAMT path-rewrites
-        # that collapse folder prefixes.
         if oe_full in dds_content_by_entry_path:
             entry_path = oe_full
         else:
             candidates = entry_paths_by_filename.get(oe.filename.lower(), [])
             if len(candidates) == 0:
-                continue  # e.g. auto-included .pabgh siblings, not DDS
+                continue  # non-DDS entry or auto-included .pabgh sibling
             if len(candidates) > 1:
                 logger.warning(
                     "PATHC register: ambiguous basename %s — overlay entry "
@@ -279,7 +328,6 @@ def build_texture_overlay(
             "registered in PATHC — rejecting as broken")
         return None
 
-    # ── Serialize PATHC ──────────────────────────────────────────────
     try:
         modified_bytes = serialize_pathc(pathc)
     except Exception as e:
@@ -293,7 +341,7 @@ def build_texture_overlay(
         "Texture overlay: registered %d DDS entries in PATHC (%d -> %d bytes)",
         added_count, pathc_src.stat().st_size, len(modified_bytes))
 
-    return target_dir, added_count
+    return target_dir, len(entries), added_count
 
 
 def convert_texture_mod(
