@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.13",
+        "date": "2026-10-28",
+        "notes": [
+            "<b>Loose-file mods that add new game files now install completely.</b> Character Creator Enhanced puts its files one folder deeper than CDUMM expected, and most of them are new files the game does not have yet. CDUMM kept only the 14 files that replace existing ones and quietly dropped the other 1,131, so the game never finished loading. Its new icons also landed under the wrong path. All 1,145 files now go where the game looks for them, and a new file is never mistaken for an unrelated game file that happens to share its name. Reported and fixed by 7uk0.",
+        ],
+    },
+    {
         "version": "3.17.12",
         "date": "2026-10-21",
         "notes": [
