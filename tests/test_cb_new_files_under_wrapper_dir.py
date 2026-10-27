@@ -3,7 +3,8 @@ files with no vanilla PAMT entry (prefab / pac / pac_xml)."""
 from types import SimpleNamespace
 
 from cdumm.engine.crimson_browser_handler import (
-    _numbered_dir_index, _vanilla_ext_convention,
+    _numbered_dir_index,
+    _vanilla_ext_convention,
 )
 
 
