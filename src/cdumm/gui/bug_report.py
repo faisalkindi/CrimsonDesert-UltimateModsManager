@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from cdumm.platform import IS_WINDOWS
+from cdumm.platform import IS_MACOS, IS_WINDOWS
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -600,23 +600,29 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                 "often break mod install — consider moving the Steam library "
                 "to a non-protected drive.")
         body.append(f"Game Platform: {_detect_game_platform(game_dir)}")
-        # Game exe specifics — same-size check, admin compat flag, mtime
-        game_exe = game_dir / "bin64" / "CrimsonDesert.exe"
-        if not game_exe.exists():
-            game_exe = game_dir / "CrimsonDesert.exe"
-        body.append(f"Game Exe: {_exe_info(game_exe)}")
-        if game_exe.exists():
-            compat = _read_compat_flags(game_exe)
-            if compat:
-                body.append(f"Game Exe Compat Flags: {' '.join(compat)}")
-                if any("RUNASADMIN" in c.upper() for c in compat):
-                    tldr_flags.append(
-                        "Game exe has RUNASADMIN set in Windows compatibility "
-                        "flags — this causes WINerror 740 and blocks drag-drop. "
-                        "Right-click CrimsonDesert.exe → Properties → "
-                        "Compatibility → uncheck 'Run as administrator'.")
-            else:
-                body.append("Game Exe Compat Flags: none")
+        # Game exe specifics — same-size check, admin compat flag, mtime.
+        # The native macOS build is a Crimson Desert.app bundle with no
+        # bin64/CrimsonDesert.exe at all (MACOS.md), so this check is
+        # Windows/Linux(Proton)-only; on macOS it always reported
+        # "MISSING" and told users their install was broken when it
+        # wasn't (GitHub #457).
+        if not IS_MACOS:
+            game_exe = game_dir / "bin64" / "CrimsonDesert.exe"
+            if not game_exe.exists():
+                game_exe = game_dir / "CrimsonDesert.exe"
+            body.append(f"Game Exe: {_exe_info(game_exe)}")
+            if game_exe.exists():
+                compat = _read_compat_flags(game_exe)
+                if compat:
+                    body.append(f"Game Exe Compat Flags: {' '.join(compat)}")
+                    if any("RUNASADMIN" in c.upper() for c in compat):
+                        tldr_flags.append(
+                            "Game exe has RUNASADMIN set in Windows compatibility "
+                            "flags — this causes WINerror 740 and blocks drag-drop. "
+                            "Right-click CrimsonDesert.exe → Properties → "
+                            "Compatibility → uncheck 'Run as administrator'.")
+                else:
+                    body.append("Game Exe Compat Flags: none")
         # Current game version hash (fingerprint of installed game files)
         try:
             from cdumm.engine.version_detector import detect_game_version
@@ -903,37 +909,46 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
                     "re-order if the wrong one is winning.")
         body.append("")
 
-        # Installation checks — things outside CDUMM's own DB that affect behavior
+        # Installation checks — things outside CDUMM's own DB that affect behavior.
+        # bin64/ and ASI loader DLLs are a Windows/Linux(Proton) concept: the
+        # native macOS build is a Crimson Desert.app bundle with no bin64/ at
+        # all, and ASI plugins are a Win32-only proxy-DLL format that isn't
+        # possible there (MACOS.md). Checking for it on macOS always reported
+        # "not present" and told users their install was incomplete or wrong
+        # when it wasn't (GitHub #457).
         body.append("--- INSTALLATION CHECKS ---")
-        bin64 = (game_dir / "bin64") if game_dir else None
-        if bin64 and bin64.exists():
-            body.append(f"  bin64: {bin64}")
-            loader_names = ("winmm.dll", "dinput8.dll", "version.dll",
-                             "xinput1_3.dll", "d3d11.dll")
-            loaders_present = [n for n in loader_names if (bin64 / n).exists()]
-            if loaders_present:
-                body.append(f"  ASI loader DLL(s): {', '.join(loaders_present)}")
-            else:
-                body.append("  ASI loader DLL(s): NONE FOUND")
-                # Only flag as critical if user has ASI plugins
-                try:
-                    asi_n = db.connection.execute(
-                        "SELECT COUNT(*) FROM asi_plugin_state").fetchone()[0]
-                except Exception:
-                    asi_n = 0
-                if asi_n:
-                    tldr_flags.append(
-                        f"{asi_n} ASI plugin(s) are installed but no ASI loader "
-                        "DLL is in bin64/ — ASI mods will not run. Install "
-                        "Ultimate ASI Loader (winmm.dll) into bin64/.")
-            # Count installed .asi files
-            asi_files = list(bin64.glob("*.asi"))
-            body.append(f"  .asi files in bin64: {len(asi_files)}")
+        if IS_MACOS:
+            body.append("  bin64: n/a (native macOS build; ASI plugins unsupported)")
         else:
-            body.append("  bin64: (not present)")
-            tldr_flags.append(
-                "bin64/ folder missing — game install is incomplete or the "
-                "game_dir is wrong.")
+            bin64 = (game_dir / "bin64") if game_dir else None
+            if bin64 and bin64.exists():
+                body.append(f"  bin64: {bin64}")
+                loader_names = ("winmm.dll", "dinput8.dll", "version.dll",
+                                 "xinput1_3.dll", "d3d11.dll")
+                loaders_present = [n for n in loader_names if (bin64 / n).exists()]
+                if loaders_present:
+                    body.append(f"  ASI loader DLL(s): {', '.join(loaders_present)}")
+                else:
+                    body.append("  ASI loader DLL(s): NONE FOUND")
+                    # Only flag as critical if user has ASI plugins
+                    try:
+                        asi_n = db.connection.execute(
+                            "SELECT COUNT(*) FROM asi_plugin_state").fetchone()[0]
+                    except Exception:
+                        asi_n = 0
+                    if asi_n:
+                        tldr_flags.append(
+                            f"{asi_n} ASI plugin(s) are installed but no ASI loader "
+                            "DLL is in bin64/ — ASI mods will not run. Install "
+                            "Ultimate ASI Loader (winmm.dll) into bin64/.")
+                # Count installed .asi files
+                asi_files = list(bin64.glob("*.asi"))
+                body.append(f"  .asi files in bin64: {len(asi_files)}")
+            else:
+                body.append("  bin64: (not present)")
+                tldr_flags.append(
+                    "bin64/ folder missing — game install is incomplete or the "
+                    "game_dir is wrong.")
 
         # Implicit-metadata presence
         if game_dir:
