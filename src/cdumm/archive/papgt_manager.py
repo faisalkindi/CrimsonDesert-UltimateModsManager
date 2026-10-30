@@ -33,6 +33,35 @@ ENTRY_SIZE = 12  # bytes per directory entry
 DEFAULT_LANG_TYPE = 0x3FFF
 
 
+def _compact_papgt_layout(data: bytes) -> tuple[int, int] | None:
+    """Recognise 2.04's four-byte prefix and opaque 64-byte trailer.
+
+    This only frames existing entries. It deliberately makes no claim about
+    regenerating the trailer or about the engine accepting a modified index.
+    """
+    for count in range(1, max(1, (len(data) - 72) // ENTRY_SIZE + 1)):
+        size_pos = 4 + count * ENTRY_SIZE
+        size = struct.unpack_from('<I', data, size_pos)[0]
+        start = size_pos + 4
+        end = start + size
+        if size == 0 or end + 64 != len(data):
+            continue
+        names = data[start:end]
+        seen = set()
+        for i in range(count):
+            offset = struct.unpack_from('<I', data, 4 + i * ENTRY_SIZE + 4)[0]
+            if offset >= size or (offset and names[offset - 1] != 0):
+                break
+            name_end = names.find(b'\0', offset)
+            name = names[offset:name_end] if name_end >= 0 else b''
+            if len(name) != 4 or not name.isdigit() or name in seen:
+                break
+            seen.add(name)
+        else:
+            return count, start
+    return None
+
+
 def decode_papgt_entry_flags(flags: int) -> tuple[int, int, int]:
     """Split a PAPGT entry's first 4 bytes into the named fields.
 
@@ -72,9 +101,10 @@ def read_papgt_entries(path: Path) -> "list[tuple[str, int, int]] | None":
         data = path.read_bytes()
         if len(data) < 12:
             return None
-        entry_start = 12
-        entry_count = _find_entry_count(bytearray(data), entry_start)
-        string_table_start = entry_start + entry_count * ENTRY_SIZE + 4
+        compact = _compact_papgt_layout(data)
+        entry_start = 4 if compact else 12
+        entry_count = compact[0] if compact else _find_entry_count(bytearray(data), entry_start)
+        string_table_start = compact[1] if compact else entry_start + entry_count * ENTRY_SIZE + 4
         out: list[tuple[str, int, int]] = []
         for i in range(entry_count):
             pos = entry_start + i * ENTRY_SIZE
@@ -214,6 +244,20 @@ class PapgtManager:
         Returns:
             The rebuilt PAPGT bytes.
         """
+        # Inspect the live index even when an older vanilla snapshot or a
+        # mod-supplied index would otherwise become the rebuild base (#458).
+        # The legacy writer cannot represent 2.04's prefix/trailer. Refuse
+        # before the apply transaction can replace the game's entry list.
+        candidates = [mod_papgt] if mod_papgt else []
+        for path in (self._papgt_path, self._vanilla_papgt):
+            if path is not None and path.exists():
+                candidates.append(path.read_bytes())
+        for data in candidates:
+            if _compact_papgt_layout(data) is not None:
+                raise ValueError(
+                    'Game 2.04 archive index detected. Rebuilding this PAPGT format '
+                    'is not supported yet; the original index has been preserved.')
+            _find_entry_count(bytearray(data), 12)
         # Use mod-shipped PAPGT as base if available (it includes new dirs
         # with correct flags and ordering). Otherwise use vanilla.
         if mod_papgt and len(mod_papgt) >= 12:
@@ -540,16 +584,14 @@ def _find_entry_count(papgt: bytearray, entry_start: int) -> int:
     satisfies: entry_start + N*12 + 4 + string_size == len(papgt).
     """
     file_size = len(papgt)
-    for n in range(1, 100):
+    for n in range(max(0, (file_size - entry_start - 4) // ENTRY_SIZE + 1)):
         size_field_pos = entry_start + n * ENTRY_SIZE
         if size_field_pos + 4 > file_size:
             break
         string_size = struct.unpack_from("<I", papgt, size_field_pos)[0]
         if size_field_pos + 4 + string_size == file_size:
             return n
-    # Fallback: estimate from file size
-    logger.warning("PAPGT: could not determine entry count, estimating")
-    return (file_size - entry_start - 4) // ENTRY_SIZE
+    raise ValueError('Unsupported or corrupt PAPGT layout; refusing to estimate its entry count')
 
 
 def _read_string(papgt: bytearray, string_table_start: int,

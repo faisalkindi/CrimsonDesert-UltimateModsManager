@@ -359,100 +359,12 @@ def _build_full_path_map(
         if not pamt_path.exists():
             continue
 
-        data = pamt_path.read_bytes()
-        if len(data) < 24:
-            continue
-
         try:
-            # Skip header: hash(4) + paz_count(4) + hash2(4) + zero(4)
-            off = 16
-            # Skip PAZ table entries
-            pc = struct.unpack_from('<I', data, 4)[0]
-            for i in range(pc):
-                off += 8  # hash + size
-                if i < pc - 1:
-                    off += 4  # separator
-
-            # Folder section — build hierarchical folder tree
-            folder_len = struct.unpack_from('<I', data, off)[0]; off += 4
-            folders = {}
-            foff = off
-            while foff < off + folder_len:
-                rel = foff - off
-                parent = struct.unpack_from('<I', data, foff)[0]
-                slen = data[foff + 4]
-                name = data[foff + 5:foff + 5 + slen].decode('utf-8', errors='replace')
-                folders[rel] = (parent, name)
-                foff += 5 + slen
-            off += folder_len
-
-            def build_folder_path(ref):
-                parts = []
-                cur = ref
-                while cur != 0xFFFFFFFF and len(parts) < 20:
-                    if cur not in folders:
-                        break
-                    p, n = folders[cur]
-                    parts.append(n)
-                    cur = p
-                return ''.join(reversed(parts))
-
-            # Node section — trie of filenames
-            node_len = struct.unpack_from('<I', data, off)[0]; off += 4
-            nodes = {}
-            noff = off
-            while noff < off + node_len:
-                rel = noff - off
-                parent = struct.unpack_from('<I', data, noff)[0]
-                slen = data[noff + 4]
-                name = data[noff + 5:noff + 5 + slen].decode('utf-8', errors='replace')
-                nodes[rel] = (parent, name)
-                noff += 5 + slen
-            off += node_len
-
-            def build_node_path(ref):
-                parts = []
-                cur = ref
-                while cur != 0xFFFFFFFF and len(parts) < 64:
-                    if cur not in nodes:
-                        break
-                    p, n = nodes[cur]
-                    parts.append(n)
-                    cur = p
-                return ''.join(reversed(parts))
-
-            # Folder records — map each folder to its file range
-            folder_count = struct.unpack_from('<I', data, off)[0]; off += 4
-            folder_recs = []
-            for i in range(folder_count):
-                ph, fr, fi, fc = struct.unpack_from('<IIII', data, off)
-                folder_recs.append((build_folder_path(fr), fi, fc))
-                off += 16
-
-            # File records — build the map
-            file_count = struct.unpack_from('<I', data, off)[0]; off += 4
-            # Find root folder name (for building flattened path)
-            root_folder = ""
-            for _, (p, n) in folders.items():
-                if p == 0xFFFFFFFF:
-                    root_folder = n
-                    break
-
-            # Build file_index → folder_path lookup (O(1) per file instead of O(folders))
-            file_to_folder: dict[int, str] = {}
-            for fp, fi, fc in folder_recs:
-                for idx in range(fi, fi + fc):
-                    file_to_folder[idx] = fp
-
-            for i in range(file_count):
-                nr = struct.unpack_from('<I', data, off)[0]
-                off += 20
-                filename = build_node_path(nr)
-                fp = file_to_folder.get(i)
-                if fp is not None:
-                    flattened = f"{root_folder}/{filename}" if root_folder else filename
-                    result[flattened] = fp
-
+            entries = parse_pamt(str(pamt_path))
+            full_entries = parse_pamt(str(pamt_path), full_paths=True)
+            for entry, full in zip(entries, full_entries):
+                if '/' in full.path:
+                    result[entry.path] = full.path.rsplit('/', 1)[0]
             return result
         except Exception as e:
             logger.debug("Failed to build path map for %s: %s", pamt_dir, e)
