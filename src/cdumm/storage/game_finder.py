@@ -371,11 +371,38 @@ def _scan_for_steam_libraries(base_paths: list[Path]) -> list[Path]:
     return found
 
 
+def _macos_app_data_dir(app: Path) -> Path | None:
+    """Return the PAZ data directory for a ``.app`` bundle, or ``None``.
+
+    Tries the normal in-bundle layout first (``Contents/Resources/
+    packages``). Some native-macOS Steam releases instead ship the
+    data as a ``packages/`` directory sitting NEXT TO the ``.app``,
+    e.g.::
+
+        Crimson Desert/CrimsonDesert_Steam.app
+        Crimson Desert/packages/
+
+    GitHub #463 (KSNdodgob): auto-detect and the manual picker both
+    failed on this layout because only the in-bundle path was ever
+    checked, so a real install with ``packages`` as a sibling of the
+    ``.app`` was rejected as "not found". Fall back to the sibling
+    directory when the in-bundle one isn't the PAZ layout.
+    """
+    inner = app / MACOS_APP_DATA_SUBPATH
+    if _looks_like_game_root(inner):
+        return inner
+    sibling = app.parent / "packages"
+    if _looks_like_game_root(sibling):
+        return sibling
+    return None
+
+
 def _resolve_macos_game_dir(candidate: Path) -> Path | None:
     """Resolve a user-supplied macOS path to the inner PAZ directory.
 
     Accepts:
-    - A ``Crimson Desert.app`` bundle (returns ``Contents/Resources/packages``).
+    - A ``Crimson Desert.app`` bundle (returns ``Contents/Resources/packages``,
+      or a ``packages/`` directory sitting next to the ``.app``).
     - A ``packages/`` directory directly (returns it unchanged).
     - Any directory that already looks like the game root (PAZ layout).
 
@@ -389,20 +416,21 @@ def _resolve_macos_game_dir(candidate: Path) -> Path | None:
     # Already pointed at the inner data directory.
     if _looks_like_game_root(candidate):
         return candidate
-    # Pointed at the .app — walk into Contents/Resources/packages.
+    # Pointed at the .app — walk into Contents/Resources/packages,
+    # or the sibling packages/ dir some releases use instead.
     if candidate.suffix == ".app":
-        inner = candidate / MACOS_APP_DATA_SUBPATH
-        if _looks_like_game_root(inner):
-            return inner
+        found = _macos_app_data_dir(candidate)
+        if found is not None:
+            return found
     # Pointed at a sibling of the .app — scan one level for any .app
-    # whose inner packages dir looks right.
+    # whose data dir (in-bundle or sibling) looks right.
     if candidate.is_dir():
         try:
             for child in candidate.iterdir():
                 if child.suffix == ".app":
-                    inner = child / MACOS_APP_DATA_SUBPATH
-                    if _looks_like_game_root(inner):
-                        return inner
+                    found = _macos_app_data_dir(child)
+                    if found is not None:
+                        return found
         except OSError:
             pass
     return None
@@ -426,9 +454,11 @@ def _scan_macos_app_in_dir(parent: Path, depth: int = 2) -> list[Path]:
     expected. Cost is one extra ``iterdir`` per non-.app subdirectory
     — negligible at the scale of a Steam library.
 
-    Returns the inner ``Contents/Resources/packages`` path for each
-    hit (not the .app itself) so callers can treat it like a Steam
-    library result.
+    Returns the data directory for each hit (not the .app itself) —
+    normally the inner ``Contents/Resources/packages``, or a
+    ``packages/`` directory sitting next to the ``.app`` on releases
+    that ship the layout that way (#463) — so callers can treat it
+    like a Steam library result.
     """
     found: list[Path] = []
     if not parent.exists() or not parent.is_dir():
@@ -440,9 +470,9 @@ def _scan_macos_app_in_dir(parent: Path, depth: int = 2) -> list[Path]:
                 # the user has installed in /Applications.
                 if "crimson" not in entry.name.lower():
                     continue
-                inner = entry / MACOS_APP_DATA_SUBPATH
-                if _looks_like_game_root(inner):
-                    found.append(inner)
+                data_dir = _macos_app_data_dir(entry)
+                if data_dir is not None:
+                    found.append(data_dir)
                     logger.info(
                         "Found Crimson Desert (macOS .app) at %s", entry)
             elif depth > 1 and entry.is_dir():

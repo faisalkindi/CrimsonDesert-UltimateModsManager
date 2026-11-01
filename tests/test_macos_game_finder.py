@@ -54,6 +54,17 @@ def _make_inner_packages(parent: Path) -> Path:
     return inner
 
 
+def _make_app_bundle_with_sibling_packages(
+        parent: Path, app_name: str = "CrimsonDesert_Steam.app") -> Path:
+    """GitHub #463 layout: the .app bundle itself is empty/opaque and
+    the PAZ data lives in a ``packages/`` directory sitting NEXT TO
+    the .app, not inside ``Contents/Resources/packages``."""
+    app = parent / app_name
+    app.mkdir(parents=True)
+    _make_inner_packages(parent)
+    return app
+
+
 # ── _resolve_macos_game_dir ──────────────────────────────────────────
 
 
@@ -93,6 +104,20 @@ class TestResolveMacosGameDir:
         empty_app = tmp_path / "Empty.app"
         empty_app.mkdir()
         assert game_finder._resolve_macos_game_dir(empty_app) is None
+
+    def test_app_with_sibling_packages_resolves_to_sibling(self, tmp_path):
+        # #463: packages/ sits next to the .app instead of inside it.
+        app = _make_app_bundle_with_sibling_packages(tmp_path)
+        result = game_finder._resolve_macos_game_dir(app)
+        assert result == tmp_path / "packages"
+
+    def test_wrapper_dir_with_sibling_packages_resolves(self, tmp_path):
+        # User points at the wrapper folder containing both the .app
+        # and the sibling packages/ (the exact #463 report: pointing
+        # at ".../steamapps/common/Crimson Desert/").
+        _make_app_bundle_with_sibling_packages(tmp_path)
+        result = game_finder._resolve_macos_game_dir(tmp_path)
+        assert result == tmp_path / "packages"
 
 
 # ── _find_macos_game_directories (auto-detect) ───────────────────────
@@ -180,6 +205,25 @@ class TestFindMacosGameDirectories:
         assert "CrimsonDesert_Steam.app" in str(results[0])
         assert results[0].name == "packages"
 
+    def test_finds_app_with_sibling_packages_in_steam_library(
+            self, tmp_path, monkeypatch):
+        """#463 (KSNdodgob): this release ships ``packages/`` next to
+        the .app instead of inside ``Contents/Resources/packages``."""
+        steam_root = tmp_path / "Steam"
+        common = steam_root / "steamapps" / "common"
+        wrapper = common / "Crimson Desert"
+        wrapper.mkdir(parents=True)
+        _make_app_bundle_with_sibling_packages(wrapper)
+
+        monkeypatch.setattr(
+            game_finder, "MACOS_GAME_LOCATIONS", [])
+        monkeypatch.setattr(
+            game_finder, "STEAM_DEFAULT_PATHS_MACOS", [steam_root])
+
+        results = game_finder._find_macos_game_directories()
+        assert len(results) == 1
+        assert results[0] == wrapper / "packages"
+
     def test_finds_app_in_grandchild_for_games_location(
             self, tmp_path, monkeypatch):
         """Defensive: users who put the .app inside a wrapper folder
@@ -216,6 +260,16 @@ class TestValidateGameDirectoryMacos:
         monkeypatch.setattr(game_finder, "IS_MACOS", True)
         inner = _make_inner_packages(tmp_path)
         assert game_finder.validate_game_directory(inner) is True
+
+    def test_accepts_app_with_sibling_packages(self, tmp_path, monkeypatch):
+        # #463: the wrapper folder (what the user actually browses to)
+        # must validate even though the .app's own in-bundle packages
+        # dir doesn't exist.
+        monkeypatch.setattr(game_finder, "IS_MACOS", True)
+        wrapper = tmp_path / "Crimson Desert"
+        wrapper.mkdir()
+        _make_app_bundle_with_sibling_packages(wrapper)
+        assert game_finder.validate_game_directory(wrapper) is True
 
     def test_rejects_unrelated_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(game_finder, "IS_MACOS", True)
