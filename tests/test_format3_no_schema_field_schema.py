@@ -204,6 +204,25 @@ def test_raw_replacement_skips_on_ambiguous_match(field_schema_root):
     assert changes == []
 
 
+def test_raw_replacement_skips_when_old_is_not_a_string(field_schema_root):
+    """GitHub #467: an exporter shipped 'old' as a JSON integer
+    instead of a hex string. The apply path must skip just this
+    intent (bytes.fromhex rejects a non-str argument) rather than
+    crashing the whole batch."""
+    body, header = _build_pabgb(
+        [_entry_u32_id(1, "First", 0xAABBCCDD, 0x42424242, 0x9999)],
+        keys=[1])
+    intents = [Format3Intent(
+        entry="First", key=1, field="_buff_data_raw",
+        op="set",
+        old=0,
+        new="CAFEF00D",
+    )]
+    changes = _intents_to_v2_changes(
+        "synthnoschema.pabgb", body, header, intents)
+    assert changes == []
+
+
 def test_raw_replacement_skips_on_length_mismatch(field_schema_root):
     """old and new must be equal-length byte strings; otherwise the
     write would shift trailing bytes and corrupt subsequent fields."""

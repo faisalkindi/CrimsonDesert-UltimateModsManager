@@ -429,18 +429,17 @@ def _parse_intents_block(
                 )
         else:
             raw_key = 0
-        # ``old`` is optional and only present on raw-record
-        # replacement intents (e.g. _buff_data_raw on skill.pabgb).
-        # When present alongside ``new``, both must be hex strings
-        # of equal length; the apply path treats them as a literal
-        # byte search-and-replace within the entry's payload.
+        # ``old`` is optional and only consulted on raw-record
+        # replacement intents (e.g. _buff_data_raw on skill.pabgb):
+        # the apply path treats a hex-string ``old`` alongside ``new``
+        # as a literal byte search-and-replace within the entry's
+        # payload. Any table CDUMM has a PABGB schema for ignores
+        # ``old`` entirely. A non-hex-string value already fails
+        # gracefully per-intent downstream (format3_apply's
+        # bytes.fromhex raises, is caught, warns, and skips just that
+        # intent) -- raising here instead took the whole mod down for
+        # one bad intent (#467: Quest Givers On Map ships an int).
         raw_old = raw.get("old")
-        if raw_old is not None and not isinstance(raw_old, str):
-            raise ValueError(
-                f"{label} intent #{i} has non-string 'old' "
-                f"({type(raw_old).__name__}); 'old' must be a hex "
-                f"string when present"
-            )
         # Parser stays lenient on op (#66 deadriver35 contract): accept
         # any string, default missing op to 'set'. The actual rejection
         # of unsupported ops happens in validate_intents downstream, so
