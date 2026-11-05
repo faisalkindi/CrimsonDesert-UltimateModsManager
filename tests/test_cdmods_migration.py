@@ -117,3 +117,47 @@ def test_detect_partial_migration_returns_none_when_clean(tmp_path):
     cdmods = tmp_path / "cdmods"
     cdmods.mkdir()
     assert detect_partial_migration(cdmods) is None
+
+
+def test_refuses_dst_inside_src(tmp_path):
+    """Regression for #475: dst nested under src must be refused before
+    any copying starts, not discovered after rmtree(src) has already
+    deleted the copy along with everything else."""
+    from cdumm.storage.cdmods_migration import migrate_cdmods, MigrationError
+
+    src = tmp_path / "CDMods"
+    _write_file(src / "vanilla" / "0008" / "0.pamt", b"x" * 64)
+    dst = src / "New folder"
+    dst.mkdir()
+
+    with pytest.raises(MigrationError):
+        migrate_cdmods(src, dst)
+
+    # Nothing was touched: the original file and the empty subfolder
+    # are both exactly as they were.
+    assert (src / "vanilla" / "0008" / "0.pamt").read_bytes() == b"x" * 64
+    assert dst.exists()
+    assert next(dst.iterdir(), None) is None
+
+
+def test_refuses_src_inside_dst(tmp_path):
+    from cdumm.storage.cdmods_migration import migrate_cdmods, MigrationError
+
+    dst = tmp_path / "Outer"
+    src = dst / "CDMods"
+    _write_file(src / "a.txt", b"x")
+
+    with pytest.raises(MigrationError):
+        migrate_cdmods(src, dst)
+    assert (src / "a.txt").read_bytes() == b"x"
+
+
+def test_refuses_dst_equal_to_src(tmp_path):
+    from cdumm.storage.cdmods_migration import migrate_cdmods, MigrationError
+
+    src = tmp_path / "CDMods"
+    _write_file(src / "a.txt", b"x")
+
+    with pytest.raises(MigrationError):
+        migrate_cdmods(src, src)
+    assert (src / "a.txt").read_bytes() == b"x"
