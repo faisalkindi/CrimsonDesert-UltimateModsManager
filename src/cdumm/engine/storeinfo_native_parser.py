@@ -94,6 +94,8 @@ import logging
 import struct
 from dataclasses import dataclass, field
 
+from cdumm.semantic.record_header import NAME_FIRST, header_end, read_header
+
 logger = logging.getLogger(__name__)
 
 
@@ -539,10 +541,29 @@ def serialize_stock_list(records: list[StockRecord],
 
 # ── layout detection ────────────────────────────────────────────────────
 
-def _entry_payload(body: bytes, off: int) -> int:
-    """Start of an entry's payload: past u16 id + u32 name_len + name + NUL."""
+def _entry_payload(body: bytes, off: int,
+                   header_order: str | None = None) -> int:
+    """Start of an entry's payload: past u16 id + u32 name_len + name + NUL.
+
+    On a name-first table (game 2.04, see ``cdumm.semantic.record_header``)
+    the id follows the name, and the payload starts one byte past the id,
+    as it started one byte past the name before.
+    """
+    if header_order == NAME_FIRST:
+        end = header_end(body, off, 2, NAME_FIRST)
+        if end is not None:
+            return end + 1
     name_len = struct.unpack_from("<I", body, off + 2)[0]
     return off + 6 + name_len + 1
+
+
+def _entry_key(body: bytes, off: int, header_order: str | None = None) -> int:
+    """An entry's own u16 id, wherever its header order puts it."""
+    if header_order == NAME_FIRST:
+        got = read_header(body, off, 2, NAME_FIRST)
+        if got is not None:
+            return got[0]
+    return struct.unpack_from("<H", body, off)[0]
 
 
 class StoreListNotFound(StoreinfoParseError):
@@ -639,20 +660,21 @@ def locate_stock_list(body: bytes, payload: int, entry_end: int, key: int,
 
 
 def _is_provably_empty(body: bytes, entry_offsets: list[int],
-                       off: int) -> bool:
+                       off: int, header_order: str | None = None) -> bool:
     """True when this entry cannot hold one record under ANY layout."""
     ordered = sorted(entry_offsets)
     i = ordered.index(off)
     end = ordered[i + 1] if i + 1 < len(ordered) else len(body)
     try:
-        room = end - _entry_payload(body, off)
+        room = end - _entry_payload(body, off, header_order)
     except (struct.error, IndexError):
         return False
     return room < min(_min_list_bytes(c) for c in LAYOUTS)
 
 
 def _score_layout(body: bytes, entry_offsets: list[int],
-                  layout: StoreLayout) -> tuple[int, int]:
+                  layout: StoreLayout,
+                  header_order: str | None = None) -> tuple[int, int]:
     """``(entries_decoded, records_decoded)`` for one candidate layout.
 
     An entry counts only if its whole stock list parses AND re-serializes
@@ -670,9 +692,10 @@ def _score_layout(body: bytes, entry_offsets: list[int],
     for i, off in enumerate(ordered):
         end = ordered[i + 1] if i + 1 < len(ordered) else len(body)
         try:
-            key = struct.unpack_from("<H", body, off)[0]
+            key = _entry_key(body, off, header_order)
             recs, _s, _e = locate_stock_list(
-                body, _entry_payload(body, off), end, key, layout)
+                body, _entry_payload(body, off, header_order), end, key,
+                layout)
         except (StoreinfoParseError, struct.error, IndexError):
             continue
         entries += 1
@@ -681,7 +704,8 @@ def _score_layout(body: bytes, entry_offsets: list[int],
 
 
 def _unreadable_entries(body: bytes, entry_offsets: list[int],
-                        layout: StoreLayout) -> int:
+                        layout: StoreLayout,
+                        header_order: str | None = None) -> int:
     """Entries that neither decode nor are *provably empty* under ``layout``.
 
     The count of decoded entries alone stopped separating layouts on the
@@ -701,9 +725,10 @@ def _unreadable_entries(body: bytes, entry_offsets: list[int],
     for i, off in enumerate(ordered):
         end = ordered[i + 1] if i + 1 < len(ordered) else len(body)
         try:
-            key = struct.unpack_from("<H", body, off)[0]
+            key = _entry_key(body, off, header_order)
             locate_stock_list(
-                body, _entry_payload(body, off), end, key, layout)
+                body, _entry_payload(body, off, header_order), end, key,
+                layout)
         except StoreListNotFound as exc:
             if not exc.provably_empty:
                 holes += 1
@@ -713,7 +738,8 @@ def _unreadable_entries(body: bytes, entry_offsets: list[int],
 
 
 def detect_storeinfo_layout(body: bytes,
-                            entry_offsets: list[int]) -> StoreLayout:
+                            entry_offsets: list[int],
+                            header_order: str | None = None) -> StoreLayout:
     """Pick the layout that actually decodes this table.
 
     Trial-parses every candidate and keeps the one that leaves the
@@ -728,7 +754,8 @@ def detect_storeinfo_layout(body: bytes,
     best: StoreLayout | None = None
     best_rank: tuple[int, int, int] | None = None
     for cand in LAYOUTS:
-        entries, records = _score_layout(body, entry_offsets, cand)
+        entries, records = _score_layout(body, entry_offsets, cand,
+                                         header_order)
         if not entries:
             logger.debug("storeinfo layout %s: decodes nothing", cand.label)
             continue
@@ -736,7 +763,7 @@ def detect_storeinfo_layout(body: bytes,
         # (entries, records) ordering. A layout that reads more records
         # while abandoning entries the other one reads has not understood
         # the table better -- see `_unreadable_entries`.
-        holes = _unreadable_entries(body, entry_offsets, cand)
+        holes = _unreadable_entries(body, entry_offsets, cand, header_order)
         rank = (-holes, entries, records)
         logger.debug(
             "storeinfo layout %s: %d entries, %d records, %d unreadable",
@@ -754,7 +781,7 @@ def detect_storeinfo_layout(body: bytes,
     # distinction an all-empty table would be a hard error.
     if best is None or best_rank is None:
         if entry_offsets and all(
-                _is_provably_empty(body, entry_offsets, off)
+                _is_provably_empty(body, entry_offsets, off, header_order)
                 for off in entry_offsets):
             logger.info(
                 "storeinfo: every entry is too small to hold a stock "

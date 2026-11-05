@@ -65,6 +65,7 @@ from cdumm.semantic.parser import (
     parse_pabgh_index,
     parse_records,
 )
+from cdumm.semantic.record_header import NAME_FIRST, header_end
 
 logger = logging.getLogger(__name__)
 
@@ -2950,7 +2951,8 @@ def _consume_field_bytes(body: bytes, off: int, spec, entry_end: int
 def _payload_offset(body: bytes, entry_off: int,
                     key_size: int,
                     no_null_skip: bool = False,
-                    no_entry_header: bool = False) -> "int | None":
+                    no_entry_header: bool = False,
+                    header_order: str | None = None) -> "int | None":
     """Return the byte offset where the entry's first payload field starts.
 
     Three modes (in priority order):
@@ -2967,6 +2969,11 @@ def _payload_offset(body: bytes, entry_off: int,
     * Default, legacy heuristic from ``format3_handler``: skip a single
       0 byte after the name when present. Works for tables where the
       post-name byte is genuinely padding.
+
+    ``header_order`` is the table's key/name order from
+    ``record_header.table_header_order``. On a name-first table (game
+    2.04) the id follows the name, and the two rules above apply to the
+    byte after the id instead of the byte after the name.
     """
     if no_entry_header:
         # Strict `<` so EOF itself is rejected, there's no field to
@@ -2975,6 +2982,15 @@ def _payload_offset(body: bytes, entry_off: int,
         # also catch a subsequent read, but rejecting up front
         # surfaces malformed PAMT offsets at the right layer.
         return entry_off if 0 <= entry_off < len(body) else None
+    if header_order == NAME_FIRST:
+        id_end = header_end(body, entry_off, key_size, NAME_FIRST)
+        if id_end is None:
+            return None
+        if no_null_skip:
+            return id_end
+        if id_end < len(body) and body[id_end] == 0:
+            return id_end + 1
+        return id_end
     # The id width is simply key_size. This used to read
     # `2 if key_size == 2 else 4`, which silently truncated every other
     # width -- and `parser._parse_entry_header` was fixed for exactly that
