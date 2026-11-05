@@ -21,6 +21,13 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.16",
+        "date": "2026-11-06",
+        "notes": [
+            "<b>Game 2.04: the Game Data tab shows record names again.</b> 2.04 put each data record's name before its id, and CDUMM kept reading the old order, so on 2.04 the tab showed no names and the columns after them read the wrong bytes. Characters, items, stores and vehicles now show their names on 2.04. 2.04 also reordered fields inside many tables, so many columns still read wrong there, and mods still can't be installed on 2.04. Found and fixed by AgentKush.",
+        ],
+    },
+    {
         "version": "3.17.15",
         "date": "2026-11-05",
         "notes": [
