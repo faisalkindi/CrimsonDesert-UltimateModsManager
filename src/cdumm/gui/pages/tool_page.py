@@ -1230,6 +1230,19 @@ class FindCulpritPage(ToolPageBase):
                 tr("tools.culprit.need_two_mods"), "#EBCB8B")
             return
 
+        # Refuse where no round can be tested, before anything is
+        # renamed or disabled (#483).
+        from cdumm.gui.binary_search_dialog import (
+            BLOCKED_SIGNED_INDEX, find_culprit_blocker)
+        blocker = find_culprit_blocker(self._game_dir, require_steam=True)
+        if blocker:
+            self._clear_results()
+            self._set_status(
+                tr("tools.culprit.blocked_signed_index")
+                if blocker == BLOCKED_SIGNED_INDEX
+                else tr("tools.culprit.blocked_not_steam"), "#BF616A")
+            return
+
         # Check if game is already running
         try:
             from cdumm.engine.game_monitor import find_game_process
@@ -1257,27 +1270,10 @@ class FindCulpritPage(ToolPageBase):
 
         # Build session and ASI mod list
         from cdumm.engine.binary_search import DeltaDebugSession
-        from cdumm.gui.binary_search_dialog import _AutoBisectWorker
+        from cdumm.gui.binary_search_dialog import (
+            _AutoBisectWorker, build_asi_suspects)
 
-        asi_mods = {}
-        try:
-            from cdumm.asi.asi_manager import AsiManager
-            bin64 = self._game_dir / "bin64"
-            if bin64.exists():
-                asi_mgr = AsiManager(bin64)
-                plugins = asi_mgr.scan()
-                for i, p in enumerate(plugins):
-                    if p.enabled:
-                        fake_id = -(i + 1)
-                        asi_mods[fake_id] = {
-                            "id": fake_id,
-                            "name": f"[ASI] {p.name}",
-                            "enabled": True,
-                            "mod_type": "asi",
-                            "_plugin": p,
-                        }
-        except Exception:
-            pass
+        asi_mods = build_asi_suspects(self._game_dir)
 
         session = DeltaDebugSession(
             self._mod_manager, extra_mods=list(asi_mods.values()))

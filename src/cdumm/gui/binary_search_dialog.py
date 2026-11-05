@@ -32,6 +32,64 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+BLOCKED_SIGNED_INDEX = "signed_index"
+BLOCKED_NOT_STEAM = "not_steam"
+
+BLOCKED_MESSAGES = {
+    BLOCKED_SIGNED_INDEX: (
+        "Find Culprit can't run on game 2.04 or newer yet. CDUMM can't "
+        "apply mods there, so no round could be tested."),
+    BLOCKED_NOT_STEAM: (
+        "Find Culprit only works on a Steam install for now. It launches "
+        "the game through Steam to test each round."),
+}
+
+
+def find_culprit_blocker(
+    game_dir: Path | None, *, require_steam: bool = False
+) -> str | None:
+    """Why Find Culprit can't test anything here, or None.
+
+    Returns ``BLOCKED_SIGNED_INDEX`` on game 2.04 (every apply is
+    refused) and, with ``require_steam``, ``BLOCKED_NOT_STEAM`` for an
+    install the Steam launcher can't start (GitHub #483).
+    """
+    if game_dir is None:
+        return None
+    from cdumm.archive.papgt_manager import game_uses_signed_index
+    if game_uses_signed_index(game_dir):
+        return BLOCKED_SIGNED_INDEX
+    if require_steam:
+        from cdumm.storage.game_finder import is_steam_install
+        if not is_steam_install(game_dir):
+            return BLOCKED_NOT_STEAM
+    return None
+
+
+def build_asi_suspects(game_dir: Path | None) -> dict[int, dict]:
+    """Enabled ASI plugins as fake negative-id mods for the bisection."""
+    asi_mods: dict[int, dict] = {}
+    try:
+        from cdumm.asi.asi_manager import AsiManager
+        bin64 = game_dir / "bin64"
+        if bin64.exists():
+            plugins = AsiManager(bin64).scan()
+            for i, p in enumerate(plugins):
+                if p.enabled:
+                    fake_id = -(i + 1)
+                    label = "Add-on" if p.kind == "addon64" else "ASI"
+                    asi_mods[fake_id] = {
+                        "id": fake_id,
+                        "name": f"[{label}] {p.name}",
+                        "enabled": True,
+                        "mod_type": "asi",
+                        "_plugin": p,
+                    }
+    except Exception:
+        pass
+    return asi_mods
+
+
 class _AutoBisectWorker:
     """Drives the full auto-bisection loop on a background thread.
 
@@ -132,9 +190,10 @@ class _AutoBisectWorker:
                 return
             try:
                 # Re-scan: file path may have changed if a previous
-                # round flipped this plugin.
+                # round flipped this plugin. Match on kind as well as
+                # name: Foo.asi and Foo.addon64 share a stem (#481).
                 for p in self._asi_manager.scan():
-                    if p.name == plugin.name:
+                    if p.name == plugin.name and p.kind == plugin.kind:
                         plugin = p
                         break
                 if enabled:
@@ -151,8 +210,16 @@ class _AutoBisectWorker:
     # ── Main loop ───────────────────────────────────────────────
 
     def run(self) -> None:
-        from cdumm.engine.game_monitor import launch_and_test
+        from cdumm.engine.game_monitor import GameNotTestable, launch_and_test
         from cdumm.engine.cdmods_paths import get_cdmods_root
+
+        # Nothing below can be tested where every apply is refused, and
+        # nothing may be renamed or disabled before we know that.
+        blocker = find_culprit_blocker(self._game_dir)
+        if blocker:
+            self._log(BLOCKED_MESSAGES[blocker])
+            self._emit("error", BLOCKED_MESSAGES[blocker])
+            return
 
         # SQLite handles can't cross threads — open a fresh one here.
         db_path = get_cdmods_root(None, self._game_dir) / "cdumm.db"
@@ -189,6 +256,9 @@ class _AutoBisectWorker:
         for em in self._asi_mods.values():
             original_state[em["id"]] = em.get("enabled", False)
         total_rounds = 0
+        # Set when a round can't be tested (apply refused, game won't
+        # launch). That is not a crash: the run stops and blames no one.
+        abort_reason: str | None = None
 
         try:
             # Outer: find a culprit, disable it, re-test until stable.
@@ -248,9 +318,10 @@ class _AutoBisectWorker:
                         "  ✗ Apply failed during verification: "
                         f"{verify_errors[0]}"
                     )
-                    self._log(
-                        "  Continuing anyway — may be transient."
-                    )
+                    abort_reason = (
+                        "Couldn't test: the mods couldn't be applied. "
+                        f"{verify_errors[0]}")
+                    break
 
                 if self._cancelled:
                     break
@@ -259,13 +330,17 @@ class _AutoBisectWorker:
                     break
 
                 self._broke_for_pause = False
-                crashed = launch_and_test(
-                    self._game_dir,
-                    stable_seconds=90,
-                    launch_timeout=60,
-                    log_cb=lambda msg: self._log(f"  {msg}"),
-                    cancel_check=_should_break,
-                )
+                try:
+                    crashed = launch_and_test(
+                        self._game_dir,
+                        stable_seconds=90,
+                        launch_timeout=60,
+                        log_cb=lambda msg: self._log(f"  {msg}"),
+                        cancel_check=_should_break,
+                    )
+                except GameNotTestable as e:
+                    abort_reason = f"Couldn't test: {e}"
+                    break
 
                 # _broke_for_pause is the authoritative signal here;
                 # reading self._paused live races against the user
@@ -333,12 +408,10 @@ class _AutoBisectWorker:
                         self._log(
                             f"  ✗ Apply failed: {apply_errors[0]}"
                         )
-                        self._log(
-                            "  Treating as crash for this round."
-                        )
-                        session.report_crash(True)
-                        self._save_progress(thread_db, session)
-                        continue
+                        abort_reason = (
+                            "Couldn't test: the mods couldn't be applied. "
+                            f"{apply_errors[0]}")
+                        break
 
                     if self._cancelled:
                         break
@@ -348,13 +421,17 @@ class _AutoBisectWorker:
 
                     self._log("Launching game through Steam...")
                     self._broke_for_pause = False
-                    crashed = launch_and_test(
-                        self._game_dir,
-                        stable_seconds=90,
-                        launch_timeout=60,
-                        log_cb=lambda msg: self._log(f"  {msg}"),
-                        cancel_check=_should_break,
-                    )
+                    try:
+                        crashed = launch_and_test(
+                            self._game_dir,
+                            stable_seconds=90,
+                            launch_timeout=60,
+                            log_cb=lambda msg: self._log(f"  {msg}"),
+                            cancel_check=_should_break,
+                        )
+                    except GameNotTestable as e:
+                        abort_reason = f"Couldn't test: {e}"
+                        break
 
                     # See verify-block comment: _broke_for_pause is
                     # set inside _should_break at the moment pause
@@ -376,7 +453,7 @@ class _AutoBisectWorker:
                     session.report_crash(crashed)
                     self._save_progress(thread_db, session)
 
-                if self._cancelled:
+                if self._cancelled or abort_reason:
                     break
 
                 result = session.get_result()
@@ -434,6 +511,11 @@ class _AutoBisectWorker:
             if self._cancelled:
                 self._log("Bisection cancelled. Mods restored.")
                 self._emit("error", "Cancelled by user")
+            elif abort_reason:
+                self._log(
+                    f"\n{abort_reason}\nFind Culprit stopped without "
+                    "blaming any mod. Mods restored.")
+                self._emit("error", abort_reason)
             else:
                 final_result = {
                     "minimal_set": [

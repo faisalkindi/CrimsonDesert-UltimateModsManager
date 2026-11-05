@@ -293,6 +293,13 @@ def _next_priority(db: Database) -> int:
     return cursor.fetchone()[0]
 
 
+def _still_installed_note(existing_mod_id: int | None) -> str:
+    """Tail for an update/reimport error: the old version was not touched."""
+    if not existing_mod_id:
+        return ""
+    return " The previously installed version is still installed."
+
+
 def _json_mod_display_name(jp_data: dict, fallback: str) -> str:
     """Pick the best human display name for a JSON-patch mod.
 
@@ -3158,7 +3165,8 @@ def _import_from_extracted(
                     f"This mod is incompatible with the current game version. "
                     f"{mismatched} byte patches don't match. The game data has "
                     f"changed since this mod was created (mod targets version "
-                    f"{game_ver}). The mod author needs to update it.")
+                    f"{game_ver}). The mod author needs to update it."
+                    + _still_installed_note(existing_mod_id))
                 return result
             if not entr_result["changed_files"]:
                 result = ModImportResult(jp_name)
@@ -3662,7 +3670,8 @@ def import_from_zip(
                 result.error = (
                     f"JSON patch mod detected but failed to process. "
                     f"Target game file(s) not found: {', '.join(target_files)}. "
-                    f"Use Inspect Mod for a detailed diagnostic report.")
+                    f"Use Inspect Mod for a detailed diagnostic report."
+                    + _still_installed_note(existing_mod_id))
                 return result
             if entr_result is not None:
                 if entr_result.get("version_mismatch"):
@@ -3674,7 +3683,8 @@ def import_from_zip(
                         f"This mod is incompatible with the current game version. "
                         f"{mismatched} byte patches don't match. The game data has "
                         f"changed since this mod was created (mod targets version "
-                        f"{game_ver}). The mod author needs to update it.")
+                        f"{game_ver}). The mod author needs to update it."
+                        + _still_installed_note(existing_mod_id))
                     return result
                 if not entr_result["changed_files"]:
                     result.error = (
@@ -4221,7 +4231,8 @@ def import_from_folder(
                         f"This mod is incompatible with the current game version. "
                         f"{mismatched} byte patches don't match. The game data has "
                         f"changed since this mod was created (mod targets version "
-                        f"{game_ver}). The mod author needs to update it.")
+                        f"{game_ver}). The mod author needs to update it."
+                        + _still_installed_note(existing_mod_id))
                     primary_result = result
                 else:
                     logger.warning(
@@ -5045,6 +5056,7 @@ def import_from_natt_format_3(
         json_path=json_path, target=primary_target, mod_name=title,
         modinfo=(data.get("modinfo") or {}),
         game_dir=game_dir, db=db, existing_mod_id=existing_mod_id,
+        deltas_dir=deltas_dir,
     )
     if persist_outcome is None:
         # Persistence failed — couldn't resolve target file in PAMTs
@@ -5128,11 +5140,16 @@ def import_from_natt_format_3(
 def _persist_format3_mod(
     json_path: Path, target: str, mod_name: str,
     modinfo: dict, game_dir: Path, db: Database,
-    existing_mod_id: int | None,
+    existing_mod_id: int | None, deltas_dir: Path,
 ) -> dict | None:
     """Persist a Format 3 mod: store JSON + create mods row + lightweight
     mod_deltas rows. Returns ``{mod_id, changed_files}`` or None when the
-    target file can't be resolved in the game's PAMT index."""
+    target file can't be resolved in the game's PAMT index.
+
+    The JSON is stored in ``mods/`` next to ``deltas_dir``. A real import
+    passes CDMods/deltas, so that is CDMods/mods; Inspect Mod passes a
+    staging folder, so a trial never overwrites an installed mod's JSON
+    (GitHub #480)."""
     from cdumm.engine.json_patch_handler import (
         _derive_pamt_dir, _find_pamt_entry,
     )
@@ -5160,7 +5177,7 @@ def _persist_format3_mod(
     # Store the Format 3 JSON in CDMods/mods/. Reuse the same name-
     # sanitization import_json_fast uses (Windows reserved chars + a
     # short hash to disambiguate post-sanitize collisions).
-    mods_dir = _cdmods / "mods"
+    mods_dir = deltas_dir.parent / "mods"
     mods_dir.mkdir(parents=True, exist_ok=True)
     import re as _re_fn
     import hashlib as _hash
@@ -5294,7 +5311,9 @@ def import_from_json_patch(
 
         if entr_result is None:
             result = ModImportResult(mod_name)
-            result.error = "Failed to apply JSON patches to game files."
+            result.error = (
+                "Failed to apply JSON patches to game files."
+                + _still_installed_note(existing_mod_id))
             return result
 
         if entr_result.get("version_mismatch"):
@@ -5305,7 +5324,8 @@ def import_from_json_patch(
                 f"This mod is incompatible with the current game version. "
                 f"{mismatched} byte patches don't match. The game data has "
                 f"changed since this mod was created (mod targets version "
-                f"{game_ver}). The mod author needs to update it.")
+                f"{game_ver}). The mod author needs to update it."
+                + _still_installed_note(existing_mod_id))
             return result
 
         if not entr_result["changed_files"]:

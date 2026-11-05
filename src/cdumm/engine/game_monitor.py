@@ -321,6 +321,12 @@ def launch_via_steam(game_dir: Path) -> float:
 
 # ── High-level: launch, monitor, detect crash ─────────────────────
 
+class GameNotTestable(Exception):
+    """The game could not be launched or monitored, so a round has no
+    crash / no-crash result. This is not a crash: callers must stop
+    instead of blaming a mod (GitHub #483)."""
+
+
 def launch_and_test(
     game_dir: Path,
     stable_seconds: int = 45,
@@ -329,6 +335,9 @@ def launch_and_test(
     cancel_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Launch game, wait for crash or stability. Returns True if crashed.
+
+    Raises ``GameNotTestable`` when the launch raised, the game process
+    never appeared, or monitoring failed: none of those is a crash.
 
     Two-timeout pattern:
     - launch_timeout: max seconds to wait for process to appear
@@ -356,7 +365,13 @@ def launch_and_test(
     delete_old_dumps()
 
     try:  # try/finally guarantees crashpad restore
-        launch_ts = launch_via_steam(game_dir)
+        try:
+            launch_ts = launch_via_steam(game_dir)
+        except Exception as e:
+            _log(f"Could not launch through Steam: {e}")
+            raise GameNotTestable(
+                f"The game could not be launched through Steam ({e})."
+            ) from e
         _log("Launched through Steam, waiting for process...")
 
         # Wait for process to appear
@@ -371,8 +386,10 @@ def launch_and_test(
             time.sleep(1)
 
         if not pid:
-            _log(f"Game process not found after {launch_timeout}s — treating as crash")
-            return True
+            _log(f"Game process not found after {launch_timeout}s")
+            raise GameNotTestable(
+                f"The game did not start within {launch_timeout}s of "
+                "launching it through Steam.")
 
         _log(f"Game detected (PID {pid}) — monitoring for {stable_seconds}s...")
 
@@ -402,8 +419,11 @@ def launch_and_test(
 
         return False
 
+    except GameNotTestable:
+        raise
     except Exception as e:
         _log(f"Error during monitoring: {e}")
-        return True  # treat errors as crash to be safe
+        raise GameNotTestable(
+            f"Monitoring the game failed ({e}).") from e
     finally:
         restore_crashpad(bin64)

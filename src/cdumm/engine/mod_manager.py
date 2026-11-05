@@ -500,6 +500,56 @@ class ModManager:
 
         return _status("not applied")
 
+    def _reroot_moved_paths(self) -> int:
+        """Point stored paths that name an old CDMods root at the one
+        this session runs from.
+
+        Delta, JSON and source paths are stored absolute. Moving the
+        game folder with its default CDMods inside leaves them all
+        naming the old drive, and the sweep below would delete every
+        row as missing (#477). A missing path is re-rooted only when
+        it sits in a ``deltas``, ``mods`` or ``sources`` folder of a
+        folder named like the current CDMods root, and the re-rooted
+        file exists.
+        """
+        root = self._deltas_dir.parent
+        root_name = root.name.lower()
+        anchors = {"deltas", "mods", "sources"}
+
+        def _moved(stored: str) -> str | None:
+            if not stored or os.path.exists(stored):
+                return None
+            parts = Path(stored).parts
+            for i in range(len(parts) - 2, 0, -1):
+                if (parts[i].lower() in anchors
+                        and parts[i - 1].lower() == root_name):
+                    candidate = root.joinpath(*parts[i:])
+                    if candidate.exists():
+                        return str(candidate)
+            return None
+
+        conn = self._db.connection
+        changed = 0
+        for table, column in (("mod_deltas", "delta_path"),
+                              ("mods", "json_source"),
+                              ("mods", "source_path")):
+            rows = conn.execute(
+                f"SELECT id, {column} FROM {table} "
+                f"WHERE {column} IS NOT NULL AND {column} != ''").fetchall()
+            for row_id, stored in rows:
+                new = _moved(stored)
+                if new is not None:
+                    conn.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE id = ?",
+                        (new, row_id))
+                    changed += 1
+        if changed:
+            conn.commit()
+            logger.info(
+                "Re-rooted %d stored path(s) onto %s after a move",
+                changed, root)
+        return changed
+
     def cleanup_orphaned_deltas(self) -> None:
         """Remove delta folders on disk that have no matching mod in the DB.
         Also clean up DB entries pointing to missing delta files."""
@@ -511,6 +561,8 @@ class ModManager:
                 if entry.is_dir() and entry.name not in valid_ids:
                     shutil.rmtree(entry)
                     logger.info("Cleaned up orphaned delta folder: %s", entry.name)
+
+        self._reroot_moved_paths()
 
         # Clean up DB entries pointing to missing delta files (zombie entries
         # from old game update resets that deleted files but kept DB rows)

@@ -663,6 +663,57 @@ def _clear_pending_post_import_state(win, path) -> None:
     _pop_nxm_mod_id(win, path)
 
 
+_TOGGLE_TMP_PREFIX = "cdumm_toggle_"
+
+
+def _write_toggle_pick(data: dict, source: Path) -> Path:
+    """Write the toggle picker's filtered JSON into a new folder of its
+    own, under the original file name, and return the file.
+
+    The detector's ``_json_path`` is a ``Path``, which ``json.dump``
+    can't write, so ``_``-prefixed keys are dropped first, as
+    ``import_json_as_entr`` does before archiving (#485).
+    """
+    import json
+    import shutil
+    import tempfile
+    name = Path(data.get("_json_path") or source).name
+    if not name.lower().endswith(".json"):
+        name = f"{Path(name).stem or 'mod'}.json"
+    folder = Path(tempfile.mkdtemp(prefix=_TOGGLE_TMP_PREFIX))
+    out = folder / name
+    try:
+        out.write_text(json.dumps(
+            {k: v for k, v in data.items() if not k.startswith("_")},
+            indent=2), encoding="utf-8")
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return out
+
+
+def _remove_pending_tmp(win) -> None:
+    """Delete the folder :func:`_write_toggle_pick` made for the last
+    import, and nothing else. The slot once held the system temp
+    folder itself (#485), so anything that isn't a picker folder is
+    left alone."""
+    import shutil
+    import tempfile
+    tmp = getattr(win, "_pending_tmp_cleanup", None)
+    win._pending_tmp_cleanup = None
+    if not tmp:
+        return
+    tmp = Path(tmp)
+    try:
+        is_root = tmp.resolve() == Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        is_root = True
+    if is_root or not tmp.name.startswith(_TOGGLE_TMP_PREFIX):
+        logger.warning("Not removing %s: not a toggle picker folder", tmp)
+        return
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _pop_nxm_mod_id(win, path) -> int:
     """Return, and forget, the Nexus mod id an nxm:// download of
     ``path`` arrived with, or 0 when it didn't come through nxm://.
@@ -5146,17 +5197,18 @@ class CdummWindow(FluentWindow):
                 from cdumm.gui.preset_picker import TogglePickerDialog
                 dialog = TogglePickerDialog(json_data, self)
                 if dialog.exec() and dialog.selected_data:
-                    # Write filtered JSON to temp
-                    import tempfile
-                    import json
-                    tmp = tempfile.NamedTemporaryFile(
-                        suffix=".json", prefix="cdumm_toggle_",
-                        delete=False, mode="w", encoding="utf-8")
-                    json.dump(dialog.selected_data, tmp, indent=2)
-                    tmp.close()
-                    self._configurable_labels = getattr(dialog, 'selected_labels', None)
-                    path = Path(tmp.name)
-                    self._pending_tmp_cleanup = Path(tmp.name).parent
+                    try:
+                        filtered = _write_toggle_pick(
+                            dialog.selected_data, path)
+                    except Exception as e:
+                        logger.warning(
+                            "Toggle picker: could not write the picked "
+                            "options, importing every option: %s", e)
+                    else:
+                        self._configurable_labels = getattr(
+                            dialog, 'selected_labels', None)
+                        path = filtered
+                        self._pending_tmp_cleanup = filtered.parent
                 else:
                     self._configurable_source = None
                     self._process_next_import()
@@ -5164,7 +5216,7 @@ class CdummWindow(FluentWindow):
         except ImportError:
             pass
         except Exception as e:
-            logger.debug("Toggle check failed: %s", e)
+            logger.warning("Toggle check failed: %s", e)
 
         # ── Launch ImportWorker ────────────────────────────────────────
         self._launch_import_worker(path, existing_mod_id)
@@ -5346,6 +5398,9 @@ class CdummWindow(FluentWindow):
                         return
                     # Declined: fall through to the normal error path
                     # (the refusal message explains what happened).
+                # A failed import must not leave the slot armed for
+                # the next one's success cleanup (#485).
+                _remove_pending_tmp(self)
                 if not hasattr(self, '_import_errors'):
                     self._import_errors = []
                 self._import_errors.append(f"{path.name}: {err}")
@@ -5396,11 +5451,7 @@ class CdummWindow(FluentWindow):
                 self._pending_update_old_name = None
 
             # Clean temp dirs from pre-checks
-            tmp = getattr(self, '_pending_tmp_cleanup', None)
-            if tmp:
-                import shutil
-                shutil.rmtree(str(tmp), ignore_errors=True)
-                self._pending_tmp_cleanup = None
+            _remove_pending_tmp(self)
             # Variant-picker pre-extract dir cleanup is DEFERRED until
             # AFTER the ASI install loop further down. The
             # `_pending_asi_from_variant` list holds paths INSIDE this
