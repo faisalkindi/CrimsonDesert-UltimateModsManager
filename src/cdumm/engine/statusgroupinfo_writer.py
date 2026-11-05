@@ -124,6 +124,7 @@ import struct
 from contextlib import suppress
 
 from cdumm.semantic.parser import parse_pabgh_index
+from cdumm.semantic.record_header import NAME_FIRST
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ def _read_list(body: bytes, p: int, end: int) -> tuple[int, int] | None:
 
 
 def parse_record_full(
-    body: bytes, start: int, end: int
+    body: bytes, start: int, end: int, header_order: str | None = None
 ) -> tuple[list[tuple[int, int]], list[tuple[int, int]]] | None:
     """``(lists, tables)`` as (element_start, count) each, or None.
 
@@ -240,10 +241,17 @@ def parse_record_full(
     three lists then two 75-entry tables, ending on the last byte. A record
     that does not tile is not one this writer understands, so it is left
     alone rather than written into.
+
+    ``header_order`` is the table's key/name order from
+    ``record_header.table_header_order``; on a name-first table (game
+    2.04) the envelope is the same 8 bytes plus the name, key last.
     """
     if end - start < _ENVELOPE:
         return None
-    name_len = struct.unpack_from("<I", body, start + 4)[0]
+    if header_order == NAME_FIRST:
+        name_len = struct.unpack_from("<I", body, start)[0]
+    else:
+        name_len = struct.unpack_from("<I", body, start + 4)[0]
     p = start + _ENVELOPE + name_len
     if p >= end:
         return None

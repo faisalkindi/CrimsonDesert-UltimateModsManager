@@ -101,18 +101,20 @@ def check_storeinfo(body: bytes, header: bytes) -> tuple[bool, str]:
         serialize_stock_list,
     )
     from cdumm.semantic.parser import parse_pabgh_index
-    _ks, offs = parse_pabgh_index(header, "storeinfo")
+    from cdumm.semantic.record_header import table_header_order
+    ks, offs = parse_pabgh_index(header, "storeinfo")
+    order = table_header_order(body, offs, ks)
     starts = sorted(offs.values())
     spans = starts + [len(body)]
     # Takes the ENTRY OFFSETS, not the header bytes. Passing the header
     # here silently picks a wrong layout instead of raising.
-    layout = detect_storeinfo_layout(body, starts)
+    layout = detect_storeinfo_layout(body, starts, order)
     located = records = empty = not_found = bad_rt = 0
     for key, off in offs.items():
         end = spans[spans.index(off) + 1]
         try:
             recs, s, e = locate_stock_list(
-                body, _entry_payload(body, off), end, key, layout)
+                body, _entry_payload(body, off, order), end, key, layout)
         except StoreListNotFound as exc:
             if "too" in str(exc) or "provably" in str(exc):
                 empty += 1
@@ -136,14 +138,16 @@ def check_storeinfo(body: bytes, header: bytes) -> tuple[bool, str]:
 def check_statusgroupinfo(body: bytes, header: bytes) -> tuple[bool, str]:
     from cdumm.engine.statusgroupinfo_writer import parse_record_full
     from cdumm.semantic.parser import parse_pabgh_index
-    _ks, offs = parse_pabgh_index(header, "statusgroupinfo")
+    from cdumm.semantic.record_header import table_header_order
+    ks, offs = parse_pabgh_index(header, "statusgroupinfo")
+    order = table_header_order(body, offs, ks)
     starts = sorted(offs.values())
     ok_n = 0
     widths: set[int] = set()
     for o in offs.values():
         i = starts.index(o)
         end = starts[i + 1] if i + 1 < len(starts) else len(body)
-        got = parse_record_full(body, o, end)
+        got = parse_record_full(body, o, end, order)
         if got is None:
             continue
         ok_n += 1

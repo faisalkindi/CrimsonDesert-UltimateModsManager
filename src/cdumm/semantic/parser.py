@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from cdumm.archive.table_ext import is_body_path, strip_table_ext
+from cdumm.semantic.record_header import (
+    NAME_FIRST,
+    header_end,
+    read_header,
+    table_header_order,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -492,9 +498,16 @@ def parse_pabgh_index(header_bytes: bytes, table_name: str = ""
 # ── Record parsing ──────────────────────────────────────────────────────────
 
 def _parse_entry_header(data: bytes, offset: int,
-                        key_size: int = 4
+                        key_size: int = 4,
+                        header_order: str | None = None
                         ) -> tuple[int, str, int]:
     """Parse entry header at ``offset``.
+
+    ``header_order`` is the table's key/name order from
+    ``record_header.table_header_order``. Game 2.04 writes the name
+    before the id (``NAME_FIRST``); the byte that followed the name before
+    follows the id there, and is skipped the same way. Without it, the
+    header is read id first, as every pre-2.04 table is.
 
     The entry_id width matches the PABGH index ``key_size``: u16
     for storeinfo / inventory style tables, u32 for dropsetinfo /
@@ -534,6 +547,19 @@ def _parse_entry_header(data: bytes, offset: int,
 
     Returns ``(entry_id, entry_name, payload_start_offset)``.
     """
+    if header_order == NAME_FIRST:
+        got = read_header(data, offset, key_size, NAME_FIRST)
+        if got is None:
+            return 0, "", offset
+        eid, raw, id_end = got
+        try:
+            name = raw.decode("utf-8") if raw else ""
+        except UnicodeDecodeError:
+            name = ""
+        payload_start = (id_end + 1 if id_end < len(data) and data[id_end] == 0
+                         else id_end)
+        return eid, name, payload_start
+
     eid_size = key_size if key_size > 0 else 4
     head_size = eid_size + 4  # entry_id + u32 name_len
 
@@ -637,6 +663,7 @@ def parse_records(table_name: str, body_bytes: bytes, header_bytes: bytes
     key_size, offsets = parse_pabgh_index(header_bytes, table_name)
     if not offsets:
         return {}
+    header_order = table_header_order(body_bytes, offsets, key_size)
 
     # Sort offsets to determine entry boundaries
     sorted_entries = sorted(offsets.items(), key=lambda x: x[1])
@@ -657,7 +684,7 @@ def parse_records(table_name: str, body_bytes: bytes, header_bytes: bytes
 
         # Parse entry header — entry_id width matches PABGH key_size.
         eid, name, payload_start = _parse_entry_header(
-            entry_data, 0, key_size)
+            entry_data, 0, key_size, header_order)
         payload = entry_data[payload_start:]
 
         # Parse payload using schema
@@ -695,10 +722,19 @@ _DISPLAY_PRIM_FMT = {
 
 
 def _display_payload_start(entry: bytes, schema: "TableSchema",
-                           key_size: int) -> int:
+                           key_size: int,
+                           header_order: str | None = None) -> int:
     """Byte offset of the first field, honoring the override flags."""
     if schema.no_entry_header:
         return 0
+    if header_order == NAME_FIRST:
+        id_end = header_end(entry, 0, key_size, NAME_FIRST)
+        if id_end is None:
+            return 0
+        if schema.no_null_skip:
+            return id_end
+        return (id_end + 1
+                if id_end < len(entry) and entry[id_end] == 0 else id_end)
     eid_size = 2 if key_size == 2 else 4
     head = eid_size + 4
     if len(entry) < head:
@@ -741,10 +777,11 @@ def _display_value(td: str, body: bytes, off: int, width: int) -> Any:
 
 
 def decode_record_display(entry_data: bytes, schema: "TableSchema",
-                          key_size: int) -> dict[str, Any]:
+                          key_size: int,
+                          header_order: str | None = None) -> dict[str, Any]:
     """Walk one entry into {field: display_value}, walker-driven."""
     from cdumm.semantic import pabgb_types as _pt
-    off = _display_payload_start(entry_data, schema, key_size)
+    off = _display_payload_start(entry_data, schema, key_size, header_order)
     end = len(entry_data)
     out: dict[str, Any] = {}
     for spec in schema.fields:
@@ -803,6 +840,7 @@ def parse_records_display(table_name: str, body_bytes: bytes,
     key_size, offsets = parse_pabgh_index(header_bytes, table_name)
     if not offsets:
         return {}
+    header_order = table_header_order(body_bytes, offsets, key_size)
     sorted_entries = sorted(offsets.items(), key=lambda x: x[1])
     records: dict[int, dict[str, Any]] = {}
     for idx, (key, entry_offset) in enumerate(sorted_entries):
@@ -813,8 +851,10 @@ def parse_records_display(table_name: str, body_bytes: bytes,
         entry_data = body_bytes[entry_offset:entry_end]
         name = ""
         if not schema.no_entry_header:
-            _eid, name, _ps = _parse_entry_header(entry_data, 0, key_size)
-        fields = decode_record_display(entry_data, schema, key_size)
+            _eid, name, _ps = _parse_entry_header(
+                entry_data, 0, key_size, header_order)
+        fields = decode_record_display(entry_data, schema, key_size,
+                                       header_order)
         fields["_key"] = key
         fields["_name"] = name
         records[key] = fields

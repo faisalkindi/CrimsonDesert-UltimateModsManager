@@ -409,6 +409,7 @@ def decode_table_positions(table: str, body: bytes, header: bytes) -> dict:
         return {}
     if not offsets:
         return {}
+    header_order = sem.table_header_order(body, offsets, key_size)
     ordered = sorted(offsets.items(), key=lambda kv: kv[1])
     out: dict = {}
     n = len(body)
@@ -418,7 +419,8 @@ def decode_table_positions(table: str, body: bytes, header: bytes) -> dict:
             continue
         rec = body[start:end]
         try:
-            _eid, _name, pstart = sem._parse_entry_header(rec, 0, key_size)
+            _eid, _name, pstart = sem._parse_entry_header(
+                rec, 0, key_size, header_order)
         except Exception:  # noqa: BLE001
             pstart = key_size
         payload = rec[pstart:]

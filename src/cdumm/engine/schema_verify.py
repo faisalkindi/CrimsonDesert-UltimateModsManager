@@ -62,6 +62,7 @@ from typing import Any
 from cdumm.engine.format3_apply import _consume_field_bytes, _payload_offset
 from cdumm.semantic import parser as parser_mod
 from cdumm.semantic.parser import TableSchema, get_schema, parse_pabgh_index
+from cdumm.semantic.record_header import table_header_order
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ def decode_score(table: str, order: list[str],
     """
     schema = _schema_in_order(table, order)
     key_size, offsets = parse_pabgh_index(header, table)
+    hdr_order = table_header_order(body, offsets, key_size)
     entries = sorted(offsets.items(), key=lambda kv: kv[1])
     total = len(entries)
     if total == 0:
@@ -160,7 +162,8 @@ def decode_score(table: str, order: list[str],
         end = entries[i + 1][1] if i + 1 < total else len(body)
         po = _payload_offset(body, off0, key_size,
                              no_null_skip=schema.no_null_skip,
-                             no_entry_header=schema.no_entry_header)
+                             no_entry_header=schema.no_entry_header,
+                             header_order=hdr_order)
         if po is None:
             consumed_counts.append(0)
             continue
@@ -393,6 +396,7 @@ def value_agreement(table: str, order: list[str], body: bytes, header: bytes,
     )
     schema = _schema_in_order(table, order)
     key_size, offsets = parse_pabgh_index(header, table)
+    hdr_order = table_header_order(body, offsets, key_size)
     entries = sorted(offsets.items(), key=lambda kv: kv[1])
     # A record ends where the NEXT one begins, so the boundary always comes
     # from the full list. Taking it from the sampled list instead would hand
@@ -418,9 +422,9 @@ def value_agreement(table: str, order: list[str], body: bytes, header: bytes,
             continue
         entry = body[off:end]
         if not schema.no_entry_header:
-            _parse_entry_header(entry, 0, key_size)
+            _parse_entry_header(entry, 0, key_size, hdr_order)
         try:
-            got = decode_record_display(entry, schema, key_size)
+            got = decode_record_display(entry, schema, key_size, hdr_order)
         except Exception as exc:                              # noqa: BLE001
             # An order that cannot decode a record earns nothing for it,
             # which is the scoring answer. But swallowing the reason in
@@ -815,6 +819,7 @@ def layout_fit(table: str, body: bytes, header: bytes,
         return None
     if not offsets:
         return None
+    hdr_order = table_header_order(body, offsets, key_size)
     ent = sorted(offsets.items(), key=lambda kv: kv[1])
     n = len(ent)
     step = max(1, n // max_samples)
@@ -827,7 +832,8 @@ def layout_fit(table: str, body: bytes, header: bytes,
         try:
             p = _payload_offset(body, off, key_size,
                                 no_null_skip=schema.no_null_skip,
-                                no_entry_header=schema.no_entry_header)
+                                no_entry_header=schema.no_entry_header,
+                                header_order=hdr_order)
         except Exception:                                   # noqa: BLE001
             p = None
         if p is None:
