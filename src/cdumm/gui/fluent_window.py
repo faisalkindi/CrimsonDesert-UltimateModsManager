@@ -660,6 +660,26 @@ def _clear_pending_post_import_state(win, path) -> None:
     nrf = getattr(win, "_nexus_real_file_id_map", None)
     if isinstance(nrf, dict) and path is not None:
         nrf.pop(str(path), None)
+    _pop_nxm_mod_id(win, path)
+
+
+def _pop_nxm_mod_id(win, path) -> int:
+    """Return, and forget, the Nexus mod id an nxm:// download of
+    ``path`` arrived with, or 0 when it didn't come through nxm://.
+
+    The nxm:// URL names the mod outright, but only its file id used to
+    be handed on to the import, so the post-import steps re-derived the
+    mod id from the filename and stored none when the name didn't parse
+    (GitHub #379). Keyed on ``str(path)`` like
+    ``_nexus_real_file_id_map``.
+    """
+    nmm = getattr(win, "_nexus_nxm_mod_id_map", None)
+    if not isinstance(nmm, dict) or path is None:
+        return 0
+    try:
+        return max(int(nmm.pop(str(path), 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _decide_auth_banner(
@@ -3223,7 +3243,8 @@ class CdummWindow(FluentWindow):
                 self._queue_import(
                     result,
                     existing_mod_id=existing_id,
-                    nexus_real_file_id=nexus_file_id)
+                    nexus_real_file_id=nexus_file_id,
+                    nexus_mod_id=nexus_mod_id)
 
     # ------------------------------------------------------------------
     # Theme change, reapply custom styles on all components
@@ -3605,7 +3626,8 @@ class CdummWindow(FluentWindow):
         self._queue_import(Path(path) if not isinstance(path, Path) else path)
 
     def _queue_import(self, path: Path, existing_mod_id: int | None = None,
-                       nexus_real_file_id: int | None = None) -> None:
+                       nexus_real_file_id: int | None = None,
+                       nexus_mod_id: int | None = None) -> None:
         """Add a path to the import queue. Processes sequentially.
 
         ``existing_mod_id`` lets callers (notably the nxm:// download
@@ -3616,6 +3638,10 @@ class CdummWindow(FluentWindow):
         known (always present for nxm:// downloads). Stored on the mod
         row by the post-import handler so the next update check can
         walk the file_updates chain.
+
+        ``nexus_mod_id`` is the Nexus mod id from the nxm:// URL. The
+        post-import steps prefer it to whatever the filename parses to
+        (see ``_pop_nxm_mod_id``).
         """
         if not hasattr(self, '_import_queue'):
             self._import_queue: list[Path] = []
@@ -3625,6 +3651,8 @@ class CdummWindow(FluentWindow):
             self._existing_mod_id_map: dict[str, int] = {}
         if not hasattr(self, '_nexus_real_file_id_map'):
             self._nexus_real_file_id_map: dict[str, int] = {}
+        if not hasattr(self, '_nexus_nxm_mod_id_map'):
+            self._nexus_nxm_mod_id_map: dict[str, int] = {}
         self._import_queue.append(path)
         if existing_mod_id is not None:
             self._existing_mod_id_map[str(path)] = existing_mod_id
@@ -3638,6 +3666,8 @@ class CdummWindow(FluentWindow):
                          path.name, len(self._import_queue), self._active_worker is not None)
         if nexus_real_file_id:
             self._nexus_real_file_id_map[str(path)] = int(nexus_real_file_id)
+        if nexus_mod_id:
+            self._nexus_nxm_mod_id_map[str(path)] = int(nexus_mod_id)
         # If no import is running, start the first one
         if not self._active_worker:
             self._process_next_import()
@@ -5440,6 +5470,8 @@ class CdummWindow(FluentWindow):
             else:
                 _nexus_stem = path.stem
             nexus_id, nexus_file_ver = _parse_nexus_filename(_nexus_stem)
+            # nxm:// downloads know the mod id from the URL (#379).
+            nexus_id = _pop_nxm_mod_id(self, path) or nexus_id
             if nexus_id:
                 try:
                     if _pid is not None:
@@ -6000,6 +6032,9 @@ class CdummWindow(FluentWindow):
             nexus_id, _ = _parse_nexus_filename(stem)
         except Exception:
             nexus_id = None
+        # An nxm:// install already knows its mod id from the URL, and
+        # that beats anything the filename does or doesn't say (#379).
+        nexus_id = _pop_nxm_mod_id(self, source_path) or nexus_id
         # Bug 35: pick up the real numeric Nexus file_id if this install
         # came through the nxm:// flow. _nexus_real_file_id_map is
         # keyed on the original drop path; look it up and pop so a
@@ -6014,6 +6049,13 @@ class CdummWindow(FluentWindow):
         if not version and not nexus_id and not real_file_id:
             return
         from cdumm.asi.asi_manager import _stem_from_installed
+        # Every plugin this install put in bin64. The rename cleanup
+        # below must never treat one of them as the stale predecessor
+        # of another: an archive shipping two .asi files used to lose
+        # the first one when the second was recorded.
+        this_install = {
+            n for n in (_stem_from_installed(f) for f in installed_files)
+            if n is not None}
         for fname in installed_files:
             plugin_name = _stem_from_installed(fname)
             if plugin_name is None:
@@ -6056,10 +6098,12 @@ class CdummWindow(FluentWindow):
                 # stale prior file + DB row.
                 if nexus_id:
                     try:
-                        stale_rows = self._db.connection.execute(
-                            "SELECT name FROM asi_plugin_state "
-                            "WHERE nexus_mod_id = ? AND name != ?",
-                            (nexus_id, plugin_name)).fetchall()
+                        stale_rows = [
+                            r for r in self._db.connection.execute(
+                                "SELECT name FROM asi_plugin_state "
+                                "WHERE nexus_mod_id = ? AND name != ?",
+                                (nexus_id, plugin_name)).fetchall()
+                            if r[0] not in this_install]
                         for (old_name,) in stale_rows:
                             bin64_dir = self._game_dir / "bin64"
                             # Sweep every variant the old plugin could
@@ -6187,6 +6231,8 @@ class CdummWindow(FluentWindow):
             nexus_id, nexus_file_ver = _parse_nexus_filename(drop_path.stem)
         except Exception:
             nexus_id, nexus_file_ver = None, ""
+        # nxm:// downloads know the mod id from the URL (#379).
+        nexus_id = _pop_nxm_mod_id(self, drop_path) or nexus_id
         real_file_id = None
         if hasattr(self, "_nexus_real_file_id_map"):
             real_file_id = self._nexus_real_file_id_map.pop(

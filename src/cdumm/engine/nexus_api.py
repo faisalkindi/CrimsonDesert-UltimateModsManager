@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from cdumm import __version__
+from cdumm.engine.nexus_filename import split_nexus_filename
 
 logger = logging.getLogger(__name__)
 
@@ -948,6 +949,16 @@ def check_mod_updates(
                 if drop:
                     base = re.sub(
                         r"-\d+(?:-[\w.]+)*-\d{6,}(?:\.\w+)?$", "", drop)
+                    if base == drop:
+                        # Not the dash-separated form. Nexus's newer
+                        # names put the file name first and space-
+                        # separate the rest ("No Peach Fuzz 3941 1
+                        # 2026-10-31T18-11Z vEjq5ZqS9.zip"), and a
+                        # nested-variant drop_name carries
+                        # "||<variant>" (GitHub #379).
+                        parts = split_nexus_filename(drop)
+                        if parts is not None:
+                            base = parts.name
                     base = base.replace("_", " ").strip()
                     if base and base.lower() != local_name.lower():
                         candidates = _filter_files_by_name(files, base)
