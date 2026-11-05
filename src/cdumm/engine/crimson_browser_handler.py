@@ -786,55 +786,7 @@ def _pamt_full_paths(pamt_path: Path) -> list[str] | None:
     PAMT cannot be read.
     """
     try:
-        data = Path(pamt_path).read_bytes()
-        off = 4
-        paz_count = struct.unpack_from("<I", data, off)[0]
-        off += 4 + 8
-        off += paz_count * 8 + max(0, paz_count - 1) * 4
-
-        def read_trie(off):
-            size = struct.unpack_from("<I", data, off)[0]
-            start = off + 4
-            items = {}
-            o = start
-            while o < start + size:
-                parent = struct.unpack_from("<I", data, o)[0]
-                slen = data[o + 4]
-                items[o - start] = (parent, data[o + 5:o + 5 + slen].decode(
-                    "utf-8", errors="replace"))
-                o += 5 + slen
-            return items, start + size
-
-        def join(trie, ref, limit):
-            parts = []
-            while ref != 0xFFFFFFFF and len(parts) < limit and ref in trie:
-                parent, name = trie[ref]
-                parts.append(name)
-                ref = parent
-            return "".join(reversed(parts))
-
-        folders, off = read_trie(off)
-        nodes, off = read_trie(off)
-        folder_count = struct.unpack_from("<I", data, off)[0]
-        off += 4
-        file_folder: dict[int, str] = {}
-        for _ in range(folder_count):
-            _h, fref, first, count = struct.unpack_from("<IIII", data, off)
-            off += 16
-            fpath = join(folders, fref, 64).strip("/")
-            for idx in range(first, first + count):
-                file_folder[idx] = fpath
-        off += 4  # file_count
-        out = []
-        i = 0
-        while off + 20 <= len(data):
-            node_ref = struct.unpack_from("<I", data, off)[0]
-            off += 20
-            name = join(nodes, node_ref, 64)
-            folder = file_folder.get(i, "")
-            out.append(f"{folder}/{name}" if folder else name)
-            i += 1
-        return out
+        return [entry.path for entry in parse_pamt(str(pamt_path), full_paths=True)]
     except Exception as e:
         logger.debug("CB mod: full-path index failed for %s: %s", pamt_path, e)
         return None
