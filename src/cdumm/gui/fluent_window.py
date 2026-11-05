@@ -1988,6 +1988,11 @@ class CdummWindow(FluentWindow):
             papgt_path = self._game_dir / "meta" / "0.papgt"
             if not papgt_path.exists():
                 return
+            # On 2.04 CDUMM never writes the game's archives, and this
+            # auto-fix would put a pre-2.04 PAPGT backup back (#458).
+            from cdumm.archive.papgt_manager import game_uses_signed_index
+            if game_uses_signed_index(self._game_dir):
+                return
             snap = self._db.connection.execute(
                 "SELECT file_size FROM snapshots WHERE file_path = 'meta/0.papgt'"
             ).fetchone()

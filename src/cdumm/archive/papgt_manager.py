@@ -62,6 +62,46 @@ def _compact_papgt_layout(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+def _pamt_is_compact(pamt_path: Path) -> bool:
+    """True for a 2.04-layout PAMT (varint name trees).
+
+    The legacy name trees open with the root's absolute u32 parent,
+    0xFFFFFFFF; the compact ones open with a zero parent distance.
+    """
+    try:
+        data = pamt_path.read_bytes()
+        paz_count = struct.unpack_from('<I', data, 4)[0]
+        off = 16 + paz_count * 8 + max(0, paz_count - 1) * 4
+        folder_size = struct.unpack_from('<I', data, off)[0]
+        return bool(folder_size) and data[off + 4] == 0
+    except (OSError, struct.error, IndexError):
+        return False
+
+
+def game_uses_signed_index(game_dir: Path) -> bool:
+    """True when the game is on the 2.04 archive layout (#458).
+
+    2.04 signs ``meta/0.papgt`` and refuses to start when it has been
+    rewritten, so CDUMM must not write to the game's archives there. The
+    base ``0000/0.pamt`` is checked as well because v3.17.13 could
+    replace a 2.04 PAPGT with a legacy one before this check existed.
+    """
+    papgt = game_dir / "meta" / "0.papgt"
+    try:
+        if papgt.exists() and _compact_papgt_layout(papgt.read_bytes()):
+            return True
+    except OSError:
+        pass
+    return _pamt_is_compact(game_dir / "0000" / "0.pamt")
+
+
+SIGNED_INDEX_MESSAGE = (
+    "Game 2.04 or newer detected. This game version rejects a modified "
+    "archive list, so CDUMM can't install or remove mods on it yet, and "
+    "it left your game files untouched. If a mod tool already changed "
+    "them, verify the game files in Steam to restore them.")
+
+
 def decode_papgt_entry_flags(flags: int) -> tuple[int, int, int]:
     """Split a PAPGT entry's first 4 bytes into the named fields.
 
@@ -162,8 +202,16 @@ def language_pack_dirs(game_dir: Path,
     PAPGT lists it as optional, and it carries no
     ``_cdumm_overlay.marker`` -- a CDUMM overlay that squatted one of
     these slots (pre-3.16.1) is still CDUMM's to clean up.
+
+    On game 2.04 CDUMM never writes the PAPGT, so every directory the
+    live one lists belongs to the game and qualifies too (#458).
     """
     optional: set[str] = set()
+    if game_uses_signed_index(game_dir):
+        for name, _flags, _h in (
+                read_papgt_entries(game_dir / "meta" / "0.papgt") or []):
+            if name.isdigit() and len(name) == 4:
+                optional.add(name)
     for papgt in (game_dir / "meta" / "0.papgt",
                   (vanilla_dir / "meta" / "0.papgt") if vanilla_dir else None):
         if papgt is None:
@@ -195,6 +243,8 @@ def strip_dangling_entries(game_dir: Path) -> int:
     entries dropped; 0 when the file needed no change.
     """
     papgt = game_dir / "meta" / "0.papgt"
+    if game_uses_signed_index(game_dir):
+        return 0
     entries = read_papgt_entries(papgt)
     if not entries:
         return 0

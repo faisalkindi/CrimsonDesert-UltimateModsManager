@@ -2034,7 +2034,7 @@ def _update_pamt_record(pamt_path: Path, entry: PazEntry,
 _pamt_index_cache: dict[str, dict[str, PazEntry]] = {}
 
 
-_PAMT_INDEX_CACHE_VERSION = "v4"
+_PAMT_INDEX_CACHE_VERSION = "v5"
 
 
 def _retire_superseded_index_caches(cdmods: Path) -> None:
@@ -2101,6 +2101,10 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     _key = "vanilla" if game_dir.name == "vanilla" else (
         "game_" + _hashlib.sha1(str(game_dir).encode("utf-8")).hexdigest()[:12]
     )
+    # Cache version bumped to v5 for game 2.04 (#458). v3.17.13 could
+    # not read 2.04's compact PAMTs, built an empty index and cached
+    # it; the staleness check below never looks at emptiness, so those
+    # caches kept serving 0 keys after the reader learned the format.
     # Cache version bumped to v4 on 2026-09-04 for the .pabgb ->
     # .staticinfobody alias keys (see cdumm.archive.table_ext). A v3
     # cache carries only the post-update names, so every mod-declared
@@ -2150,6 +2154,7 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
     # Build fresh index
     t0 = _time.perf_counter()
     index: dict[str, PazEntry] = {}
+    base_failed = False
     for d in sorted(game_dir.iterdir()):
         if not d.is_dir() or not d.name.isdigit():
             continue
@@ -2219,18 +2224,24 @@ def _get_pamt_index(game_dir: Path) -> dict[str, PazEntry]:
                         bn_list = []
                         index[bn_key] = bn_list
                     bn_list.append(e)
-        except Exception:
+        except Exception as e:
+            logger.warning("PAMT index: could not read %s: %s", pamt, e)
+            if int(d.name) < 36:
+                base_failed = True
             continue
 
     dt = _time.perf_counter() - t0
     logger.info("Built PAMT index for %s: %d keys in %.2fs", game_dir, len(index), dt)
 
-    # Persist to disk for next subprocess invocation
-    try:
-        with open(cache_path, "wb") as f:
-            _pickle.dump(index, f, protocol=5)
-    except Exception:
-        pass
+    # Persist to disk for next subprocess invocation. An index missing a
+    # base archive is not worth keeping: the cache is only rebuilt when a
+    # base PAMT changes, so a failed read would be served forever (#458).
+    if not base_failed:
+        try:
+            with open(cache_path, "wb") as f:
+                _pickle.dump(index, f, protocol=5)
+        except Exception:
+            pass
 
     _pamt_index_cache[key] = index
     return index
