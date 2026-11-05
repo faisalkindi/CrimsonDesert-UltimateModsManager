@@ -61,7 +61,9 @@ class _StubWindow:
         # Mirrors fluent_window._on_cdmods_path_change_requested but
         # without managers/UI re-wiring. We only care about the
         # close -> migrate -> reopen -> persist ordering.
-        from cdumm.storage.cdmods_migration import migrate_cdmods
+        from cdumm.storage.cdmods_migration import (
+            migrate_cdmods, SourceCleanupError,
+        )
         from cdumm.storage.database import Database
         from cdumm.storage.config import Config
         from cdumm.engine.cdmods_paths import write_cdmods_path_pointer
@@ -70,8 +72,14 @@ class _StubWindow:
         self._db.close()
         self._db = None
 
-        # 2. Migrate (verifies + deletes old tree).
-        migrate_cdmods(old_path, new_path)
+        # 2. Migrate (verifies + deletes old tree). A SourceCleanupError
+        # (copy verified, only the old-tree delete failed) is NOT a
+        # revert case (#478): new_path is the live data either way.
+        self.leftover_warning = None
+        try:
+            migrate_cdmods(old_path, new_path)
+        except SourceCleanupError as e:
+            self.leftover_warning = str(e)
 
         # 3. Reopen at the new location.
         self._cdmods_dir = new_path
@@ -139,6 +147,54 @@ def test_window_migration_close_then_migrate_then_reopen_persists(
     # Pointer file written (C1 follow-up).
     pointer = cdmods_paths.read_cdmods_path_pointer()
     assert pointer == new_path
+
+
+def test_window_migration_switches_over_despite_rmtree_failure(
+        tmp_path, monkeypatch):
+    """Regression for #478: if the copy to new_path is fully verified
+    but deleting old_path afterward fails, the window must switch to
+    new_path anyway (new DB, override persisted, pointer written) --
+    not revert to a stale or freshly-emptied old DB."""
+    from cdumm.storage.database import Database
+    from cdumm.storage.config import Config
+    from cdumm.engine import cdmods_paths
+
+    monkeypatch.setattr(
+        cdmods_paths, "_APP_DATA_DIR", tmp_path / "appdata")
+
+    old_path = tmp_path / "CDMods"
+    _make_seeded_cdmods(old_path)
+    new_path = tmp_path / "alt_storage"
+    new_path.mkdir()
+
+    db = Database(old_path / "cdumm.db")
+    db.initialize()
+
+    import shutil
+    real_rmtree = shutil.rmtree
+
+    def _bad_rmtree(path, *a, **kw):
+        if Path(path) == old_path:
+            raise OSError("simulated: file locked")
+        return real_rmtree(path, *a, **kw)
+    monkeypatch.setattr("shutil.rmtree", _bad_rmtree)
+
+    win = _StubWindow(db, old_path)
+    win.run_migration(old_path, new_path)
+
+    assert win.leftover_warning is not None, (
+        "expected a SourceCleanupError to have been caught")
+
+    # Switched to the new location despite the leftover old folder.
+    assert (new_path / "cdumm.db").exists()
+    assert Config(win._db).get("cdmods_path") == str(new_path)
+    pointer = cdmods_paths.read_cdmods_path_pointer()
+    assert pointer == new_path
+
+    # The old folder is still there (rmtree failed) -- proving this
+    # scenario is distinguishable from a clean migration, and that
+    # nothing tried to clean it up or revert to it.
+    assert old_path.exists()
 
 
 def test_window_migration_fails_when_db_still_open(tmp_path):

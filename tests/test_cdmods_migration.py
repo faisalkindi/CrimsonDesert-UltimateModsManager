@@ -152,6 +152,47 @@ def test_refuses_src_inside_dst(tmp_path):
     assert (src / "a.txt").read_bytes() == b"x"
 
 
+def test_rmtree_failure_after_verified_copy_raises_source_cleanup_error(
+        monkeypatch, tmp_path):
+    """Regression for #478: once every file is copied + verified,
+    a failed shutil.rmtree(src) must NOT look like an ordinary
+    MigrationError. SourceCleanupError tells the caller dst is the
+    live, complete data now and must not be cleaned up or reverted
+    from -- only src (now possibly partially destroyed) is in a bad
+    state."""
+    from cdumm.storage.cdmods_migration import (
+        migrate_cdmods, SourceCleanupError, MARKER_NAME,
+    )
+
+    src = tmp_path / "old"
+    dst = tmp_path / "new"
+    _write_file(src / "a.txt", b"x" * 1000)
+    _write_file(src / "vanilla" / "0008" / "0.paz", b"big-binary-blob")
+
+    import shutil
+    real_rmtree = shutil.rmtree
+
+    def _bad_rmtree(path, *a, **kw):
+        if Path(path) == src:
+            raise OSError("simulated: file locked")
+        return real_rmtree(path, *a, **kw)
+    monkeypatch.setattr("shutil.rmtree", _bad_rmtree)
+
+    with pytest.raises(SourceCleanupError) as exc_info:
+        migrate_cdmods(src, dst)
+    assert exc_info.value.dst == dst
+
+    # dst holds the complete, verified copy -- untouched by the
+    # failure, unlike a copy/verify failure which cleans dst up.
+    assert (dst / "a.txt").read_bytes() == b"x" * 1000
+    assert (dst / "vanilla" / "0008" / "0.paz").read_bytes() == b"big-binary-blob"
+    # Marker stays in place so detect_partial_migration can see it.
+    assert (dst / MARKER_NAME).exists()
+    # src is still there (rmtree failed), proving this path really is
+    # distinguishable from "nothing was copied".
+    assert src.exists()
+
+
 def test_refuses_dst_equal_to_src(tmp_path):
     from cdumm.storage.cdmods_migration import migrate_cdmods, MigrationError
 
