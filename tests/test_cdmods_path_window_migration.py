@@ -78,6 +78,25 @@ class _StubWindow:
         self._db = Database(new_path / "cdumm.db")
         self._db.initialize()
 
+        # 3b. Rewrite stored absolute paths that still name the OLD
+        # root (#477), mirroring fluent_window._on_cdmods_path_
+        # change_requested.
+        old_prefix = str(old_path)
+        new_prefix = str(new_path)
+        like_pattern = old_prefix + "%"
+        cur = self._db.connection
+        for table, column in (
+            ("mod_deltas", "delta_path"),
+            ("mods", "json_source"),
+            ("mods", "source_path"),
+        ):
+            cur.execute(
+                f"UPDATE {table} SET {column} = "
+                f"REPLACE({column}, ?, ?) WHERE {column} LIKE ?",
+                (old_prefix, new_prefix, like_pattern),
+            )
+        cur.commit()
+
         # 4. Persist override to the NEW DB (C3 fix).
         Config(self._db).set("cdmods_path", str(new_path))
 
@@ -157,3 +176,83 @@ def test_window_migration_fails_when_db_still_open(tmp_path):
             migrate_cdmods(old_path, new_path)
     finally:
         db.close()
+
+
+def test_window_migration_rewrites_stored_paths_so_next_launch_keeps_rows(
+        tmp_path, monkeypatch):
+    """Regression for #477: mod_deltas.delta_path and mods.json_source/
+    source_path are stored as absolute paths. Without rewriting them
+    to the new root after a move, cleanup_orphaned_deltas (run on
+    every launch) finds them "missing" and deletes the rows, even
+    though the real files moved along with everything else."""
+    from cdumm.storage.database import Database
+    from cdumm.engine import cdmods_paths
+    from cdumm.engine.mod_manager import ModManager
+
+    monkeypatch.setattr(
+        cdmods_paths, "_APP_DATA_DIR", tmp_path / "appdata")
+
+    old_path = tmp_path / "CDMods"
+    _make_seeded_cdmods(old_path)
+    new_path = tmp_path / "alt_storage"
+    new_path.mkdir()
+
+    db = Database(old_path / "cdumm.db")
+    db.initialize()
+
+    # Seed one enabled mod with a delta file, and one disabled mod
+    # with a json_source and a source_path, both under old_path --
+    # exactly the shape the real importers write.
+    (old_path / "deltas" / "1").mkdir(parents=True)
+    delta_file = old_path / "deltas" / "1" / "a.bsdiff"
+    delta_file.write_bytes(b"delta")
+    (old_path / "mods").mkdir()
+    json_source = old_path / "mods" / "mod.json"
+    json_source.write_text("{}", encoding="utf-8")
+
+    cur = db.connection
+    cur.execute(
+        "INSERT INTO mods (id, name, mod_type, enabled, source_path) "
+        "VALUES (1, 'Entr Mod', 'paz', 1, ?)", (str(json_source),))
+    cur.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path) "
+        "VALUES (1, '0008/0.paz', ?)", (str(delta_file),))
+    cur.execute(
+        "INSERT INTO mods (id, name, mod_type, enabled, json_source) "
+        "VALUES (2, 'Json Mod', 'paz', 0, ?)", (str(json_source),))
+    cur.commit()
+
+    win = _StubWindow(db, old_path)
+    win.run_migration(old_path, new_path)
+
+    new_delta_file = new_path / "deltas" / "1" / "a.bsdiff"
+    new_json_source = new_path / "mods" / "mod.json"
+    assert new_delta_file.exists()
+    assert new_json_source.exists()
+
+    rows = dict(win._db.connection.execute(
+        "SELECT mod_id, delta_path FROM mod_deltas").fetchall())
+    assert rows[1] == str(new_delta_file), (
+        "delta_path still names the old (deleted) root")
+
+    sources = dict(win._db.connection.execute(
+        "SELECT id, source_path FROM mods WHERE id = 1").fetchall())
+    assert sources[1] == str(new_json_source)
+
+    json_sources = dict(win._db.connection.execute(
+        "SELECT id, json_source FROM mods WHERE id = 2").fetchall())
+    assert json_sources[2] == str(new_json_source)
+
+    # The real regression: the next-launch sweep must not treat these
+    # rows as orphaned now that their paths resolve under the new root.
+    mgr = ModManager(win._db, new_path / "deltas")
+    mgr.cleanup_orphaned_deltas()
+
+    remaining_deltas = win._db.connection.execute(
+        "SELECT COUNT(*) FROM mod_deltas").fetchone()[0]
+    remaining_mods = win._db.connection.execute(
+        "SELECT COUNT(*) FROM mods").fetchone()[0]
+    assert remaining_deltas == 1, (
+        "mod_deltas row was dropped as orphaned after the move")
+    assert remaining_mods == 2, (
+        "a mod was removed as a zombie after the move")

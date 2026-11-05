@@ -7273,6 +7273,36 @@ class CdummWindow(FluentWindow):
         self._db = Database(new_db_path)
         self._db.initialize()
 
+        # The rows below still name the OLD root: mod_deltas.delta_path
+        # and mods.json_source/source_path are stored as absolute
+        # paths under the CDMods tree we just moved. Left alone,
+        # cleanup_orphaned_deltas deletes them as missing on the very
+        # next launch (#477).
+        try:
+            old_prefix = str(old_path)
+            new_prefix = str(new_path)
+            like_pattern = old_prefix + "%"
+            cur = self._db.connection
+            total = 0
+            for table, column in (
+                ("mod_deltas", "delta_path"),
+                ("mods", "json_source"),
+                ("mods", "source_path"),
+            ):
+                total += cur.execute(
+                    f"UPDATE {table} SET {column} = "
+                    f"REPLACE({column}, ?, ?) WHERE {column} LIKE ?",
+                    (old_prefix, new_prefix, like_pattern),
+                ).rowcount
+            cur.commit()
+            logger.info(
+                "cdmods migration: rewrote %d stored path(s) %s -> %s",
+                total, old_path, new_path)
+        except Exception:
+            logger.exception(
+                "cdmods migration: failed to rewrite stored paths to "
+                "the new location")
+
         # Persist the override to the NEW DB (the OLD one is gone).
         try:
             from cdumm.storage.config import Config
