@@ -11,6 +11,9 @@ Safety guarantees:
   1. Refuse to overwrite an existing non-empty destination — the
      caller picked a folder that already has stuff in it, which is
      either a typo or a user assuming we'd merge. We don't merge.
+     We also refuse a destination inside the source (or the other
+     way round): copying into a subfolder of src and then deleting
+     src would delete the copy along with it.
   2. Drop a ``.cdumm_migration_in_progress`` marker inside dst as
      the very first write. If the process crashes mid-copy the
      marker is still there on next launch, so CDUMM can detect a
@@ -173,6 +176,18 @@ def migrate_cdmods(
     if not src.is_dir():
         raise MigrationError(
             f"source path is not a directory: {src}")
+
+    resolved_src = src.resolve()
+    resolved_dst = dst.resolve()
+    if resolved_dst == resolved_src or resolved_dst.is_relative_to(resolved_src):
+        raise MigrationError(
+            f"destination {dst} is inside the source {src} (or the same "
+            "folder) — the source would be deleted out from under the "
+            "copy. Pick a folder outside it.")
+    if resolved_src.is_relative_to(resolved_dst):
+        raise MigrationError(
+            f"source {src} is inside the destination {dst}. Pick a "
+            "folder outside it.")
 
     if dst.exists() and not _is_empty_dir(dst):
         raise MigrationError(
