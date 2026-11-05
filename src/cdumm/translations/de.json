@@ -715,6 +715,8 @@
   "tools.culprit.no_manager": "Mod-Manager nicht verfügbar.",
   "tools.culprit.need_two_mods": "Mindestens 2 aktivierte Mods erforderlich.",
   "tools.culprit.close_game": "Schließe Crimson Desert vor dem Start.",
+  "tools.culprit.blocked_signed_index": "Die Suche nach dem Übeltäter funktioniert noch nicht mit Spielversion 2.04 oder neuer. CDUMM kann dort keine Mods anwenden, daher ließe sich keine Runde testen.",
+  "tools.culprit.blocked_not_steam": "Die Suche nach dem Übeltäter funktioniert vorerst nur mit einer Steam-Installation. Sie startet das Spiel für jede Runde über Steam.",
   "tools.culprit.testing_mods": "Teste {count} aktivierte Mods",
   "tools.culprit.no_problems": "Keine problematischen Mods gefunden!",
   "tools.culprit.all_clear": "Alles in Ordnung",

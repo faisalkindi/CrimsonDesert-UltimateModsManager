@@ -1230,6 +1230,19 @@ class FindCulpritPage(ToolPageBase):
                 tr("tools.culprit.need_two_mods"), "#EBCB8B")
             return
 
+        # Refuse where no round can be tested, before anything is
+        # renamed or disabled (#483).
+        from cdumm.gui.binary_search_dialog import (
+            BLOCKED_SIGNED_INDEX, find_culprit_blocker)
+        blocker = find_culprit_blocker(self._game_dir, require_steam=True)
+        if blocker:
+            self._clear_results()
+            self._set_status(
+                tr("tools.culprit.blocked_signed_index")
+                if blocker == BLOCKED_SIGNED_INDEX
+                else tr("tools.culprit.blocked_not_steam"), "#BF616A")
+            return
+
         # Check if game is already running
         try:
             from cdumm.engine.game_monitor import find_game_process

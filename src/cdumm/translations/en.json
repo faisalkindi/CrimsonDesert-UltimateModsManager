@@ -715,6 +715,8 @@
   "tools.culprit.no_manager": "Mod manager not available.",
   "tools.culprit.need_two_mods": "Need at least 2 enabled mods to run bisection.",
   "tools.culprit.close_game": "Close Crimson Desert before starting.",
+  "tools.culprit.blocked_signed_index": "Find Culprit can't run on game 2.04 or newer yet. CDUMM can't apply mods there, so no round could be tested.",
+  "tools.culprit.blocked_not_steam": "Find Culprit only works on a Steam install for now. It launches the game through Steam to test each round.",
   "tools.culprit.testing_mods": "Testing {count} enabled mods",
   "tools.culprit.no_problems": "No problem mods found!",
   "tools.culprit.all_clear": "All Clear",
