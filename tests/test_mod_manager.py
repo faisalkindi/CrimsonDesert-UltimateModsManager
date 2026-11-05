@@ -97,3 +97,58 @@ def test_mod_count(db: Database, tmp_path: Path) -> None:
 
     _create_test_mod(db, 1, "ModA")
     assert mgr.get_mod_count() == 1
+
+
+def _create_stub_mod(db: Database, mod_id: int, name: str,
+                      file_path: str, version: str | None = None) -> None:
+    """Mirrors what import_json_fast / _persist_format3_mod write for
+    a mount-time JSON or Format 3 mod: a mod_deltas row with
+    delta_path='' (no delta file on disk; apply derives bytes from
+    vanilla at apply time)."""
+    db.connection.execute(
+        "INSERT INTO mods (id, name, mod_type, enabled, version) "
+        "VALUES (?, ?, 'paz', 1, ?)",
+        (mod_id, name, version),
+    )
+    db.connection.execute(
+        "INSERT INTO mod_deltas (mod_id, file_path, delta_path) "
+        "VALUES (?, ?, '')",
+        (mod_id, file_path),
+    )
+    db.connection.commit()
+
+
+def test_cleanup_orphaned_deltas_keeps_stub_rows(db: Database, tmp_path: Path) -> None:
+    """Regression for #476 (pass 1): os.path.exists('') is False, so
+    the stub mod_deltas rows that fast-path JSON and Format 3 mods
+    write (delta_path='', no file on disk by design) used to be
+    deleted on every launch."""
+    _create_stub_mod(db, 1, "Loot 2x", "0010/0.paz")
+
+    mgr = ModManager(db, tmp_path / "deltas")
+    mgr.cleanup_orphaned_deltas()
+
+    remaining = db.connection.execute(
+        "SELECT COUNT(*) FROM mod_deltas WHERE mod_id = 1").fetchone()[0]
+    assert remaining == 1, "stub delta row was wrongly treated as orphaned"
+
+
+def test_cleanup_orphaned_deltas_does_not_auto_remove_duplicates(
+        db: Database, tmp_path: Path) -> None:
+    """Regression for #476 (pass 2): two different multiplier variants
+    ("Loot 2x" / "Loot 10x") both prettify to the display name "Loot"
+    and target the identical byte range of the identical file, so a
+    position-only fingerprint saw them as duplicates and silently
+    deleted one on every restart. Launch-time cleanup must not delete
+    same-name mods at all; that is the banner's job now (mod_dedup,
+    with a content-based fingerprint)."""
+    _create_stub_mod(db, 1, "Loot", "0010/0.paz", version="1.0")
+    _create_stub_mod(db, 2, "Loot", "0010/0.paz", version="1.0")
+
+    mgr = ModManager(db, tmp_path / "deltas")
+    mgr.cleanup_orphaned_deltas()
+
+    remaining = db.connection.execute(
+        "SELECT COUNT(*) FROM mods").fetchone()[0]
+    assert remaining == 2, (
+        "launch-time cleanup silently removed a same-name mod variant")

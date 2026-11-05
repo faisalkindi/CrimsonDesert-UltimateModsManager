@@ -152,6 +152,63 @@ def test_same_name_version_but_different_deltas_is_not_a_duplicate(db):
     assert find_duplicate_groups(db.connection) == {}
 
 
+def test_stub_json_mods_same_target_different_content_not_a_duplicate(
+        db, tmp_path):
+    """Regression for #476: mount-time JSON / Format 3 mods store a
+    mod_deltas row with delta_path='' (no delta file on disk) and
+    their actual content lives in mods.json_source. Two multiplier
+    variants ("Stack Size 2x" / "Stack Size 5x") commonly target the
+    identical file_path/entry_path, so a position-only fingerprint
+    made them collide. The fingerprint must follow json_source's
+    actual content instead."""
+    src_2x = tmp_path / "stack_size_2x.json"
+    src_2x.write_text('{"multiplier": 2}', encoding="utf-8")
+    src_5x = tmp_path / "stack_size_5x.json"
+    src_5x.write_text('{"multiplier": 5}', encoding="utf-8")
+
+    _insert(db.connection, name="Stack Size", mod_type="paz", enabled=1,
+            priority=1, version="1.2", json_source=str(src_2x))
+    _insert(db.connection, name="Stack Size", mod_type="paz", enabled=1,
+            priority=2, version="1.2", json_source=str(src_5x))
+    ids = [r[0] for r in db.connection.execute(
+        "SELECT id FROM mods ORDER BY id").fetchall()]
+    for mod_id in ids:
+        db.connection.execute(
+            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+            "byte_start, byte_end, entry_path) "
+            "VALUES (?, '0010/0.paz', '', 100, 200, 'target.json')",
+            (mod_id,))
+    db.connection.commit()
+
+    assert find_duplicate_groups(db.connection) == {}
+
+
+def test_stub_json_mods_identical_content_is_a_duplicate(db, tmp_path):
+    """The flip side: a real re-import of the exact same JSON mod has
+    identical json_source content and must still be caught."""
+    src = tmp_path / "stack_size_2x.json"
+    src.write_text('{"multiplier": 2}', encoding="utf-8")
+
+    _insert(db.connection, name="Stack Size", mod_type="paz", enabled=1,
+            priority=1, version="1.2", json_source=str(src))
+    _insert(db.connection, name="Stack Size", mod_type="paz", enabled=0,
+            priority=2, version="1.2", json_source=str(src))
+    ids = [r[0] for r in db.connection.execute(
+        "SELECT id FROM mods ORDER BY id").fetchall()]
+    for mod_id in ids:
+        db.connection.execute(
+            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+            "byte_start, byte_end, entry_path) "
+            "VALUES (?, '0010/0.paz', '', 100, 200, 'target.json')",
+            (mod_id,))
+    db.connection.commit()
+
+    groups = find_duplicate_groups(db.connection)
+    assert len(groups) == 1
+    (_, rows), = groups.items()
+    assert len(rows) == 2
+
+
 def test_plan_cleanup_uses_canonical_then_merge(db):
     _insert(db.connection,
              name="X", mod_type="paz", enabled=1, applied=1, priority=5,
