@@ -21,6 +21,19 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.15",
+        "date": "2026-11-05",
+        "notes": [
+            "<b>A failed update no longer deletes the mod it was updating.</b> When an update or reimport of a JSON mod failed, for example because the new version was made for another game version, CDUMM removed the installed mod along with its settings and profiles, while the error read as if the old version were still there. The old version now stays exactly as it was, and the error says so. Found by AgentKush.",
+            "<b>Moving your mod storage no longer loses mods.</b> After Settings moved the CDMods folder, or after you moved the game folder with CDMods inside it, CDUMM kept looking for mod files at the old place, and the next launch deleted their records. Picking a folder inside the current CDMods folder deleted the whole library and is now refused. If the old folder can't be fully removed after a verified move, CDUMM keeps using the new one and tells you what was left behind. Found by AgentKush.",
+            "<b>Mod variants are no longer removed as duplicates at launch.</b> Two variants of one mod, like Loot 2x and Loot 10x, could be deleted on restart, and JSON and Format 3 mods lost their file records every time CDUMM started. Found by AgentKush.",
+            "<b>Inspect Mod no longer overwrites an installed Format 3 mod</b> with the version you were inspecting. Found by AgentKush.",
+            "<b>Find Culprit no longer blames an innocent mod when it can't test.</b> A refused Apply, a game that didn't launch, or a non-Steam install counted as a crash, so it flagged and turned off the first mod in the list. It now stops and says why, and it doesn't start on game 2.04, where CDUMM can't apply mods yet. ReShade add-ons (.addon64) also stay add-ons when Find Culprit or the ASI page turns them off and on again; they used to come back as ASI plugins. Found by AgentKush.",
+            "<b>Options you untick in the toggle picker are left out again</b> when you drop a JSON mod. Every option was imported, whatever you picked. Found by AgentKush.",
+            "<b>Fix Everything again removes an old CDUMM mod sitting in a language pack folder.</b> Fixed by AgentKush.",
+        ],
+    },
+    {
         "version": "3.17.14",
         "date": "2026-11-05",
         "notes": [

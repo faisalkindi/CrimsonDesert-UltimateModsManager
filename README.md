@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/github/downloads/faisalkindi/CrimsonDesert-UltimateModsManager/total?style=flat-square&color=16A34A&label=Downloads" alt="Downloads">
 </p>
 
-> **Game 2.04 (29 October 2026): CDUMM can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list (`meta/0.papgt`) has been rewritten, and rewriting it is how CDUMM installs mods. From 3.17.14, CDUMM reads the 2.04 archives and leaves the game's files alone: Apply and Revert stop with a message instead. 3.17.13 could not read 2.04 at all: it skipped JSON and Format 3 mods while Apply reported success, could rewrite `meta/0.papgt` down to 2 entries (a Steam file verify restores it), and could delete installed voice packs in folders 0036–0040 on Rescan, so update before rescanning. Details in [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458).
+> **Game 2.04 (29 October 2026): CDUMM can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list (`meta/0.papgt`) has been rewritten, and rewriting it is how CDUMM installs mods. From 3.17.14, CDUMM reads the 2.04 archives and leaves the game's files alone: Apply and Revert stop with a message instead, and from 3.17.15 so does Find Culprit. 3.17.13 could not read 2.04 at all: it skipped JSON and Format 3 mods while Apply reported success, could rewrite `meta/0.papgt` down to 2 entries (a Steam file verify restores it), and could delete installed voice packs in folders 0036–0040 on Rescan, so update before rescanning. Details in [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458).
 
 ---
 
@@ -23,6 +23,7 @@ CDUMM ships frequent updates. The complete version history — every release bac
 
 ### v3.17 — the 4 September game update
 
+- **v3.17.15** — _November 5, 2026_ — **A failed update no longer deletes the mod it was updating, and moving your mod storage no longer loses mods.** The old version now stays installed when an update fails. After a storage move, or moving the game folder with CDMods inside, CDUMM finds your mod files at the new place instead of deleting their records, and a destination inside the current CDMods folder is refused (it deleted the library). Also: mod variants like Loot 2x and Loot 10x are no longer removed as duplicates at launch, Inspect Mod no longer overwrites an installed Format 3 mod, Find Culprit stops instead of blaming a mod when it can't test (and doesn't start on 2.04), ReShade add-ons stay add-ons when turned off and on, and the toggle picker leaves out the options you untick again. All found by AgentKush.
 - **v3.17.14** — _November 5, 2026_ — **Game 2.04: CDUMM leaves your game files alone, but can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list has been rewritten, which is how CDUMM installs mods. 3.17.13 couldn't read 2.04, skipped JSON mods while reporting success, could cut that list to 2 entries, and could delete voice packs on Rescan. CDUMM now reads 2.04 and stops Apply with a message instead. Also: the Nexus update check reads Nexus's newer file names, and three macOS fixes. 2.04 reader by GSharpd and Vi-gilo; voice pack deletions found by AgentKush.
 - **v3.17.13** — _October 28, 2026_ — **Loose-file mods that add new game files now install completely.** Character Creator Enhanced lost 1,131 of its 1,145 files on import and the game never finished loading; all of them now land where the game looks for them. Reported and fixed by 7uk0.
 - **v3.17.12** — _October 21, 2026_ — **Two mods that change the same game table now both reach the game after you edit one of them.** CDUMM merges them into one file and reuses the last result when nothing changed, but it only checked the first mod. Change the other one and Apply reported success while the game kept the old merge. Reported and traced by Vi-gilo.
@@ -212,7 +213,7 @@ Your original game files are **never modified**. Mods are applied through an ove
 - **Verify game state** — scan all files, see vanilla vs modded
 - **One-click revert** — restores all files including PATHC and PAMTs
 - **Crash recovery** — atomic commits with `.pre-apply` markers
-- **Find Culprit** — auto-bisect tool that finds which mod crashes the game by toggling halves on and off until stable
+- **Find Culprit** — auto-bisect tool that finds which mod crashes the game by toggling halves on and off until stable. It launches the game through Steam, so it needs a Steam install, and it doesn't run on game 2.04 yet. If a round can't be tested, it stops without blaming a mod
 
 ---
 
@@ -269,7 +270,7 @@ By default, CDUMM keeps all of its working data (imported mods, vanilla snapshot
 
 ### Changing the location
 
-If you want CDMods on a different drive (smaller SSD, dedicated mods drive, network share), open **Settings**, scroll to **Mod storage location**, and click **Change...**. Pick any folder on a writable drive. CDUMM updates the override and migrates the existing `CDMods/` contents to the new path before the next apply.
+If you want CDMods on a different drive (smaller SSD, dedicated mods drive, network share), open **Settings**, scroll to **Mod storage location**, and click **Change...**. Pick any empty folder on a writable drive, outside the current `CDMods/` folder. CDUMM updates the override, migrates the existing `CDMods/` contents to the new path, and points its stored mod paths at the new location. If you move the whole game folder with `CDMods/` inside it, CDUMM picks up the new location on its next launch.
 
 ### Migration safety
 
