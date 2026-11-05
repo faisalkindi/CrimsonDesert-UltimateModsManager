@@ -763,6 +763,43 @@ def is_steam_install(game_dir: Path) -> bool:
     return "steamapps" in str(game_dir).lower()
 
 
+# How far above the game directory ``steamapps_dir_for`` looks. Windows
+# and Linux put ``steamapps`` two levels up; the native macOS layouts put
+# it three levels up (``packages`` next to the ``.app``, #463) or six
+# (``<Name>.app/Contents/Resources/packages``). Eight allows a wrapper
+# folder or two more; the cap keeps a non-Steam install from matching a
+# ``steamapps`` folder far above it.
+_STEAMAPPS_MAX_LEVELS = 8
+
+
+def steamapps_dir_for(game_dir: Path) -> Path:
+    """Return the Steam ``steamapps`` folder for ``game_dir``.
+
+    Steam keeps ``appmanifest_<appid>.acf`` in the library's
+    ``steamapps`` folder. On Windows and Linux the game directory is
+    ``<library>/steamapps/common/Crimson Desert``, so that folder is
+    ``game_dir.parent.parent``, which the build-id, language and app-id
+    lookups used to hard-code. On native macOS the game directory is the
+    inner ``packages`` folder, inside the ``.app`` bundle or next to it,
+    so two levels up is the bundle's ``Contents`` folder or
+    ``steamapps/common``, and the manifest was never found. With no
+    build id and no exe, the game version fingerprint is ``None`` there
+    (#457 reports ``Game Version Hash: (not detected)``).
+
+    Returns the nearest ancestor named ``steamapps`` (any case) within
+    ``_STEAMAPPS_MAX_LEVELS`` levels. Without one (Xbox, Epic, a
+    standalone ``.app``, a custom folder) it returns
+    ``game_dir.parent.parent``, as before. Only the path is inspected;
+    nothing is read from disk.
+    """
+    for level, ancestor in enumerate(game_dir.parents, start=1):
+        if level > _STEAMAPPS_MAX_LEVELS:
+            break
+        if ancestor.name.lower() == "steamapps":
+            return ancestor
+    return game_dir.parent.parent
+
+
 def is_epic_install(game_dir: Path) -> bool:
     """Check if the game directory is an Epic Games Store installation."""
     path_lower = str(game_dir).lower()
