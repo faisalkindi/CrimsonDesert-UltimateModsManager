@@ -57,8 +57,10 @@ def test_reimport_when_source_already_in_mods_dir_does_not_winerror():
         td = Path(td)
         db = Database(td / "test.db")
         db.initialize()
-        deltas = td / "deltas"
-        deltas.mkdir()
+        # deltas_dir sits next to CDMods/mods, as in a real install: the
+        # stored JSON goes to <deltas_dir>/../mods (GitHub #480).
+        deltas = td / "fake_game" / "CDMods" / "deltas"
+        deltas.mkdir(parents=True)
         snapshot = SnapshotManager(game_dir / "CDMods" / "snapshot.json")
 
         # Stage the JSON in CDMods/mods/ to mirror the post-import
@@ -67,7 +69,7 @@ def test_reimport_when_source_already_in_mods_dir_does_not_winerror():
         # state. The function under test computes its dest path from
         # game_dir, so we must redirect game_dir to the temp.
         fake_game_dir = td / "fake_game"
-        fake_game_dir.mkdir()
+        fake_game_dir.mkdir(exist_ok=True)
         # Also need fake 0008/0.pamt for the validation step. Just
         # link to the real one.
         (fake_game_dir / "0008").mkdir()
@@ -124,12 +126,14 @@ def test_first_time_import_still_copies_to_mods_dir():
         td = Path(td)
         db = Database(td / "test.db")
         db.initialize()
-        deltas = td / "deltas"
-        deltas.mkdir()
+        # deltas_dir sits next to CDMods/mods, as in a real install: the
+        # stored JSON goes to <deltas_dir>/../mods (GitHub #480).
+        deltas = td / "fake_game" / "CDMods" / "deltas"
+        deltas.mkdir(parents=True)
         snapshot = SnapshotManager(game_dir / "CDMods" / "snapshot.json")
 
         fake_game_dir = td / "fake_game"
-        fake_game_dir.mkdir()
+        fake_game_dir.mkdir(exist_ok=True)
         (fake_game_dir / "0008").mkdir()
         for f in ("0.pamt", "0.paz"):
             real = game_dir / "0008" / f

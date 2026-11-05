@@ -5045,6 +5045,7 @@ def import_from_natt_format_3(
         json_path=json_path, target=primary_target, mod_name=title,
         modinfo=(data.get("modinfo") or {}),
         game_dir=game_dir, db=db, existing_mod_id=existing_mod_id,
+        deltas_dir=deltas_dir,
     )
     if persist_outcome is None:
         # Persistence failed — couldn't resolve target file in PAMTs
@@ -5128,11 +5129,16 @@ def import_from_natt_format_3(
 def _persist_format3_mod(
     json_path: Path, target: str, mod_name: str,
     modinfo: dict, game_dir: Path, db: Database,
-    existing_mod_id: int | None,
+    existing_mod_id: int | None, deltas_dir: Path,
 ) -> dict | None:
     """Persist a Format 3 mod: store JSON + create mods row + lightweight
     mod_deltas rows. Returns ``{mod_id, changed_files}`` or None when the
-    target file can't be resolved in the game's PAMT index."""
+    target file can't be resolved in the game's PAMT index.
+
+    The JSON is stored in ``mods/`` next to ``deltas_dir``. A real import
+    passes CDMods/deltas, so that is CDMods/mods; Inspect Mod passes a
+    staging folder, so a trial never overwrites an installed mod's JSON
+    (GitHub #480)."""
     from cdumm.engine.json_patch_handler import (
         _derive_pamt_dir, _find_pamt_entry,
     )
@@ -5160,7 +5166,7 @@ def _persist_format3_mod(
     # Store the Format 3 JSON in CDMods/mods/. Reuse the same name-
     # sanitization import_json_fast uses (Windows reserved chars + a
     # short hash to disambiguate post-sanitize collisions).
-    mods_dir = _cdmods / "mods"
+    mods_dir = deltas_dir.parent / "mods"
     mods_dir.mkdir(parents=True, exist_ok=True)
     import re as _re_fn
     import hashlib as _hash
