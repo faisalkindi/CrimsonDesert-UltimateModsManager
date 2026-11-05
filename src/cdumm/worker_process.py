@@ -739,6 +739,14 @@ def _run_fix(game_dir: str, vanilla_dir: str, db_path: str,
         # snapshot rows either, and is not an orphan (#458).
         from cdumm.archive.papgt_manager import language_pack_dirs
         _lang_dirs = language_pack_dirs(game_dir, vanilla_dir)
+        # A slot whose 0.pamt CDUMM itself added holds a CDUMM mod, not
+        # Steam's pack, so it isn't exempt. Before #384, standalone mods
+        # were numbered from 0036 up, so one can sit in a slot the PAPGT
+        # now names, and standalone folders carry no overlay marker.
+        _lang_dirs -= {
+            fp.split("/", 1)[0] for (fp,) in db2.connection.execute(
+                "SELECT DISTINCT file_path FROM mod_deltas "
+                "WHERE is_new = 1 AND file_path LIKE '____/0.pamt'")}
         for d in sorted(game_dir.iterdir()):
             if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
                     and int(d.name) >= 36 and d.name not in _lang_dirs):
