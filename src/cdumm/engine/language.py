@@ -59,12 +59,15 @@ def detect_steam_language(game_dir: Path) -> str | None:
     """Read the Crimson Desert appmanifest for the active Steam language.
 
     Mirrors JMM ``DetectSteamLanguage`` — looks at
-    ``<game_dir>/../../appmanifest_3321460.acf`` (Steam stores these in the
-    library root, two levels above the game install). Returns the language
-    token (e.g. ``"english"``, ``"korean"``) or ``None`` if the manifest
-    can't be parsed.
+    ``<steamapps>/appmanifest_3321460.acf``. Steam keeps these in the
+    library's ``steamapps`` folder: two levels above the game install on
+    Windows/Linux (JMM's ``<game_dir>/../..``), further up on native macOS
+    (see ``steamapps_dir_for``). Returns the language token (e.g.
+    ``"english"``, ``"korean"``) or ``None`` if the manifest can't be
+    parsed.
     """
-    manifest = game_dir.parent.parent / f"appmanifest_{STEAM_APP_ID}.acf"
+    from cdumm.storage.game_finder import steamapps_dir_for
+    manifest = steamapps_dir_for(game_dir) / f"appmanifest_{STEAM_APP_ID}.acf"
     if not manifest.exists():
         return None
     try:

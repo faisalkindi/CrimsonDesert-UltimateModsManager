@@ -263,8 +263,12 @@ def get_steam_app_id(game_dir: Path) -> str:
     ``steam://rungameid/332146`` and Steam answered 'Game configuration
     unavailable'. The appmanifest (appmanifest_3321460.acf) was present
     and correct the whole time, so it now takes precedence.
+
+    ``steamapps`` comes from ``steamapps_dir_for``: two levels above the
+    game on Windows/Linux, further up on native macOS.
     """
-    steamapps = game_dir.parent.parent
+    from cdumm.storage.game_finder import steamapps_dir_for
+    steamapps = steamapps_dir_for(game_dir)
     if steamapps.is_dir():
         try:
             entries = os.listdir(steamapps)
