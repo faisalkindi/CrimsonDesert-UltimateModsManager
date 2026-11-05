@@ -7226,10 +7226,24 @@ class CdummWindow(FluentWindow):
 
         # Run the verified migration.
         from cdumm.storage.cdmods_migration import (
-            migrate_cdmods, MigrationError,
+            migrate_cdmods, MigrationError, SourceCleanupError,
         )
+        leftover_warning: str | None = None
         try:
             migrate_cdmods(old_path, new_path)
+        except SourceCleanupError as e:
+            # Every file was copied to new_path and verified; only
+            # deleting the old tree failed, and it may now be
+            # partially destroyed. Unlike a copy/verify failure,
+            # new_path -- not old_path -- is the live data from here
+            # on: reopening the OLD db would mean either a stale
+            # database, or (if rmtree reached cdumm.db before the
+            # locked file) a fresh EMPTY one at old_path, with the
+            # real data silently stranded at new_path (#478).
+            logger.warning(
+                "cdmods migration: copy verified but source cleanup "
+                "failed, continuing with the new location: %s", e)
+            leftover_warning = str(e)
         except (MigrationError, Exception) as e:
             logger.exception("cdmods migration failed")
             # Reopen the OLD DB so the app stays usable. The override
@@ -7262,9 +7276,11 @@ class CdummWindow(FluentWindow):
                 self._db_poll_timer.start(2000)
             return
 
-        # Migration succeeded. Update path state and reopen at new
-        # location. The new DB needs the override persisted, otherwise
-        # bootstrap on next launch won't see it (C3).
+        # Migration succeeded (or SourceCleanupError, which is close
+        # enough to switch over for -- see above). Update path state
+        # and reopen at the new location. The new DB needs the
+        # override persisted, otherwise bootstrap on next launch
+        # won't see it (C3).
         self._cdmods_dir = new_path
         self._deltas_dir = self._cdmods_dir / "deltas"
         self._vanilla_dir = self._cdmods_dir / "vanilla"
@@ -7343,16 +7359,29 @@ class CdummWindow(FluentWindow):
         if hasattr(self, '_db_poll_timer'):
             self._db_poll_timer.start(2000)
 
-        InfoBar.success(
-            title=tr("settings.cdmods_path_migrate_done_title"),
-            content=str(new_path),
-            duration=5000,
-            position=InfoBarPosition.TOP,
-            parent=self,
-        )
+        if leftover_warning is not None:
+            InfoBar.warning(
+                title=tr("settings.cdmods_path_migrate_done_title"),
+                content=(
+                    f"{new_path} is now in use, but the old folder at "
+                    f"{old_path} could not be fully removed: "
+                    f"{leftover_warning}. You can delete it by hand."),
+                duration=15000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+        else:
+            InfoBar.success(
+                title=tr("settings.cdmods_path_migrate_done_title"),
+                content=str(new_path),
+                duration=5000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
         logger.info(
-            "cdmods_path migration complete: %s -> %s",
-            old_path, new_path)
+            "cdmods_path migration complete: %s -> %s%s",
+            old_path, new_path,
+            " (old folder not fully removed)" if leftover_warning else "")
 
     def _on_profiles(self) -> None:
         """Open the mod profiles dialog."""

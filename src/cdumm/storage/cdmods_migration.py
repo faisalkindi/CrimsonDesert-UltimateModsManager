@@ -25,7 +25,12 @@ Safety guarantees:
      with the source left untouched, and the partial destination
      tree (marker included) is removed so a retry can proceed.
   4. Only after every file is copied + verified do we delete the
-     source tree. Marker is cleared last.
+     source tree. Marker is cleared last. If THAT delete fails, dst
+     already holds a complete, verified copy and src may now be
+     partially destroyed, so we raise ``SourceCleanupError`` instead
+     of plain ``MigrationError`` — callers must treat this as a
+     completed migration (switch to dst) and only warn about
+     whatever is left behind at src, never revert to it (#478).
 
 We deliberately do NOT use shutil.move — on cross-drive moves it
 falls back to copy+delete with no integrity check. We also skip
@@ -50,6 +55,23 @@ _CHUNK = 8192
 
 class MigrationError(RuntimeError):
     """Raised when an atomic CDMods/ migration cannot complete safely."""
+
+
+class SourceCleanupError(MigrationError):
+    """Every file was copied to ``dst`` and verified; only deleting
+    ``src`` afterward failed (locked file, permission, antivirus).
+
+    Unlike every other ``MigrationError``, this one leaves a complete
+    and verified copy at ``dst``. ``rmtree`` may have already removed
+    some of ``src`` before hitting the file that blocked it, so
+    ``src`` is partially destroyed and must not be treated as the
+    live data anymore. Callers must switch to ``dst``, not revert to
+    ``src``, and only warn about whatever is left behind at ``src``
+    (#478)."""
+
+    def __init__(self, message: str, *, dst: Path) -> None:
+        super().__init__(message)
+        self.dst = dst
 
 
 def _sha256_file(path: Path) -> str:
@@ -161,11 +183,16 @@ def migrate_cdmods(
     ``src`` is left intact (we delete src LAST, after every file is
     verified). A copy/verify failure also cleans up the partially-
     copied destination tree (marker included) so the user can retry
-    into the same folder without hitting the non-empty guard. Only
-    the post-copy "source tree refused to delete" failure leaves the
-    marker in place, because at that point the verified data lives
-    in ``dst`` and must not be removed; the next launch picks that
-    up via :func:`detect_partial_migration`.
+    into the same folder without hitting the non-empty guard.
+
+    The post-copy "source tree refused to delete" failure is
+    different in kind, not just degree: it raises
+    ``SourceCleanupError`` (a ``MigrationError`` subclass) instead,
+    leaves the marker in place, and does NOT clean up ``dst`` —
+    at that point ``dst`` holds the verified data and ``src`` may be
+    partially destroyed. Callers must switch to ``dst`` on this one,
+    never revert to ``src``; the next launch's
+    :func:`detect_partial_migration` picks up the leftover marker.
     """
     src = Path(src)
     dst = Path(dst)
@@ -248,13 +275,17 @@ def migrate_cdmods(
     try:
         shutil.rmtree(src)
     except OSError as e:
-        # Files made it to dst safely. Source tree refused to
-        # delete (locked file, permission, etc). Leave the marker
-        # in place so the user can retry / clean up manually, but
-        # surface the failure to the caller.
-        raise MigrationError(
+        # Files made it to dst safely. Source tree refused to fully
+        # delete (locked file, permission, etc), and may now be
+        # partially destroyed since rmtree can get partway through
+        # before hitting the file that blocks it. Leave the marker
+        # in place so the user, or detect_partial_migration, can spot
+        # the leftover folder. SourceCleanupError (not a plain
+        # MigrationError) tells the caller the migration is done and
+        # dst is the live data now, not that it should revert to src.
+        raise SourceCleanupError(
             f"copies verified but failed to remove source tree "
-            f"{src}: {e}") from e
+            f"{src}: {e}", dst=dst) from e
 
     # Source gone, copies verified — clear the marker last.
     try:
