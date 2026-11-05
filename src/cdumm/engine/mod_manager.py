@@ -519,7 +519,12 @@ class ModManager:
             "JOIN mods m ON m.id = md.mod_id").fetchall()
         missing_ids = []
         for md_id, dp, name in rows:
-            if not os.path.exists(dp):
+            # delta_path == '' marks a mount-time JSON / Format 3 stub
+            # row (no delta file on disk by design — the apply phase
+            # derives bytes from vanilla). os.path.exists('') is
+            # False, so without this guard every such row looked
+            # "missing" and got deleted on every launch (#476).
+            if dp and not os.path.exists(dp):
                 missing_ids.append(md_id)
         if missing_ids:
             # Batch deletes to avoid SQLite's variable limit (~999)
@@ -587,48 +592,17 @@ class ModManager:
                     f", +{len(kept_with_source) - 5} more"
                     if len(kept_with_source) > 5 else ""))
 
-        # Remove TRUE duplicate mods only. A shared display name is
-        # NOT sufficient identity: prettify_mod_name strips versions
-        # and trailing multipliers, so "Trust Me 2x" and "Trust Me 5x"
-        # both land as "Trust Me", and the old name-only removal
-        # permanently destroyed one of two intentionally different
-        # variants (deltas + archived sources, via remove_mod) on
-        # every launch (audit finding C2/mod_manager, 2026-06-10).
-        # Two mods are duplicates only when name AND version AND the
-        # full delta fingerprint (file_path, entry_path, byte range,
-        # is_new) all match. Anything less stays untouched.
-        dupes = self._db.connection.execute(
-            "SELECT name, COUNT(*) as cnt FROM mods "
-            "GROUP BY name HAVING cnt > 1").fetchall()
-        for name, cnt in dupes:
-            rows = self._db.connection.execute(
-                "SELECT id, priority, COALESCE(version, '') FROM mods "
-                "WHERE name = ? ORDER BY priority ASC",
-                (name,)).fetchall()
-
-            def _fingerprint(mod_id: int) -> tuple:
-                deltas = self._db.connection.execute(
-                    "SELECT file_path, COALESCE(entry_path, ''), "
-                    "COALESCE(byte_start, -1), COALESCE(byte_end, -1), "
-                    "is_new FROM mod_deltas WHERE mod_id = ? "
-                    "ORDER BY file_path, entry_path, byte_start",
-                    (mod_id,)).fetchall()
-                return tuple(tuple(d) for d in deltas)
-
-            keep_id, _, keep_ver = rows[0]
-            keep_fp = _fingerprint(keep_id)
-            for mod_id, _, ver in rows[1:]:
-                if ver != keep_ver or _fingerprint(mod_id) != keep_fp:
-                    logger.info(
-                        "Keeping same-name mod %r (id=%d): version or "
-                        "delta content differs from id=%d, not a true "
-                        "duplicate", name, mod_id, keep_id)
-                    continue
-                self.remove_mod(mod_id)
-                logger.info(
-                    "Removed true duplicate mod: %s (id=%d, kept id=%d, "
-                    "identical version + delta fingerprint)",
-                    name, mod_id, keep_id)
+        # Duplicate mods are NOT removed here. This used to run an
+        # automatic, unprompted removal on every launch, matched on
+        # name + version + a position-based delta fingerprint (which
+        # file/offset a mod targets). Two multiplier variants of the
+        # same mod ("Loot 2x" and "Loot 10x") routinely target the
+        # identical byte range of the identical file, so they fingerprint
+        # as identical too, and one was silently deleted on every
+        # restart (#476). Duplicate detection now lives entirely in
+        # ``mod_dedup`` (content-based fingerprint) and surfaces as a
+        # one-click "Clean up" banner (``_check_duplicate_mods`` in
+        # fluent_window.py) instead of an unprompted launch-time delete.
 
     def rename_mod(self, mod_id: int, new_name: str) -> None:
         """Rename a mod."""

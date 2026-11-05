@@ -26,8 +26,10 @@ All public helpers are unit-testable without Qt.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +61,46 @@ def _fetch_rows(conn) -> list[_Row]:
     return out
 
 
+def _file_identity(path: str) -> str:
+    """SHA-256 of ``path``'s content when it's readable, else the
+    path string itself. The string fallback still lets two distinct
+    (if unreadable or not-yet-written) paths read as different rather
+    than colliding on a read error."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return path
+
+
 def _delta_fingerprint(conn, mod_id: int) -> tuple:
-    """Content identity for a mod's deltas: what files it touches and
-    where. Two rows are only true duplicates when this matches."""
+    """Content identity for a mod: two rows are true duplicates only
+    when the bytes they'd actually apply match, not merely which
+    file/offset they target. Position alone is not enough: two
+    multiplier variants of the same mod ("Loot 2x" and "Loot 10x")
+    routinely patch the identical byte range of the identical file,
+    so a position-only fingerprint made them look like duplicates and
+    one got silently deleted (#476).
+
+    Mount-time JSON and Format 3 mods store their whole patch in
+    ``mods.json_source`` with no delta file on disk (``delta_path``
+    is empty by design), so their identity is that file's content.
+    Everything else is identified by each delta file's content.
+    """
+    row = conn.execute(
+        "SELECT json_source FROM mods WHERE id = ?", (mod_id,)).fetchone()
+    json_source = row[0] if row else None
+    if json_source:
+        return ("json", _file_identity(json_source))
+
     rows = conn.execute(
-        "SELECT file_path, COALESCE(entry_path, ''), "
-        "COALESCE(byte_start, -1), COALESCE(byte_end, -1), is_new "
+        "SELECT file_path, COALESCE(entry_path, ''), delta_path, is_new "
         "FROM mod_deltas WHERE mod_id = ? "
-        "ORDER BY file_path, entry_path, byte_start",
+        "ORDER BY file_path, entry_path",
         (mod_id,)).fetchall()
-    return tuple(tuple(r) for r in rows)
+    return tuple(
+        (file_path, entry_path,
+         _file_identity(delta_path) if delta_path else "", is_new)
+        for file_path, entry_path, delta_path, is_new in rows)
 
 
 def find_duplicate_groups(conn) -> dict[str, list[_Row]]:
