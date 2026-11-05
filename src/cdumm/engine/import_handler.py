@@ -293,6 +293,13 @@ def _next_priority(db: Database) -> int:
     return cursor.fetchone()[0]
 
 
+def _still_installed_note(existing_mod_id: int | None) -> str:
+    """Tail for an update/reimport error: the old version was not touched."""
+    if not existing_mod_id:
+        return ""
+    return " The previously installed version is still installed."
+
+
 def _json_mod_display_name(jp_data: dict, fallback: str) -> str:
     """Pick the best human display name for a JSON-patch mod.
 
@@ -3158,7 +3165,8 @@ def _import_from_extracted(
                     f"This mod is incompatible with the current game version. "
                     f"{mismatched} byte patches don't match. The game data has "
                     f"changed since this mod was created (mod targets version "
-                    f"{game_ver}). The mod author needs to update it.")
+                    f"{game_ver}). The mod author needs to update it."
+                    + _still_installed_note(existing_mod_id))
                 return result
             if not entr_result["changed_files"]:
                 result = ModImportResult(jp_name)
@@ -3662,7 +3670,8 @@ def import_from_zip(
                 result.error = (
                     f"JSON patch mod detected but failed to process. "
                     f"Target game file(s) not found: {', '.join(target_files)}. "
-                    f"Use Inspect Mod for a detailed diagnostic report.")
+                    f"Use Inspect Mod for a detailed diagnostic report."
+                    + _still_installed_note(existing_mod_id))
                 return result
             if entr_result is not None:
                 if entr_result.get("version_mismatch"):
@@ -3674,7 +3683,8 @@ def import_from_zip(
                         f"This mod is incompatible with the current game version. "
                         f"{mismatched} byte patches don't match. The game data has "
                         f"changed since this mod was created (mod targets version "
-                        f"{game_ver}). The mod author needs to update it.")
+                        f"{game_ver}). The mod author needs to update it."
+                        + _still_installed_note(existing_mod_id))
                     return result
                 if not entr_result["changed_files"]:
                     result.error = (
@@ -4221,7 +4231,8 @@ def import_from_folder(
                         f"This mod is incompatible with the current game version. "
                         f"{mismatched} byte patches don't match. The game data has "
                         f"changed since this mod was created (mod targets version "
-                        f"{game_ver}). The mod author needs to update it.")
+                        f"{game_ver}). The mod author needs to update it."
+                        + _still_installed_note(existing_mod_id))
                     primary_result = result
                 else:
                     logger.warning(
@@ -5300,7 +5311,9 @@ def import_from_json_patch(
 
         if entr_result is None:
             result = ModImportResult(mod_name)
-            result.error = "Failed to apply JSON patches to game files."
+            result.error = (
+                "Failed to apply JSON patches to game files."
+                + _still_installed_note(existing_mod_id))
             return result
 
         if entr_result.get("version_mismatch"):
@@ -5311,7 +5324,8 @@ def import_from_json_patch(
                 f"This mod is incompatible with the current game version. "
                 f"{mismatched} byte patches don't match. The game data has "
                 f"changed since this mod was created (mod targets version "
-                f"{game_ver}). The mod author needs to update it.")
+                f"{game_ver}). The mod author needs to update it."
+                + _still_installed_note(existing_mod_id))
             return result
 
         if not entr_result["changed_files"]:

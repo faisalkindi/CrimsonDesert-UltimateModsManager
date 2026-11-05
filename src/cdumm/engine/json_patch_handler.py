@@ -2350,8 +2350,92 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
     This produces entry-level deltas that compose correctly when multiple
     mods modify different entries in the same PAZ file.
 
+    With ``existing_mod_id`` (update or reimport) the new deltas are built
+    in a staging folder and only swapped in once the whole import has
+    succeeded. Any failure, returned or raised, leaves the installed mod's
+    row, config, deltas and folder untouched (GitHub #479). A row this
+    call did not create is never deleted.
+
     Returns a result dict with mod_id and changed_files, or None on failure.
     """
+    try:
+        return _import_json_as_entr(
+            patch_data, game_dir, db, deltas_dir, mod_name,
+            existing_mod_id, modinfo, config)
+    finally:
+        if existing_mod_id:
+            shutil.rmtree(
+                deltas_dir / _staging_name(existing_mod_id),
+                ignore_errors=True)
+
+
+def _staging_name(mod_id: int) -> str:
+    # Leading dot: never a valid mod id, so a staging folder left behind by
+    # a crash is swept up as an orphan by cleanup_orphaned_deltas.
+    return f".staging-{mod_id}"
+
+
+def _swap_in_staged_deltas(db, mod_id: int, deltas_dir: Path,
+                           work_dir: Path, final_dir: Path,
+                           rows: list[tuple], json_source: str | None,
+                           game_ver_hash: str | None) -> None:
+    """Replace an installed mod's deltas with the freshly built staged set.
+
+    The old folder is only moved aside until the database commit has
+    succeeded, so a failure at any step puts it back and rolls the rows
+    back. The mods row itself is never deleted, so its config, profile
+    membership and Nexus link survive either way.
+    """
+    backup = deltas_dir / f".replaced-{mod_id}"
+    shutil.rmtree(backup, ignore_errors=True)
+    moved_old = False
+    swapped = False
+    try:
+        if final_dir.exists():
+            os.replace(final_dir, backup)
+            moved_old = True
+        os.replace(work_dir, final_dir)
+        swapped = True
+        db.connection.execute(
+            "DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
+        if game_ver_hash:
+            db.connection.execute(
+                "UPDATE mods SET game_version_hash = ? WHERE id = ?",
+                (game_ver_hash, mod_id))
+        if json_source:
+            db.connection.execute(
+                "UPDATE mods SET json_source = ? WHERE id = ?",
+                (json_source, mod_id))
+        db.connection.executemany(
+            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+            "byte_start, byte_end, entry_path) "
+            "VALUES (?, ?, ?, ?, ?, ?)", rows)
+        db.connection.commit()
+    except BaseException:
+        try:
+            db.connection.rollback()
+        except Exception:
+            pass
+        # Put the old folder back. If that fails the backup stays on disk
+        # (it is the only remaining copy) and is not deleted here.
+        try:
+            if swapped:
+                shutil.rmtree(final_dir, ignore_errors=True)
+            if moved_old:
+                os.replace(backup, final_dir)
+        except Exception:
+            logger.error(
+                "import_json_as_entr: could not restore the previous "
+                "deltas for mod %d; they are kept at %s", mod_id, backup)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+
+
+def _import_json_as_entr(patch_data: dict, game_dir: Path, db,
+                         deltas_dir: Path, mod_name: str,
+                         existing_mod_id: int | None,
+                         modinfo: dict | None,
+                         config: "Config | None") -> dict | None:
     from cdumm.engine.delta_engine import save_entry_delta
 
     patches = patch_data["patches"]
@@ -2380,24 +2464,32 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
     except Exception:
         pass
 
+    # Update/reimport: build into a staging folder and keep the new rows in
+    # memory. The installed mod's rows and folder are not touched until the
+    # swap after the loop, so any failure before it leaves them as they were.
+    staged = bool(existing_mod_id)
+    pending_rows: list[tuple] = []
+    pending_json_source: str | None = None
     if existing_mod_id:
         mod_id = existing_mod_id
-        # Clear existing deltas for re-import
-        db.connection.execute("DELETE FROM mod_deltas WHERE mod_id = ?", (mod_id,))
-        if game_ver_hash:
-            db.connection.execute(
-                "UPDATE mods SET game_version_hash = ? WHERE id = ?",
-                (game_ver_hash, mod_id))
-        import shutil
-        old_delta_dir = deltas_dir / str(mod_id)
-        if old_delta_dir.exists():
-            shutil.rmtree(old_delta_dir)
+        final_delta_dir = deltas_dir / str(mod_id)
+        work_delta_dir = deltas_dir / _staging_name(mod_id)
+        shutil.rmtree(work_delta_dir, ignore_errors=True)
     else:
         cursor = db.connection.execute(
             "INSERT INTO mods (name, mod_type, priority, author, version, description, game_version_hash) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (_prettify(mod_name), "paz", priority, author, version, description, game_ver_hash))
         mod_id = cursor.lastrowid
+        final_delta_dir = work_delta_dir = deltas_dir / str(mod_id)
+
+    def _discard_new_row() -> None:
+        # Only a row this call created is ever deleted. An existing mod is
+        # left exactly as installed; its staging folder is removed by the
+        # caller's finally block.
+        if not staged:
+            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
+            db.connection.commit()
 
     # #145 Option Y: also archive the source JSON as json_source so the
     # apply-time aggregator can fold this mod's patches into a single
@@ -2406,7 +2498,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
     # patches when sizes diverge (size-change merge fallback drops one).
     try:
         import json as _json_for_archive
-        mod_delta_dir = deltas_dir / str(mod_id)
+        mod_delta_dir = work_delta_dir
         mod_delta_dir.mkdir(parents=True, exist_ok=True)
         source_json_path = mod_delta_dir / "source.json"
         # Strip internal detector metadata (_json_path = WindowsPath,
@@ -2417,9 +2509,13 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         }
         source_json_path.write_text(
             _json_for_archive.dumps(_archivable), encoding="utf-8")
-        db.connection.execute(
-            "UPDATE mods SET json_source = ? WHERE id = ?",
-            (str(source_json_path), mod_id))
+        _final_source_json = str(final_delta_dir / "source.json")
+        if staged:
+            pending_json_source = _final_source_json
+        else:
+            db.connection.execute(
+                "UPDATE mods SET json_source = ? WHERE id = ?",
+                (_final_source_json, mod_id))
     except Exception as _archive_exc:
         # If archiving fails (disk full, permissions), the mod still
         # works via its ENTR deltas, the aggregator just won't see it.
@@ -2487,9 +2583,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         entry = entry_cache.get(game_file.lower())
         if entry is None:
             logger.error("Could not find '%s' in any PAMT index", game_file)
-            # Rollback
-            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
-            db.connection.commit()
+            _discard_new_row()
             return None
 
         # Extract and decompress
@@ -2514,8 +2608,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                     raise
             except Exception:
                 logger.error("Failed to extract %s: %s", game_file, e)
-                db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
-                db.connection.commit()
+                _discard_new_row()
                 return None
 
         # v2 entry-anchored: resolve name→offset map for characterinfo.pabgb etc.
@@ -2640,8 +2733,7 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
                 "data table %s. Shipping a partial data table crashes "
                 "the game. Mod was built for game version %s.",
                 mismatched, applied + mismatched, game_file, game_ver)
-            db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
-            db.connection.commit()
+            _discard_new_row()
             return {"changed_files": [], "version_mismatch": True,
                     "game_file": game_file, "game_version": game_ver,
                     "mismatched": mismatched,
@@ -2702,16 +2794,19 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
             pass
 
         safe_name = entry.path.replace("/", "_") + ".entr"
-        delta_path = deltas_dir / str(mod_id) / safe_name
-        save_entry_delta(bytes(modified), metadata, delta_path)
+        delta_path = final_delta_dir / safe_name
+        save_entry_delta(bytes(modified), metadata, work_delta_dir / safe_name)
 
-        # DB entry
-        db.connection.execute(
-            "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
-            "byte_start, byte_end, entry_path) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (mod_id, paz_file_path, str(delta_path),
-             entry.offset, entry.offset + entry.comp_size, entry.path))
+        # DB entry (deferred until the swap when updating an installed mod)
+        _row = (mod_id, paz_file_path, str(delta_path),
+                entry.offset, entry.offset + entry.comp_size, entry.path)
+        if staged:
+            pending_rows.append(_row)
+        else:
+            db.connection.execute(
+                "INSERT INTO mod_deltas (mod_id, file_path, delta_path, "
+                "byte_start, byte_end, entry_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)", _row)
 
         changed_files.append({
             "file_path": paz_file_path,
@@ -2722,10 +2817,41 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         logger.info("ENTR delta: %s in %s (comp=%d, orig=%d)",
                      entry.path, paz_file_path, entry.comp_size, entry.orig_size)
 
+    if not changed_files:
+        # No changes produced. Two distinct reasons matter to the user:
+        #  (a) ALL files in the mod failed with version mismatches , 
+        #      the mod is genuinely incompatible with the current game
+        #      build. Surface as version_mismatch so the importer
+        #      shows the same banner the single-file path always did.
+        #  (b) Mod parsed but produced empty patches (zero changes).
+        #      Same removal as before.
+        _discard_new_row()
+        if skipped_files:
+            game_ver = patch_data.get("game_version", "unknown")
+            logger.error(
+                "All %d files in this mod failed with byte mismatches, "
+                "mod targets game version %s.",
+                len(skipped_files), game_ver)
+            return {
+                "changed_files": [],
+                "version_mismatch": True,
+                "game_file": skipped_files[0].get("game_file", "?"),
+                "game_version": game_ver,
+                "mismatched": sum(s.get("mismatched", 0)
+                                  for s in skipped_files),
+                "skipped_files": skipped_files,
+            }
+        logger.info("Removed empty mod entry %d (no changes)", mod_id)
+        return {"mod_id": None, "changed_files": [], "name": mod_name}
+
+    if staged:
+        _swap_in_staged_deltas(
+            db, mod_id, deltas_dir, work_delta_dir, final_delta_dir,
+            pending_rows, pending_json_source, game_ver_hash)
+
     # Archive JSON source for auto-reimport after game updates
     sources_dir = deltas_dir.parent / "sources" / str(mod_id)
     try:
-        import shutil
         if sources_dir.exists():
             shutil.rmtree(sources_dir)
         sources_dir.mkdir(parents=True, exist_ok=True)
@@ -2751,34 +2877,6 @@ def import_json_as_entr(patch_data: dict, game_dir: Path, db, deltas_dir: Path,
         logger.info("Archived JSON source: %s -> %s", mod_name, sources_dir)
     except Exception as e:
         logger.warning("Failed to archive JSON source: %s", e)
-
-    if not changed_files:
-        # No changes produced. Two distinct reasons matter to the user:
-        #  (a) ALL files in the mod failed with version mismatches , 
-        #      the mod is genuinely incompatible with the current game
-        #      build. Surface as version_mismatch so the importer
-        #      shows the same banner the single-file path always did.
-        #  (b) Mod parsed but produced empty patches (zero changes).
-        #      Same removal as before.
-        db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
-        db.connection.commit()
-        if skipped_files:
-            game_ver = patch_data.get("game_version", "unknown")
-            logger.error(
-                "All %d files in this mod failed with byte mismatches, "
-                "mod targets game version %s.",
-                len(skipped_files), game_ver)
-            return {
-                "changed_files": [],
-                "version_mismatch": True,
-                "game_file": skipped_files[0].get("game_file", "?"),
-                "game_version": game_ver,
-                "mismatched": sum(s.get("mismatched", 0)
-                                  for s in skipped_files),
-                "skipped_files": skipped_files,
-            }
-        logger.info("Removed empty mod entry %d (no changes)", mod_id)
-        return {"mod_id": None, "changed_files": [], "name": mod_name}
 
     db.connection.commit()
     return {
