@@ -208,8 +208,11 @@ def get_steam_build_id(game_dir: Path) -> str | None:
     """
     try:
         from cdumm.engine.language import STEAM_APP_ID
-        # game_dir is like .../steamapps/common/Crimson Desert
-        steamapps = game_dir.parent.parent
+        from cdumm.storage.game_finder import steamapps_dir_for
+        # Two levels up on Windows/Linux (.../steamapps/common/Crimson
+        # Desert); further up on native macOS, where game_dir is the
+        # packages folder.
+        steamapps = steamapps_dir_for(game_dir)
         canonical = steamapps / f"appmanifest_{STEAM_APP_ID}.acf"
         if canonical.exists():
             return _buildid_from_acf(canonical)

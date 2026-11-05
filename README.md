@@ -13,6 +13,8 @@
   <img src="https://img.shields.io/github/downloads/faisalkindi/CrimsonDesert-UltimateModsManager/total?style=flat-square&color=16A34A&label=Downloads" alt="Downloads">
 </p>
 
+> **Game 2.04 (29 October 2026): CDUMM can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list (`meta/0.papgt`) has been rewritten, and rewriting it is how CDUMM installs mods. From 3.17.14, CDUMM reads the 2.04 archives and leaves the game's files alone: Apply and Revert stop with a message instead. 3.17.13 could not read 2.04 at all: it skipped JSON and Format 3 mods while Apply reported success, could rewrite `meta/0.papgt` down to 2 entries (a Steam file verify restores it), and could delete installed voice packs in folders 0036–0040 on Rescan, so update before rescanning. Details in [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458).
+
 ---
 
 ## What's New
@@ -21,6 +23,7 @@ CDUMM ships frequent updates. The complete version history — every release bac
 
 ### v3.17 — the 4 September game update
 
+- **v3.17.14** — _November 5, 2026_ — **Game 2.04: CDUMM leaves your game files alone, but can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list has been rewritten, which is how CDUMM installs mods. 3.17.13 couldn't read 2.04, skipped JSON mods while reporting success, could cut that list to 2 entries, and could delete voice packs on Rescan. CDUMM now reads 2.04 and stops Apply with a message instead. Also: the Nexus update check reads Nexus's newer file names, and three macOS fixes. 2.04 reader by GSharpd and Vi-gilo; voice pack deletions found by AgentKush.
 - **v3.17.13** — _October 28, 2026_ — **Loose-file mods that add new game files now install completely.** Character Creator Enhanced lost 1,131 of its 1,145 files on import and the game never finished loading; all of them now land where the game looks for them. Reported and fixed by 7uk0.
 - **v3.17.12** — _October 21, 2026_ — **Two mods that change the same game table now both reach the game after you edit one of them.** CDUMM merges them into one file and reuses the last result when nothing changed, but it only checked the first mod. Change the other one and Apply reported success while the game kept the old merge. Reported and traced by Vi-gilo.
 - **v3.17.11** — _October 15, 2026_ — **The first-run setup window can be closed again**, instead of swallowing ALT+F4, the taskbar close and Escape and leaving Task Manager as the only way out (reported by Ahplla). **macOS and Linux: script mod imports work and asset extraction no longer fails** on paths built on Windows.
@@ -136,7 +139,7 @@ Your original game files are **never modified**. Mods are applied through an ove
 | `.zip` / `.7z` / `.rar` | Archives — auto-extracted, including nested zips for multi-language packs |
 | Folders | Loose directories with PAZ/PAMT files or Crimson Browser mods |
 | `.json` (byte-patch) | Offset-based JSON mods (`offset`, `original`, `patched`) |
-| `.field.json` (field-name) | Field-name JSON mods — items, mounts, terrain, stages, regions, mount character, buffs, drop sets, skills, stores (stock lists including appends and per-slot edits, reset timers, purchase currency), NPC dyers (colour groups, texture sets), and dye colour groups (colour lists). Accepts DMM's `array_append` shape. Supports both singular `target` and multi-target `targets: [...]` shapes. |
+| `.field.json` (field-name) | Field-name JSON mods — items, mounts, terrain, stages, regions, characters (appearance and animation swaps, mount re-summon cooldowns), buffs, drop sets, skills, stores (stock lists including appends and per-slot edits, reset timers, purchase currency), NPC dyers (colour groups, texture sets), and dye colour groups (colour lists). Accepts DMM's `array_append` shape. Supports both singular `target` and multi-target `targets: [...]` shapes. |
 | `.cdmod` (v3.6) | Crimson Desert Mod Package — imports directly, including localization patches that tweak individual strings instead of replacing a whole language file |
 | `.dds` | DDS texture mods with full PATHC index registration (BC1/BC3/BC4/BC5/BC7) |
 | `OG_*.xml` | XML full replacement mods |
@@ -156,8 +159,8 @@ Your original game files are **never modified**. Mods are applied through an ove
 - **Make mods without a hex editor** — edit a verified value in the grid (an item's price, a stack size…) and _Make mod from edits_ writes a shareable `.field.json`. Only fields verified byte-for-byte are editable, so you can't corrupt a file by hand.
 - **Gear stat editor** (v3.6) — read and edit weapon / armour stats straight from the grid.
 - **Preview assets inline** — DDS textures (with a rotatable 3D view), Wwise audio (play / export to WAV), and text / structured formats, without leaving the app.
-- **Keeps up with game patches** — a version-adaptive `iteminfo` decoder re-aligns to each record-layout change, so stackable-item, price, stat and socket mods keep applying byte-exact. It picks the layout by reading the file rather than by trusting a version number, and currently carries layouts up to game 1.16.
-- **55 tables read record-by-record** (v3.15) — up from 7. Most had their layouts recovered from the game's own code and are held to a hard rule: the walk has to account for every byte of every record in the table, or the table is left alone. Those 22 are readable but not yet editable — the grid only lets you change a field once its meaning has been cross-checked, not merely its position.
+- **Keeps up with game patches** — a version-adaptive `iteminfo` decoder re-aligns to each record-layout change, so stackable-item, price, stat and socket mods keep applying byte-exact. It picks the layout by reading the file rather than by trusting a version number, and currently carries layouts up to the 4 September 2026 update.
+- **55 tables read record-by-record** (v3.15) — up from 7. Most had their layouts recovered from the game's own code and are held to a hard rule: the walk has to account for every byte of every record in the table, or the table is left alone. Those 48 are readable but not yet editable — the grid only lets you change a field once its meaning has been cross-checked, not merely its position.
 
 ### NexusMods Integration (v3.2)
 - **One-click sign-in** — Login with Nexus opens your browser, you confirm, done. No API keys to copy and paste. CDUMM never sees your password.
@@ -175,7 +178,7 @@ Your original game files are **never modified**. Mods are applied through an ove
 - **Apply is hundreds of times faster on big mod sets** (v3.2). Conflict detection is near-instant; cross-mod byte merging runs hundreds of times faster than the v3.1 line.
 - **Batch import** — drop dozens of mods at once, single-process import
 - **Fast apply** — overlay cache + Rust native engine, applies in seconds
-- **~50 MB exe** — single standalone binary, no install needed
+- **~80 MB exe** — single standalone binary, no install needed
 
 ### Resilience
 - **One bad mod can't kill the apply** (v3.2.3) — broken changes are skipped with a clear log naming the mod, the rest of your stack still applies
@@ -219,6 +222,10 @@ Your original game files are **never modified**. Mods are applied through an ove
 
 Download `CDUMM3.exe` from the [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases) page. No Python required. Just run it.
 
+On macOS (Apple Silicon), download `CDUMM-<version>-macos-arm64.dmg` from the same page; [MACOS.md](MACOS.md) covers the two permission steps the first launch needs. On Linux, see [LINUX.md](LINUX.md) for the native and Wine setups.
+
+The Releases page is where current builds are published, and where the in-app updater looks for new ones.
+
 ### Run from Source
 
 Requires Python 3.10+.
@@ -248,10 +255,11 @@ pyinstaller cdumm.spec --noconfirm
 - Crimson Desert from Steam, Epic Games Store, Xbox Game Pass, or
   the native macOS build
 
-> **macOS:** native port (no Wine). Run-from-source today via
-> `pip install -e . && python -m cdumm.main`; signed `.app` bundle is
-> tracked separately. ASI plugins, the Find-Culprit auto-bisect tool,
-> and `nxm://` Mod Manager Download buttons remain Windows-only.
+> **macOS:** native port (no Wine), Apple Silicon only. Each release
+> includes `CDUMM-<version>-macos-arm64.dmg`, ad-hoc signed rather than
+> notarised; [MACOS.md](MACOS.md) has the first-launch steps and the
+> run-from-source route. ASI plugins and `nxm://` Mod Manager Download
+> buttons are not available on macOS.
 
 ---
 
@@ -314,7 +322,7 @@ JSON patches also support `editable_value` metadata for inline value editing in 
 
 ### Field-name JSON mods (Format 3)
 
-CDUMM supports the field-name JSON format (`.field.json`) for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), mount character data (`characterinfo.pabgb`), buffs (`buffinfo.pabgb`), drop sets (`dropsetinfo.pabgb`), skills (`skill.pabgb`), and wanted-bounty prices (`wantedinfo.pabgb` — the `increase_price` field). Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
+CDUMM supports the field-name JSON format (`.field.json`) for these tables: items (`iteminfo.pabgb`), mounts (`vehicleinfo.pabgb`), terrain (`fieldinfo.pabgb`), stages (`stageinfo.pabgb`), regions (`regioninfo.pabgb`), characters (`characterinfo.pabgb` — the appearance and animation fields character-swap mods set, and mount re-summon cooldowns), buffs (`buffinfo.pabgb`), drop sets (`dropsetinfo.pabgb`), skills (`skill.pabgb`), stores (`storeinfo.pabgb`), NPC dyers (`npcinfo.pabgb` — the dye colour-group and texture-set lists), dye colour groups (`dyecolorgroupinfo.pabgb`), and wanted-bounty prices (`wantedinfo.pabgb` — the `increase_price` field). Since the 4 September 2026 update the game names these files `<table>.staticinfobody` (`iteminfo.staticinfobody` and so on); a target may use either name. Other tables show a clean "no schema for this table yet" message naming the missing schema. See `field_schema/README.md` to author a schema for an unsupported table.
 
 Coverage grows as more tables get a validated schema: a table becomes moddable field-by-field as each field is confirmed against real record data (via `_verified_fields` in `schemas/pabgb_type_overrides.json`). Only fields proven to sit at a known offset are writable — an unproven field is refused rather than risk writing to the wrong byte.
 
@@ -333,6 +341,7 @@ Both file shapes work: the original singular `{"format": 3, "target": "iteminfo.
 - **Potter420 (corin)** — `crimson-rs` ItemInfo schema port (MIT)
 - **HaZt** — German translation
 - **Kyo-70** — Brazilian Portuguese translation
+- **Code contributors** — everyone listed on GitHub's [contributors page](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/graphs/contributors)
 
 ---
 

@@ -33,6 +33,75 @@ ENTRY_SIZE = 12  # bytes per directory entry
 DEFAULT_LANG_TYPE = 0x3FFF
 
 
+def _compact_papgt_layout(data: bytes) -> tuple[int, int] | None:
+    """Recognise 2.04's four-byte prefix and opaque 64-byte trailer.
+
+    This only frames existing entries. It deliberately makes no claim about
+    regenerating the trailer or about the engine accepting a modified index.
+    """
+    for count in range(1, max(1, (len(data) - 72) // ENTRY_SIZE + 1)):
+        size_pos = 4 + count * ENTRY_SIZE
+        size = struct.unpack_from('<I', data, size_pos)[0]
+        start = size_pos + 4
+        end = start + size
+        if size == 0 or end + 64 != len(data):
+            continue
+        names = data[start:end]
+        seen = set()
+        for i in range(count):
+            offset = struct.unpack_from('<I', data, 4 + i * ENTRY_SIZE + 4)[0]
+            if offset >= size or (offset and names[offset - 1] != 0):
+                break
+            name_end = names.find(b'\0', offset)
+            name = names[offset:name_end] if name_end >= 0 else b''
+            if len(name) != 4 or not name.isdigit() or name in seen:
+                break
+            seen.add(name)
+        else:
+            return count, start
+    return None
+
+
+def _pamt_is_compact(pamt_path: Path) -> bool:
+    """True for a 2.04-layout PAMT (varint name trees).
+
+    The legacy name trees open with the root's absolute u32 parent,
+    0xFFFFFFFF; the compact ones open with a zero parent distance.
+    """
+    try:
+        data = pamt_path.read_bytes()
+        paz_count = struct.unpack_from('<I', data, 4)[0]
+        off = 16 + paz_count * 8 + max(0, paz_count - 1) * 4
+        folder_size = struct.unpack_from('<I', data, off)[0]
+        return bool(folder_size) and data[off + 4] == 0
+    except (OSError, struct.error, IndexError):
+        return False
+
+
+def game_uses_signed_index(game_dir: Path) -> bool:
+    """True when the game is on the 2.04 archive layout (#458).
+
+    2.04 signs ``meta/0.papgt`` and refuses to start when it has been
+    rewritten, so CDUMM must not write to the game's archives there. The
+    base ``0000/0.pamt`` is checked as well because v3.17.13 could
+    replace a 2.04 PAPGT with a legacy one before this check existed.
+    """
+    papgt = game_dir / "meta" / "0.papgt"
+    try:
+        if papgt.exists() and _compact_papgt_layout(papgt.read_bytes()):
+            return True
+    except OSError:
+        pass
+    return _pamt_is_compact(game_dir / "0000" / "0.pamt")
+
+
+SIGNED_INDEX_MESSAGE = (
+    "Game 2.04 or newer detected. This game version rejects a modified "
+    "archive list, so CDUMM can't install or remove mods on it yet, and "
+    "it left your game files untouched. If a mod tool already changed "
+    "them, verify the game files in Steam to restore them.")
+
+
 def decode_papgt_entry_flags(flags: int) -> tuple[int, int, int]:
     """Split a PAPGT entry's first 4 bytes into the named fields.
 
@@ -72,9 +141,10 @@ def read_papgt_entries(path: Path) -> "list[tuple[str, int, int]] | None":
         data = path.read_bytes()
         if len(data) < 12:
             return None
-        entry_start = 12
-        entry_count = _find_entry_count(bytearray(data), entry_start)
-        string_table_start = entry_start + entry_count * ENTRY_SIZE + 4
+        compact = _compact_papgt_layout(data)
+        entry_start = 4 if compact else 12
+        entry_count = compact[0] if compact else _find_entry_count(bytearray(data), entry_start)
+        string_table_start = compact[1] if compact else entry_start + entry_count * ENTRY_SIZE + 4
         out: list[tuple[str, int, int]] = []
         for i in range(entry_count):
             pos = entry_start + i * ENTRY_SIZE
@@ -132,8 +202,16 @@ def language_pack_dirs(game_dir: Path,
     PAPGT lists it as optional, and it carries no
     ``_cdumm_overlay.marker`` -- a CDUMM overlay that squatted one of
     these slots (pre-3.16.1) is still CDUMM's to clean up.
+
+    On game 2.04 CDUMM never writes the PAPGT, so every directory the
+    live one lists belongs to the game and qualifies too (#458).
     """
     optional: set[str] = set()
+    if game_uses_signed_index(game_dir):
+        for name, _flags, _h in (
+                read_papgt_entries(game_dir / "meta" / "0.papgt") or []):
+            if name.isdigit() and len(name) == 4:
+                optional.add(name)
     for papgt in (game_dir / "meta" / "0.papgt",
                   (vanilla_dir / "meta" / "0.papgt") if vanilla_dir else None):
         if papgt is None:
@@ -165,6 +243,8 @@ def strip_dangling_entries(game_dir: Path) -> int:
     entries dropped; 0 when the file needed no change.
     """
     papgt = game_dir / "meta" / "0.papgt"
+    if game_uses_signed_index(game_dir):
+        return 0
     entries = read_papgt_entries(papgt)
     if not entries:
         return 0
@@ -214,6 +294,20 @@ class PapgtManager:
         Returns:
             The rebuilt PAPGT bytes.
         """
+        # Inspect the live index even when an older vanilla snapshot or a
+        # mod-supplied index would otherwise become the rebuild base (#458).
+        # The legacy writer cannot represent 2.04's prefix/trailer. Refuse
+        # before the apply transaction can replace the game's entry list.
+        candidates = [mod_papgt] if mod_papgt else []
+        for path in (self._papgt_path, self._vanilla_papgt):
+            if path is not None and path.exists():
+                candidates.append(path.read_bytes())
+        for data in candidates:
+            if _compact_papgt_layout(data) is not None:
+                raise ValueError(
+                    'Game 2.04 archive index detected. Rebuilding this PAPGT format '
+                    'is not supported yet; the original index has been preserved.')
+            _find_entry_count(bytearray(data), 12)
         # Use mod-shipped PAPGT as base if available (it includes new dirs
         # with correct flags and ordering). Otherwise use vanilla.
         if mod_papgt and len(mod_papgt) >= 12:
@@ -540,16 +634,14 @@ def _find_entry_count(papgt: bytearray, entry_start: int) -> int:
     satisfies: entry_start + N*12 + 4 + string_size == len(papgt).
     """
     file_size = len(papgt)
-    for n in range(1, 100):
+    for n in range(max(0, (file_size - entry_start - 4) // ENTRY_SIZE + 1)):
         size_field_pos = entry_start + n * ENTRY_SIZE
         if size_field_pos + 4 > file_size:
             break
         string_size = struct.unpack_from("<I", papgt, size_field_pos)[0]
         if size_field_pos + 4 + string_size == file_size:
             return n
-    # Fallback: estimate from file size
-    logger.warning("PAPGT: could not determine entry count, estimating")
-    return (file_size - entry_start - 4) // ENTRY_SIZE
+    raise ValueError('Unsupported or corrupt PAPGT layout; refusing to estimate its entry count')
 
 
 def _read_string(papgt: bytearray, string_table_start: int,

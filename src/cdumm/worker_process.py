@@ -735,9 +735,13 @@ def _run_fix(game_dir: str, vanilla_dir: str, db_path: str,
     try:
         db2 = Database(Path(db_path))
         db2.initialize()
+        # A voice pack Steam installed after the last snapshot has no
+        # snapshot rows either, and is not an orphan (#458).
+        from cdumm.archive.papgt_manager import language_pack_dirs
+        _lang_dirs = language_pack_dirs(game_dir, vanilla_dir)
         for d in sorted(game_dir.iterdir()):
             if (d.is_dir() and d.name.isdigit() and len(d.name) == 4
-                    and int(d.name) >= 36):
+                    and int(d.name) >= 36 and d.name not in _lang_dirs):
                 snap_check = db2.connection.execute(
                     "SELECT COUNT(*) FROM snapshots WHERE file_path LIKE ?",
                     (d.name + "/%",)).fetchone()[0]

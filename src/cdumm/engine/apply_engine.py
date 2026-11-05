@@ -1723,6 +1723,12 @@ class ApplyWorker(QObject):
 
     def run(self) -> None:
         try:
+            from cdumm.archive.papgt_manager import (
+                SIGNED_INDEX_MESSAGE, game_uses_signed_index)
+            if game_uses_signed_index(self._game_dir):
+                logger.warning("Apply refused: game uses the 2.04 signed index")
+                self.error_occurred.emit(SIGNED_INDEX_MESSAGE)
+                return
             self._db = Database(self._db_path)
             self._db.initialize()
             self._apply()
@@ -5286,6 +5292,12 @@ class RevertWorker(QObject):
 
     def run(self) -> None:
         try:
+            from cdumm.archive.papgt_manager import (
+                SIGNED_INDEX_MESSAGE, game_uses_signed_index)
+            if game_uses_signed_index(self._game_dir):
+                logger.warning("Revert refused: game uses the 2.04 signed index")
+                self.error_occurred.emit(SIGNED_INDEX_MESSAGE)
+                return
             self._db = Database(self._db_path)
             self._db.initialize()
             self._revert()
