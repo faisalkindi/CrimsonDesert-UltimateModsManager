@@ -21,6 +21,17 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.14",
+        "date": "2026-11-05",
+        "notes": [
+            "<b>Game 2.04: CDUMM now leaves your game files alone, but can't install mods on 2.04 yet.</b> 2.04 changed the format of the game's archive index, and the game now refuses to start once its archive list has been rewritten, which is how CDUMM installs mods. 3.17.13 could not read the new format: JSON mods were skipped while Apply reported success, Apply could cut the archive list down to 2 entries, and Rescan or Fix Everything could delete an installed voice pack. CDUMM now reads 2.04's archives, and on 2.04 it stops Apply and Revert with a message instead of touching the game. If you applied mods with 3.17.13 on 2.04, verify the game files in Steam once. The 2.04 reader is by GSharpd and Vi-gilo; the voice pack deletions were found and measured by AgentKush.",
+            "<b>Fix Everything no longer deletes a voice pack Steam installed after your last rescan</b>, on any game version. It treated any folder from 0036 up that the last rescan had not seen as a mod leftover. Found by AgentKush.",
+            "<b>Check for mod updates now covers mods downloaded under Nexus's newer file names</b>, like <code>No Peach Fuzz 3941 1 2026-10-31T18-11Z vEjq5ZqS9.zip</code>. CDUMM couldn't read the mod id from those names, so the update check skipped the mod. A mod installed with Mod Manager Download now also keeps the mod id from the download link itself. By AgentKush.",
+            "<b>macOS: a game whose packages folder sits next to the app is accepted</b> (reported by KSNdodgob), the bug report no longer lists bin64 as missing (reported by madcatnoir), and CDUMM finds the Steam build and language again, so a rescan no longer ends in \"Game Version Unknown\" (fixed by AgentKush).",
+            "<b>A Format 3 mod with one malformed change now imports.</b> A change whose original value was a number instead of text rejected the whole mod; that value is only used for a few tables, and is now checked per change. Reported by turiyski.",
+        ],
+    },
+    {
         "version": "3.17.13",
         "date": "2026-10-28",
         "notes": [

@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/github/downloads/faisalkindi/CrimsonDesert-UltimateModsManager/total?style=flat-square&color=16A34A&label=Downloads" alt="Downloads">
 </p>
 
-> **Game 2.04 (29 October 2026): CDUMM 3.17.13 came out the day before and cannot read the update's new archive index.** On 2.04, JSON and Format 3 mods are skipped while Apply still reports success, Apply can rewrite the game's `meta/0.papgt` down to 2 entries (a Steam file verify restores it), and Rescan, including the one Start Recovery runs, can delete installed voice packs in folders 0036–0040. Details in [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458).
+> **Game 2.04 (29 October 2026): CDUMM can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list (`meta/0.papgt`) has been rewritten, and rewriting it is how CDUMM installs mods. From 3.17.14, CDUMM reads the 2.04 archives and leaves the game's files alone: Apply and Revert stop with a message instead. 3.17.13 could not read 2.04 at all: it skipped JSON and Format 3 mods while Apply reported success, could rewrite `meta/0.papgt` down to 2 entries (a Steam file verify restores it), and could delete installed voice packs in folders 0036–0040 on Rescan, so update before rescanning. Details in [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458).
 
 ---
 
@@ -23,6 +23,7 @@ CDUMM ships frequent updates. The complete version history — every release bac
 
 ### v3.17 — the 4 September game update
 
+- **v3.17.14** — _November 5, 2026_ — **Game 2.04: CDUMM leaves your game files alone, but can't install mods on 2.04 yet.** 2.04 refuses to start once its archive list has been rewritten, which is how CDUMM installs mods. 3.17.13 couldn't read 2.04, skipped JSON mods while reporting success, could cut that list to 2 entries, and could delete voice packs on Rescan. CDUMM now reads 2.04 and stops Apply with a message instead. Also: the Nexus update check reads Nexus's newer file names, and three macOS fixes. 2.04 reader by GSharpd and Vi-gilo; voice pack deletions found by AgentKush.
 - **v3.17.13** — _October 28, 2026_ — **Loose-file mods that add new game files now install completely.** Character Creator Enhanced lost 1,131 of its 1,145 files on import and the game never finished loading; all of them now land where the game looks for them. Reported and fixed by 7uk0.
 - **v3.17.12** — _October 21, 2026_ — **Two mods that change the same game table now both reach the game after you edit one of them.** CDUMM merges them into one file and reuses the last result when nothing changed, but it only checked the first mod. Change the other one and Apply reported success while the game kept the old merge. Reported and traced by Vi-gilo.
 - **v3.17.11** — _October 15, 2026_ — **The first-run setup window can be closed again**, instead of swallowing ALT+F4, the taskbar close and Escape and leaving Task Manager as the only way out (reported by Ahplla). **macOS and Linux: script mod imports work and asset extraction no longer fails** on paths built on Windows.
