@@ -1840,7 +1840,10 @@ class AsiPluginsPage(QWidget):
         old_ini = None
         if plugin.ini_path and plugin.ini_path.exists():
             old_ini = plugin.ini_path
-        ext = ".asi" if plugin.enabled else ".asi.disabled"
+        # Keep the plugin's own extension: a ReShade add-on must stay
+        # `.addon64`, not become an ASI plugin (#481).
+        base_ext = ".addon64" if plugin.kind == "addon64" else ".asi"
+        ext = base_ext if plugin.enabled else base_ext + ".disabled"
         new_path = plugin.path.parent / (new_name + ext)
         try:
             plugin.path.rename(new_path)

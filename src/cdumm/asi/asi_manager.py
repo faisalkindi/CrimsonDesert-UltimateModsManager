@@ -16,10 +16,11 @@ DISABLED_SUFFIX = ".asi.disabled"
 # alongside ASI plugins but are loaded by ReShade at runtime, not by
 # Ultimate ASI Loader. Same install / uninstall plumbing works for
 # them since we only need to drop the file in bin64 and track it
-# through the same sidecar manifest. Enable / disable is currently
-# all-or-nothing (no .disabled suffix yet) — that lands later when a
-# user asks for per-addon toggling.
+# through the same sidecar manifest. Disabling appends ".disabled" to
+# the add-on's own name (`Foo.addon64.disabled`) so the kind survives
+# a disable / enable round trip (GitHub #481).
 ADDON64_SUFFIX = ".addon64"
+ADDON64_DISABLED_SUFFIX = ".addon64.disabled"
 LOOSE_LOADER_SUFFIXES = (ASI_SUFFIX, ADDON64_SUFFIX)
 
 
@@ -116,12 +117,17 @@ class AsiManager:
                     ini_path=ini, hook_targets=hooks, kind="asi",
                 ))
             elif f.suffix.lower() == ADDON64_SUFFIX:
-                # ReShade addons. No ini lookup, no hook targets, no
-                # disabled-form handling for now (uninstall removes them
-                # outright via the sidecar manifest). GitHub #120.
+                # ReShade addons. No ini lookup, no hook targets.
+                # GitHub #120.
                 plugins.append(AsiPlugin(
                     name=f.stem, path=f, enabled=True,
                     ini_path=None, hook_targets=[], kind="addon64",
+                ))
+            elif f.name.lower().endswith(ADDON64_DISABLED_SUFFIX):
+                plugins.append(AsiPlugin(
+                    name=f.name[: -len(ADDON64_DISABLED_SUFFIX)], path=f,
+                    enabled=False, ini_path=None, hook_targets=[],
+                    kind="addon64",
                 ))
 
         return plugins
@@ -130,11 +136,19 @@ class AsiManager:
         """Check if Ultimate ASI Loader is present (any known proxy DLL name)."""
         return any((self._bin64 / name).exists() for name in ASI_LOADER_NAMES)
 
+    @staticmethod
+    def _suffixes(plugin: AsiPlugin) -> tuple[str, str]:
+        """(enabled, disabled) file suffix for this plugin's kind."""
+        if plugin.kind == "addon64":
+            return ADDON64_SUFFIX, ADDON64_DISABLED_SUFFIX
+        return ASI_SUFFIX, DISABLED_SUFFIX
+
     def enable(self, plugin: AsiPlugin) -> None:
         """Enable a disabled ASI plugin."""
         if plugin.enabled:
             return
-        new_path = plugin.path.with_name(plugin.name + ASI_SUFFIX)
+        new_path = plugin.path.with_name(
+            plugin.name + self._suffixes(plugin)[0])
         # os.replace is atomic on Windows even when the destination
         # already exists (e.g., a stale .asi sibling left after a
         # crash). Path.rename() raises FileExistsError on Windows in
@@ -150,7 +164,8 @@ class AsiManager:
         """Disable an enabled ASI plugin."""
         if not plugin.enabled:
             return
-        new_path = plugin.path.with_name(plugin.name + DISABLED_SUFFIX)
+        new_path = plugin.path.with_name(
+            plugin.name + self._suffixes(plugin)[1])
         import os as _os
         _os.replace(str(plugin.path), str(new_path))
         plugin.path = new_path
@@ -203,6 +218,23 @@ class AsiManager:
                 return self._bin64 / f"{stem}{DISABLED_SUFFIX}"
             return self._bin64 / default_name
 
+        # Same for a ReShade add-on that is currently disabled
+        # (`<stem>.addon64.disabled`).
+        def _resolve_dest_for_addon64(stem: str, default_name: str) -> Path:
+            stale = self._bin64 / f"{stem}{ADDON64_DISABLED_SUFFIX}"
+            if stale.exists():
+                try:
+                    stale.unlink()
+                    logger.info(
+                        "Removed stale disabled sibling on update: %s",
+                        stale.name)
+                except OSError as e:
+                    logger.warning(
+                        "Could not remove stale disabled sibling %s: %s",
+                        stale.name, e)
+                return self._bin64 / f"{stem}{ADDON64_DISABLED_SUFFIX}"
+            return self._bin64 / default_name
+
         # Track files we created (not pre-existing loader DLLs) so a
         # mid-install failure can roll them back. Without this, a
         # partially-installed mod leaves loose .ini / .dll files in
@@ -239,11 +271,11 @@ class AsiManager:
                 # sidecar tracking so uninstall picks it up. No .ini /
                 # loader-DLL companion handling — ReShade addons ship
                 # standalone.
-                target = self._bin64 / source.name
+                target = _resolve_dest_for_addon64(source.stem, source.name)
                 shutil.copy2(source, target)
                 created_paths.append(target)
                 installed.append(target.name)
-                owned.append(target.name)
+                owned.append(source.name)
                 plugin_name = source.stem
             elif source.is_dir():
                 for f in source.rglob("*"):
@@ -260,11 +292,11 @@ class AsiManager:
                             plugin_name = f.stem
                     elif ext == ADDON64_SUFFIX:
                         # ReShade addon, plain copy. GitHub #120.
-                        target = self._bin64 / f.name
+                        target = _resolve_dest_for_addon64(f.stem, f.name)
                         shutil.copy2(f, target)
                         created_paths.append(target)
                         installed.append(target.name)
-                        owned.append(target.name)
+                        owned.append(f.name)
                         if plugin_name is None:
                             plugin_name = f.stem
                     elif ext == ".ini":
@@ -335,13 +367,20 @@ class AsiManager:
 
         if sidecar_files is not None:
             for name in sidecar_files:
-                target = self._bin64 / name
-                if target.exists():
-                    try:
-                        target.unlink()
-                        deleted.append(name)
-                    except OSError as e:
-                        logger.warning("Could not delete %s: %s", target, e)
+                # The sidecar names the as-installed file. Its disabled
+                # form is that name plus ".disabled" for both kinds.
+                candidates = [name]
+                if name.lower().endswith(LOOSE_LOADER_SUFFIXES):
+                    candidates.append(name + ".disabled")
+                for cand in candidates:
+                    target = self._bin64 / cand
+                    if target.exists():
+                        try:
+                            target.unlink()
+                            deleted.append(cand)
+                        except OSError as e:
+                            logger.warning(
+                                "Could not delete %s: %s", target, e)
             try:
                 sidecar.unlink()
             except OSError:

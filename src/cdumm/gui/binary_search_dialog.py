@@ -32,6 +32,30 @@ from cdumm.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+def build_asi_suspects(game_dir: Path | None) -> dict[int, dict]:
+    """Enabled ASI plugins as fake negative-id mods for the bisection."""
+    asi_mods: dict[int, dict] = {}
+    try:
+        from cdumm.asi.asi_manager import AsiManager
+        bin64 = game_dir / "bin64"
+        if bin64.exists():
+            plugins = AsiManager(bin64).scan()
+            for i, p in enumerate(plugins):
+                if p.enabled:
+                    fake_id = -(i + 1)
+                    label = "Add-on" if p.kind == "addon64" else "ASI"
+                    asi_mods[fake_id] = {
+                        "id": fake_id,
+                        "name": f"[{label}] {p.name}",
+                        "enabled": True,
+                        "mod_type": "asi",
+                        "_plugin": p,
+                    }
+    except Exception:
+        pass
+    return asi_mods
+
+
 class _AutoBisectWorker:
     """Drives the full auto-bisection loop on a background thread.
 
@@ -132,9 +156,10 @@ class _AutoBisectWorker:
                 return
             try:
                 # Re-scan: file path may have changed if a previous
-                # round flipped this plugin.
+                # round flipped this plugin. Match on kind as well as
+                # name: Foo.asi and Foo.addon64 share a stem (#481).
                 for p in self._asi_manager.scan():
-                    if p.name == plugin.name:
+                    if p.name == plugin.name and p.kind == plugin.kind:
                         plugin = p
                         break
                 if enabled:

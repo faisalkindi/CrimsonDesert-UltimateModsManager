@@ -1257,27 +1257,10 @@ class FindCulpritPage(ToolPageBase):
 
         # Build session and ASI mod list
         from cdumm.engine.binary_search import DeltaDebugSession
-        from cdumm.gui.binary_search_dialog import _AutoBisectWorker
+        from cdumm.gui.binary_search_dialog import (
+            _AutoBisectWorker, build_asi_suspects)
 
-        asi_mods = {}
-        try:
-            from cdumm.asi.asi_manager import AsiManager
-            bin64 = self._game_dir / "bin64"
-            if bin64.exists():
-                asi_mgr = AsiManager(bin64)
-                plugins = asi_mgr.scan()
-                for i, p in enumerate(plugins):
-                    if p.enabled:
-                        fake_id = -(i + 1)
-                        asi_mods[fake_id] = {
-                            "id": fake_id,
-                            "name": f"[ASI] {p.name}",
-                            "enabled": True,
-                            "mod_type": "asi",
-                            "_plugin": p,
-                        }
-        except Exception:
-            pass
+        asi_mods = build_asi_suspects(self._game_dir)
 
         session = DeltaDebugSession(
             self._mod_manager, extra_mods=list(asi_mods.values()))
