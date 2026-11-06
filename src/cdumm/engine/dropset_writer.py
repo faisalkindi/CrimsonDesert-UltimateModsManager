@@ -42,8 +42,11 @@ class ItemDrop:
     rates: int = 0
     rates_100: int = 0
     unk2: int = 0
-    max_amt: int = 0
-    min_amt: int = 0
+    # The 2.04 exe reads these two as _minValue, then _maxValue. CDUMM
+    # called them max_amt and min_amt, the wrong way round (#491). Format 3
+    # JSON still takes those two keys; see _drop_amounts.
+    min_value: int = 0
+    max_value: int = 0
     unk3_flags: int = 0xFFFF
     item_key_dup: int = 0
     extra_u8: Optional[int] = None
@@ -90,9 +93,9 @@ def _parse_drop_entry(buf: bytes, pos: int) -> tuple[ItemDrop, int]:
     pos += 8
     unk2 = struct.unpack_from("<I", buf, pos)[0]
     pos += 4
-    max_amt = struct.unpack_from("<Q", buf, pos)[0]
+    min_value = struct.unpack_from("<Q", buf, pos)[0]
     pos += 8
-    min_amt = struct.unpack_from("<Q", buf, pos)[0]
+    max_value = struct.unpack_from("<Q", buf, pos)[0]
     pos += 8
     unk3_flags = struct.unpack_from("<H", buf, pos)[0]
     pos += 2
@@ -117,7 +120,7 @@ def _parse_drop_entry(buf: bytes, pos: int) -> tuple[ItemDrop, int]:
         unk1_flag=unk1_flag, unk_cond_flag=unk_cond_flag,
         unk_post_cond=unk_post_cond,
         rates=rates, rates_100=rates_100, unk2=unk2,
-        max_amt=max_amt, min_amt=min_amt, unk3_flags=unk3_flags,
+        min_value=min_value, max_value=max_value, unk3_flags=unk3_flags,
         item_key_dup=item_key_dup,
         extra_u8=extra_u8, extra_u32=extra_u32, friendly_data=friendly_data,
     ), pos
@@ -139,8 +142,8 @@ def _serialize_drop_entry(drop: ItemDrop) -> bytes:
     buf += struct.pack("<Q", drop.rates)
     buf += struct.pack("<Q", drop.rates_100)
     buf += struct.pack("<I", drop.unk2)
-    buf += struct.pack("<Q", max(0, drop.max_amt))
-    buf += struct.pack("<Q", max(0, drop.min_amt))
+    buf += struct.pack("<Q", max(0, drop.min_value))
+    buf += struct.pack("<Q", max(0, drop.max_value))
     buf += struct.pack("<H", drop.unk3_flags)
     buf += struct.pack("<I", drop.item_key_dup)
     # Tagged-trailer guards. Earlier the conditions silently passed
@@ -241,6 +244,36 @@ def parse_dropset_record(record: bytes) -> DropSet:
     )
 
 
+_LEGACY_AMOUNT_KEYS = ("max_amt", "min_amt")
+_AMOUNT_KEYS = ("min_value", "max_value")
+
+
+def _drop_amounts(d: dict) -> tuple[int, int]:
+    """``(min_value, max_value)`` from a JSON drop dict.
+
+    Takes ``min_value``/``max_value``, which mean what the game means, or
+    the legacy ``max_amt``/``min_amt``, but not a mix of the two: a drop
+    with keys from both pairs is refused rather than guessed at. A key
+    that's left out is 0.
+    """
+    legacy = [k for k in _LEGACY_AMOUNT_KEYS if k in d]
+    named = [k for k in _AMOUNT_KEYS if k in d]
+    if legacy and named:
+        raise ValueError(
+            f"drop for item_key={d.get('item_key')!r} mixes the older "
+            f"amount keys ({', '.join(legacy)}) with the newer ones "
+            f"({', '.join(named)}). Use one pair: min_value/max_value, or "
+            f"max_amt/min_amt, where max_amt is the game's minimum and "
+            f"min_amt its maximum")
+    if named:
+        return int(d.get("min_value", 0)), int(d.get("max_value", 0))
+    # Legacy keys, crossed on purpose: "max_amt" has always written the
+    # first u64, which the game reads as _minValue, and "min_amt" the
+    # second, _maxValue (#491). Exports rely on it (the 5x drops fixture
+    # never has max_amt above min_amt), so the keys keep their bytes.
+    return int(d.get("max_amt", 0)), int(d.get("min_amt", 0))
+
+
 def _drop_dict_to_item_drop(
     d: dict,
     template: Optional[ItemDrop] = None,
@@ -256,6 +289,7 @@ def _drop_dict_to_item_drop(
     NattKh's add_item helper at dropset_editor.py:270 uses the same
     template-fallback pattern.
     """
+    min_value, max_value = _drop_amounts(d)
     # Tagged-extras (unk4 + its trailing block) MUST fall back to the
     # template, not default to 0/None. NattKh's exports only include
     # the user-meaningful fields (item_key, rates, min/max amount); the
@@ -308,8 +342,8 @@ def _drop_dict_to_item_drop(
         rates=int(d.get("rates", 0)),
         rates_100=int(d.get("rates_100", 0)),
         unk2=int(d.get("unk2", 0)),
-        max_amt=int(d.get("max_amt", 0)),
-        min_amt=int(d.get("min_amt", 0)),
+        min_value=min_value,
+        max_value=max_value,
         unk3_flags=int(d.get("unk3_flags", 0xFFFF)),
         item_key_dup=int(d.get("item_key_dup", d["item_key"])),
         extra_u8=extra_u8,
