@@ -245,8 +245,11 @@ def test_a_drop_that_mixes_the_two_pairs_is_refused(fields, caplog):
     drop = {"item_key": 30010, "rates": 1000000, **fields}
     with pytest.raises(ValueError, match="mixes the older amount keys") as exc:
         _drop_dict_to_item_drop(drop)
-    for key in fields:
-        assert key in str(exc.value)
+    # The message ends by spelling out both pairs, so only the part before
+    # that shows which keys it found: this drop's, and no others.
+    found = str(exc.value).split("Use one pair")[0]
+    for key in ("max_amt", "min_amt", "min_value", "max_value"):
+        assert (key in found) == (key in fields), key
 
     rec = _records()[_GRAYMANE]
     fine = {"item_key": 103, "rates": 1000000, "max_amt": 1, "min_amt": 2}
