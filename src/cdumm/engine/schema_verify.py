@@ -368,7 +368,7 @@ def _oracle_for(table: str):
 
 #: Records compared per order when choosing one. Selection asks which of
 #: two orders agrees with the oracle *more*, and that margin is not close:
-#: on live 1.16 it is 405,280 values against 23,116. Comparing all 6,581
+#: on live 1.16 it is 443,073 values against 23,116. Comparing all 6,581
 #: records to re-establish that costs ~3s per distinct table body and buys
 #: nothing -- an evenly spread few hundred settles it just as firmly, and
 #: a field read from the wrong offset is wrong in every record, so the
@@ -492,11 +492,11 @@ def _select_order_uncached(table: str, body: bytes,
     """Pick a field order by how many decoded VALUES the oracle confirms.
 
     Walk depth used to decide this, and walk depth is blind to the error
-    class that matters. On live 1.16 the declared order scores a median
-    109 of 109 fields at 87.5% full depth while ``_respawnTimeSeconds``
-    and ``_maxEndurance`` agree with the native parser on **zero** of
-    5,756 records -- the walker lands both 10 bytes off, inside the
-    opaque run, and consumes exactly the same number of bytes doing it.
+    class that matters. On live 1.16, before #492, the cd116 order scored
+    a median 109 of 109 fields at 87.5% full depth while
+    ``_respawnTimeSeconds`` and ``_maxEndurance`` agreed with the native
+    parser on **zero** of 5,756 records -- the walker read both from the
+    wrong offset and consumed exactly the same number of bytes doing it.
     ``decode_score`` cannot see that, because the byte arithmetic is
     identical either way.
 
@@ -568,7 +568,9 @@ def _select_order_uncached(table: str, body: bytes,
     # introduces. It only fires on a field that is wrong on zeros as well:
     # _respawnTimeSeconds is read from the wrong offset there too, but
     # since #492 that offset holds 0 on 5,758 of the 5,809 records whose
-    # real value is 0, so it is not named.
+    # real value is 0, so it is not named. On b24934353 and b25116796 it
+    # names nothing, though both fields are still read from the wrong
+    # offset there.
     broken = score.zero_agreement_fields()
     if broken:
         logger.warning(

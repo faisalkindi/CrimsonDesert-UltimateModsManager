@@ -319,11 +319,11 @@ def test_v2_edits_convert_to_the_name_of_the_byte_they_touch():
 def test_the_game_data_grid_reads_the_run_where_the_parser_does():
     """The grid walks the schema's ItemInfo order, not the native parser,
     so the order needs the byte too. It had no filler at all, so from
-    ``_patternDescriptionDataList`` on it read 5 bytes early: on master,
-    ``_enableAlertSystemToUI`` matched the native parser on 19 of the 6,788
-    records it reached here. schema_verify's value check never saw that,
-    because ``_camel_to_snake`` can't map that name, so it is compared
-    here directly."""
+    ``_patternDescriptionDataList`` on it read at least 5 bytes early: on
+    master, ``_enableAlertSystemToUI`` matched the native parser on 19 of
+    the 6,788 records it reached here. schema_verify's value check never
+    saw that, because ``_camel_to_snake`` can't map that name, so it is
+    compared here directly."""
     from cdumm.semantic.parser import parse_records_display
 
     body, header, _s, _f, items = _parse("vanilla_b25116796")

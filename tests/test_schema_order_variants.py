@@ -18,11 +18,12 @@ spelling, and one asserts both spellings agree.
 
 **Walk depth was the wrong arbiter.** ``decode_score`` counts how far a
 walk gets, and the failure that matters is a walk that goes exactly as
-far while reading the wrong bytes. On live 1.16 the winning order scores
-a median 109 of 109 fields at 87.5% full depth while ``_maxEndurance``
-and ``_respawnTimeSeconds`` agree with the native parser on **zero** of
-5,756 records -- both land 10 bytes off, inside the opaque run, and
-consume the same number of bytes doing it. The arbiter is now the native
+far while reading the wrong bytes. On live 1.16, before #492, the winning
+order scored a median 109 of 109 fields at 87.5% full depth while
+``_maxEndurance`` and ``_respawnTimeSeconds`` agreed with the native
+parser on **zero** of 5,756 records -- both were read from the wrong
+offset, and the walk consumed the same number of bytes doing it. (The
+test below has the numbers since then.) The arbiter is now the native
 parser's decoded values, which is a real oracle: #336 established it
 byte-exact, and it is what settled where the 1.16 10-byte run goes.
 """
