@@ -104,3 +104,33 @@ def table_header_order(body: bytes, offsets: dict[int, int],
            for key, off in offsets.items()):
         return NAME_FIRST
     return None
+
+
+def is_name_first(body: bytes, header: bytes, table: str) -> bool:
+    """True when ``table_header_order`` reads ``body`` as name first.
+
+    ``header`` is the table's own .pabgh and ``table`` its name, which the
+    index parse uses as a tiebreak.
+
+    The table writers only know the key-first layout, so each one calls
+    this before it places a byte and refuses a name-first table outright
+    (#493). Without it they refused game 2.04 only where a key-first read
+    happened to fail on its bytes: on 2.04.08 that is 13 of the 15, and
+    two (stringinfo, storeinfo) wrote.
+
+    False when the index doesn't parse, or when neither order fits every
+    record. The writer then does whatever it did before.
+    """
+    # parser imports this module, so it can't be imported at the top.
+    from cdumm.semantic.parser import parse_pabgh_index
+    try:
+        key_size, offsets = parse_pabgh_index(header, table)
+    except Exception:  # noqa: BLE001 -- the writer's own index read reports it
+        return False
+    return table_header_order(body, offsets, key_size) == NAME_FIRST
+
+
+def name_first_refusal(table: str) -> str:
+    """What a writer says when it refuses a name-first ``table``."""
+    return (f"{table}: game 2.04 isn't supported for this table yet (its "
+            f"records open name first), so nothing was written")

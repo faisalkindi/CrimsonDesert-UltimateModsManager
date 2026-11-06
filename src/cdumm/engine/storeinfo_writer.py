@@ -44,6 +44,7 @@ from cdumm.engine.storeinfo_native_parser import (
     serialize_stock_list,
 )
 from cdumm.semantic.parser import _parse_entry_header, parse_pabgh_index
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
 
 # ``stock_data_list[N].raw_c`` / ``stock_data_list[N].sub_data`` -- the
 # per-slot edits Expanded Vendor Inventory Rebuilt V3 (#191) makes on
@@ -261,6 +262,11 @@ def build_storeinfo_changes(
     .pabgh replace when entry offsets shift. Both are produced from
     the same rebuild so they stay mutually consistent.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493). On 2.04.08 its stock lists land
+    # right anyway; this check is what to remove once that's been checked.
+    if is_name_first(vanilla_body, vanilla_header, "storeinfo"):
+        raise StoreinfoWriteRefused(name_first_refusal("storeinfo.pabgb"))
     key_size, offsets = parse_pabgh_index(vanilla_header, "storeinfo")
     if not offsets:
         logger.warning("storeinfo writer: could not parse pabgh index")

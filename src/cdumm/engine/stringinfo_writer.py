@@ -29,6 +29,8 @@ from __future__ import annotations
 import logging
 import struct
 
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
+
 logger = logging.getLogger(__name__)
 
 _HEADER_LEN = 9          # key(4) + isBlocked(1) + stringKey(4)
@@ -172,6 +174,12 @@ def build_stringinfo_changes(
         companion stringinfo.pabgh, or None when no record changed
         length AND no offset moved.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493). On 2.04.08 its writes land right
+    # anyway; this check is what to remove once that's been checked.
+    if is_name_first(vanilla_body, vanilla_header, "stringinfo"):
+        logger.warning("%s", name_first_refusal("stringinfo.pabgb"))
+        return [], None
     v_bounds = _record_bounds(vanilla_body, vanilla_header)
 
     buffers_by_key: dict[int, bytes] = {}

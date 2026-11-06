@@ -31,6 +31,7 @@ import logging
 import struct
 
 from cdumm.semantic.parser import _parse_entry_header, parse_pabgh_index
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,11 @@ def build_dyecolorgroupinfo_changes(
 ) -> tuple[list[dict], dict | None]:
     """Resolve Format 3 colour-list intents (set / array_append) into v2
     change dicts plus a .pabgh rewrite when entries grow."""
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "dyecolorgroupinfo"):
+        raise DyecolorgroupinfoWriteRefused(
+            name_first_refusal("dyecolorgroupinfo.pabgb"))
     key_size, offsets = parse_pabgh_index(vanilla_header, "dyecolorgroupinfo")
     if not offsets:
         logger.warning("dyecolorgroupinfo writer: could not parse pabgh index")

@@ -65,7 +65,12 @@ from cdumm.semantic.parser import (
     parse_pabgh_index,
     parse_records,
 )
-from cdumm.semantic.record_header import NAME_FIRST, header_end
+from cdumm.semantic.record_header import (
+    NAME_FIRST,
+    header_end,
+    is_name_first,
+    name_first_refusal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2057,7 +2062,14 @@ def _intents_to_v2_changes(
         if fs_routable:
             key_size_ns, offsets_ns = parse_pabgh_index(
                 vanilla_header, table_name)
-            if offsets_ns and key_size_ns in (2, 4):
+            # Game 2.04's name-first records are refused outright: the
+            # _payload_offset call below reads the key-first header (#493).
+            if offsets_ns and is_name_first(
+                    vanilla_body, vanilla_header, table_name):
+                logger.warning(
+                    "Format 3: %d intent(s) refused. %s", len(fs_routable),
+                    name_first_refusal(f"{table_name}.pabgb"))
+            elif offsets_ns and key_size_ns in (2, 4):
                 sorted_ns = sorted(
                     offsets_ns.items(), key=lambda kv: kv[1])
                 bounds_ns: dict[int, tuple[int, int, str]] = {}
@@ -2298,6 +2310,13 @@ def _intents_to_v2_changes(
         )
     )
 
+    # Game 2.04's name-first records are refused outright below (#493):
+    # the per-record list writers (dropset parses each record key first)
+    # and the _payload_offset call both read the key-first header. The
+    # iteminfo and skill batches check in their own writers.
+    name_first = is_name_first(vanilla_body, vanilla_header, table_name)
+    refused_name_first = 0
+
     for intent in intents:
         # Batched whole-table writer dispatch (forced for iteminfo /
         # skill when any list-writer intent exists in the same mod).
@@ -2334,6 +2353,9 @@ def _intents_to_v2_changes(
                 continue
 
         if intent.key not in entry_bounds:
+            continue
+        if name_first:
+            refused_name_first += 1
             continue
         entry_off, entry_end, entry_name = entry_bounds[intent.key]
 
@@ -2413,6 +2435,10 @@ def _intents_to_v2_changes(
             "patched": new_bytes.hex(),
             "label": f"{intent.entry}.{intent.field}",
         })
+    if refused_name_first:
+        logger.warning(
+            "Format 3: %d intent(s) refused. %s", refused_name_first,
+            name_first_refusal(f"{table_name}.pabgb"))
 
     # Flush the iteminfo batch (whole-table writer): all collected
     # intents become a single offset=0 change covering the full

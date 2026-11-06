@@ -34,6 +34,7 @@ from cdumm.archive.format_parsers.characterinfo_full_parser import (
     parse_entry,
     parse_pabgh_index,
 )
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,14 @@ def build_characterinfo_changes(
     abandoned record so a caller can surface it to the user; the reason
     is also logged at WARNING either way.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "characterinfo"):
+        msg = name_first_refusal("characterinfo.pabgb")
+        logger.warning("%s", msg)
+        if refusals_out is not None:
+            refusals_out.append(msg)
+        return []
     idx = parse_pabgh_index(vanilla_header)  # {key: record offset}
     order = sorted(idx.items(), key=lambda kv: kv[1])
 

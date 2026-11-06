@@ -40,6 +40,7 @@ import re
 import struct
 
 from cdumm.semantic.parser import parse_pabgh_index, _parse_entry_header
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,10 @@ def build_equipslotinfo_changes(
     grow when a mod appends hashes, so the companion .pabgh offsets
     are rebuilt in the same pass.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "equipslotinfo"):
+        raise EquipslotWriteRefused(name_first_refusal("equipslotinfo.pabgb"))
     key_size, offsets = parse_pabgh_index(vanilla_header, "equipslotinfo")
     if not offsets:
         logger.warning("equipslotinfo writer: pabgh parse failed")

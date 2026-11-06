@@ -10,6 +10,7 @@ not yet committed.
 """
 from __future__ import annotations
 
+import struct
 import zlib
 from functools import lru_cache
 from pathlib import Path
@@ -397,3 +398,32 @@ MOD_FIXTURE_HOWTO = (
     "tests/fixtures/mods/ or set $CDUMM_MOD_FIXTURES (these mods are not "
     "committed: they're other authors' work)"
 )
+
+
+def to_name_first(body: bytes, header: bytes, table: str) -> bytes:
+    """The game 2.04 shape of a committed pre-2.04 table (#458).
+
+    Up to 2.03 every .pabgb record opens ``[key][u32 name_len][name]``;
+    2.04 writes ``[u32 name_len][name][key]`` and changes nothing after
+    them. No 2.04 table can be committed, so a test builds one from a
+    fixture by swapping the two fields in every record -- which is
+    exactly, and only, what 2.04 changed. The copy is the same size and
+    uses the fixture's own .pabgh unchanged.
+    """
+    # Imported here so that loading a fixture never imports cdumm.
+    from cdumm.semantic.parser import parse_pabgh_index
+    from cdumm.semantic.record_header import KEY_FIRST, read_header
+
+    ks, offs = parse_pabgh_index(header, table)
+    ents = sorted(offs.items(), key=lambda kv: kv[1])
+    out = bytearray(body)
+    for i, (key, off) in enumerate(ents):
+        end = ents[i + 1][1] if i + 1 < len(ents) else len(body)
+        got = read_header(body, off, ks, KEY_FIRST)
+        assert got is not None and got[0] == key, (table, off)
+        _k, name, hdr_end = got
+        assert hdr_end <= end
+        out[off:hdr_end] = (struct.pack("<I", len(name)) + name
+                            + key.to_bytes(ks if ks > 0 else 4, "little"))
+    assert len(out) == len(body)
+    return bytes(out)

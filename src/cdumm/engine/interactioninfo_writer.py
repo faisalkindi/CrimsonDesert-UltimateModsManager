@@ -81,6 +81,8 @@ import logging
 import math
 import struct
 
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
+
 logger = logging.getLogger(__name__)
 
 #: The zero frame: _interactionUpperHeight (4) + _targetGotoOffset (12).
@@ -183,6 +185,11 @@ def build_interactioninfo_changes(
     Returns ``(changes, dropped)``; each change is a 4-byte
     ``{offset, original, patched}``. No .pabgh companion.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "interactioninfo"):
+        why = name_first_refusal("interactioninfo.pabgb")
+        return [], [(it, why) for it in intents]
     dropped: list[tuple[object, str]] = []
     bounds = _record_bounds(vanilla_header, vanilla_body)
     writes: dict[int, int] = {}

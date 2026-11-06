@@ -72,6 +72,7 @@ import re
 import struct
 
 from cdumm.semantic.parser import parse_pabgh_index
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,11 @@ def build_statusinfo_changes(
     ``(intent, reason)`` for intents that could not be applied. No .pabgh
     companion is emitted: the writes are length-preserving.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "statusinfo"):
+        why = name_first_refusal("statusinfo.pabgb")
+        return [], [(i, why) for i in intents]
     dropped: list[tuple[object, str]] = []
     try:
         _, offsets = parse_pabgh_index(vanilla_header, "statusinfo")

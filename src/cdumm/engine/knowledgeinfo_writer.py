@@ -59,6 +59,8 @@ from __future__ import annotations
 import logging
 import struct
 
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
+
 logger = logging.getLogger(__name__)
 
 #: Byte offset of ``is_default`` measured from the end of the record's
@@ -119,6 +121,11 @@ def build_knowledgeinfo_changes(
     ``{offset, original, patched}``. No .pabgh companion is emitted --
     nothing moves.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "knowledgeinfo"):
+        why = name_first_refusal("knowledgeinfo.pabgb")
+        return [], [(it, why) for it in intents]
     dropped: list[tuple[object, str]] = []
     bounds = _record_bounds(vanilla_header, vanilla_body)
     writes: dict[int, int] = {}
