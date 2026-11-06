@@ -562,10 +562,13 @@ def _select_order_uncached(table: str, body: bytes,
     # A field that agrees on NO record is not noise, it is a field being
     # read from the wrong offset -- the winning order still shows it in
     # the grid, so say so rather than let it pass as data. On 1.16 this
-    # names _maxEndurance and _respawnTimeSeconds, which straddle the
-    # opaque run a name-only order cannot express; the declared order
-    # gets them wrong on 1.13 too, so this is long-standing rather than
-    # something the variant introduces.
+    # names _maxEndurance, which straddles the opaque run a name-only
+    # order cannot express; the declared order gets it wrong on 1.13 too,
+    # so this is long-standing rather than something the variant
+    # introduces. It only fires on a field that is wrong on zeros as well:
+    # _respawnTimeSeconds is read from the wrong offset there too, but
+    # since #492 that offset holds 0 on 5,758 of the 5,809 records whose
+    # real value is 0, so it is not named.
     broken = score.zero_agreement_fields()
     if broken:
         logger.warning(

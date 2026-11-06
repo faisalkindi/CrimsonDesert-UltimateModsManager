@@ -96,6 +96,7 @@
       "_hackableCharacterGroupInfoList",
       "_itemGroupInfoList",
       "_discardOffsetY",
+      "_discardAttachTerrain",
       "_hideFromInventoryOnPopItem",
       "_isShieldItem",
       "_isTowerShieldItem",
@@ -103,6 +104,7 @@
       "_packedItemInfo",
       "_unpackedItemInfo",
       "_convertItemInfoByDropNPC",
+      "_unk_pre_pattern",
       "_patternDescriptionDataList",
       "_lookDetailGameAdviceInfoWrapper",
       "_lookDetailMissionInfo",
@@ -400,6 +402,9 @@
     "_discardOffsetY": {
       "type": "f32"
     },
+    "_discardAttachTerrain": {
+      "type": "u8"
+    },
     "_hideFromInventoryOnPopItem": {
       "type": "u8"
     },
@@ -419,6 +424,9 @@
       "type": "u32"
     },
     "_convertItemInfoByDropNPC": {
+      "type": "u32"
+    },
+    "_unk_pre_pattern": {
       "type": "u32"
     },
     "_patternDescriptionDataList": {
