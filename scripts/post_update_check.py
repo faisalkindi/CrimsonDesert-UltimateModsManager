@@ -174,7 +174,11 @@ def check_statusgroupinfo(body: bytes, header: bytes) -> tuple[bool, str]:
 #:
 #: Verified 2026-08-11, fingerprint 2471644ba4ce9feb.
 _ORDER_BASELINE: dict[str, tuple[str, float]] = {
-    "ItemInfo": ("cd116", 109),
+    # Was 109. #492 added the flag byte and the 4-byte filler the order was
+    # missing: 111 of 111 on all four committed cd116 fixtures (1.16,
+    # b24773079, b24934353, b25116796). Measured on the fixtures, not
+    # re-run against a live install.
+    "ItemInfo": ("cd116", 111),
     "CharacterInfo": ("base", 14),
     "RegionInfo": ("base", 21),
     # Was 25. The 26 Aug 2026 patch (b24934353) moved something in the
