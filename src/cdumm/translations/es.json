@@ -899,7 +899,6 @@
   "settings.privatebin_title": "Subida de informes de errores (PrivateBin)",
   "settings.privatebin_instance": "URL de la instancia:",
   "settings.privatebin_expire": "Expira tras:",
-  "settings.privatebin_hint": "Cuando pulsas 'Enviar informe' en la página de informe de error, el informe se cifra de extremo a extremo y se sube a esta instancia de PrivateBin, luego se abre la página de GitHub Issues. La clave de descifrado permanece en el fragmento de la URL — el servidor nunca ve tus datos.",
   "settings.privatebin_saved": "Ajustes de PrivateBin guardados.",
   "main.saved": "Guardado",
   "main.error": "Error",

@@ -904,7 +904,6 @@
   "settings.privatebin_title": "バグ報告のアップロード (PrivateBin)",
   "settings.privatebin_instance": "インスタンス URL:",
   "settings.privatebin_expire": "有効期限:",
-  "settings.privatebin_hint": "バグ報告ページで「レポートを送信」をクリックすると、レポートはエンドツーエンドで暗号化されてこの PrivateBin インスタンスにアップロードされ、その後 GitHub Issues ページが開きます。復号鍵は URL フラグメントに残るため、サーバがデータを見ることはありません。",
   "settings.privatebin_saved": "PrivateBin 設定を保存しました。",
   "main.saved": "保存しました",
   "main.error": "エラー",

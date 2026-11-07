@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import pytest
 
+from cdumm.gui import issue_link
 from cdumm.gui.issue_link import (
     BUG_TEMPLATE,
     CRASH_TEMPLATE,
@@ -282,6 +283,66 @@ def test_scrub_catches_python_error_text_and_paths_that_end_at_the_name():
     # Already scrubbed text doesn't change, because reports are scrubbed twice.
     done = r"C:\Users\USER\AppData and C:\\Users\\USER\\x"
     assert scrub_windows_paths(done) == done
+
+
+@pytest.fixture
+def home(monkeypatch):
+    """Pin the reporter's own folder name, which the scrub matches whole."""
+    def _set(name):
+        monkeypatch.setattr(issue_link, "_own_home_name", lambda: name)
+    _set("")
+    return _set
+
+
+def test_scrub_ends_the_name_at_list_separators(home):
+    # A path stopping at the name, then another path: the first match used to
+    # run on to the second one's drive letter and leave its name.
+    assert (scrub_windows_paths(r"PATH=C:\Users\Finlay;D:\Users\Finlay\bin")
+            == r"PATH=C:\Users\USER;D:\Users\USER\bin")
+    assert (scrub_windows_paths(r"C:\Users\Finlay,C:\Users\Bob\x")
+            == r"C:\Users\USER,C:\Users\USER\x")
+    assert scrub_windows_paths(r"[C:\Users\Finlay]") == r"[C:\Users\USER]"
+    # Whatever separates them, the next path's drive letter ends the name.
+    out = scrub_windows_paths(r"copied C:\Users\Finlay to D:\Users\Bob\x")
+    assert "Finlay" not in out and "Bob" not in out
+    assert out.endswith(r"D:\Users\USER\x")
+
+
+def test_scrub_keeps_going_past_plus_and_equals(home):
+    """A profile folder made from an email address can hold them."""
+    assert scrub_windows_paths(r"C:\Users\jo+cd=1\x") == r"C:\Users\USER\x"
+
+
+def test_own_name_goes_whole_even_with_an_apostrophe(home):
+    home("O'Brien")
+    assert scrub_windows_paths(r"C:\Users\O'Brien\AppData") == r"C:\Users\USER\AppData"
+    assert (scrub_windows_paths(r"'C:\\Users\\O'Brien\\x.log'")
+            == r"'C:\\Users\\USER\\x.log'")
+    assert scrub_windows_paths(r"C:\Users\O'Brien") == r"C:\Users\USER"
+    assert scrub_windows_paths(r"c:\users\o'brien\x") == r"c:\users\USER\x"
+
+
+def test_own_name_goes_on_macos_linux_and_wine(home):
+    home("finlay")
+    assert scrub_windows_paths("/Users/finlay/Library/x") == "/Users/USER/Library/x"
+    assert scrub_windows_paths("/home/finlay/.steam") == "/home/USER/.steam"
+    assert scrub_windows_paths("HOME=/home/finlay") == "HOME=/home/USER"
+    assert scrub_windows_paths(r"Z:\home\finlay\x") == r"Z:\home\USER\x"
+
+
+def test_own_name_is_matched_whole_and_only_after_users_or_home(home):
+    home("ann")
+    assert scrub_windows_paths("/home/anna/x") == "/home/anna/x"
+    assert scrub_windows_paths(r"D:\Games\ann\x") == r"D:\Games\ann\x"
+    assert scrub_windows_paths("ann") == "ann"
+    # Another Windows profile still goes, through the general rule.
+    assert scrub_windows_paths(r"C:\Users\anna\x") == r"C:\Users\USER\x"
+
+
+def test_own_home_name_is_the_profile_folder(monkeypatch):
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\O'Brien")
+    monkeypatch.setenv("HOME", "/home/O'Brien")
+    assert issue_link._own_home_name() == "O'Brien"
 
 
 def test_scrub_is_still_importable_from_bug_report():

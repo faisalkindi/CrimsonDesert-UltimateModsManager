@@ -1123,7 +1123,7 @@
   "settings.privatebin_title": "Bug-Report-Uploads (PrivateBin)",
   "settings.privatebin_instance": "Instanz-URL:",
   "settings.privatebin_expire": "Läuft ab nach:",
-  "settings.privatebin_hint": "Wenn du auf der Bug-Report-Seite auf 'Bug-Report senden' klickst, wird der Bericht Ende-zu-Ende verschlüsselt und zu dieser PrivateBin-Instanz hochgeladen, danach öffnet sich die GitHub-Issue-Seite. Der Entschlüsselungsschlüssel bleibt im URL-Fragment — der Server sieht deine Daten nie.",
+  "settings.privatebin_hint": "Wenn du auf der Bug-Report-Seite auf „Auf PrivateBin hochladen“ klickst, wird der Bericht Ende-zu-Ende verschlüsselt und zu dieser PrivateBin-Instanz hochgeladen, und der Link wird kopiert, damit du ihn auf NexusMods oder Discord teilen kannst. Der Entschlüsselungsschlüssel steht im Teil des Links nach '#', der Server sieht deine Daten also nie.",
   "settings.privatebin_saved": "PrivateBin-Einstellungen gespeichert.",
   "settings.about_title": "Über CDUMM (v{version})",
   "settings.about_desc": "Sieh dir an, was in dieser und allen vorherigen Versionen neu ist.",

@@ -899,7 +899,6 @@
   "settings.privatebin_title": "Envios de relatórios de erro (PrivateBin)",
   "settings.privatebin_instance": "URL da instância:",
   "settings.privatebin_expire": "Expira após:",
-  "settings.privatebin_hint": "Ao clicar em 'Enviar relatório' na página de Relatório de erro, o relatório é criptografado de ponta a ponta e enviado para esta instância do PrivateBin, depois a página de GitHub Issues é aberta. A chave de descriptografia fica no fragmento da URL — o servidor nunca vê seus dados.",
   "settings.privatebin_saved": "Configurações do PrivateBin salvas.",
   "main.saved": "Salvo",
   "main.error": "Erro",

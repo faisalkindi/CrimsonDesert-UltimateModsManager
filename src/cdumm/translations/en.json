@@ -1123,7 +1123,7 @@
   "settings.privatebin_title": "Bug Report Uploads (PrivateBin)",
   "settings.privatebin_instance": "Instance URL:",
   "settings.privatebin_expire": "Expires after:",
-  "settings.privatebin_hint": "When you click 'Submit Bug Report' on the Bug Report page, the report is end-to-end encrypted and uploaded to this PrivateBin instance, then the GitHub issues page opens. The decryption key stays in the URL fragment — the server never sees your data.",
+  "settings.privatebin_hint": "When you click Upload to PrivateBin on the Bug Report page, the report is end-to-end encrypted and uploaded to this PrivateBin instance, and the link is copied for you to share on NexusMods or Discord. The decryption key stays in the part of the link after '#', so the server never sees your data.",
   "settings.privatebin_saved": "PrivateBin settings saved.",
   "settings.about_title": "About CDUMM (v{version})",
   "settings.about_desc": "Read what's new in this release and every prior version.",

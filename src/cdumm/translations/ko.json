@@ -899,7 +899,6 @@
   "settings.privatebin_title": "버그 보고서 업로드 (PrivateBin)",
   "settings.privatebin_instance": "인스턴스 URL:",
   "settings.privatebin_expire": "만료 기간:",
-  "settings.privatebin_hint": "버그 신고 페이지에서 '보고서 제출'을 누르면 보고서가 종단 간 암호화되어 이 PrivateBin 인스턴스에 업로드되고, 이어서 GitHub 이슈 페이지가 열립니다. 복호화 키는 URL 단편에 남아 서버는 데이터를 볼 수 없습니다.",
   "settings.privatebin_saved": "PrivateBin 설정이 저장되었습니다.",
   "main.saved": "저장됨",
   "main.error": "오류",
