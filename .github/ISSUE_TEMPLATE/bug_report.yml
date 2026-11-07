@@ -1,6 +1,5 @@
 name: Bug report
 description: Report something in CDUMM that's broken or behaving wrong.
-title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown

@@ -1,6 +1,5 @@
 name: Crash report
 description: CDUMM crashed, or the game crashes after applying mods.
-title: "[Crash]: "
 labels: ["crash"]
 body:
   - type: markdown

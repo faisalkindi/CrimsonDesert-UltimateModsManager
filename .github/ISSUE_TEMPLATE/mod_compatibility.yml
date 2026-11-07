@@ -1,6 +1,5 @@
 name: Mod won't install or apply
 description: A specific mod fails to install, or only part of it applies (often a game-version mismatch).
-title: "[Mod]: "
 labels: ["mod-compatibility"]
 body:
   - type: markdown

@@ -1,6 +1,5 @@
 name: Question / how-to
 description: Ask how to do something, or whether a behavior is expected.
-title: "[Question]: "
 labels: ["question"]
 body:
   - type: markdown

@@ -1,6 +1,5 @@
 name: Feature request
 description: Suggest an improvement or a new capability for CDUMM.
-title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: textarea
