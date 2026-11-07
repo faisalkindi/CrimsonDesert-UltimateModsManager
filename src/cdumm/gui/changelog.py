@@ -21,6 +21,15 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.18",
+        "date": "2026-11-07",
+        "notes": [
+            "<b>Reporting a bug takes one click.</b> Report on GitHub copies the report and opens the right form with your title and description filled in. Paste the report, fill in the rest and submit. Submit Bug Report is now Upload to PrivateBin, for NexusMods or Discord. By AgentKush.",
+            "<b>Your Windows user name stays out of the report.</b> Copy to Clipboard and Save as File used to keep it. Every button and the preview now replace it with USER, including the way Python error messages quote a path. Found by AgentKush.",
+            "<b>For mod authors, on games before 2.04: Format 3 mods no longer write to guessed positions.</b> A set on a field whose position CDUMM never proved is now refused, and the mod's warning names the field. A field_schema entry can still place it. By AgentKush.",
+        ],
+    },
+    {
         "version": "3.17.17",
         "date": "2026-11-07",
         "notes": [
