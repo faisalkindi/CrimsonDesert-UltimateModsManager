@@ -1,6 +1,5 @@
 name: Mod won't install or apply
 description: A specific mod fails to install, or only part of it applies (often a game-version mismatch).
-title: "[Mod]: "
 labels: ["mod-compatibility"]
 body:
   - type: markdown
@@ -9,8 +8,8 @@ body:
         Use this when **one specific mod** doesn't install or only partly applies.
 
         If CDUMM showed a "patches skipped" warning after Apply, that usually
-        means the mod was built for a different game version — see the pinned
-        **FAQ**. Paste the skipped-patch text below so we can confirm.
+        means the mod was built for a different game version — see the [FAQ](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/236).
+        Paste the skipped-patch text below so we can confirm.
   - type: input
     id: mod
     attributes:
@@ -60,12 +59,15 @@ body:
         - Yes, it works there
         - No, it fails there too
     validations:
-      required: false
+      required: true
   - type: textarea
     id: report
     attributes:
       label: CDUMM bug report
-      description: Paste the full report from CDUMM's built-in generator (it scrubs your Windows username).
+      description: >
+        In CDUMM, open Bug Report at the bottom of the sidebar and click Copy to
+        Clipboard, then paste it here. The report hides your Windows user name
+        in file paths.
       render: text
     validations:
       required: false

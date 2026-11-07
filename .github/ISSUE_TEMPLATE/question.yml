@@ -1,13 +1,12 @@
 name: Question / how-to
 description: Ask how to do something, or whether a behavior is expected.
-title: "[Question]: "
 labels: ["question"]
 body:
   - type: markdown
     attributes:
       value: |
-        Many common questions are answered in the pinned **FAQ** — please check
-        it first. If it's not covered there, ask away.
+        Many common questions are answered in the [FAQ](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/236),
+        so please check it first. If it's not covered there, ask away.
   - type: textarea
     id: question
     attributes:
@@ -19,5 +18,5 @@ body:
     attributes:
       label: Before asking
       options:
-        - label: I checked the pinned FAQ and didn't find the answer
+        - label: I checked the FAQ and didn't find the answer
           required: true

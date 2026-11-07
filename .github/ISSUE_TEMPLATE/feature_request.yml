@@ -1,22 +1,7 @@
 name: Feature request
 description: Suggest an improvement or a new capability for CDUMM.
-title: "[Feature]: "
 labels: ["enhancement"]
 body:
-  - type: dropdown
-    id: area
-    attributes:
-      label: Area
-      description: Which part of CDUMM does this touch?
-      options:
-        - Mod install / apply
-        - Conflict handling & load order
-        - Updates / Nexus integration
-        - Backups & safety
-        - Interface / usability
-        - Other
-    validations:
-      required: false
   - type: textarea
     id: problem
     attributes:
