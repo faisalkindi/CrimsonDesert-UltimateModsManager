@@ -2145,6 +2145,16 @@ _ITEM_FIELDS = [
     ("hackable_character_group_info_list", "carray_u16"),
     ("item_group_info_list", "carray_u16"),
     ("discard_offset_y", "f32"),
+    # Five u8 flags follow discard_offset_y, not four (GitHub #492). Without
+    # this one, every field from hide_from_inventory_on_pop_item to
+    # convert_item_info_by_drop_npc read one byte early (is_wild read the
+    # tower-shield flag) and the filler below absorbed the byte, so both
+    # readings tile every record and only the values tell them apart. 2.04's
+    # exe names the byte _discardAttachTerrain; it is 1 on the 48 Food_* fish.
+    # Read this way, the run matches 2.04.08's named fields key by key on all
+    # six committed fixtures (exceptions in #492), and every nonzero u32
+    # below is the key of a record in the same table.
+    ("discard_attach_terrain", "u8"),
     ("hide_from_inventory_on_pop_item", "u8"),
     ("is_shield_item", "u8"),
     ("is_tower_shield_item", "u8"),
@@ -2152,14 +2162,18 @@ _ITEM_FIELDS = [
     ("packed_item_info", "u32"),
     ("unpacked_item_info", "u32"),
     ("convert_item_info_by_drop_npc", "u32"),
-    # Post-1.0.4.1: 5-byte preamble field before pattern_description_data_list.
-    # All zeros in records sampled so far. Identified by the 5-byte gap between
-    # convert_item_info_by_drop_npc end and where the pattern count u32 = 1
-    # actually sits in non-empty records (rec 796 = Item_gimmick_resourcestorage).
-    # Net byte count balanced by removing usable_alert_type/usable_alert below
-    # (oracle places usable_alert_type elsewhere; not yet relocated here).
-    ("unk_pre_pattern_a", "u32"),
-    ("unk_pre_pattern_b", "u8"),
+    # Post-1.0.4.1: 4 bytes before pattern_description_data_list, 0 on every
+    # decoded record of all six committed fixtures; what they hold is unknown.
+    # Located by the gap between convert_item_info_by_drop_npc's end and where
+    # the pattern count u32 = 1 actually sits in non-empty records (rec 796 =
+    # Item_gimmick_resourcestorage). This used to be read 5 bytes wide, as
+    # unk_pre_pattern_a (u32) + unk_pre_pattern_b (u8), and noted as all
+    # zeros, but its first byte was 122 on 15 records of every fixture: the
+    # top byte of convert_item_info_by_drop_npc, one byte early (#492).
+    # With discard_attach_terrain, these are the 5 bytes the previous schema
+    # gave usable_alert_type/usable_alert below (oracle places
+    # usable_alert_type elsewhere; not yet relocated here).
+    ("unk_pre_pattern", "u32"),
     # Post-1.0.4.1: pattern_description_data_list = carray<PatternDescriptionData>
     # where each entry has u32 pattern_description_info + carray<ParamString>.
     # Confirmed against oracle on record 1003823 with non-empty content.
@@ -2171,7 +2185,7 @@ _ITEM_FIELDS = [
     # Post-1.0.4.1: usable_alert_type and usable_alert (u32+u8) used to live
     # here per the previous schema attempt, but byte-level RE shows their 5
     # bytes don't actually exist at this position in the live binary —
-    # they're consumed by the 5-byte preamble before pattern_description.
+    # they're discard_attach_terrain and unk_pre_pattern above.
     # Oracle places usable_alert_type between item_charge_type and sharpness;
     # leaving it absent here for now until the rest of the schema balances.
     ("is_save_game_data_at_use_item", "u8"),

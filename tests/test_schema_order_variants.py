@@ -18,11 +18,12 @@ spelling, and one asserts both spellings agree.
 
 **Walk depth was the wrong arbiter.** ``decode_score`` counts how far a
 walk gets, and the failure that matters is a walk that goes exactly as
-far while reading the wrong bytes. On live 1.16 the winning order scores
-a median 109 of 109 fields at 87.5% full depth while ``_maxEndurance``
-and ``_respawnTimeSeconds`` agree with the native parser on **zero** of
-5,756 records -- both land 10 bytes off, inside the opaque run, and
-consume the same number of bytes doing it. The arbiter is now the native
+far while reading the wrong bytes. On live 1.16, before #492, the winning
+order scored a median 109 of 109 fields at 87.5% full depth while
+``_maxEndurance`` and ``_respawnTimeSeconds`` agreed with the native
+parser on **zero** of 5,756 records -- both were read from the wrong
+offset, and the walk consumed the same number of bytes doing it. (The
+test below has the numbers since then.) The arbiter is now the native
 parser's decoded values, which is a real oracle: #336 established it
 byte-exact, and it is what settled where the 1.16 10-byte run goes.
 """
@@ -98,10 +99,17 @@ def test_the_display_path_uses_the_chosen_order():
 def test_the_oracle_sees_fields_that_walk_depth_calls_fine():
     """The whole reason for the rewrite.
 
-    These two fields straddle the opaque run that a field-NAME order
-    cannot express, so the walker reads them 10 bytes early. It consumes
-    the right number of bytes doing it, which is why depth-based scoring
-    rates the order a perfect 109/109.
+    ``_maxEndurance`` straddles the opaque run that a field-NAME order
+    cannot express, so the walker reads it early. It consumes the right
+    number of bytes doing it, which is why depth-based scoring rates the
+    order as near perfect.
+
+    ``_respawnTimeSeconds`` straddles the run too and is read just as
+    wrong, but it is no longer in this set. Since #492 put the missing
+    flag byte and the 4 filler bytes in the order, it lands on bytes that
+    are 0 on most records whose real value is 0, so it "agrees" there; on
+    the 798 records where either side is nonzero it matches none. A field
+    in this set is wrong; a field missing from it is not proven right.
     """
     t = _fixture("116", "iteminfo")
     if t is None:
@@ -116,8 +124,10 @@ def test_the_oracle_sees_fields_that_walk_depth_calls_fine():
     values = sv.value_agreement(TABLE, order, body, header, truth)
 
     assert depth.frac_reached_last > 0.8          # depth says: excellent
-    assert set(values.zero_agreement_fields()) == {   # values say: two are wrong
-        "_maxEndurance", "_respawnTimeSeconds"}
+    assert set(values.zero_agreement_fields()) == {   # values say: it's wrong
+        "_maxEndurance"}
+    ok, n = values.per_field["_respawnTimeSeconds"]
+    assert ok < n                                   # and this one isn't right
 
 
 def test_the_1_16_order_wins_on_1_16_by_values():

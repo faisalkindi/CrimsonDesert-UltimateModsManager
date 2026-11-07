@@ -19,7 +19,8 @@ way again.
 iteminfo, CD 1.13 (tests/fixtures/vanilla113 — committed, runs in CI):
   * 6508 entries
   * reaches ``_cooltime`` on 6498 of them (99.8%)
-  * decodes a median of 110 of the schema's 113 fields
+  * decodes a median of 112 of the schema's 115 fields (110 of 113 until
+    #492 added the flag byte and the filler the order was missing)
   * completes the full schema on 0 entries. This is a structural
     ceiling, not a bug to chase: the LANTERN block is a 12-byte
     conditional keyed on the *value* of ``equip_type_info``, and the
@@ -32,7 +33,7 @@ iteminfo, CD 1.13 (tests/fixtures/vanilla113 — committed, runs in CI):
     IS the "iteminfo grid only shows 11 fields" wall.
 
 iteminfo, CD 1.10 (tests/fixtures/vanilla110 — committed, runs in CI):
-  * decodes a median of 64 of 113 fields (master: 11), but still reaches
+  * decodes a median of 64 of 115 fields (master: 11), but still reaches
     ``_cooltime`` on 0 entries: it stops at ``_enchantDataList``, a field
     1.13 added and 1.10 does not have.
   * So 1.10 is strictly better off than on master and no worse in target
@@ -155,8 +156,8 @@ def test_walker_reaches_cooltime_on_the_cd_113_table():
     assert reached == 6498, (
         f"reached _cooltime on {reached}/{total} entries, expected 6498. "
         f"Bails: {dict(sorted(bails.items(), key=lambda x: -x[1])[:5])}")
-    assert median == 110, (
-        f"median {median} of 113 fields decoded, expected 110. On "
+    assert median == 112, (
+        f"median {median} of 115 fields decoded, expected 112. On "
         f"upstream/master this is 11 — a drop back toward that means the "
         f"ItemInfo schema has gone stale against the game again.")
 
@@ -181,7 +182,7 @@ def test_1_10_is_a_known_limitation_not_a_silent_one():
     assert reached == 0, (
         f"1.10 now reaches _cooltime on {reached}/{total} entries. If you "
         f"fixed 1.10, say so here and in the module docstring.")
-    assert median == 64, f"median {median} of 113 fields decoded on 1.10"
+    assert median == 64, f"median {median} of 115 fields decoded on 1.10"
     assert bails.get("_enchantDataList", 0) > 5000, (
         f"expected 1.10 to stop at _enchantDataList (absent in 1.10); "
         f"actually stopped at: "
