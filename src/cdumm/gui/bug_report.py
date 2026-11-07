@@ -2,7 +2,6 @@
 import logging
 import os
 import platform
-import re
 import shutil
 import sys
 from datetime import datetime
@@ -10,6 +9,8 @@ from pathlib import Path
 
 from cdumm.platform import IS_MACOS, IS_WINDOWS
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -21,6 +22,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     ComboBox,
+    FluentIcon,
     InfoBar,
     InfoBarPosition,
     MessageBoxBase,
@@ -32,27 +34,49 @@ from qfluentwidgets import (
 from cdumm.i18n import tr
 from cdumm.storage.database import Database
 
+# The scrub lives in issue_link so the link builder and its tests don't need
+# Qt; it is imported here so `from cdumm.gui.bug_report import
+# scrub_windows_paths` keeps working.
+from cdumm.gui.issue_link import (
+    CHOOSER_URL,
+    SEVERITY_CRASH,
+    SEVERITY_KEYS,
+    build_issue_url,
+    scrub_windows_paths,
+)
+
 logger = logging.getLogger(__name__)
 
 from cdumm import __version__ as APP_VERSION
 
 
-_USER_PATH_RE = re.compile(
-    r"([A-Za-z]:[\\/]Users[\\/])([^\\/\r\n\"'<>|:*?]+)([\\/])",
-    re.IGNORECASE,
-)
+def copy_report_and_open_issue(report: str, severity_index: int,
+                               description: str) -> bool:
+    """Put the scrubbed report on the clipboard and open the pre-filled form.
 
-
-def scrub_windows_paths(text: str) -> str:
-    """Replace `C:\\Users\\<name>\\` with `C:\\Users\\USER\\` to protect privacy.
-
-    Preserves the slash style that was used (backslash or forward-slash) and the
-    drive letter. Leaves the rest of the path intact. Case-insensitive on the
-    Users/drive portion.
+    The form opens with its title and description filled and its report box
+    empty, for the reporter to paste into. Returns False when no browser could
+    be opened; the report is on the clipboard either way.
     """
-    if not text:
-        return text
-    return _USER_PATH_RE.sub(lambda m: f"{m.group(1)}USER{m.group(3)}", text)
+    QApplication.clipboard().setText(scrub_windows_paths(report))
+    url = build_issue_url(severity_index, description)
+    return QDesktopServices.openUrl(QUrl(url))
+
+
+def show_issue_opened(parent, opened: bool) -> None:
+    """Tell the reporter what to do next, or where to go if no browser opened."""
+    if opened:
+        InfoBar.success(
+            title=tr("main.copied"),
+            content=tr("bug.report_github_ok"),
+            duration=10000, position=InfoBarPosition.TOP, parent=parent,
+        )
+    else:
+        InfoBar.warning(
+            title=tr("main.error"),
+            content=tr("bug.report_github_failed", url=CHOOSER_URL),
+            duration=-1, position=InfoBarPosition.TOP, parent=parent,
+        )
 
 
 def _short_python_version() -> str:
@@ -1190,12 +1214,9 @@ class BugReportDialog(MessageBoxBase):
         sev_row = QHBoxLayout()
         sev_row.addWidget(CaptionLabel(tr("bug.severity")))
         self._severity = ComboBox()
-        self._severity.addItems([
-            tr("bug.crash"), tr("bug.wrong"),
-            tr("bug.visual"), tr("bug.other"),
-        ])
+        self._severity.addItems([tr(k) for k in SEVERITY_KEYS])
         if is_crash:
-            self._severity.setCurrentIndex(0)
+            self._severity.setCurrentIndex(SEVERITY_CRASH)
         self._severity.setFixedWidth(220)
         sev_row.addWidget(self._severity)
         sev_row.addStretch()
@@ -1235,7 +1256,11 @@ class BugReportDialog(MessageBoxBase):
         # Action buttons
         btn_row = QHBoxLayout()
 
-        copy_btn = PrimaryPushButton(tr("bug.copy"))
+        github_btn = PrimaryPushButton(FluentIcon.GITHUB, tr("bug.report_github"))
+        github_btn.clicked.connect(self._report_on_github)
+        btn_row.addWidget(github_btn)
+
+        copy_btn = PushButton(tr("bug.copy"))
         copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(copy_btn)
 
@@ -1263,6 +1288,12 @@ class BugReportDialog(MessageBoxBase):
             header += f"\n--- USER DESCRIPTION ---\n{desc}\n"
         header += "\n"
         return header + self._base_report
+
+    def _report_on_github(self) -> None:
+        opened = copy_report_and_open_issue(
+            self._get_full_report(), self._severity.currentIndex(),
+            self._desc_edit.toPlainText())
+        show_issue_opened(self, opened)
 
     def _copy(self) -> None:
         clipboard = QApplication.clipboard()
