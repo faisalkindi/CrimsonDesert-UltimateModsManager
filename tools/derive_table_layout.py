@@ -1489,23 +1489,40 @@ class Deriver:
                 return None, name
         return p, None
 
-    def tiles(self, body, ent, key_size, fields, elem, subset=None) -> bool:
+    def tiles(self, body, ent, key_size, fields, elem, subset=None,
+              order=None) -> bool:
         """Exact tiling on EVERY record, or False. No partial credit.
 
         ``subset`` restricts which records are checked, used only to PRUNE
         a search: a width that tiles all records must also tile any subset,
         so a subset failure is a sound rejection. Every survivor is then
         re-checked against the full table before it is believed.
+
+        ``order`` is the table's record header order, ``record_header``'s
+        ``KEY_FIRST`` or ``NAME_FIRST``, and the walk starts after the key
+        and the name wherever it puts them. None reads key first, as every
+        build before 2.04 does. Game 2.04 opens every record name first
+        (#489), and read key first the name length comes from the wrong
+        four bytes, so no 2.04 table tiles: on 2.04.08, wantedinfo,
+        statusgroupinfo and regioninfo tiled on 0 of 35, 0 of 9 and 0 of
+        1,012 records with this tool's own models. main() decides the
+        order once per table, never per record.
+
+        Key first reads as it did before with one exception: ``header_end``
+        refuses a name longer than ``record_header.MAX_NAME_LEN``, as
+        CDUMM's parser does, so such a record no longer tiles. No table
+        has one: the longest name on 2.04.08 is 260 bytes.
         """
+        from cdumm.semantic.record_header import KEY_FIRST, header_end
+        order = order or KEY_FIRST
         rng = subset if subset is not None else range(len(ent))
         for i in rng:
             o = ent[i][1]
             end = ent[i + 1][1] if i + 1 < len(ent) else len(body)
-            if o + key_size + 4 > end:
+            start = header_end(body, o, key_size, order)
+            if start is None or start > end:
                 return False
-            nlen = struct.unpack_from("<I", body, o + key_size)[0]
-            got, _bad = self._consume(
-                body, o + key_size + 4 + nlen, end, fields, elem)
+            got, _bad = self._consume(body, start, end, fields, elem)
             if got != end:
                 return False
         return True
@@ -1570,13 +1587,15 @@ class Deriver:
         out += [("str", n) for n in range(33)]
         return out
 
-    def search(self, body, ent, key_size, fields, unknown: list[int]):
+    def search(self, body, ent, key_size, fields, unknown: list[int],
+               order=None):
         """Every shape assignment that tiles the WHOLE table.
 
         One or two unknowns. A spread of records prunes first and only
         survivors are verified in full -- sound, because a shape that tiles
         every record must also tile any subset, so a subset failure cannot
-        be a false rejection.
+        be a false rejection. ``order`` is the record header order, passed
+        to every ``tiles()`` call (see there).
         """
         n = len(ent)
         step = max(1, n // 24)
@@ -1587,10 +1606,10 @@ class Deriver:
             cands = self.candidates(c)
             cheap = [x for x in cands
                      if self.tiles(body, ent, key_size, fields,
-                                   {**self.elem, c: x}, probe)]
+                                   {**self.elem, c: x}, probe, order=order)]
             return [(x,) for x in cheap
                     if self.tiles(body, ent, key_size, fields,
-                                  {**self.elem, c: x})]
+                                  {**self.elem, c: x}, order=order)]
 
         a, b = unknown
         cands_a, cands_b = self.candidates(a), self.candidates(b)
@@ -1599,18 +1618,20 @@ class Deriver:
         # probe for ANY partner cannot be part of a full solution.
         viable_a = [x for x in cands_a
                     if any(self.tiles(body, ent, key_size, fields,
-                                      {**self.elem, a: x, b: y}, probe[:4])
+                                      {**self.elem, a: x, b: y}, probe[:4],
+                                      order=order)
                            for y in cands_b[::8])]
         viable_b = [y for y in cands_b
                     if any(self.tiles(body, ent, key_size, fields,
-                                      {**self.elem, a: x, b: y}, probe[:4])
+                                      {**self.elem, a: x, b: y}, probe[:4],
+                                      order=order)
                            for x in viable_a[::8] or cands_a[::8])]
         cheap = [(x, y) for x in viable_a for y in viable_b
                  if self.tiles(body, ent, key_size, fields,
-                               {**self.elem, a: x, b: y}, probe)]
+                               {**self.elem, a: x, b: y}, probe, order=order)]
         return [(x, y) for x, y in cheap
                 if self.tiles(body, ent, key_size, fields,
-                              {**self.elem, a: x, b: y})]
+                              {**self.elem, a: x, b: y}, order=order)]
 
 
 def load_table(game: Path, stem: str):
@@ -1859,7 +1880,12 @@ def main(argv: list[str] | None = None) -> int:
         for c, s in sorted(variable.items()):
             print(f"   sub_{c:X}  {s}")
 
+    # Each record opens with its key and its name, key first up to game
+    # 2.03 and name first from 2.04 (#489). tiles() starts every walk
+    # after them, so it has to know which order the table uses.
+    from cdumm.semantic.record_header import KEY_FIRST, NAME_FIRST, table_header_order
     loaded = {}
+    orders = collections.Counter()
     for s in stems:
         try:
             body, ent, ks = load_table(args.game_dir, s)
@@ -1869,8 +1895,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  skip {s}: {type(e).__name__}")
             continue
         if ent:
-            loaded[s] = (body, ent, ks)
+            # Once per table, against its own .pabgh: the key read out of
+            # the body must equal the index's key on every record. A
+            # record can fit both readings, and no table mixes them.
+            order = table_header_order(body, dict(ent), ks)
+            orders[order] += 1
+            loaded[s] = (body, ent, ks, order)
     print(f"tables loaded from the install: {len(loaded)}")
+    # None fits neither order, and is read key first, as before.
+    print(f"record headers: {orders[NAME_FIRST]} name first (game 2.04), "
+          f"{orders[KEY_FIRST]} key first, {orders[None]} neither "
+          f"(read key first)")
 
     # stage 2, to a fixed point
     proven: dict[str, int] = {}
@@ -1889,17 +1924,17 @@ def main(argv: list[str] | None = None) -> int:
             f = [x for x in fields[stem] if x[0] not in HEADER_FIELDS]
             if any(k == "?" for _n, k, _v in f):
                 continue
-            body, ent, ks = loaded[stem]
+            body, ent, ks, order = loaded[stem]
             unknown = sorted({v for _n, k, v in f if k == "call"
                               and v not in d.model and v not in d.elem})
             if not unknown:
-                if d.tiles(body, ent, ks, f, d.elem):
+                if d.tiles(body, ent, ks, f, d.elem, order=order):
                     proven[stem] = len(ent)
                 continue
             if len(unknown) > 2:
                 continue
 
-            sols = d.search(body, ent, ks, f, unknown)
+            sols = d.search(body, ent, ks, f, unknown, order=order)
             if not sols:
                 continue
 
