@@ -2,8 +2,10 @@
 
 Renders the same auto-collected report that BugReportDialog shows (system info,
 mod state, recent logs) but as a full page the user can return to any time via
-the sidebar. The user picks a severity, types a description, then clicks Copy or
-Save and pastes the result into their NexusMods / GitHub bug thread.
+the sidebar. The user picks a severity and types a description. Report on
+GitHub copies the scrubbed report and opens the matching issue form with the
+title and description filled in, for the user to paste the report, review and
+submit. Copy, Save and the PrivateBin upload cover NexusMods and other places.
 """
 
 from __future__ import annotations
@@ -12,8 +14,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -40,6 +42,7 @@ from qfluentwidgets import (
     TextEdit,
 )
 
+from cdumm.gui.issue_link import SEVERITY_KEYS
 from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
@@ -125,12 +128,10 @@ class BugReportPage(SmoothScrollArea):
         sev_row = QHBoxLayout()
         sev_row.addWidget(StrongBodyLabel(tr("bug.severity"), desc_card))
         self._severity = ComboBox(desc_card)
-        self._severity.addItems([
-            tr("bug.crash"), tr("bug.wrong"),
-            tr("bug.visual"), tr("bug.other"),
-        ])
+        self._severity.addItems([tr(k) for k in SEVERITY_KEYS])
         self._severity.setFixedWidth(260)
-        self._severity.setCurrentIndex(1)  # 'Wrong behavior' is the most common
+        # 'Wrong behavior' is the most common
+        self._severity.setCurrentIndex(SEVERITY_KEYS.index("bug.wrong"))
         sev_row.addWidget(self._severity)
         sev_row.addStretch()
         dc_layout.addLayout(sev_row)
@@ -156,9 +157,10 @@ class BugReportPage(SmoothScrollArea):
 
         action_row.addStretch()
 
-        self._upload_btn = PrimaryPushButton(FluentIcon.SHARE, tr("bug.upload"), container)
-        self._upload_btn.clicked.connect(self._upload_report)
-        action_row.addWidget(self._upload_btn)
+        self._github_btn = PrimaryPushButton(
+            FluentIcon.GITHUB, tr("bug.report_github"), container)
+        self._github_btn.clicked.connect(self._report_on_github)
+        action_row.addWidget(self._github_btn)
 
         self._copy_btn = PushButton(FluentIcon.COPY, tr("bug.copy"), container)
         self._copy_btn.clicked.connect(self._copy_report)
@@ -167,6 +169,11 @@ class BugReportPage(SmoothScrollArea):
         self._save_btn = PushButton(FluentIcon.SAVE, tr("bug.save"), container)
         self._save_btn.clicked.connect(self._save_report)
         action_row.addWidget(self._save_btn)
+
+        self._upload_btn = PushButton(
+            FluentIcon.SHARE, tr("bug.upload_privatebin"), container)
+        self._upload_btn.clicked.connect(self._upload_report)
+        action_row.addWidget(self._upload_btn)
 
         self._layout.addLayout(action_row)
 
@@ -221,19 +228,17 @@ class BugReportPage(SmoothScrollArea):
         self._what_label.setText(tr("bug.what_happened"))
         self._desc_edit.setPlaceholderText(tr("bug.placeholder"))
         self._regen_btn.setText(tr("bug_page.regenerate"))
-        self._upload_btn.setText(tr("bug.upload"))
+        self._github_btn.setText(tr("bug.report_github"))
         self._copy_btn.setText(tr("bug.copy"))
         self._save_btn.setText(tr("bug.save"))
+        self._upload_btn.setText(tr("bug.upload_privatebin"))
         self._preview_label.setText(tr("bug.preview"))
         # Re-fill the severity combo with translated items, preserving
         # the user's current selection by index.
         sev_idx = self._severity.currentIndex()
         self._severity.blockSignals(True)
         self._severity.clear()
-        self._severity.addItems([
-            tr("bug.crash"), tr("bug.wrong"),
-            tr("bug.visual"), tr("bug.other"),
-        ])
+        self._severity.addItems([tr(k) for k in SEVERITY_KEYS])
         if 0 <= sev_idx < self._severity.count():
             self._severity.setCurrentIndex(sev_idx)
         self._severity.blockSignals(False)
@@ -273,6 +278,13 @@ class BugReportPage(SmoothScrollArea):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+
+    def _report_on_github(self) -> None:
+        from cdumm.gui.bug_report import copy_report_and_open_issue, show_issue_opened
+        opened = copy_report_and_open_issue(
+            self._compose_report(), self._severity.currentIndex(),
+            self._desc_edit.toPlainText())
+        show_issue_opened(self, opened)
 
     def _copy_report(self) -> None:
         QApplication.clipboard().setText(self._compose_report())
@@ -321,7 +333,7 @@ class BugReportPage(SmoothScrollArea):
 
         self._upload_btn.setEnabled(False)
         InfoBar.info(
-            title=tr("bug.upload"),
+            title=tr("bug.upload_privatebin"),
             content=tr("bug.uploading"),
             duration=2500, position=InfoBarPosition.TOP, parent=self,
         )
@@ -337,16 +349,15 @@ class BugReportPage(SmoothScrollArea):
         self._upload_worker.start()
 
     def _on_upload_ok(self, url: str) -> None:
+        # No GitHub page opens from here any more: the issue forms ask for the
+        # report itself, and a PrivateBin link expires. Report on GitHub
+        # covers GitHub; this link is for NexusMods or Discord.
         QApplication.clipboard().setText(url)
         InfoBar.success(
             title=tr("main.copied"),
-            content=tr("bug.upload_ok"),
-            duration=6000, position=InfoBarPosition.TOP, parent=self,
+            content=tr("bug.privatebin_ok"),
+            duration=8000, position=InfoBarPosition.TOP, parent=self,
         )
-        # Open the GitHub issue page so the user can paste the URL right away.
-        QDesktopServices.openUrl(QUrl(
-            "https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/new/choose"
-        ))
 
     def _on_upload_failed(self, err: str) -> None:
         # Fall back to copying the raw (scrubbed) text so the user still has something to share.

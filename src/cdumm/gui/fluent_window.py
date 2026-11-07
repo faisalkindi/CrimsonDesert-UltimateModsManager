@@ -7832,12 +7832,11 @@ class CdummWindow(FluentWindow):
     # ------------------------------------------------------------------
 
     def _offer_crash_report(self) -> None:
+        # "Yes" opens the report dialog with Crash preselected; its
+        # Report on GitHub button copies the report and opens the crash form.
         box = MessageBox(
-            "Previous Session Crashed",
-            "It looks like the app didn't close normally last time.\n"
-            "This could indicate a bug.\n\n"
-            "Would you like to generate a bug report?\n"
-            "(You can attach it to a Nexus Mods bug report)",
+            tr("dialog.previous_crash_title"),
+            tr("dialog.previous_crash_body"),
             self,
         )
         if box.exec():
