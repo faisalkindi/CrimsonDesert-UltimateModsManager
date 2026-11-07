@@ -15,13 +15,15 @@ fields a table lists as ``verified``. Those checks are below, on the same
 fixture bytes.
 
 The fixtures are base-game tables only, and their records use 343 of the
-354 layout features any 2.04.08 base record uses. The rest sit in tables
-too big to commit (characterinfo, gimmickinfo, gimmickgroupinfo), so
-small synthetic records test them: a null flag that is null, a tag with a
-default, an optional LocalizableString, a nested condition logic. So do a
-3-byte tag (bitmapposition), a union default no record takes, and a
-condition tree too deep to walk. Four condition functions (176, 212, 224,
-416) occur only in gimmickinfo and get no test here.
+354 layout features any 2.04.08 base record uses. The other 11 all occur
+in tables too big to commit: characterinfo, gimmickinfo and
+gimmickgroupinfo (an optional LocalizableString also in stageinfo, and
+absent in iteminfo). So small synthetic records test them: a null flag
+that is null, a tag with a default, an optional LocalizableString, a
+nested condition logic. So do a 3-byte tag (bitmapposition), a union
+default no record takes, and a condition tree too deep to walk. Four
+condition functions (176, 212, 224, 416) occur only in gimmickinfo and get
+no test here.
 """
 from __future__ import annotations
 
@@ -122,7 +124,9 @@ def _raw_fields(schema, body: bytes, offsets: dict[int, int],
         for f in schema.fields:
             if f.name in want:
                 got[f.name] = p
-            p += PT.consume_bytes(f.type_descriptor, body, p, end)
+            n = PT.consume_bytes(f.type_descriptor, body, p, end)
+            assert n is not None, (by_off[off], f.name)
+            p += n
         out[by_off[off]] = got
     return out
 
@@ -205,6 +209,68 @@ def test_a_pre_2_04_table_gets_no_build_layout(build, stem):
     goes on exactly as it did before for every pre-2.04 table."""
     body, header = _load_pre(build, stem)
     assert BL.schema_for_bytes(stem, body, header) is None
+
+
+@pytest.mark.parametrize("build,stem", [
+    ("vanilla113", "skill"), ("vanilla116", "skill"),
+    ("vanilla113", "inventory"), ("vanilla115", "inventory"),
+    ("vanilla115", "equipslotinfo")])
+def test_a_2_04_only_stem_on_pre_2_04_bytes_has_no_schema_to_show(build, stem):
+    """The grid names these stems through ``table_for_path`` because 2.04
+    has a layout for them. Their pre-2.04 bytes read key first, so they
+    get no layout, and with no pre-2.04 schema either the decode raises.
+    The grid catches that and shows the raw view, as it did before."""
+    body, header = _load_pre(build, stem)
+    assert BL.table_for_path(f"gamedata/{stem}.pabgb") == stem
+    assert not parser_mod.has_schema(stem)
+    assert BL.schema_for_bytes(stem, body, header) is None
+    with pytest.raises(KeyError):
+        parse_records_display(stem, body, header)
+
+
+def test_builds_compiles_once_when_threads_race():
+    """The Game Data tab starts a worker thread per selection, so the
+    first builds() calls can come from several threads at once. Each must
+    get the compiled build, and it must stay: without the lock, the second
+    compile found its names already registered and that thread cached no
+    builds for the rest of the session."""
+    import sys
+    import threading
+
+    pref = "2.04.08/"
+    saved = BL.builds()                # a compiled state to put back afterwards
+    saved_sd = {k: v for k, v in PT.SUBSTRUCT_DEFS.items() if k.startswith(pref)}
+    saved_tv = {k: v for k, v in PT.TAGGED_VARIANT_DEFS.items()
+                if k.startswith(pref)}
+    for k in saved_sd:
+        del PT.SUBSTRUCT_DEFS[k]
+    for k in saved_tv:
+        del PT.TAGGED_VARIANT_DEFS[k]
+    BL._BUILDS = None
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)        # switch threads often, as a busy GUI does
+    try:
+        n = 8
+        barrier = threading.Barrier(n)
+        got = []
+
+        def first_call():
+            barrier.wait()
+            got.append(BL.builds())
+
+        threads = [threading.Thread(target=first_call) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(got) == n and all(g is got[0] for g in got)
+        assert [b.build for b in got[0]] == ["2.04.08"]
+        assert [b.build for b in BL.builds()] == ["2.04.08"]
+    finally:
+        sys.setswitchinterval(interval)
+        PT.SUBSTRUCT_DEFS.update(saved_sd)
+        PT.TAGGED_VARIANT_DEFS.update(saved_tv)
+        BL._BUILDS = saved
 
 
 def test_get_schema_never_returns_a_build_layout():

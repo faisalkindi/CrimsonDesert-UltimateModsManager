@@ -399,6 +399,33 @@ def _shape_records(records: dict, schema, positions: dict | None = None
     return cols, rows, len(records), health
 
 
+def _grid_schema(table: str, body: bytes, header: bytes) -> tuple:
+    """``(schema, no_204_layout)``: what the grid shapes, gates and edits with.
+
+    When a shipped build layout fits these bytes (game 2.04), that layout,
+    the one ``parse_records_display`` decoded the rows with. Otherwise
+    ``get_schema(table)``, as before. On 2.04 bytes no layout fits, that is
+    the pre-2.04 schema, whose verified fields sit at pre-2.04 offsets:
+    read that way, 2.04 WantedInfo's price came out 256 times too high and
+    still verified and editable. So a table that reads name first and has
+    no fitting layout keeps the pre-2.04 columns, none of them verified,
+    and ``no_204_layout`` is True.
+    """
+    import dataclasses
+
+    from cdumm.engine.schema_verify import schema_for_table
+    from cdumm.semantic import build_layouts
+    from cdumm.semantic import parser as sem
+    schema = schema_for_table(table, body, header)
+    if schema is not None and schema.build is not None:
+        return schema, False
+    schema = sem.get_schema(table)
+    if schema is None or not build_layouts.reads_name_first(
+            table, body, header):
+        return schema, False
+    return dataclasses.replace(schema, verified_fields=frozenset()), True
+
+
 def _locate_gear_stats(table: str, body: bytes, header: bytes) -> dict:
     """``{item_key: [GearStat, ...]}`` for iteminfo, ``{}`` for anything else.
 
@@ -496,17 +523,12 @@ class _PreviewWorker(QObject):
                     # variable-length fields so richly-schema'd tables
                     # (iteminfo, regioninfo, ...) show their real columns.
                     recs = sem.parse_records_display(table, body, header)
-                    # When a build layout decoded those rows (game 2.04),
-                    # the columns, the verified gate and editing must come
-                    # from it too: get_schema is the pre-2.04 layout, whose
-                    # verified fields sit at other offsets there. Every
-                    # other table keeps get_schema, as before.
-                    from cdumm.engine.schema_verify import schema_for_table
-                    schema = schema_for_table(table, body, header)
-                    if schema is None or schema.build is None:
-                        schema = sem.get_schema(table)
+                    # Columns, the verified gate and editing come from the
+                    # layout that decoded those rows on game 2.04, and from
+                    # get_schema everywhere else, as before (_grid_schema).
+                    schema, no_204_layout = _grid_schema(table, body, header)
                 except Exception:  # noqa: BLE001 — fall back to a raw view
-                    recs, schema = {}, None
+                    recs, schema, no_204_layout = {}, None, False
                 if recs:
                     positions = game_index.decode_table_positions(
                         table, body, header)
@@ -524,7 +546,7 @@ class _PreviewWorker(QObject):
                         fit = None
                     res.update(kind="table", table=table, cols=cols,
                                rows=rows, total=total, health=health, layout=fit,
-                               schema=schema,
+                               schema=schema, no_204_layout=no_204_layout,
                                has_pos=bool(positions),
                                gear_stats=_locate_gear_stats(
                                    table, body, header))
@@ -1686,6 +1708,11 @@ class GameDataPage(ToolPageBase):
                          f"read from its executable — columns marked "
                          f"(unverified) haven't had their values checked, "
                          f"and nothing here can be edited on this build yet")
+            elif res.get("no_204_layout"):
+                note += ("\n⚠ this table reads in game 2.04's order, but "
+                         "no 2.04 layout CDUMM ships fits these bytes, so the "
+                         "columns use the pre-2.04 layout and none is shown "
+                         "as verified")
             self._pv_meta.setText(
                 f"data table “{res.get('table', '')}”  ·  {total:,} records"
                 f"{more}{note}\n{res.get('path', '')}")

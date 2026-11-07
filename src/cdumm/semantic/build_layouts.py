@@ -13,7 +13,7 @@ them, without changing what ``get_schema`` returns:
   condition-logic model the specs refer to. Per table it records what
   the layout was proven on: the record count, the sha256 of both files,
   and a digest of every field's end offset in every record.
-* ``_compile`` turns a build into ``TableSchema`` objects whose fields
+* ``_Compiler`` turns a build into ``TableSchema`` objects whose fields
   carry ordinary ``pabgb_types`` descriptors. The structs and tagged
   variants they need are registered in ``SUBSTRUCT_DEFS`` and
   ``TAGGED_VARIANT_DEFS`` under the build's prefix (``2.04.08/...``), so
@@ -32,10 +32,13 @@ else ``verified_fields`` is empty, and the Game Data grid shows those
 fields as ``(unverified)``.
 
 Nothing that writes reaches these schemas. ``get_schema``,
-``has_schema`` and ``identify_table_from_path`` never return them, and
-``schema_verify.schema_for_table``, which asks here first, is called only
-by the Game Data grid's decoder and ``layout_fit``. Each schema carries
-the build in ``TableSchema.build``, and the grid offers no edits on one.
+``has_schema`` and ``identify_table_from_path`` never return them.
+``schema_verify.schema_for_table``, which asks here first, is called by
+the Game Data tab (its decoder, ``parse_records_display``, and the tab
+itself, for the schema it shapes and gates the rows with), by
+``layout_fit`` and by the post-update check, and by no writer. Each
+schema carries the build in ``TableSchema.build``, and the grid offers no
+edits on one.
 """
 from __future__ import annotations
 
@@ -43,6 +46,7 @@ import hashlib
 import json
 import logging
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -452,6 +456,11 @@ def _unique(fields: list[tuple[str, str]]) -> list[tuple[str, str]]:
 # ── loading ─────────────────────────────────────────────────────────────
 
 _BUILDS: list[BuildLayouts] | None = None
+#: The Game Data tab starts a worker thread per selection, so the first
+#: calls can come from two threads at once. Without this, both compiled,
+#: the second registration found its names already defined, and that
+#: thread cached no builds for the rest of the session.
+_BUILDS_LOCK = threading.Lock()
 
 
 def builds() -> list[BuildLayouts]:
@@ -463,21 +472,24 @@ def builds() -> list[BuildLayouts]:
     global _BUILDS
     if _BUILDS is not None:
         return _BUILDS
-    found: dict[str, Path] = {}
-    for d in _layout_dirs():
-        if d.is_dir():
-            for p in sorted(d.glob("*.json")):
-                found.setdefault(p.name, p)
-    out = []
-    for name in sorted(found, reverse=True):
-        p = found[name]
-        try:
-            data = json.loads(p.read_text(encoding="utf-8-sig"))
-            out.append(BuildLayouts(data, p))
-        except Exception:
-            logger.exception("build layouts %s didn't load; skipped", p)
-    _BUILDS = out
-    return out
+    with _BUILDS_LOCK:
+        if _BUILDS is not None:
+            return _BUILDS
+        found: dict[str, Path] = {}
+        for d in _layout_dirs():
+            if d.is_dir():
+                for p in sorted(d.glob("*.json")):
+                    found.setdefault(p.name, p)
+        out = []
+        for name in sorted(found, reverse=True):
+            p = found[name]
+            try:
+                data = json.loads(p.read_text(encoding="utf-8-sig"))
+                out.append(BuildLayouts(data, p))
+            except Exception:
+                logger.exception("build layouts %s didn't load; skipped", p)
+        _BUILDS = out
+        return out
 
 
 def has_layout(table: str) -> bool:
@@ -541,6 +553,25 @@ def tiles(schema: TableSchema, body: bytes, offsets: dict[int, int],
     return True
 
 
+def _name_first_index(table: str, body: bytes, header: bytes
+                      ) -> tuple[int, dict[int, int]] | None:
+    """``(key_size, offsets)`` when every record of the table reads name
+    first, else None (key first, no index, or neither order fits)."""
+    try:
+        key_size, offsets = parse_pabgh_index(header, table.lower())
+    except Exception:                                       # noqa: BLE001
+        return None
+    if not offsets or table_header_order(body, offsets,
+                                         key_size) != NAME_FIRST:
+        return None
+    return key_size, offsets
+
+
+def reads_name_first(table: str, body: bytes, header: bytes) -> bool:
+    """True when every record of the table opens name first (game 2.04)."""
+    return _name_first_index(table, body, header) is not None
+
+
 def schema_for_bytes(table: str, body: bytes,
                      header: bytes) -> TableSchema | None:
     """A 2.04 layout for these bytes of ``table``, or None.
@@ -557,14 +588,10 @@ def schema_for_bytes(table: str, body: bytes,
     candidates = [b for b in builds() if stem in b.tables]
     if not candidates:
         return None
-    try:
-        key_size, offsets = parse_pabgh_index(header, stem)
-    except Exception:                                       # noqa: BLE001
+    index = _name_first_index(stem, body, header)
+    if index is None:
         return None
-    if not offsets:
-        return None
-    if table_header_order(body, offsets, key_size) != NAME_FIRST:
-        return None
+    key_size, offsets = index
     body_sha, header_sha = _sha256(body), _sha256(header)
     for b in candidates:
         t = b.tables[stem]
