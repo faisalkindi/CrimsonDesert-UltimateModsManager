@@ -264,6 +264,31 @@ def has_vanilla_b25116796(name: str) -> bool:
         return False
 
 
+def load_vanilla20408(name: str) -> bytes:
+    """Load a game 2.04.08 extract (``meta/0.paver`` 2.4.8.1).
+
+    The first committed tables of game 2.04, where every record opens
+    name first. Each is byte-identical to the bytes its layout in
+    ``schemas/layouts/2.04.08.json`` was proven on: the build file
+    records both files' sha256. Base game only, nothing from the DLC.
+    Named by the version in ``0.paver``: the folder the tables were
+    copied from has no Steam buildid to go by.
+    """
+    packed = _TESTS_DIR / "fixtures" / "vanilla20408" / (name + ".zlib")
+    if packed.exists():
+        return zlib.decompress(packed.read_bytes())
+    raise FileNotFoundError(
+        f"vanilla20408 fixture {name!r} absent from tests/fixtures")
+
+
+def has_vanilla20408(name: str) -> bool:
+    try:
+        load_vanilla20408(name)
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def has_vanilla115(name: str) -> bool:
     try:
         load_vanilla115(name)

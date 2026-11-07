@@ -583,10 +583,23 @@ def _select_order_uncached(table: str, body: bytes,
 def schema_for_table(table: str, body: bytes, header: bytes) -> TableSchema:
     """``get_schema(table)``, but with the field order that actually fits.
 
-    Drop-in for ``get_schema`` at any call site that has the table bytes.
-    Identical to ``get_schema`` for every table with no variants declared,
-    and for any build the declared order already fits.
+    Drop-in for ``get_schema`` at the display call sites that have the
+    table bytes; not for writers (below). Identical to ``get_schema`` for
+    every table with no variants declared, and for any build the declared
+    order already fits.
+
+    A game 2.04 table that reads name first gets its per-build layout
+    instead, when a shipped one fits these bytes
+    (``build_layouts.schema_for_bytes``). That schema is read-only and
+    carries its build. The callers are the Game Data tab (its decoder,
+    ``parse_records_display``, and the tab itself, for the schema it
+    shapes and gates the rows with), ``layout_fit`` and the post-update
+    check. No writer calls this.
     """
+    from cdumm.semantic.build_layouts import schema_for_bytes
+    built = schema_for_bytes(table, body, header)
+    if built is not None:
+        return built
     label, order = select_order(table, body, header)
     if label == "base":
         return get_schema(table)

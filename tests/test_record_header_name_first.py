@@ -3,12 +3,14 @@
 Up to 2.03 every .pabgb record opens ``[key][u32 name_len][name]``; 2.04
 writes ``[u32 name_len][name][key]`` and changes nothing after them.
 
-No 2.04 table can be committed here, so each test builds one from a
-committed pre-2.04 fixture by swapping the two fields in every record --
-which is exactly, and only, what 2.04 changed. The oracle is the
-original: a reader handed the name-first copy and told so must read the
-same records, at the same payload offsets, as it reads from the fixture.
-The copy is the same size and uses the fixture's own .pabgh unchanged.
+Each test builds a 2.04 table from a committed pre-2.04 fixture by
+swapping the two fields in every record -- which is exactly, and only,
+what 2.04 changed. The oracle is the original: a reader handed the
+name-first copy and told so must read the same records, at the same
+payload offsets, as it reads from the fixture. The copy is the same size
+and uses the fixture's own .pabgh unchanged. The real 2.04.08 tables in
+fixtures/vanilla20408 are name first already, so they're left out here
+(test_build_layouts.py reads them).
 """
 from __future__ import annotations
 
@@ -48,9 +50,14 @@ def _load(build: str, table: str) -> tuple[bytes, bytes]:
             zlib.decompress((d / f"{table}.pabgh.zlib").read_bytes()))
 
 
+#: Fixture folders of game 2.04 itself: name first, not copies to make.
+_NAME_FIRST_BUILDS = frozenset({"vanilla20408"})
+
+
 def _fixture_tables() -> list[tuple[str, str]]:
     out = []
-    for d in sorted(p for p in _FIXTURES.iterdir() if p.is_dir()):
+    for d in sorted(p for p in _FIXTURES.iterdir() if p.is_dir()
+                    and p.name not in _NAME_FIRST_BUILDS):
         for b in sorted(d.glob("*.pabgb.zlib")):
             table = b.name.split(".")[0]
             if (d / f"{table}.pabgh.zlib").exists():

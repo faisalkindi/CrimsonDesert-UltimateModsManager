@@ -25,3 +25,10 @@ pabgb_type_overrides.json
 Source:    Authored by CDUMM, with field-level type definitions
            ported from Potter420/crimson-rs (MIT).
 License:   See the _meta block inside the file.
+
+
+layouts/2.04.08.json
+--------------------
+Source:    Authored by CDUMM. Record layouts read from game 2.04.08's
+           executable with tools/derive_table_layout.py (see the file's
+           "about"). No third-party content.

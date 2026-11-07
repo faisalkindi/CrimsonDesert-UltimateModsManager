@@ -399,6 +399,33 @@ def _shape_records(records: dict, schema, positions: dict | None = None
     return cols, rows, len(records), health
 
 
+def _grid_schema(table: str, body: bytes, header: bytes) -> tuple:
+    """``(schema, no_204_layout)``: what the grid shapes, gates and edits with.
+
+    When a shipped build layout fits these bytes (game 2.04), that layout,
+    the one ``parse_records_display`` decoded the rows with. Otherwise
+    ``get_schema(table)``, as before. On 2.04 bytes no layout fits, that is
+    the pre-2.04 schema, whose verified fields sit at pre-2.04 offsets:
+    read that way, 2.04 WantedInfo's price came out 256 times too high and
+    still verified and editable. So a table that reads name first and has
+    no fitting layout keeps the pre-2.04 columns, none of them verified,
+    and ``no_204_layout`` is True.
+    """
+    import dataclasses
+
+    from cdumm.engine.schema_verify import schema_for_table
+    from cdumm.semantic import build_layouts
+    from cdumm.semantic import parser as sem
+    schema = schema_for_table(table, body, header)
+    if schema is not None and schema.build is not None:
+        return schema, False
+    schema = sem.get_schema(table)
+    if schema is None or not build_layouts.reads_name_first(
+            table, body, header):
+        return schema, False
+    return dataclasses.replace(schema, verified_fields=frozenset()), True
+
+
 def _locate_gear_stats(table: str, body: bytes, header: bytes) -> dict:
     """``{item_key: [GearStat, ...]}`` for iteminfo, ``{}`` for anything else.
 
@@ -475,8 +502,13 @@ class _PreviewWorker(QObject):
         # 1) keyed game-data table → parsed grid (CDUMM's semantic schemas)
         if gd and is_body_path(self._path):
             try:
+                from cdumm.semantic import build_layouts
                 from cdumm.semantic import parser as sem
-                table = sem.identify_table_from_path(self._path)
+                # A 2.04 table with no pre-2.04 schema still has a build
+                # layout. That lookup is the grid's alone: the writers keep
+                # identify_table_from_path.
+                table = (sem.identify_table_from_path(self._path)
+                         or build_layouts.table_for_path(self._path))
             except Exception:  # noqa: BLE001
                 table = None
             if table:
@@ -491,13 +523,17 @@ class _PreviewWorker(QObject):
                     # variable-length fields so richly-schema'd tables
                     # (iteminfo, regioninfo, ...) show their real columns.
                     recs = sem.parse_records_display(table, body, header)
+                    # Columns, the verified gate and editing come from the
+                    # layout that decoded those rows on game 2.04, and from
+                    # get_schema everywhere else, as before (_grid_schema).
+                    schema, no_204_layout = _grid_schema(table, body, header)
                 except Exception:  # noqa: BLE001 — fall back to a raw view
-                    recs = {}
+                    recs, schema, no_204_layout = {}, None, False
                 if recs:
                     positions = game_index.decode_table_positions(
                         table, body, header)
                     cols, rows, total, health = _shape_records(
-                        recs, sem.get_schema(table), positions)
+                        recs, schema, positions)
                     # Structural check, separate from `health`. `health` is
                     # a heuristic about VALUES looking unusable; this asks
                     # whether the schema can frame the record at all on
@@ -510,6 +546,7 @@ class _PreviewWorker(QObject):
                         fit = None
                     res.update(kind="table", table=table, cols=cols,
                                rows=rows, total=total, health=health, layout=fit,
+                               schema=schema, no_204_layout=no_204_layout,
                                has_pos=bool(positions),
                                gear_stats=_locate_gear_stats(
                                    table, body, header))
@@ -1665,13 +1702,25 @@ class GameDataPage(ToolPageBase):
             if res.get("has_pos"):
                 note += ("\nworld pos (X, Y, Z) = decoded, region-validated "
                          "map coordinates for mod-makers")
+            build = getattr(res.get("schema"), "build", None)
+            if build:
+                note += (f"\nfield names and order are game {build}'s own, "
+                         f"read from its executable — columns marked "
+                         f"(unverified) haven't had their values checked, "
+                         f"and nothing here can be edited on this build yet")
+            elif res.get("no_204_layout"):
+                note += ("\n⚠ this table reads in game 2.04's order, but "
+                         "no 2.04 layout CDUMM ships fits these bytes, so the "
+                         "columns use the pre-2.04 layout and none is shown "
+                         "as verified")
             self._pv_meta.setText(
                 f"data table “{res.get('table', '')}”  ·  {total:,} records"
                 f"{more}{note}\n{res.get('path', '')}")
             self._show_grid(res.get("cols", []), res.get("rows", []))
             self._pv_extract.setEnabled(True)
             self._enable_table_editing(
-                res.get("table", ""), res.get("cols", []))
+                res.get("table", ""), res.get("cols", []),
+                res.get("schema"))
             self._gear_stats = res.get("gear_stats") or {}
             self._update_gear_button()
             return
@@ -1956,17 +2005,20 @@ class GameDataPage(ToolPageBase):
             except Exception:  # noqa: BLE001
                 pass
 
-    def _enable_table_editing(self, table: str, cols: list) -> None:
+    def _enable_table_editing(self, table: str, cols: list,
+                              schema=None) -> None:
         """Make verified fixed-width cells of the just-shown table editable
         and reveal the maker controls. Stays read-only (no controls) when the
         table has no curated/verified fixed-width fields — so a guessed byte
-        is never editable."""
+        is never editable. ``schema`` is the one the grid was shaped with;
+        without it, ``get_schema(table)``."""
         self._pv_cols = list(cols)
-        try:
-            from cdumm.semantic import parser as sem
-            schema = sem.get_schema(table)
-        except Exception:  # noqa: BLE001
-            schema = None
+        if schema is None:
+            try:
+                from cdumm.semantic import parser as sem
+                schema = sem.get_schema(table)
+            except Exception:  # noqa: BLE001
+                schema = None
         editable = self._editable_columns(cols, schema)
         grid = self._pv_grid
         grid.blockSignals(True)
@@ -2002,6 +2054,11 @@ class GameDataPage(ToolPageBase):
         from cdumm.engine.format3_builder import is_editable_scalar_field
         out: dict = {}
         if not schema:
+            return out
+        # A per-build layout (game 2.04) is for reading only: the writers
+        # still place fields with the pre-2.04 layouts, and Apply refuses
+        # on 2.04, so an edit made here couldn't be installed.
+        if getattr(schema, "build", None):
             return out
         verified = getattr(schema, "verified_fields", None)
         by_name = {f.name: f for f in schema.fields}
