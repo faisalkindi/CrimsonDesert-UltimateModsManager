@@ -114,6 +114,30 @@ def test_dialog_preview_hides_the_name_before_and_after_typing(qapp, no_infobar)
     parent.deleteLater()
 
 
+def test_page_rebuilds_the_report_each_time_it_opens(qapp, no_infobar, monkeypatch):
+    """It was built once with the main window, so a bug hit later went out
+    with the start-up log unless the reporter pressed Refresh Report."""
+    built = []
+
+    def fake_report(db, game_dir, app_data_dir):
+        built.append(1)
+        return f"log as of build {len(built)}\n"
+
+    monkeypatch.setattr(bug_report, "generate_bug_report", fake_report)
+    p = BugReportPage()
+    p.show()
+    qapp.processEvents()
+    assert "log as of build 1" in p._preview.toPlainText()
+    p._desc_edit.setPlainText("typed before leaving")
+    p.hide()
+    p.show()
+    qapp.processEvents()
+    assert len(built) == 2
+    text = p._compose_report()
+    assert "log as of build 2" in text and "typed before leaving" in text
+    p.deleteLater()
+
+
 @pytest.mark.parametrize("home,flagged", [
     ("C:\\Users\\Finlay", False),
     ("C:\\Users\\Fi\u00f1lay", True),

@@ -904,7 +904,6 @@
   "settings.privatebin_title": "Wysyłanie raportów błędów (PrivateBin)",
   "settings.privatebin_instance": "URL instancji:",
   "settings.privatebin_expire": "Wygasa po:",
-  "settings.privatebin_hint": "Po kliknięciu „Wyślij raport” na stronie Zgłoszenie błędu raport jest szyfrowany end-to-end i przesyłany na tę instancję PrivateBin, a następnie otwiera się strona GitHub Issues. Klucz deszyfrujący pozostaje we fragmencie URL — serwer nigdy nie widzi Twoich danych.",
   "settings.privatebin_saved": "Ustawienia PrivateBin zapisane.",
   "main.saved": "Zapisano",
   "main.error": "Błąd",

@@ -904,7 +904,6 @@
   "settings.privatebin_title": "Hata Raporu Yüklemeleri (PrivateBin)",
   "settings.privatebin_instance": "Örnek URL'si:",
   "settings.privatebin_expire": "Süresi:",
-  "settings.privatebin_hint": "Hata Raporu sayfasında 'Raporu Gönder'e tıkladığında rapor uçtan uca şifrelenip bu PrivateBin örneğine yüklenir, ardından GitHub Issues sayfası açılır. Şifre çözme anahtarı URL parçasında kalır — sunucu verilerini asla görmez.",
   "settings.privatebin_saved": "PrivateBin ayarları kaydedildi.",
   "main.saved": "Kaydedildi",
   "main.error": "Hata",

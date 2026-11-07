@@ -904,7 +904,6 @@
   "settings.privatebin_title": "Завантаження звітів про помилки (PrivateBin)",
   "settings.privatebin_instance": "URL сервера:",
   "settings.privatebin_expire": "Термін дії:",
-  "settings.privatebin_hint": "Коли ви натискаєте «Надіслати звіт» на сторінці звіту про помилку, звіт наскрізно шифрується і завантажується на цей сервер PrivateBin, а потім відкривається сторінка GitHub Issues. Ключ розшифрування залишається у фрагменті URL — сервер ніколи не бачить ваших даних.",
   "settings.privatebin_saved": "Налаштування PrivateBin збережено.",
   "main.saved": "Збережено",
   "main.error": "Помилка",

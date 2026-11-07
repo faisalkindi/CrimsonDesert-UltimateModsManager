@@ -904,7 +904,6 @@
   "settings.privatebin_title": "Загрузки отчётов об ошибках (PrivateBin)",
   "settings.privatebin_instance": "URL сервера:",
   "settings.privatebin_expire": "Срок действия:",
-  "settings.privatebin_hint": "Когда вы нажимаете «Отправить отчёт» на странице отчёта об ошибке, отчёт сквозно шифруется и загружается на этот сервер PrivateBin, после чего открывается страница GitHub Issues. Ключ расшифровки остаётся во фрагменте URL — сервер никогда не видит ваших данных.",
   "settings.privatebin_saved": "Настройки PrivateBin сохранены.",
   "main.saved": "Сохранено",
   "main.error": "Ошибка",

@@ -35,6 +35,7 @@ from cdumm.engine.conflict_detector import ConflictDetector
 from cdumm.engine.mod_manager import ModManager
 from cdumm.engine.snapshot_manager import SnapshotManager
 from cdumm.gui.components.drop_overlay import DropOverlay
+from cdumm.gui.issue_link import scrub_windows_paths
 from cdumm.i18n import tr
 from cdumm.storage.database import Database
 
@@ -3493,7 +3494,8 @@ class CdummWindow(FluentWindow):
                 btn_row = QHBoxLayout()
                 copy_btn = PushButton(tr("main.copy_report_btn"))
                 copy_btn.clicked.connect(lambda: (
-                    QApplication.clipboard().setText(self._report),
+                    QApplication.clipboard().setText(
+                        scrub_windows_paths(self._report)),
                     InfoBar.success(title=tr("main.copied"), content=tr("main.report_copied"),
                                     duration=2000, position=InfoBarPosition.TOP, parent=self),
                 ))
@@ -3659,7 +3661,8 @@ class CdummWindow(FluentWindow):
                 btn_row = QHBoxLayout()
                 copy_btn = PushButton(tr("main.copy_report_btn"))
                 copy_btn.clicked.connect(lambda: (
-                    QApplication.clipboard().setText(report),
+                    QApplication.clipboard().setText(
+                        scrub_windows_paths(report)),
                     InfoBar.success(title=tr("main.copied"), content=tr("main.report_copied"),
                                     duration=2000, position=InfoBarPosition.TOP, parent=self),
                 ))

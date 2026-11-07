@@ -9,10 +9,9 @@ CDUMM has a built-in report generator — use it. It captures your app version,
 game version, storage layout, installed mods, and the recent log, which is
 almost always what's needed to diagnose an issue.
 
-1. In CDUMM, open **Bug Report** at the bottom of the sidebar and click
-   **Refresh Report**: the page builds its report when CDUMM starts and
-   doesn't update it on its own. Describe what happened, pick a severity, and
-   click **Report on GitHub**. CDUMM copies the report to your clipboard and
+1. In CDUMM, open **Bug Report** at the bottom of the sidebar. The page
+   builds a fresh report each time you open it. Describe what happened, pick
+   a severity, and click **Report on GitHub**. CDUMM copies the report to your clipboard and
    opens GitHub's **Bug report** form, or **Crash report** for a crash, with
    your description filled in.
 2. Paste the report into the form's **CDUMM bug report** box and fill in the

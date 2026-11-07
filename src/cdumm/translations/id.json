@@ -904,7 +904,6 @@
   "settings.privatebin_title": "Unggahan Laporan Bug (PrivateBin)",
   "settings.privatebin_instance": "URL Instans:",
   "settings.privatebin_expire": "Kedaluwarsa setelah:",
-  "settings.privatebin_hint": "Saat kamu klik 'Kirim Laporan Bug' di halaman Laporan Bug, laporan dienkripsi secara end-to-end dan diunggah ke instans PrivateBin ini, lalu halaman GitHub Issues terbuka. Kunci dekripsi tetap berada di fragmen URL — server tidak pernah melihat datamu.",
   "settings.privatebin_saved": "Pengaturan PrivateBin disimpan.",
   "main.saved": "Disimpan",
   "main.error": "Galat",

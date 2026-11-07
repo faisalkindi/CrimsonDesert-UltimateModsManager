@@ -899,7 +899,6 @@
   "settings.privatebin_title": "Téléversements de rapports de bugs (PrivateBin)",
   "settings.privatebin_instance": "URL de l'instance :",
   "settings.privatebin_expire": "Expire après :",
-  "settings.privatebin_hint": "Quand tu cliques sur 'Envoyer le rapport' dans la page Rapport de bug, le rapport est chiffré de bout en bout et téléversé vers cette instance PrivateBin, puis la page GitHub Issues s'ouvre. La clé de déchiffrement reste dans le fragment d'URL — le serveur ne voit jamais tes données.",
   "settings.privatebin_saved": "Paramètres PrivateBin enregistrés.",
   "main.saved": "Enregistré",
   "main.error": "Erreur",

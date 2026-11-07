@@ -904,7 +904,6 @@
   "settings.privatebin_title": "Caricamento report di bug (PrivateBin)",
   "settings.privatebin_instance": "URL istanza:",
   "settings.privatebin_expire": "Scade dopo:",
-  "settings.privatebin_hint": "Quando premi 'Invia report' nella pagina Report di bug, il report viene cifrato end-to-end e caricato su questa istanza PrivateBin, poi si apre la pagina GitHub Issues. La chiave di decifratura resta nel frammento dell'URL — il server non vede mai i tuoi dati.",
   "settings.privatebin_saved": "Impostazioni PrivateBin salvate.",
   "main.saved": "Salvato",
   "main.error": "Errore",

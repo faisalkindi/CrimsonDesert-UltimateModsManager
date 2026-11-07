@@ -904,7 +904,6 @@
   "settings.privatebin_title": "错误报告上传 (PrivateBin)",
   "settings.privatebin_instance": "实例 URL:",
   "settings.privatebin_expire": "过期时间:",
-  "settings.privatebin_hint": "点击错误报告页面上的“提交错误报告”时,报告会端到端加密并上传到此 PrivateBin 实例,然后打开 GitHub Issues 页面。解密密钥保留在 URL 片段中 — 服务器永远看不到你的数据。",
   "settings.privatebin_saved": "PrivateBin 设置已保存。",
   "main.saved": "已保存",
   "main.error": "错误",

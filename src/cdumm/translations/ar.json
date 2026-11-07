@@ -899,7 +899,6 @@
   "settings.privatebin_title": "رفع بلاغات الأخطاء (PrivateBin)",
   "settings.privatebin_instance": "رابط الخادم:",
   "settings.privatebin_expire": "تنتهي بعد:",
-  "settings.privatebin_hint": "عند النقر على 'إرسال البلاغ' في صفحة بلاغ الخلل، يُشفَّر التقرير من طرف إلى طرف ويُرفع إلى خادم PrivateBin هذا، ثم تُفتح صفحة GitHub Issues. يبقى مفتاح فك التشفير في جزء الرابط بعد '#' — لا يرى الخادم بياناتك أبدًا.",
   "settings.privatebin_saved": "تم حفظ إعدادات PrivateBin.",
   "main.saved": "تم الحفظ",
   "main.error": "خطأ",

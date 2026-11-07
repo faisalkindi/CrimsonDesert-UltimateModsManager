@@ -899,7 +899,6 @@
   "settings.privatebin_title": "錯誤回報上傳 (PrivateBin)",
   "settings.privatebin_instance": "實例 URL:",
   "settings.privatebin_expire": "過期時間:",
-  "settings.privatebin_hint": "點擊錯誤回報頁面上的「提交錯誤回報」時,報告會端對端加密並上傳到此 PrivateBin 實例,接著開啟 GitHub Issues 頁面。解密金鑰會保留在 URL 片段中 — 伺服器永遠看不到你的資料。",
   "settings.privatebin_saved": "PrivateBin 設定已儲存。",
   "main.saved": "已儲存",
   "main.error": "錯誤",

@@ -61,7 +61,7 @@ areas. Reports in these areas are in scope:
 - **Bug report upload** — **Upload to PrivateBin**, which encrypts the report
   and uploads it to a PrivateBin server (see the note below), and the
   user-name scrubbing CDUMM applies to the bug report, whether it's copied,
-  saved, or uploaded.
+  saved, or uploaded, and to what the other Copy Report buttons copy.
 
 ### Out of scope
 
@@ -96,29 +96,31 @@ upload.
   because the issue forms need the report itself.
 - CDUMM doesn't keep the paste's delete token, so it can't remove an upload
   before it expires.
-- Before uploading, CDUMM replaces the user name with `USER` in paths
-  written as `C:\Users\<name>`, with any drive letter and with `\`, `/`, or
-  the doubled backslashes a Python error in the log uses when it quotes a
-  path (`C:\\Users\\<name>\\`). For CDUMM, the name is everything after
-  `Users\` up to the next `\`, `/`, `:`, `'`, `"`, `<`, `>`, `|`, `*`, `?`,
-  or line break. So where a path stops at the name, the text after it is
-  replaced too, up to the next of those:
-  `Home: C:\Users\<name> (default profile)` becomes `Home: C:\Users\USER`.
+- Before uploading, CDUMM replaces the user name with `USER` in paths, in
+  two steps:
+  - First the name of your own user folder, matched whole, wherever it
+    comes after `Users` or `home` and a slash: `C:\Users\<name>` with any
+    drive letter and with `\`, `/`, or the doubled backslashes a Python
+    error in the log uses when it quotes a path (`C:\\Users\\<name>\\`),
+    macOS `/Users/<name>`, Linux `/home/<name>`, and Wine's
+    `Z:\home\<name>`. A name with an apostrophe, like O'Brien, goes in full.
+  - Then any other `C:\Users\<name>` path, in the same forms. Here the name
+    is everything after `Users\` up to the next `\`, `/`, `:`, `;`, `,`,
+    `[`, `]`, `@`, `'`, `"`, `<`, `>`, `|`, `*`, `?`, line break, or the
+    drive letter of the next path. So where a path stops at the name, the
+    text after it is replaced too, up to the next of those:
+    `Home: C:\Users\<name> (default profile)` becomes `Home: C:\Users\USER`.
+
   The rest of the text isn't changed. If the name has non-ASCII characters,
   the report says so in a `User name: has non-ASCII characters` line.
-- Paths written any other way keep the name: macOS `/Users/<name>/`, Linux
-  `/home/<name>/`, and Wine's `Z:\home\<name>\`. Two kinds of
-  `C:\Users\<name>` path keep it too:
-  - A path that comes after one stopping at the name, on the same line,
-    with none of those characters between them. The first replacement takes
-    its drive letter, so `C:\Users\<name> to D:\Users\<name>\x` becomes
-    `C:\Users\USER:\Users\<name>\x`.
-  - A name with an apostrophe. Only the part before the apostrophe is
-    replaced, so `C:\Users\O'Brien\` becomes `C:\Users\USER'Brien\`.
+- Other people's names can stay: someone else's macOS `/Users/<name>/` or
+  Linux `/home/<name>/`, and the part after the apostrophe in someone
+  else's `C:\Users\O'Brien\`, which becomes `C:\Users\USER'Brien\`.
 - The preview, **Report on GitHub**, **Copy to Clipboard**, and **Save as
   File** all use the same scrubbed text, so the preview shows what each
   button shares. Report on GitHub sends GitHub your description, scrubbed
   the same way, and a title made from it, in the link it opens. Nothing is
   posted until you submit the form. Copy and Save upload nothing. The
-  **Copy Report** buttons elsewhere in CDUMM, such as the one in the
-  failed-imports dialog, copy their text without replacing the name.
+  **Copy Report** buttons elsewhere in CDUMM (the failed-imports and
+  diagnostic dialogs, Find Culprit, and Inspect) scrub what they copy the
+  same way, though their windows still show your own paths.

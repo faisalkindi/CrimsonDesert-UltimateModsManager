@@ -222,6 +222,15 @@ class BugReportPage(SmoothScrollArea):
     def refresh(self) -> None:
         self._regenerate()
 
+    def showEvent(self, event) -> None:
+        """Rebuild the report each time the page opens. It was built once with
+        the main window, so a bug hit later in the session was reported with
+        the start-up log and mod list unless the reporter knew to press
+        Refresh Report. Takes about 0.1-0.6 s on a real install."""
+        super().showEvent(event)
+        if not event.spontaneous():  # not on restoring a minimised window
+            self._regenerate()
+
     def retranslate_ui(self) -> None:
         self._title.setText(tr("bug_page.title"))
         self._subtitle.setText(tr("bug_page.subtitle"))

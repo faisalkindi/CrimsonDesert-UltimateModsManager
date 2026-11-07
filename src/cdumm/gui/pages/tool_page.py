@@ -34,6 +34,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from cdumm.gui.issue_link import scrub_windows_paths
 from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
@@ -1411,7 +1412,7 @@ class FindCulpritPage(ToolPageBase):
         if self._mod_manager:
             from PySide6.QtWidgets import QApplication
             report = self._mod_manager.get_crash_report()
-            QApplication.clipboard().setText(report)
+            QApplication.clipboard().setText(scrub_windows_paths(report))
             self._set_status(tr("tools.culprit.report_copied"))
 
 
@@ -1625,7 +1626,7 @@ class InspectModPage(ToolPageBase):
         from PySide6.QtWidgets import QApplication as _QA
         copy_btn = PushButton(tr("tool.copy_report"), copy_card)
         copy_btn.clicked.connect(lambda: (
-            _QA.clipboard().setText(report),
+            _QA.clipboard().setText(scrub_windows_paths(report)),
             InfoBar.success(title=tr("main.copied"), content=tr("main.report_copied"),
                             duration=2000, position=InfoBarPosition.TOP, parent=self),
         ))

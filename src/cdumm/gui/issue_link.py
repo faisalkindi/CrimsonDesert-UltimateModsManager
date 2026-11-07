@@ -20,6 +20,7 @@ Pure Python, no Qt, so the tests need neither a display nor the game.
 """
 from __future__ import annotations
 
+import os
 import re
 from urllib.parse import quote, urlencode
 
@@ -64,10 +65,27 @@ TRUNCATION_NOTE = (
     "\n\n(Cut to fit the link. The full text is under USER DESCRIPTION "
     "in the report.)")
 
+# Where the name in a path ends: a slash, a line break, the quote Python wraps
+# a path in, or a character a Windows user name can't contain (Microsoft's
+# New-LocalUser docs list " / \ [ ] : ; | = , + * ? < > @). "+" and "=" are
+# left out, because a profile folder made from a Microsoft account's email
+# address may hold them, and stopping there would keep the rest of the name.
+# ";" and "," matter most: they separate the paths in a PATH list.
+_NAME_END = r"\\/\r\n\"'<>|:*?;,\[\]@"
+
+# The name also ends where the next path's drive letter starts, so that path
+# keeps its own match. A name can't hold ":", so this never cuts one short.
 _USER_PATH_RE = re.compile(
-    r"([A-Za-z]:[\\/]+Users[\\/]+)[^\\/\r\n\"'<>|:*?]+",
+    rf"([A-Za-z]:[\\/]+Users[\\/]+)(?:(?![A-Za-z]:[\\/])[^{_NAME_END}])+",
     re.IGNORECASE,
 )
+
+
+def _own_home_name() -> str:
+    """The reporter's own profile folder name, as their paths show it.
+    expanduser gives back "~" when it can't find a home folder."""
+    name = os.path.basename(os.path.normpath(os.path.expanduser("~")))
+    return "" if name in ("", ".", "~") else name
 
 
 def scrub_windows_paths(text: str) -> str:
@@ -77,13 +95,23 @@ def scrub_windows_paths(text: str) -> str:
     doubled backslashes Python error text quotes a path with), the drive letter
     and the rest of the path. Case-insensitive on the Users/drive portion.
 
-    The name ends at the next slash, or at any other character a Windows name
-    can't hold. A path that stops at the name, like `USERPROFILE=C:\\Users\\me`,
-    has no closing slash, so text after it on that line can go with the name.
-    Losing that beats keeping the name.
+    The reporter's own folder name goes first, matched whole, so a name with
+    an apostrophe like O'Brien goes in full, and so does their macOS
+    `/Users/<name>`, Linux `/home/<name>` or Wine `Z:\\home\\<name>`.
+
+    Any other `C:\\Users\\<name>` ends at the first `_NAME_END` character or
+    the next path's drive letter. A path that stops at the name, like
+    `USERPROFILE=C:\\Users\\me`, has no closing slash, so text after it on
+    that line can go with the name. Losing that beats keeping the name.
     """
     if not text:
         return text
+    name = _own_home_name()
+    if name:
+        text = re.sub(
+            rf"([\\/]+(?:Users|home)[\\/]+){re.escape(name)}"
+            rf"(?=[{_NAME_END}\s()]|$)",
+            lambda m: f"{m.group(1)}USER", text, flags=re.IGNORECASE)
     return _USER_PATH_RE.sub(lambda m: f"{m.group(1)}USER", text)
 
 
