@@ -1,0 +1,126 @@
+name: Sync issue labels
+
+# Creates or updates every label in .github/labels.yml, so the issue forms'
+# `labels:` lines take effect. GitHub skips a form label that doesn't exist in
+# the repo, without a warning, which is why issues from the crash and
+# mod-compatibility forms have been arriving with no label at all.
+#
+# It only creates and edits. Labels that aren't in the file (GitHub's defaults
+# such as bug / enhancement / question, or anything made by hand) are left
+# alone, and nothing is ever deleted.
+#
+# Triggers:
+#   * a push to master that changes the label file or this workflow, so the
+#     merge that adds this file runs it once and creates the labels;
+#   * workflow_dispatch, to put the labels back to what the file says (e.g.
+#     after one was edited by hand in the UI).
+#
+# No actions, not even checkout: the file is read through the API at the
+# commit being synced and parsed with yq + jq, which GitHub's Ubuntu runner
+# images already include alongside gh. Nothing is installed, so there is
+# nothing to pin or bump.
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/sync-labels.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read # read .github/labels.yml through the API
+  issues: write # create and edit labels
+
+# One sync at a time: a new run queues behind the one in progress instead of
+# racing it, so the labels end up matching the newest file.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync labels
+    # Only master's copy of the file is synced: dispatched by hand on any
+    # other branch, the job is skipped.
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create or update labels from .github/labels.yml
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tmp="${RUNNER_TEMP}"
+          yq --version
+          jq --version
+          gh --version
+
+          # 1. Read and check the whole file before changing anything, so a
+          #    mistake in one entry fails the run instead of half-applying it.
+          gh api "repos/${GH_REPO}/contents/.github/labels.yml?ref=${GITHUB_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "${tmp}/labels.yml"
+          yq -o=json '.' "${tmp}/labels.yml" | jq -s '
+            def check(ok; msg): if ok then . else error("labels.yml: " + msg) end;
+            check(length == 1; "expected one YAML document, found \(length)")
+            | .[0]
+            | check(type == "array" and length > 0; "expected a list of labels")
+            | map(
+                check(type == "object"; "every entry must be a mapping, got \(tojson)")
+                | check((keys - ["name", "color", "description"]) == [];
+                    "\(.name): unexpected key(s) \(keys - ["name", "color", "description"])")
+                | check((.name | type) == "string" and .name != ""; "every entry needs a name")
+                | check((.color | type) == "string" and (.color | test("^[0-9A-Fa-f]{6}$"));
+                    "\(.name): color must be six hex digits in quotes, got \(.color | tojson)")
+                | check(.description == null or (.description | type) == "string";
+                    "\(.name): description must be text")
+                | {name, color: (.color | ascii_downcase), description: (.description // "")})
+            | check((map(.name | ascii_downcase) | unique | length) == length;
+                "two entries share a name (GitHub label names ignore case)")
+          ' > "${tmp}/wanted.json"
+
+          # 2. Compare with the labels the repo has now.
+          gh label list --limit 1000 --json name,color,description > "${tmp}/have.json"
+          jq -c --slurpfile have "${tmp}/have.json" '
+            .[] as $w
+            | ($have[0] | map(select((.name | ascii_downcase) == ($w.name | ascii_downcase)))) as $match
+            | if ($match | length) == 0 then $w + {action: "create"}
+              elif [$match[0].name, ($match[0].color | ascii_downcase), ($match[0].description // "")]
+                   == [$w.name, $w.color, $w.description] then $w + {action: "unchanged"}
+              else $w + {action: "update", current: $match[0].name}
+              end
+          ' "${tmp}/wanted.json" > "${tmp}/plan.jsonl"
+
+          # 3. Apply. Labels are matched by name ignoring case, so an entry
+          #    whose name differs from GitHub's only in case renames it to match.
+          mapfile -t plan < "${tmp}/plan.jsonl"
+          for entry in "${plan[@]}"; do
+            action=$(jq -r .action <<< "${entry}")
+            name=$(jq -r .name <<< "${entry}")
+            color=$(jq -r .color <<< "${entry}")
+            description=$(jq -r .description <<< "${entry}")
+            echo "${action}: ${name} #${color} ${description}"
+            case "${action}" in
+              create)
+                gh api --method POST "repos/${GH_REPO}/labels" \
+                  -f name="${name}" -f color="${color}" -f description="${description}" > /dev/null
+                ;;
+              update)
+                current=$(jq -r '.current | @uri' <<< "${entry}")
+                gh api --method PATCH "repos/${GH_REPO}/labels/${current}" \
+                  -f new_name="${name}" -f color="${color}" -f description="${description}" > /dev/null
+                ;;
+            esac
+          done
+
+          jq -rs --slurpfile have "${tmp}/have.json" '
+            map(.name | ascii_downcase) as $file
+            | ($have[0] | map(.name | select(ascii_downcase | IN($file[]) | not))) as $other
+            | "\(map(select(.action == "create")) | length) created, "
+              + "\(map(select(.action == "update")) | length) updated, "
+              + "\(map(select(.action == "unchanged")) | length) unchanged. "
+              + "Not in the file, left as they are: "
+              + (if ($other | length) == 0 then "none" else ($other | join(", ")) end)
+          ' "${tmp}/plan.jsonl"

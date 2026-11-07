@@ -1,13 +1,13 @@
 # Dedicated issue labels for CDUMM triage (in addition to GitHub's defaults
 # such as bug / enhancement / question / documentation / duplicate / wontfix).
 #
-# These can't be created through a pull request directly — labels live in repo
-# settings, not in files. A maintainer can apply this set either way:
-#   • run the `gh label create` commands listed in this PR's description, or
-#   • point a label-sync action (e.g. EndBug/label-sync, additive / skip-delete)
-#     at this file.
+# .github/workflows/sync-labels.yml creates or updates these on every push to
+# master that changes this file, or by hand from the Actions tab. It never
+# deletes a label: dropping an entry here leaves the label on GitHub, and
+# renaming an entry creates a new label next to the old one.
 #
-# Colors are hex without the leading '#'.
+# Each entry takes name, color and description, nothing else. Colors are six
+# hex digits without the leading '#', in quotes so YAML reads them as text.
 
 - name: mod-compatibility
   color: "5319e7"
