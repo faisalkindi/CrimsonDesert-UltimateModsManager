@@ -89,8 +89,10 @@ def test_drops_intent_produces_record_replacement():
     assert parsed_new.drops[0].item_key == 30010
     assert parsed_new.drops[0].rates == 1000000
     assert parsed_new.drops[0].rates_100 == 100
-    assert parsed_new.drops[0].min_amt == 3
-    assert parsed_new.drops[0].max_amt == 2
+    # The JSON keys are crossed (#491): "min_amt" writes the game's
+    # _maxValue and "max_amt" its _minValue.
+    assert parsed_new.drops[0].max_value == 3
+    assert parsed_new.drops[0].min_value == 2
     assert parsed_new.drops[1].item_key == 103
 
 

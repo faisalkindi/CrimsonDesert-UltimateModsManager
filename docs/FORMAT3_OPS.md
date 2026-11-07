@@ -133,6 +133,13 @@ Append a single element to a list field without rewriting the whole list.
 }
 ```
 
+A drop's two amounts are `min_value` and `max_value`, in the game's own
+meaning and order, here and in a `set` of `drops`. The older keys
+`max_amt` and `min_amt` still work and write what they always did, but
+their names are the wrong way round: `max_amt` sets the minimum and
+`min_amt` the maximum. A drop that mixes the two pairs is refused, and the
+log says why. An amount you leave out is written as 0.
+
 Supported today for list fields whose format CDUMM can round-trip
 byte-exact, so existing elements are never disturbed:
 
