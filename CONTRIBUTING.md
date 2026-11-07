@@ -10,11 +10,15 @@ game version, storage layout, installed mods, and the recent log, which is
 almost always what's needed to diagnose an issue.
 
 1. In CDUMM, open **Bug Report** at the bottom of the sidebar and click
-   **Copy to Clipboard**. The copied report shows file paths in full, user
-   name included (`C:\Users\<name>\` on Windows); replace your user name
-   before posting if you'd rather not share it.
-2. Open a [bug report issue](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/new/choose)
-   and paste it in.
+   **Refresh Report**: the page builds its report when CDUMM starts and
+   doesn't update it on its own. Describe what happened, pick a severity, and
+   click **Report on GitHub**. CDUMM copies the report to your clipboard and
+   opens GitHub's **Bug report** form, or **Crash report** for a crash, with
+   your description filled in.
+2. Paste the report into the form's **CDUMM bug report** box and fill in the
+   rest. If no browser opens, the report is still on your clipboard: open a
+   [new issue](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/new/choose),
+   pick the form, and paste it there.
 3. **Include one concrete example.** "Updates don't work" or "a mod won't
    apply" is hard to chase; "mod X (Nexus page link), version Y, shows error Z"
    is actionable. Name the specific mod, link its Nexus page, and say exactly

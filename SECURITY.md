@@ -58,9 +58,10 @@ areas. Reports in these areas are in scope:
   `nxm://` download handler.
 - **Local data** — the CDUMM database, snapshots, and backups under the game
   directory.
-- **Bug report upload** — **Submit Bug Report**, which encrypts the report
+- **Bug report upload** — **Upload to PrivateBin**, which encrypts the report
   and uploads it to a PrivateBin server (see the note below), and the
-  user-name scrubbing done before the upload.
+  user-name scrubbing CDUMM applies to the bug report, whether it's copied,
+  saved, or uploaded.
 
 ### Out of scope
 
@@ -79,7 +80,7 @@ page, and only install mods from sources you trust.
 
 ### Bug report uploads
 
-**Submit Bug Report**, on CDUMM's Bug Report page, uploads your report to a
+**Upload to PrivateBin**, on CDUMM's Bug Report page, uploads your report to a
 third-party paste service: the public PrivateBin instance at
 `https://privatebin.net/`, unless you set another one under **Settings → Bug
 Report Uploads (PrivateBin)**. CDUMM shows a privacy notice before the first
@@ -90,15 +91,34 @@ upload.
   can't read it, though like any website it sees your IP address. Anyone
   with the full link can read it until the paste expires: one week by
   default, adjustable in the same settings.
-- CDUMM then copies the link and opens GitHub's new-issue page. A link
-  pasted into an issue is public.
+- CDUMM then copies the link and tells you to share it on NexusMods or
+  Discord. For GitHub, it points you to **Report on GitHub** instead,
+  because the issue forms need the report itself.
 - CDUMM doesn't keep the paste's delete token, so it can't remove an upload
   before it expires.
 - Before uploading, CDUMM replaces the user name with `USER` in paths
-  written as `C:\Users\<name>\` (any drive letter, `\` or `/`). Paths
-  written any other way keep it: the doubled backslashes of a Python error
-  quoted from the log (`C:\\Users\\<name>\\`), a path that ends at the user
-  name, and macOS `/Users/<name>/` or Linux `/home/<name>/` paths. The rest
-  of the text isn't changed.
-- **Copy to Clipboard** and **Save as File** upload nothing, but they don't
-  hide your user name either.
+  written as `C:\Users\<name>`, with any drive letter and with `\`, `/`, or
+  the doubled backslashes a Python error in the log uses when it quotes a
+  path (`C:\\Users\\<name>\\`). For CDUMM, the name is everything after
+  `Users\` up to the next `\`, `/`, `:`, `'`, `"`, `<`, `>`, `|`, `*`, `?`,
+  or line break. So where a path stops at the name, the text after it is
+  replaced too, up to the next of those:
+  `Home: C:\Users\<name> (default profile)` becomes `Home: C:\Users\USER`.
+  The rest of the text isn't changed. If the name has non-ASCII characters,
+  the report says so in a `User name: has non-ASCII characters` line.
+- Paths written any other way keep the name: macOS `/Users/<name>/`, Linux
+  `/home/<name>/`, and Wine's `Z:\home\<name>\`. Two kinds of
+  `C:\Users\<name>` path keep it too:
+  - A path that comes after one stopping at the name, on the same line,
+    with none of those characters between them. The first replacement takes
+    its drive letter, so `C:\Users\<name> to D:\Users\<name>\x` becomes
+    `C:\Users\USER:\Users\<name>\x`.
+  - A name with an apostrophe. Only the part before the apostrophe is
+    replaced, so `C:\Users\O'Brien\` becomes `C:\Users\USER'Brien\`.
+- The preview, **Report on GitHub**, **Copy to Clipboard**, and **Save as
+  File** all use the same scrubbed text, so the preview shows what each
+  button shares. Report on GitHub sends GitHub your description, scrubbed
+  the same way, and a title made from it, in the link it opens. Nothing is
+  posted until you submit the form. Copy and Save upload nothing. The
+  **Copy Report** buttons elsewhere in CDUMM, such as the one in the
+  failed-imports dialog, copy their text without replacing the name.
