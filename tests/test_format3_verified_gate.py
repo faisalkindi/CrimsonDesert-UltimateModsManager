@@ -48,7 +48,10 @@ def test_unverified_field_refused():
 
 
 def test_no_gate_when_verified_is_none():
-    # tables that don't opt in are unaffected — both fields resolve
+    # a table whose field order was curated (_ordered_fields) but that has
+    # no _verified_fields is unaffected — both fields resolve. One whose
+    # schema is still in memory order is refused instead; see
+    # test_format3_memory_order_refused.py.
     schema = _schema(None)
     fs = {f.name: f for f in schema.fields}
     body = struct.pack("<Q", 1500) + b"\x01"

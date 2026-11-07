@@ -305,11 +305,22 @@ def test_skill(caplog):
 
 # ── the generic schema-driven path ───────────────────────────────────────
 
-def test_generic_path_refuses_before_payload_offset(caplog):
-    """interactioninfo's is_blocked goes to the generic schema walker, whose
-    first step is _payload_offset read key first."""
+def test_generic_path_refuses_before_payload_offset(tmp_path, monkeypatch,
+                                                     caplog):
+    """A field_schema entry on interactioninfo goes to the generic path,
+    whose first step is _payload_offset read key first.
+
+    This used is_blocked, placed by the schema walk. interactioninfo's
+    schema is still in memory order, so the walk refuses every field of it
+    now, whatever the header order; a field_schema entry still takes the
+    generic path, through _payload_offset."""
+    monkeypatch.setenv("CDUMM_FIELD_SCHEMA_ROOT", str(tmp_path))
+    (tmp_path / "field_schema").mkdir()
+    (tmp_path / "field_schema" / "interactioninfo.json").write_text(
+        json.dumps({"probe_u8": {"rel_offset": 1, "type": "u8"}}),
+        encoding="utf-8")
     body, nf, header = _pair(load_vanilla115, "interactioninfo")
-    intents = [_intent("Gimmick_PickUp", 1000004, "is_blocked", 1)]
+    intents = [_intent("Gimmick_PickUp", 1000004, "probe_u8", 1)]
     assert len(_intents_to_v2_changes(
         "interactioninfo.pabgb", body, header, intents)) == 1
     with caplog.at_level(logging.WARNING):

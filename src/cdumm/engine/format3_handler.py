@@ -63,6 +63,7 @@ from cdumm.semantic.parser import (
     has_schema,
     parse_pabgh_index,
     parse_records,
+    vouches_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -756,7 +757,6 @@ def _classify_match_selector(
     write-time gate in ``format3_apply._resolve_write_pos``.
     """
     match = intent.match or {}
-    vf = getattr(schema, "verified_fields", None)
     # DMM Mod Builder names the identity match fields ``key``/``string_key``;
     # they resolve to CDUMM's ``_key``/``_name`` metadata (see
     # format3_apply._DMM_MATCH_FIELD_ALIASES), which are always safe to match.
@@ -769,7 +769,7 @@ def _classify_match_selector(
             return (
                 f"match field {mf!r} is not a known field of this table"
             )
-        if vf is not None and resolved not in vf:
+        if not vouches_for(schema, resolved):
             return (
                 f"match field {mf!r} is not a verified field of this "
                 f"table; matching on an unverified field is unsafe"
@@ -798,7 +798,6 @@ def _classify_clone(
         return "clone_record needs an integer source_key"
     if isinstance(new_key, bool) or not isinstance(new_key, int):
         return "clone_record needs an integer new_key"
-    vf = getattr(schema, "verified_fields", None)
     for p in clone.get("patches") or []:
         pf = str(p.get("field", "")) if isinstance(p, dict) else ""
         if not pf:
@@ -821,7 +820,7 @@ def _classify_clone(
                 f"clone patches support verified scalar fields and "
                 f"gear_stat[...] on iteminfo"
             )
-        if vf is not None and resolved not in vf:
+        if not vouches_for(schema, resolved):
             return (
                 f"clone patch field {pf!r} is not a verified field of "
                 f"this table; patching it is unsafe"
@@ -2245,6 +2244,7 @@ def apply_intents_to_pabgb_bytes(
     body = bytearray(vanilla_body)
     field_specs = {f.name: f for f in schema.fields}
     fs_entries = load_field_schema(table_name)
+    unvouched: list[str] = []
 
     # Compute (start, end) bounds per record so the TID search has
     # an upper limit and won't match the next entry's bytes.
@@ -2283,6 +2283,12 @@ def apply_intents_to_pabgb_bytes(
         # Fall back to PABGB schema for direct field-name match.
         if intent.field not in field_specs:
             continue
+        # The gate format3_apply._resolve_write_pos applies: never place a
+        # field the schema doesn't vouch for. Record-op mods send their
+        # other set intents, and clone patches, through here.
+        if not vouches_for(schema, intent.field):
+            unvouched.append(intent.field)
+            continue
         located = _field_offset_in_payload(schema, intent.field)
         if located is None:
             continue
@@ -2302,6 +2308,12 @@ def apply_intents_to_pabgb_bytes(
 
         body[abs_off:abs_off + spec.stream_size] = packed
 
+    if unvouched:
+        logger.warning(
+            "Format 3 apply on '%s': %d set intent(s) refused, because "
+            "the schema doesn't vouch for their fields' positions (%s); "
+            "nothing was written for them.", table_name, len(unvouched),
+            ", ".join(sorted(set(unvouched))[:8]))
     return bytes(body)
 
 
