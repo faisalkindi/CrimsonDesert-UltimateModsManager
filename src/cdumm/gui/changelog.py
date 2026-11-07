@@ -21,6 +21,16 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.17",
+        "date": "2026-11-07",
+        "notes": [
+            "<b>Game 2.04: the Game Data tab reads every table in 2.04's own layout.</b> The columns are the game's own field names in its read order, 33 more tables open (skill, inventory and equipslotinfo among them), and wantedinfo's prices, which read about 256 times too high on 2.04, are right. It's read-only, and almost everything shows as (unverified), because a layout proves where a field sits, not what it means. If a table's bytes don't fit, as on an older 2.04 build, the tab keeps the old columns, marks none as verified and says why. By AgentKush.",
+            "<b>For mod authors: item flags now reach the field they name, on any game version.</b> CDUMM's item layout was a byte short, so seven fields read one byte early: is_wild, for example, was really the tower-shield flag. A mod that names hide_from_inventory_on_pop_item, is_shield_item, is_tower_shield_item, is_wild, packed_item_info, unpacked_item_info or convert_item_info_by_drop_npc now changes that field. If you tuned a mod in game around the old behaviour, check it. Found and fixed by AgentKush.",
+            "<b>For mod authors: drop amounts have correct names.</b> CDUMM had a drop's two amounts backwards: max_amt is the game's minimum and min_amt its maximum. Those keys still write what they always did, so existing mods don't change. New mods can use min_value and max_value, and a drop that mixes the two pairs is refused. Found and fixed by AgentKush.",
+            "<b>Table writers now refuse 2.04 tables outright.</b> They only know the older layout. Nothing changes today, because Apply already stops on 2.04. By AgentKush.",
+        ],
+    },
+    {
         "version": "3.17.16",
         "date": "2026-11-06",
         "notes": [
