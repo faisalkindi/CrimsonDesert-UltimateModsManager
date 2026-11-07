@@ -586,6 +586,10 @@ def generate_bug_report(db: Database | None, game_dir: Path | None,
     frozen = getattr(sys, "frozen", False)
     body.append(f"Python: {_short_python_version()} "
                  f"({'frozen' if frozen else 'source'})")
+    # Every path in the shared report has its user name replaced, so say when
+    # the name is one that path and encoding bugs depend on. Whether, not what.
+    if not os.path.basename(os.path.expanduser("~")).isascii():
+        body.append("User name: has non-ASCII characters")
     admin_state = _is_admin_windows()
     from cdumm.platform import is_wine
     under_wine = is_wine()
@@ -1243,7 +1247,7 @@ class BugReportDialog(MessageBoxBase):
         self.viewLayout.addWidget(CaptionLabel(tr("bug.preview")))
         self._text_edit = QTextEdit()
         self._text_edit.setReadOnly(True)
-        self._text_edit.setPlainText(report_text)
+        self._text_edit.setPlainText(scrub_windows_paths(report_text))
         self._text_edit.setFontFamily("Consolas")
         self._text_edit.setMinimumHeight(250)
         self._text_edit.setStyleSheet(_te_style)
@@ -1281,13 +1285,15 @@ class BugReportDialog(MessageBoxBase):
         self._text_edit.setPlainText(self._get_full_report())
 
     def _get_full_report(self) -> str:
+        """The report as shown and shared, with the user name scrubbed: every
+        button and the preview read it from here."""
         severity = self._severity.currentText()
         desc = self._desc_edit.toPlainText().strip()
         header = f"--- SEVERITY: {severity} ---\n"
         if desc:
             header += f"\n--- USER DESCRIPTION ---\n{desc}\n"
         header += "\n"
-        return header + self._base_report
+        return scrub_windows_paths(header + self._base_report)
 
     def _report_on_github(self) -> None:
         opened = copy_report_and_open_issue(
