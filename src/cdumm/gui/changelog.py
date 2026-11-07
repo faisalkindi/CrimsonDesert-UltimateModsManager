@@ -21,6 +21,15 @@ _UNRELEASED_NOTES: list[str] = [
 
 CHANGELOG = [
     {
+        "version": "3.17.19",
+        "date": "2026-11-08",
+        "notes": [
+            "<b>The bug report shows what just happened.</b> The Bug Report page built its report once, when CDUMM started, so a bug hit later went out with the start-up log unless you pressed Refresh Report. It now builds a fresh report each time you open the page. Found by AgentKush.",
+            "<b>Your user name is hidden in more places.</b> A line listing several paths, such as PATH, could keep a name, and a name with an apostrophe, like O'Brien, kept the part after it. Your own user folder name is now replaced whole, in macOS, Linux and Wine paths too, and the Copy Report buttons in the failed-imports and diagnostic windows, Find Culprit and Inspect hide it as well. Found by AgentKush.",
+            "<b>The PrivateBin setting describes the button as it is now.</b> It still named Submit Bug Report and said GitHub opens after the upload.",
+        ],
+    },
+    {
         "version": "3.17.18",
         "date": "2026-11-07",
         "notes": [
