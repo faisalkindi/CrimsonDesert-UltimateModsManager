@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Optional
 from cdumm.engine.iteminfo_native_parser import (
     parse_iteminfo_from_bytes, serialize_iteminfo,
 )
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
 
 if TYPE_CHECKING:
     from cdumm.engine.format3_handler import Format3Intent
@@ -743,6 +744,13 @@ def build_iteminfo_intent_change(
     refuses (returns None) if the table size changed but the index
     cannot be rebuilt.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493). Telling needs the .pabgh, which
+    # the callers pass.
+    if vanilla_header is not None and is_name_first(
+            vanilla_body, vanilla_header, "iteminfo"):
+        logger.warning("%s", name_first_refusal("iteminfo.pabgb"))
+        return None
     # Version guard: if the current schema can't decode this game
     # version's records (e.g. CD 1.13 shifted prefab_data_list — GitHub
     # #247), a full whole-table parse misaligns every record and stalls

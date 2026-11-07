@@ -31,6 +31,8 @@ from __future__ import annotations
 import logging
 import struct
 
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
+
 logger = logging.getLogger(__name__)
 
 _MARK = bytes.fromhex("2880020000")
@@ -82,6 +84,11 @@ def build_inventory_changes(
     where each change is ``{offset, original, patched}`` over the 6-byte slot
     block of one record; ``dropped`` is ``(intent, reason)`` for the rest. No
     .pabgh companion (length-preserving)."""
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "inventory"):
+        why = name_first_refusal("inventory.pabgb")
+        return [], [(i, why) for i in intents]
     dropped: list[tuple[object, str]] = []
     by_rec: dict[tuple[int, int], list[tuple[int, int]]] = {}
 

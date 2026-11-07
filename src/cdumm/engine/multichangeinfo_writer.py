@@ -39,6 +39,8 @@ import logging
 import re
 import struct
 
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
+
 logger = logging.getLogger(__name__)
 
 _FML_ELEM_SIZE = 30
@@ -289,6 +291,11 @@ def build_multichangeinfo_changes(
     the per-record changes is byte-identical to the pabgb the pabgh
     offsets describe.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "multichangeinfo"):
+        logger.warning("%s", name_first_refusal("multichangeinfo.pabgb"))
+        return [], None
     name_to_key: dict[str, int] = {}
     v_bounds = _record_bounds(vanilla_body, vanilla_header)
     for key, (start, _end) in v_bounds.items():

@@ -37,6 +37,7 @@ from cdumm.semantic.record_header import (
     read_header,
     table_header_order,
 )
+from tests.fixture_loaders import to_name_first
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -60,23 +61,6 @@ def _fixture_tables() -> list[tuple[str, str]]:
 _ALL = _fixture_tables()
 
 
-def _to_name_first(body: bytes, header: bytes, table: str) -> bytes:
-    """The 2.04 shape of a pre-2.04 table: key and name swapped, nothing else."""
-    ks, offs = parse_pabgh_index(header, table)
-    ents = sorted(offs.items(), key=lambda kv: kv[1])
-    out = bytearray(body)
-    for i, (key, off) in enumerate(ents):
-        end = ents[i + 1][1] if i + 1 < len(ents) else len(body)
-        got = read_header(body, off, ks, KEY_FIRST)
-        assert got is not None and got[0] == key, (table, off)
-        _k, name, hdr_end = got
-        assert hdr_end <= end
-        out[off:hdr_end] = (struct.pack("<I", len(name)) + name
-                            + key.to_bytes(ks if ks > 0 else 4, "little"))
-    assert len(out) == len(body)
-    return bytes(out)
-
-
 def test_the_fixture_set_is_not_empty():
     assert len(_ALL) >= 25, _ALL
 
@@ -86,7 +70,7 @@ def test_committed_fixtures_are_key_first_and_their_copies_name_first(build, tab
     body, header = _load(build, table)
     ks, offs = parse_pabgh_index(header, table)
     assert table_header_order(body, offs, ks) == KEY_FIRST
-    nf = _to_name_first(body, header, table)
+    nf = to_name_first(body, header, table)
     assert table_header_order(nf, offs, ks) == NAME_FIRST
 
 
@@ -94,7 +78,7 @@ def test_committed_fixtures_are_key_first_and_their_copies_name_first(build, tab
 def test_entry_header_reads_the_same_record_either_way(build, table):
     body, header = _load(build, table)
     ks, offs = parse_pabgh_index(header, table)
-    nf = _to_name_first(body, header, table)
+    nf = to_name_first(body, header, table)
     for key, off in offs.items():
         want = _parse_entry_header(body, off, ks)
         assert _parse_entry_header(nf, off, ks, NAME_FIRST) == want, (table, key)
@@ -108,7 +92,7 @@ def test_entry_header_reads_the_same_record_either_way(build, table):
 @pytest.mark.parametrize("build,table", _ALL)
 def test_parse_records_is_identical_on_the_name_first_copy(build, table):
     body, header = _load(build, table)
-    nf = _to_name_first(body, header, table)
+    nf = to_name_first(body, header, table)
     assert parse_records(table, nf, header) == parse_records(table, body, header)
 
 
@@ -116,7 +100,7 @@ def test_parse_records_is_identical_on_the_name_first_copy(build, table):
                                    "vanilla_b25116796"])
 def test_iteminfo_decode_score_is_identical_either_way(build):
     body, header = _load(build, "iteminfo")
-    nf = _to_name_first(body, header, "iteminfo")
+    nf = to_name_first(body, header, "iteminfo")
     order = verified_order("ItemInfo")
     assert order
     assert (decode_score("ItemInfo", order, nf, header)
@@ -128,7 +112,7 @@ def test_iteminfo_decode_score_is_identical_either_way(build):
 def test_storeinfo_locates_the_same_stock_lists_either_way(build):
     body, header = _load(build, "storeinfo")
     _ks, offs = parse_pabgh_index(header, "storeinfo")
-    nf = _to_name_first(body, header, "storeinfo")
+    nf = to_name_first(body, header, "storeinfo")
     starts = sorted(offs.values())
     layout = detect_storeinfo_layout(body, starts)
     assert detect_storeinfo_layout(nf, starts, NAME_FIRST) == layout
@@ -153,7 +137,7 @@ def test_storeinfo_locates_the_same_stock_lists_either_way(build):
 def test_statusgroupinfo_parses_the_same_records_either_way():
     body, header = _load("vanilla115", "statusgroupinfo")
     _ks, offs = parse_pabgh_index(header, "statusgroupinfo")
-    nf = _to_name_first(body, header, "statusgroupinfo")
+    nf = to_name_first(body, header, "statusgroupinfo")
     starts = sorted(offs.values())
     parsed = 0
     for o in starts:

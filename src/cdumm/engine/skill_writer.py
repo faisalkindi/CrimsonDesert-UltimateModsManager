@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from cdumm.semantic.record_header import is_name_first, name_first_refusal
+
 if TYPE_CHECKING:
     from cdumm.engine.format3_handler import Format3Intent
 
@@ -169,6 +171,11 @@ def build_skill_intent_change(
     the index to walk records). Returns None when no intents
     applied.
     """
+    # Game 2.04's name-first records are refused outright: this writer only
+    # knows the key-first layout (#493).
+    if is_name_first(vanilla_body, vanilla_header, "skill"):
+        logger.warning("%s", name_first_refusal("skill.pabgb"))
+        return None
     parser = _get_parser()
     if parser is None:
         return None
