@@ -17,7 +17,7 @@ Fixes #
 <!-- How did you test this? Paste relevant output if useful. -->
 
 - [ ] `python -m pytest` passes
-- [ ] `ruff check .` is clean
+- [ ] Any Python files this PR adds pass `ruff check` (CI's lint gate; findings in files it modifies are only reported)
 - [ ] Added or updated a regression test (fails before, passes after)
 
 ## Notes

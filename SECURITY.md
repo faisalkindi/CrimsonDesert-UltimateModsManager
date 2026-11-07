@@ -58,6 +58,9 @@ areas. Reports in these areas are in scope:
   `nxm://` download handler.
 - **Local data** — the CDUMM database, snapshots, and backups under the game
   directory.
+- **Bug report upload** — **Submit Bug Report**, which encrypts the report
+  and uploads it to a PrivateBin server (see the note below), and the
+  user-name scrubbing done before the upload.
 
 ### Out of scope
 
@@ -73,3 +76,29 @@ CDUMM modifies local game files through an overlay and installs an ASI loader.
 Only download CDUMM from the official
 [Releases](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/releases)
 page, and only install mods from sources you trust.
+
+### Bug report uploads
+
+**Submit Bug Report**, on CDUMM's Bug Report page, uploads your report to a
+third-party paste service: the public PrivateBin instance at
+`https://privatebin.net/`, unless you set another one under **Settings → Bug
+Report Uploads (PrivateBin)**. CDUMM shows a privacy notice before the first
+upload.
+
+- The report is encrypted on your machine (AES-256-GCM, by the `privatebin`
+  package) and the key is the part of the link after `#`, so the server
+  can't read it, though like any website it sees your IP address. Anyone
+  with the full link can read it until the paste expires: one week by
+  default, adjustable in the same settings.
+- CDUMM then copies the link and opens GitHub's new-issue page. A link
+  pasted into an issue is public.
+- CDUMM doesn't keep the paste's delete token, so it can't remove an upload
+  before it expires.
+- Before uploading, CDUMM replaces the user name with `USER` in paths
+  written as `C:\Users\<name>\` (any drive letter, `\` or `/`). Paths
+  written any other way keep it: the doubled backslashes of a Python error
+  quoted from the log (`C:\\Users\\<name>\\`), a path that ends at the user
+  name, and macOS `/Users/<name>/` or Linux `/home/<name>/` paths. The rest
+  of the text isn't changed.
+- **Copy to Clipboard** and **Save as File** upload nothing, but they don't
+  hide your user name either.
