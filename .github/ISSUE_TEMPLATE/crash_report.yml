@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        For **game-launch** crashes after applying mods, the pinned **FAQ**
+        For **game-launch** crashes after applying mods, the [FAQ](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/236)
         covers the two usual causes (a missing `meta/` file, or a snapshot taken
         before a game update). Please try those first, then file this if it
         still crashes.
@@ -21,13 +21,29 @@ body:
         - Game crashes in-game
     validations:
       required: true
+  - type: markdown
+    attributes:
+      value: |
+        **Getting the report:** in CDUMM, open **Bug Report** at the bottom of
+        the sidebar and click **Copy to Clipboard**. If CDUMM itself crashed,
+        open it again first: the report then includes the crash trace from the
+        previous session.
+
+        **CDUMM closes before you can get to it?** Paste `crash-pre-qt.log` if it's
+        there, or else the last 100 lines of `cdumm.log`. Both are in this folder:
+
+        - Windows: `%LOCALAPPDATA%\cdumm`
+        - macOS: `~/Library/Application Support/cdumm`
+        - Linux, run from source: `~/.local/share/cdumm`
+        - Linux, running the .exe through Proton or Wine: the Windows path inside that prefix
+
+        They aren't scrubbed like the report, so replace your user name in
+        paths like `C:\Users\<name>\` if you'd rather not share it.
   - type: textarea
     id: report
     attributes:
       label: CDUMM bug report (includes crash trace)
-      description: >
-        Paste the full report from CDUMM's generator. If CDUMM itself crashed,
-        its report includes the crash trace from the previous session.
+      description: Paste the report, or one of the log files from the note above.
       render: text
     validations:
       required: true

@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: "Game 2.04: CDUMM can't install mods yet"
+    url: https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458
+    about: "Follow #458 for progress, and check it before filing a 2.04 report."
   - name: FAQ — read this first
     url: https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/236
     about: Mods not applying, install fails, crashes, updates — the most common questions, answered.

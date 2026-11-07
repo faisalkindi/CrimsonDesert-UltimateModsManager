@@ -8,10 +8,22 @@ body:
       value: |
         Thanks for taking the time to report a bug.
 
-        **Please generate a bug report inside CDUMM and paste it below.** It
-        captures your app version, game version, storage layout, installed
-        mods, and the recent log — which is almost always what's needed to
-        diagnose the problem.
+        **Please paste CDUMM's bug report below.** In CDUMM, open **Bug Report**
+        at the bottom of the sidebar and click **Copy to Clipboard**. The report
+        has your app version, game version, storage layout, installed mods and
+        the recent log, which is almost always what's needed to diagnose the
+        problem.
+
+        **CDUMM won't open?** Paste the last 100 lines of `cdumm.log` into the
+        report box instead. It's in CDUMM's data folder:
+
+        - Windows: `%LOCALAPPDATA%\cdumm`
+        - macOS: `~/Library/Application Support/cdumm`
+        - Linux, run from source: `~/.local/share/cdumm`
+        - Linux, running the .exe through Proton or Wine: the Windows path inside that prefix
+
+        The log isn't scrubbed like the report, so replace your user name in
+        paths like `C:\Users\<name>\` if you'd rather not share it.
   - type: dropdown
     id: problem-type
     attributes:
@@ -37,12 +49,14 @@ body:
         - Standalone / other
         - Not sure
     validations:
-      required: false
+      required: true
   - type: textarea
     id: bug-report
     attributes:
       label: CDUMM bug report
-      description: Paste the full report from CDUMM's built-in report generator.
+      description: >
+        Paste the report from CDUMM's Bug Report page here. The note at the top
+        says where it is, and what to paste if CDUMM won't open.
       render: text
     validations:
       required: true
@@ -53,10 +67,11 @@ body:
       description: >
         Name the specific mod and link its Nexus page. "A mod won't apply" or
         "updates don't work" is very hard to chase down — one concrete example
-        is what actually gets fixed.
+        is what actually gets fixed. If it isn't about one mod, write "all mods"
+        or "not mod-related".
       placeholder: "Example: Bigger Minimap — https://www.nexusmods.com/crimsondesert/mods/275"
     validations:
-      required: false
+      required: true
   - type: textarea
     id: what-happened
     attributes:
