@@ -5,6 +5,11 @@ so CDUMM reads and writes mod files directly inside the
 `Crimson Desert.app` bundle on the host filesystem. Apple Silicon
 only — Crimson Desert macOS doesn't run on Intel.
 
+> **Game 2.04:** CDUMM can't install mods on game 2.04 yet, on macOS or
+> anywhere else. The note at the top of the [README](README.md) has the
+> details, and [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458)
+> tracks the work.
+
 ## Install — recommended
 
 Download `CDUMM-<version>-macos-arm64.dmg` from the
@@ -85,8 +90,8 @@ the active venv if any of them are missing, so step 4 above is optional
 when you just want a `.app`.
 
 The first launch shows the welcome wizard. Pick your
-`Crimson Desert.app` (CDUMM walks into it to find the inner
-`Contents/Resources/packages/` directory automatically) — or let
+`Crimson Desert.app` (CDUMM finds its `packages/` directory
+automatically, inside the bundle or next to it) — or let
 auto-detect locate it under `~/Games`, `~/Applications`,
 `/Applications`, or your Steam library at
 `~/Library/Application Support/Steam/steamapps/common/`.
@@ -116,6 +121,10 @@ auto-detect locate it under `~/Games`, `~/Applications`,
 | `~/Library/Application Support/cdumm/`                       | Per-user state (log, single-instance lock, game-dir pointer, welcome-wizard marker) |
 | `<Crimson Desert.app>/Contents/Resources/packages/CDMods/`   | Mod database, vanilla backups, deltas, sources, overlay |
 
+On a release that keeps `packages/` next to the `.app` (see
+[Game directory](#game-directory)), `CDMods/` is in that `packages/`
+folder, outside the bundle.
+
 Putting `CDMods/` inside the `.app` bundle invalidates the bundle's
 code signature. macOS does not re-verify a previously-launched
 unsigned app on subsequent launches, so the game still runs — but if
@@ -132,9 +141,14 @@ Auto-detect scans:
 - `~/Applications/`
 - `/Applications/`
 
-For each location it looks for `Crimson Desert.app` and validates the
-install by checking the inner PAZ layout (`0008/0.paz` and
-`meta/0.papgt` exist). The Windows-only `bin64/CrimsonDesert.exe`
+For each location it looks for a `.app` bundle with "Crimson" in its
+name, one folder down as well (Steam installs it as
+`Crimson Desert/CrimsonDesert_Steam.app`),
+and validates the install by checking its PAZ layout (`0008/0.paz` and
+`meta/0.papgt` exist). The PAZ data is normally inside the bundle at
+`Contents/Resources/packages/`. Some Steam releases put a `packages/`
+folder next to the `.app` instead, and from v3.17.14 CDUMM accepts that
+too (#463). The Windows-only `bin64/CrimsonDesert.exe`
 check does not apply on macOS — the native Mac build doesn't ship a
 Windows executable.
 
