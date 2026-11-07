@@ -11,6 +11,11 @@ Crimson Desert itself runs under Proton/Steam in both modes — only the
 manager itself changes. The game's `bin64/CrimsonDesert.exe` is the
 same Windows binary either way.
 
+> **Game 2.04:** CDUMM can't install mods on game 2.04 yet, on Linux or
+> anywhere else. The note at the top of the [README](README.md) has the
+> details, and [#458](https://github.com/faisalkindi/CrimsonDesert-UltimateModsManager/issues/458)
+> tracks the work.
+
 ## Quick start — native Linux build (recommended)
 
 ```bash
@@ -213,6 +218,3 @@ be reproduced.
 - **Steam launch buttons** open `steam://rungameid/...` URIs via
   `os.startfile`, which under Wine delegates to Wine's own URL handler.
   This works for Steam but not for the Epic and Xbox entry points.
-
-A native Linux build (no Wine) is tracked in the project roadmap but
-hasn't started — the Wine-based path above is the supported route today.
