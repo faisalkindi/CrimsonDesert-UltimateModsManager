@@ -42,7 +42,7 @@ from qfluentwidgets import (
     TextEdit,
 )
 
-from cdumm.gui.issue_link import SEVERITY_KEYS
+from cdumm.gui.issue_link import SEVERITY_KEYS, scrub_windows_paths
 from cdumm.i18n import tr
 
 logger = logging.getLogger(__name__)
@@ -264,13 +264,15 @@ class BugReportPage(SmoothScrollArea):
         self._refresh_preview()
 
     def _compose_report(self) -> str:
+        """The report as shown and shared, with the user name scrubbed: every
+        button and the preview read it from here."""
         sev = self._severity.currentText()
         desc = self._desc_edit.toPlainText().strip()
         header = f"--- SEVERITY: {sev} ---\n"
         if desc:
             header += f"\n--- USER DESCRIPTION ---\n{desc}\n"
         header += "\n"
-        return header + self._base_report
+        return scrub_windows_paths(header + self._base_report)
 
     def _refresh_preview(self) -> None:
         self._preview.setPlainText(self._compose_report())

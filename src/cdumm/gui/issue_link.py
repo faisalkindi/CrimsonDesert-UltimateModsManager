@@ -65,21 +65,26 @@ TRUNCATION_NOTE = (
     "in the report.)")
 
 _USER_PATH_RE = re.compile(
-    r"([A-Za-z]:[\\/]Users[\\/])([^\\/\r\n\"'<>|:*?]+)([\\/])",
+    r"([A-Za-z]:[\\/]+Users[\\/]+)[^\\/\r\n\"'<>|:*?]+",
     re.IGNORECASE,
 )
 
 
 def scrub_windows_paths(text: str) -> str:
-    """Replace `C:\\Users\\<name>\\` with `C:\\Users\\USER\\` to protect privacy.
+    """Replace the name in `C:\\Users\\<name>` with USER to protect privacy.
 
-    Preserves the slash style that was used (backslash or forward-slash) and the
-    drive letter. Leaves the rest of the path intact. Case-insensitive on the
-    Users/drive portion.
+    Preserves the slash style that was used (backslash, forward-slash, or the
+    doubled backslashes Python error text quotes a path with), the drive letter
+    and the rest of the path. Case-insensitive on the Users/drive portion.
+
+    The name ends at the next slash, or at any other character a Windows name
+    can't hold. A path that stops at the name, like `USERPROFILE=C:\\Users\\me`,
+    has no closing slash, so text after it on that line can go with the name.
+    Losing that beats keeping the name.
     """
     if not text:
         return text
-    return _USER_PATH_RE.sub(lambda m: f"{m.group(1)}USER{m.group(3)}", text)
+    return _USER_PATH_RE.sub(lambda m: f"{m.group(1)}USER", text)
 
 
 def template_for_severity(severity_index: int) -> str:

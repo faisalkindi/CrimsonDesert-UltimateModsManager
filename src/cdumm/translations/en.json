@@ -103,7 +103,7 @@
   "nav.bug_report": "Bug Report",
   "nav.bug_report_tooltip": "Generate a diagnostic report",
   "bug_page.title": "Bug Report",
-  "bug_page.subtitle": "Describe the issue, pick a severity, then click Report on GitHub. CDUMM copies the report and opens the matching GitHub form with your description filled in: paste the report into the form's report box, check it, and submit. For NexusMods, Copy or Save the report instead. Report on GitHub and the PrivateBin upload replace your Windows user name in paths with USER.",
+  "bug_page.subtitle": "Describe the issue, pick a severity, then click Report on GitHub. CDUMM copies the report and opens the matching GitHub form with your description filled in: paste the report into the form's report box, check it, and submit. For NexusMods, Copy or Save the report instead. Every button here replaces your Windows user name in paths with USER.",
   "bug_page.regenerate": "Refresh Report",
   "bug_page.save_dialog_title": "Save Bug Report",
   "action_bar.apply": "  Apply  ",

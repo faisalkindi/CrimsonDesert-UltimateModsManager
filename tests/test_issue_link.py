@@ -269,6 +269,21 @@ def test_scrub_keeps_slash_style_drive_and_rest_of_path():
     assert scrub_windows_paths("") == ""
 
 
+def test_scrub_catches_python_error_text_and_paths_that_end_at_the_name():
+    # Python error text quotes a path with doubled backslashes.
+    assert (scrub_windows_paths(r"No such file: 'C:\\Users\\Finlay Smith\\x.log'")
+            == r"No such file: 'C:\\Users\\USER\\x.log'")
+    # A path that stops at the name has no closing slash to find.
+    assert scrub_windows_paths(r"USERPROFILE=C:\Users\Finlay") == r"USERPROFILE=C:\Users\USER"
+    assert scrub_windows_paths(r"'C:\Users\Finlay'") == r"'C:\Users\USER'"
+    # The cut stops at the end of the line, so the next line survives.
+    assert (scrub_windows_paths("home=c:/users/finlay\nnext line")
+            == "home=c:/users/USER\nnext line")
+    # Already scrubbed text doesn't change, because reports are scrubbed twice.
+    done = r"C:\Users\USER\AppData and C:\\Users\\USER\\x"
+    assert scrub_windows_paths(done) == done
+
+
 def test_scrub_is_still_importable_from_bug_report():
     """bug_report_page imports it from there; it moved to stay Qt-free."""
     pytest.importorskip("qfluentwidgets")

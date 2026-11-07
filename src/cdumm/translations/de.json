@@ -103,7 +103,7 @@
   "nav.bug_report": "Bug-Report",
   "nav.bug_report_tooltip": "Diagnosebericht erstellen",
   "bug_page.title": "Bug-Report",
-  "bug_page.subtitle": "Beschreibe das Problem, wähle einen Schweregrad und klicke auf „Auf GitHub melden“. CDUMM kopiert den Bericht und öffnet das passende GitHub-Formular mit deiner Beschreibung: Füge den Bericht in das Berichtsfeld ein, prüfe das Formular und sende es ab. Für NexusMods kopiere oder speichere den Bericht stattdessen. „Auf GitHub melden“ und der PrivateBin-Upload ersetzen deinen Windows-Benutzernamen in Pfaden durch USER.",
+  "bug_page.subtitle": "Beschreibe das Problem, wähle einen Schweregrad und klicke auf „Auf GitHub melden“. CDUMM kopiert den Bericht und öffnet das passende GitHub-Formular mit deiner Beschreibung: Füge den Bericht in das Berichtsfeld ein, prüfe das Formular und sende es ab. Für NexusMods kopiere oder speichere den Bericht stattdessen. Alle Schaltflächen hier ersetzen deinen Windows-Benutzernamen in Pfaden durch USER.",
   "bug_page.regenerate": "Bericht aktualisieren",
   "bug_page.save_dialog_title": "Bug-Report speichern",
   "action_bar.apply": "  Anwenden  ",
