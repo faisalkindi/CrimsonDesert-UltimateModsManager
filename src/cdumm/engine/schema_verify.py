@@ -581,7 +581,17 @@ def schema_for_table(table: str, body: bytes, header: bytes) -> TableSchema:
     Drop-in for ``get_schema`` at any call site that has the table bytes.
     Identical to ``get_schema`` for every table with no variants declared,
     and for any build the declared order already fits.
+
+    A game 2.04 table that reads name first gets its per-build layout
+    instead, when a shipped one fits these bytes
+    (``build_layouts.schema_for_bytes``). That schema is read-only and
+    carries its build; only the Game Data grid's decoder and
+    ``layout_fit`` call this, never a writer.
     """
+    from cdumm.semantic.build_layouts import schema_for_bytes
+    built = schema_for_bytes(table, body, header)
+    if built is not None:
+        return built
     label, order = select_order(table, body, header)
     if label == "base":
         return get_schema(table)

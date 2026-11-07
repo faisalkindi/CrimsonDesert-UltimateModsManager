@@ -114,6 +114,11 @@ class TableSchema:
     renders any other field as ``(unverified)`` instead of a possibly-
     wrong value. Set via ``_verified_fields: [...]`` in the override file.
     ``_key`` / ``_name`` are always trustworthy and never gated."""
+    build: str | None = None
+    """The game build of a per-build layout (``semantic.build_layouts``),
+    e.g. ``"2.04.08"``; None for every schema ``get_schema`` returns. A
+    schema with a build is for reading only: nothing that writes uses it,
+    and the Game Data grid offers no edits on it."""
 
     @property
     def fixed_record_size(self) -> int | None:

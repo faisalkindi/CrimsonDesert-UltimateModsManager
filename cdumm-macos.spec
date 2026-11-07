@@ -76,6 +76,7 @@ a = Analysis(
         ('src/cdumm/translations', 'cdumm/translations'),
         ('schemas/pabgb_complete_schema.json', 'schemas'),
         ('schemas/pabgb_type_overrides.json', 'schemas'),
+        ('schemas/layouts/2.04.08.json', 'schemas/layouts'),
         ('schemas/NOTICE', 'schemas'),
         ('field_schema/README.md', 'field_schema'),
         ('field_schema/skill.json', 'field_schema'),

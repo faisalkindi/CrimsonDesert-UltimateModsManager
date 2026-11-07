@@ -227,6 +227,74 @@ def check_ordered_table(table: str, body: bytes,
     return True, detail
 
 
+def check_build_layouts(game_dir: Path) -> tuple[bool, str]:
+    """``schema_for_table`` on every table a shipped build layout covers.
+
+    That is the Game Data grid's own call. On game 2.04 it hands a
+    name-first table its per-build layout when the bytes are the ones the
+    layout was proven on, or when every record still tiles. A name-first
+    table that gets no layout is the regression: the grid falls back to
+    the pre-2.04 layout there, which reads the wrong bytes. Key-first
+    tables (any pre-2.04 build) are counted and skipped.
+
+    Tiling can't see same-width fields swapped, so "fits by tiling" on a
+    new build says the offsets still add up, not that the order held.
+    """
+    from cdumm.engine.schema_verify import schema_for_table
+    from cdumm.semantic import build_layouts
+    from cdumm.semantic.parser import parse_pabgh_index
+    from cdumm.semantic.record_header import NAME_FIRST, table_header_order
+    stems = sorted({s for b in build_layouts.builds() for s in b.tables})
+    if not stems:
+        return False, "no build layouts shipped"
+    pinned = tiled = key_first = 0
+    lost: list[str] = []
+    missing: list[str] = []
+    builds: set[str] = set()
+    for stem in stems:
+        try:
+            body = _load(game_dir, stem + ".pabgb")
+            header = _load(game_dir, stem + ".pabgh")
+        except Exception:                       # noqa: BLE001
+            missing.append(stem)
+            continue
+        key_size, offsets = parse_pabgh_index(header, stem)
+        if table_header_order(body, offsets, key_size) != NAME_FIRST:
+            key_first += 1
+            continue
+        schema = schema_for_table(stem, body, header)
+        if schema is None or schema.build is None:
+            lost.append(stem)
+            continue
+        builds.add(schema.build)
+        if _proven(stem, body, header):
+            pinned += 1
+        else:
+            tiled += 1
+    detail = (f"{len(stems)} tables: {pinned} byte-identical to the "
+              f"{'/'.join(sorted(builds)) or '-'} layouts' own, {tiled} fit "
+              f"by tiling, {len(lost)} name-first with no fitting layout, "
+              f"{key_first} key-first (pre-2.04), {len(missing)} not found")
+    if lost:
+        detail += f"   LOST: {', '.join(lost[:8])}"
+    if missing:
+        detail += f"   MISSING: {', '.join(missing[:8])}"
+    return not lost, detail
+
+
+def _proven(stem: str, body: bytes, header: bytes) -> bool:
+    """Both files are the ones a shipped layout was proven on."""
+    import hashlib
+
+    from cdumm.semantic import build_layouts
+    pair = (hashlib.sha256(body).hexdigest(),
+            hashlib.sha256(header).hexdigest())
+    return any(stem in b.tables
+               and pair == (b.tables[stem].pabgb_sha256,
+                            b.tables[stem].pabgh_sha256)
+               for b in build_layouts.builds())
+
+
 #: (label, loader-name, check). Loader-name is the .pabgb basename; the
 #: .pabgh is derived. `None` body means the check loads its own.
 _CHECKS = [
@@ -304,6 +372,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
         run(name, lambda b, h, _c=cls: check_ordered_table(_c, b, h),
             body, header)
+
+    run("2.04 layouts", lambda _b, _h: check_build_layouts(game), None, None)
 
     if args.baseline:
         print("\ncommitted fixtures (a failure here is a CODE regression, "

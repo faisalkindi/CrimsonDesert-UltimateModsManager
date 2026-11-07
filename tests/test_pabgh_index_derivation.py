@@ -27,6 +27,12 @@ from cdumm.semantic.parser import (
     _pabgh_tilings,
     parse_pabgh_index,
 )
+from cdumm.semantic.record_header import (
+    KEY_FIRST,
+    NAME_FIRST,
+    read_header,
+    table_header_order,
+)
 
 _FX = Path(__file__).resolve().parent / "fixtures"
 
@@ -118,7 +124,10 @@ def test_every_committed_fixture_index_parses_and_anchors(ver, name, path):
     went red, and the fixture sat there wrong.
 
     Every committed index must parse AND agree with its own body: each
-    entry's key has to be the key stored at that entry's offset.
+    entry's key has to be the key stored in the record at that entry's
+    offset. Up to 2.03 a record opens with its key; on 2.04 the key
+    follows the name (vanilla20408), so the key is read from the record
+    header in the order the whole table uses.
     """
     header = zlib.decompress(path.read_bytes())
     body = zlib.decompress(
@@ -128,10 +137,17 @@ def test_every_committed_fixture_index_parses_and_anchors(ver, name, path):
     assert key_size, f"{ver}/{name}: index does not parse"
     assert offsets
 
+    order = (NAME_FIRST if table_header_order(body, offsets, key_size)
+             == NAME_FIRST else KEY_FIRST)
+    assert (order == NAME_FIRST) == (ver == "vanilla20408"), (ver, name)
     mismatched = [
         (k, off) for k, off in offsets.items()
-        if off + key_size > len(body)
-        or int.from_bytes(body[off:off + key_size], "little") != k
+        if (order == KEY_FIRST
+            and (off + key_size > len(body)
+                 or int.from_bytes(body[off:off + key_size], "little") != k))
+        or (order == NAME_FIRST
+            and (read_header(body, off, key_size, NAME_FIRST) or (None,))[0]
+            != k)
     ]
     assert not mismatched, (
         f"{ver}/{name}: {len(mismatched)} of {len(offsets)} entries do not "
