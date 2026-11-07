@@ -64,6 +64,7 @@ from cdumm.semantic.parser import (
     identify_table_from_path,
     parse_pabgh_index,
     parse_records,
+    vouches_for,
 )
 from cdumm.semantic.record_header import (
     NAME_FIRST,
@@ -2316,6 +2317,9 @@ def _intents_to_v2_changes(
     # iteminfo and skill batches check in their own writers.
     name_first = is_name_first(vanilla_body, vanilla_header, table_name)
     refused_name_first = 0
+    # Fields the schema doesn't vouch for (parser.vouches_for), refused by
+    # _resolve_write_pos below and reported once after the loop.
+    unvouched: list[str] = []
 
     for intent in intents:
         # Batched whole-table writer dispatch (forced for iteminfo /
@@ -2379,7 +2383,7 @@ def _intents_to_v2_changes(
         # Resolve write position via field_schema first, then PABGB schema
         write_pos = _resolve_write_pos(
             intent, fs_entries, field_specs, schema,
-            vanilla_body, payload_off, entry_end)
+            vanilla_body, payload_off, entry_end, refused_out=unvouched)
         if write_pos is None:
             continue
         abs_off, size, fmt = write_pos
@@ -2439,6 +2443,13 @@ def _intents_to_v2_changes(
         logger.warning(
             "Format 3: %d intent(s) refused. %s", refused_name_first,
             name_first_refusal(f"{table_name}.pabgb"))
+    if unvouched:
+        shown, why = _unvouched_refusal(table_name, schema, unvouched)
+        msg = (f"Format 3: {len(unvouched)} intent(s) on '{target}' were "
+               f"refused, so nothing was written for {shown}. {why}")
+        logger.warning("%s", msg)
+        if warnings_out is not None:
+            warnings_out.append(msg)
 
     # Flush the iteminfo batch (whole-table writer): all collected
     # intents become a single offset=0 change covering the full
@@ -2852,14 +2863,40 @@ def _build_list_writer_change(
     return None
 
 
+def _unvouched_refusal(table_name: str, schema,
+                       fields: list[str]) -> tuple[str, str]:
+    """``(names, why)`` for fields refused because the schema doesn't
+    vouch for them: the field names to show, and the reason."""
+    names = sorted(set(fields))
+    shown = ", ".join(names[:8])
+    if len(names) > 8:
+        shown += f" and {len(names) - 8} more"
+    if getattr(schema, "verified_fields", None) is not None:
+        one = len(names) == 1
+        return shown, (
+            f"{'It is' if one else 'They are'} not among {table_name}'s "
+            f"verified fields, so "
+            f"{'its offset is' if one else 'their offsets are'} unproven.")
+    return shown, (
+        f"CDUMM's schema for {table_name} lists its fields in memory "
+        f"order, not the order its records store them, so no field "
+        f"position in it is proven. A field_schema/{table_name}.json "
+        f"entry with a rel_offset or tid can place a field.")
+
+
 def _resolve_write_pos(
     intent: Format3Intent, fs_entries: dict, field_specs: dict,
     schema, body: bytes, payload_off: int, entry_end: int,
+    *, refused_out: list[str] | None = None,
 ) -> "tuple[int, int, str] | None":
     """Return (abs_offset, size, struct_fmt) for the write, or None.
 
     Mirrors the precedence the Phase 1-3 writer + validator use:
     field_schema entry → PABGB schema field → None.
+
+    When the schema doesn't vouch for the field (``parser.vouches_for``),
+    the intent's field name is appended to ``refused_out``, so the caller
+    can say which fields it refused rather than just writing nothing.
     """
     fs_entry = fs_entries.get(intent.field)
     if fs_entry is not None:
@@ -2899,9 +2936,18 @@ def _resolve_write_pos(
     # `_verified_fields`). Fields it doesn't vouch for render `(unverified)`
     # in the grid because their real offset isn't proven — so a Format 3 mod
     # must not write to them either, or the write could land on the wrong
-    # byte. Only affects tables that opt in; every other table is unchanged.
-    vf = getattr(schema, "verified_fields", None)
-    if vf is not None and target_name not in vf:
+    # byte.
+    #
+    # A table with no `_ordered_fields` vouches for nothing: its fields are
+    # in the base schema's memory order, with every field that has no
+    # stream size dropped, so the walk below places each field after the
+    # wrong ones. Its "original" bytes are read from that same wrong spot,
+    # so no later check notices. On the 1.13 dropsetinfo fixture every
+    # _dropRollCount write landed 22 bytes past the field, and 3 of 6
+    # records then failed parse_dropset_record.
+    if not vouches_for(schema, target_name):
+        if refused_out is not None:
+            refused_out.append(intent.field)
         return None
     # Walk schema fields up to target. For each field, use its actual
     # binary footprint so variable-length fields (CString, etc.) are

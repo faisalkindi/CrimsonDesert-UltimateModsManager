@@ -119,6 +119,14 @@ class TableSchema:
     e.g. ``"2.04.08"``; None for every schema ``get_schema`` returns. A
     schema with a build is for reading only: nothing that writes uses it,
     and the Game Data grid offers no edits on it."""
+    memory_order: bool = False
+    """True when ``fields`` are still in the base schema's order: the
+    order of the field descriptors in memory, which is not the order a
+    record stores them, minus every field the base schema gives no stream
+    size. ``_load_schemas`` sets it for each table whose override has no
+    ``_ordered_fields``. No field position in such a schema is proven, so
+    ``vouches_for`` refuses all of them unless ``verified_fields`` names
+    them."""
 
     @property
     def fixed_record_size(self) -> int | None:
@@ -129,6 +137,23 @@ class TableSchema:
                 return None  # variable-length
             total += f.stream_size
         return total
+
+
+def vouches_for(schema, field: str) -> bool:
+    """Whether a Format 3 write or match may trust ``schema``'s position
+    for ``field``.
+
+    A schema with ``verified_fields`` vouches for exactly those fields.
+    One without them vouches for every field when its order was curated
+    (``_ordered_fields``), and for none while it is still in the base
+    schema's memory order (``memory_order``): placing a field from that
+    order is a guess, and the guess is wrong for dropsetinfo's fields on
+    every record of the committed 1.13 fixture.
+    """
+    vf = getattr(schema, "verified_fields", None)
+    if vf is not None:
+        return field in vf
+    return not getattr(schema, "memory_order", False)
 
 
 # ── Schema loading ──────────────────────────────────────────────────────────
@@ -297,7 +322,8 @@ def _load_schemas() -> dict[str, TableSchema]:
                 table_name=table_name, fields=fields,
                 no_null_skip=no_null_skip,
                 no_entry_header=no_entry_header,
-                verified_fields=verified_fields)
+                verified_fields=verified_fields,
+                memory_order=ordered is None)
 
     _loaded_schemas = schemas
     logger.info("Loaded %d PABGB table schemas (%d with type overrides)",
